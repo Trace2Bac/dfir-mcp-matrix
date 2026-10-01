@@ -1,6 +1,6 @@
 # mcp_dfir 시범 전환 원고
 
-B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
+E03·T03·R02·L02 4개 셀을 새 보고서 형식으로 쓴 원고다.
 셀과 상세 항목의 정의는 `상세정의.yaml`을 따른다.
 상세 항목마다 **구현**을 쓰고 †가 붙은 항목에는 **예외**를 따로 쓴다.
 본문의 [번호]는 그 절 끝 **근거**의 같은 번호를 가리킨다.
@@ -12,67 +12,11 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 컨테이너 안 포렌식 도구는 실행하지 않았다.
 저장소에 커밋된 예시 사건 폴더(`examples/tryhackme_volatility/`)의 기록 파일은 코드가 만든 기록의 실제 모양으로 인용한다.
 
-## B04 선행 상태에 따른 실행 제어 방식
+## E03 원본 변경 방지
 
-**상세 항목.** 미구현
+**상세 항목.** E03.01 실행 환경의 읽기 전용 강제†
 
-### 미구현
-
-**판단.** 앞선 호출이 만든 상태를 조건으로 호출을 막는 코드가 없다.
-서버 지침은 분석 전에 증거 목록을 만들고 이전 명령과 분석 노트를 검토하라고 적는다 [1].
-서버는 이 순서를 지켰는지 보지 않는다.
-컨테이너 명령 도구는 증거 목록을 만들었는지, 이전 명령을 조회했는지와 관계없이 `exec_stream`으로 명령을 실행한다 [2].
-`exec_stream`은 컨테이너가 없으면 거부하지만 서버는 기동할 때 컨테이너부터 띄우므로 모델이 채워야 할 조건이 아니다 [3].
-`download_windows_symbol`은 같은 심볼 파일이 있으면 `overwrite` 없이 다시 받지 않는다 [4].
-이 검사는 파일 덮어쓰기를 막는 것이라 H03에서 본다.
-
-### 근거
-
-[1] 서버 지침의 분석 전 순서다.
-
-```python
-Before beginning analysis always perform the following tasks:
-1. Perform an inventory of all evidence, ask the user for specific details on how, when, and where the evidence was acquired
-2. Review all previous commands that have already been run, commands should never be re-run unless the evidence has been updated or the commands were run incorrectly
-3. Review all analyst notes to not perform duplicate analysis
-```
-
-[`mcp_dfir/server.py:32-35`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/server.py#L32-L35)
-
-[2] 컨테이너 명령 도구는 인자를 붙여 바로 `exec_stream`을 부른다.
-`run_strings`·`run_grep`의 예다.
-
-```python
-def run_strings(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
-    """Runs: strings <arguments>"""
-    return docker_manager.exec_stream(ctx=ctx, command_list=["strings", *arguments])
-
-
-def run_grep(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
-    """Runs: grep <arguments>"""
-    return docker_manager.exec_stream(ctx=ctx, command_list=["grep", *arguments])
-```
-
-[`mcp_dfir/tools/file_search.py:45-52`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L45-L52)
-
-[3] 컨테이너가 없으면 거부하고([`mcp_dfir/docker_manager.py:67-69`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L69)) 서버는 MCP 연결을 받기 전에 컨테이너를 띄운다([`mcp_dfir/runner.py:56-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L56-L59)).
-
-[4] 심볼 파일이 이미 있으면 거부한다.
-
-```python
-    if output_file_external_path.exists() and not overwrite:
-        raise RuntimeError(
-            f"File {output_file_internal_path} already exists, it can be used by volatility with the `-s /symbols` "
-            "argument, set overwrite to True to overwrite this file"
-        )
-```
-
-[`mcp_dfir/tools/volatility.py:75-79`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L75-L79)
-## C04 원본 변경 방지 방식
-
-**상세 항목.** C04.01 컨테이너 증거 볼륨 읽기 전용†
-
-### C04.01 컨테이너 증거 볼륨 읽기 전용
+### E03.01 실행 환경의 읽기 전용 강제
 
 **구현.** 서버는 사건 폴더의 `evidence`를 컨테이너의 `/evidence`에 읽기 전용으로 붙이도록 볼륨을 설정한다 [1].
 분석 기록이 있는 `analysis`도 읽기 전용이고 심볼 폴더와 파생물 폴더 `artifacts`만 읽기·쓰기다 [1].
@@ -189,11 +133,67 @@ Sleuth Kit·Volatility·`strings`·`grep`·`unzip`처럼 컨테이너 안에서 
 ```
 
 [`mcp_dfir/config.py:73-74`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L73-L74)
-## E02 대량 결과 전달 방식
+## T03 실행 허가 조건 확인
 
-**상세 항목.** E02.04 파일·리소스로 전체 결과 조회†, E02.05 상한 초과 시 거부†
+**상세 항목.** 미구현
 
-### E02.04 파일·리소스로 전체 결과 조회
+### 미구현
+
+**판단.** 앞선 호출이 만든 상태를 조건으로 호출을 막는 코드가 없다.
+서버 지침은 분석 전에 증거 목록을 만들고 이전 명령과 분석 노트를 검토하라고 적는다 [1].
+서버는 이 순서를 지켰는지 보지 않는다.
+컨테이너 명령 도구는 증거 목록을 만들었는지, 이전 명령을 조회했는지와 관계없이 `exec_stream`으로 명령을 실행한다 [2].
+`exec_stream`은 컨테이너가 없으면 거부하지만 서버는 기동할 때 컨테이너부터 띄우므로 모델이 채워야 할 조건이 아니다 [3].
+`download_windows_symbol`은 같은 심볼 파일이 있으면 `overwrite` 없이 다시 받지 않는다 [4].
+이 검사는 파일 덮어쓰기를 막는 것이라 D03에서 본다.
+
+### 근거
+
+[1] 서버 지침의 분석 전 순서다.
+
+```python
+Before beginning analysis always perform the following tasks:
+1. Perform an inventory of all evidence, ask the user for specific details on how, when, and where the evidence was acquired
+2. Review all previous commands that have already been run, commands should never be re-run unless the evidence has been updated or the commands were run incorrectly
+3. Review all analyst notes to not perform duplicate analysis
+```
+
+[`mcp_dfir/server.py:32-35`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/server.py#L32-L35)
+
+[2] 컨테이너 명령 도구는 인자를 붙여 바로 `exec_stream`을 부른다.
+`run_strings`·`run_grep`의 예다.
+
+```python
+def run_strings(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs: strings <arguments>"""
+    return docker_manager.exec_stream(ctx=ctx, command_list=["strings", *arguments])
+
+
+def run_grep(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs: grep <arguments>"""
+    return docker_manager.exec_stream(ctx=ctx, command_list=["grep", *arguments])
+```
+
+[`mcp_dfir/tools/file_search.py:45-52`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L45-L52)
+
+[3] 컨테이너가 없으면 거부하고([`mcp_dfir/docker_manager.py:67-69`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L69)) 서버는 MCP 연결을 받기 전에 컨테이너를 띄운다([`mcp_dfir/runner.py:56-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L56-L59)).
+
+[4] 심볼 파일이 이미 있으면 거부한다.
+
+```python
+    if output_file_external_path.exists() and not overwrite:
+        raise RuntimeError(
+            f"File {output_file_internal_path} already exists, it can be used by volatility with the `-s /symbols` "
+            "argument, set overwrite to True to overwrite this file"
+        )
+```
+
+[`mcp_dfir/tools/volatility.py:75-79`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L75-L79)
+## R02 대량 결과 전달
+
+**상세 항목.** R02.04 파일·리소스로 전체 결과 조회†, R02.05 상한 초과 시 거부†
+
+### R02.04 파일·리소스로 전체 결과 조회
 
 **구현.** 컨테이너 명령 도구는 출력을 응답에 싣지 않는다.
 `exec_stream`은 명령의 표준 출력을 모아 기록 관리기에 넘기고 관리기가 돌려준 요약을 도구 응답으로 돌려준다 [1].
@@ -207,7 +207,7 @@ Sleuth Kit·Volatility·`strings`·`grep`·`unzip`처럼 컨테이너 안에서 
 
 **예외.** `tail`은 설명과 달리 뒤에서 N줄이 아니라 앞의 N줄을 뺀 나머지를 돌려준다 [4].
 
-### E02.05 상한 초과 시 거부
+### R02.05 상한 초과 시 거부
 
 **구현.** `get_command_result`는 고르고 남은 결과가 25,600자 이상이면 자르지 않고 예외를 낸다 [5].
 상한 값은 `25 * 1024`이고 `len()`으로 세므로 단위는 바이트가 아니라 문자다 [5].
@@ -330,17 +330,17 @@ class CommandRecordSummary(BaseModel):
 
 [8] `list_files`는 폴더를 끝까지 돌며 모든 파일을 목록에 넣는다([`mcp_dfir/tools/file_search.py:28-42`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L28-L42)).
 `get_command_history`는 요약 목록을 그대로 돌려준다([`mcp_dfir/tools/history.py:12-13`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/history.py#L12-L13)).
-## F03 실행 요청 내용 기록 방식
+## L02 기록 내용 구성
 
-**상세 항목.** F03.03 실제 실행 명령 기록†
+**상세 항목.** L02.03 실제 실행 명령 기록†
 
-### F03.03 실제 실행 명령 기록
+### L02.03 실제 실행 명령 기록
 
 **구현.** 컨테이너 명령 도구는 서버가 붙인 실행 파일 이름·고정 인자와 모델이 준 인자를 합친 인자 배열을 `exec_stream`에 넘긴다 [1].
 `exec_stream`은 명령을 실행한 뒤 이 배열을 공백으로 이어 `command` 문자열을 만들고 출력·종료 코드와 함께 기록 관리기에 넘긴다 [2].
 그래서 `command`에는 `vol -s /symbols -r jsonl`처럼 서버가 붙인 부분까지 실제로 실행한 명령 전체가 남는다 [1][2].
 기록 관리기는 요약 목록 길이로 번호를 정하고 `number`·`command`·`date_run`·`exit_code`를 `command_history.json`에 쓴다 [3].
-어떤 호출이 기록에 남는지는 F01에서 본다.
+어떤 호출이 기록에 남는지는 L01에서 본다.
 
 **예외.** 인자를 공백으로 이으므로 공백이 든 인자 하나와 인자 여러 개를 기록에서 가를 수 없다 [2].
 네트워크에서 심볼을 받는 도구 3개는 실행한 명령 대신 함수 호출 모양의 문자열을 `command`에 쓴다 [4].

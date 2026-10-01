@@ -1,6 +1,6 @@
 # regipy 시범 전환 원고
 
-B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
+E03·T03·R02·L02 4개 셀을 새 보고서 형식으로 쓴 원고다.
 셀과 상세 항목의 정의는 `상세정의.yaml`을 따른다.
 상세 항목마다 **구현**을 쓰고 †가 붙은 항목에는 **예외**를 따로 쓴다.
 본문의 [번호]는 그 절 끝 **근거**의 같은 번호를 가리킨다.
@@ -11,57 +11,11 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 **확인 방법.** 코드는 기준 커밋을 `git show`로 읽었다.
 실행 확인은 서버 모듈을 Python 3.14와 mcp 1.29.0에서 불러 저장소의 테스트 하이브로 돌린 기록(`기록/판정검토_regipy_2026-09-26/`)을 인용한다.
 
-## B04 선행 상태에 따른 실행 제어 방식
+## E03 원본 변경 방지
 
-**상세 항목.** B04.01 선행 결과 존재 대조
+**상세 항목.** E03.02 서버 코드의 원본 쓰기 제한
 
-### B04.01 선행 결과 존재 대조
-
-**구현.** 서버는 적재한 하이브를 프로세스 전역 `dict` `_loaded_hives`에 둔다 [1].
-이 상태는 기동 인자나 환경변수로 받은 폴더를 서버가 시작할 때 읽거나 모델이 `set_hive_directory`를 부를 때 채워진다 [2].
-하이브를 읽는 도구 4개(`run_plugin`·`run_all_plugins_for_hive`·`list_relevant_plugins`·`get_registry_key`)는 `_loaded_hives`가 비어 있으면 하이브를 읽지 않고 오류를 돌려준다 [3].
-오류 문구는 `set_hive_directory`를 먼저 부르라고 알린다 [3].
-`list_available_hives`는 같은 확인을 문자열로 알린다 [4].
-이 확인을 건너뛰고 하이브를 읽는 도구나 인자는 없다 [3].
-
-이 확인은 적재한 하이브가 하나라도 있는지만 본다.
-플러그인에 맞는 유형의 하이브가 있는지 보는 확인은 선택한 방법과 입력을 맞대는 일이라 A02에서 본다.
-`set_hive_directory`에 폴더가 아닌 파일 경로를 주면 `iterdir()`가 예외를 내 `_loaded_hives`를 바꾸기 전에 끝나고 이어서 부른 `run_plugin`은 앞서 적재한 폴더의 하이브로 답했다 [5].
-적재 상태가 얼마나 남는지는 A05에서 본다 [1].
-
-### 근거
-
-[1] 적재한 하이브를 담는 전역 상태다.
-
-```python
-# Global state for loaded hives
-_loaded_hives: dict[str, RegistryHive] = {}
-_hive_directory: Optional[str] = None
-```
-
-[`regipy_mcp_server/server.py:30-32`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L30-L32)
-
-[2] 시작할 때 폴더를 읽고([`regipy_mcp_server/server.py:72-92`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L72-L92)) 도구가 폴더를 바꾸면 다시 적재한다([`regipy_mcp_server/server.py:130-133`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L130-L133)).
-
-[3] 하이브가 없으면 거부한다.
-같은 확인이 [`regipy_mcp_server/server.py:303-304`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L303-L304), [`regipy_mcp_server/server.py:341-342`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L341-L342), [`regipy_mcp_server/server.py:381-382`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L381-L382)에 있다.
-
-```python
-    if not _loaded_hives:
-        return {"error": "No hives loaded. Use set_hive_directory first."}
-```
-
-[`regipy_mcp_server/server.py:251-252`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L251-L252)
-
-[4] 하이브 목록 도구의 확인: [`regipy_mcp_server/server.py:163-164`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L163-L164).
-
-[5] 폴더를 도는 `iterdir()`([`regipy_mcp_server/server.py:52`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L52))는 전역 상태에 대입하기 전에 불린다([`regipy_mcp_server/server.py:132-133`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L132-L133)).
-파일 경로를 준 뒤 `run_plugin`이 앞 폴더의 하이브로 답한 결과(실행 확인, [판정검토_regipy_2026-09-26.md 131줄](../../판정검토_regipy_2026-09-26.md)).
-## C04 원본 변경 방지 방식
-
-**상세 항목.** C04.03 읽기 전용 접근 API
-
-### C04.03 읽기 전용 접근 API
+### E03.02 서버 코드의 원본 쓰기 제한
 
 **구현.** `RegistryHive`는 하이브 파일을 `rb` 모드로 열어 내용 전체를 `BytesIO`에 복사하고 파일을 닫는다 [1].
 헤더 해석부터 플러그인 실행까지 뒤의 모든 파싱은 이 메모리 사본에서 한다 [1].
@@ -96,11 +50,57 @@ from regipy.registry import RegistryHive
 
 [3] 파일을 쓰는 함수: [`regipy/plugins/utils.py:55-71`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy/plugins/utils.py#L55-L71).
 서버가 이 모듈에서 쓰는 것은 `run_relevant_plugins`뿐이다([`regipy_mcp_server/server.py:316`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L316)).
-## E02 대량 결과 전달 방식
+## T03 실행 허가 조건 확인
 
-**상세 항목.** E02.06 값 단위 잘림
+**상세 항목.** T03.01 선행 결과 존재 대조
 
-### E02.06 값 단위 잘림
+### T03.01 선행 결과 존재 대조
+
+**구현.** 서버는 적재한 하이브를 프로세스 전역 `dict` `_loaded_hives`에 둔다 [1].
+이 상태는 기동 인자나 환경변수로 받은 폴더를 서버가 시작할 때 읽거나 모델이 `set_hive_directory`를 부를 때 채워진다 [2].
+하이브를 읽는 도구 4개(`run_plugin`·`run_all_plugins_for_hive`·`list_relevant_plugins`·`get_registry_key`)는 `_loaded_hives`가 비어 있으면 하이브를 읽지 않고 오류를 돌려준다 [3].
+오류 문구는 `set_hive_directory`를 먼저 부르라고 알린다 [3].
+`list_available_hives`는 같은 확인을 문자열로 알린다 [4].
+이 확인을 건너뛰고 하이브를 읽는 도구나 인자는 없다 [3].
+
+이 확인은 적재한 하이브가 하나라도 있는지만 본다.
+플러그인에 맞는 유형의 하이브가 있는지 보는 확인은 선택한 방법과 입력을 맞대는 일이라 P01에서 본다.
+`set_hive_directory`에 폴더가 아닌 파일 경로를 주면 `iterdir()`가 예외를 내 `_loaded_hives`를 바꾸기 전에 끝나고 이어서 부른 `run_plugin`은 앞서 적재한 폴더의 하이브로 답했다 [5].
+적재 상태가 얼마나 남는지는 P04에서 본다 [1].
+
+### 근거
+
+[1] 적재한 하이브를 담는 전역 상태다.
+
+```python
+# Global state for loaded hives
+_loaded_hives: dict[str, RegistryHive] = {}
+_hive_directory: Optional[str] = None
+```
+
+[`regipy_mcp_server/server.py:30-32`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L30-L32)
+
+[2] 시작할 때 폴더를 읽고([`regipy_mcp_server/server.py:72-92`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L72-L92)) 도구가 폴더를 바꾸면 다시 적재한다([`regipy_mcp_server/server.py:130-133`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L130-L133)).
+
+[3] 하이브가 없으면 거부한다.
+같은 확인이 [`regipy_mcp_server/server.py:303-304`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L303-L304), [`regipy_mcp_server/server.py:341-342`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L341-L342), [`regipy_mcp_server/server.py:381-382`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L381-L382)에 있다.
+
+```python
+    if not _loaded_hives:
+        return {"error": "No hives loaded. Use set_hive_directory first."}
+```
+
+[`regipy_mcp_server/server.py:251-252`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L251-L252)
+
+[4] 하이브 목록 도구의 확인: [`regipy_mcp_server/server.py:163-164`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L163-L164).
+
+[5] 폴더를 도는 `iterdir()`([`regipy_mcp_server/server.py:52`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L52))는 전역 상태에 대입하기 전에 불린다([`regipy_mcp_server/server.py:132-133`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L132-L133)).
+파일 경로를 준 뒤 `run_plugin`이 앞 폴더의 하이브로 답한 결과(실행 확인, [판정검토_regipy_2026-09-26.md 131줄](../../판정검토_regipy_2026-09-26.md)).
+## R02 대량 결과 전달
+
+**상세 항목.** R02.06 값 단위 잘림
+
+### R02.06 값 단위 잘림
 
 **구현.** regipy 라이브러리는 값 하나의 최대 길이 `MAX_LEN`을 256으로 둔다 [1].
 키의 값을 돌려주는 `iter_values`는 기본으로 `trim_values=True`를 쓴다 [2].
@@ -170,7 +170,7 @@ def try_decode_binary(data, as_json=False, max_len=MAX_LEN, trim_values=True):
 [`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L312-L323)
 
 [6] 응답 크기(실행 확인, [review_3_E_values.md 156줄](../../판정검토_regipy_2026-09-26/review_3_E_values.md)).
-## F03 실행 요청 내용 기록 방식
+## L02 기록 내용 구성
 
 **상세 항목.** 비적용
 

@@ -1,6 +1,6 @@
 # trudi 시범 전환 원고
 
-B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
+E03·T03·R02·L02 4개 셀을 새 보고서 형식으로 쓴 원고다.
 셀과 상세 항목의 정의는 `상세정의.yaml`을 따른다.
 상세 항목마다 **구현**을 쓰고 †가 붙은 항목에는 **예외**를 따로 쓴다.
 본문의 [번호]는 그 절 끝 **근거**의 같은 번호를 가리킨다.
@@ -12,11 +12,120 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 서버를 띄우지 않았고 조사를 돌리지 않았다.
 도구 이름은 네임스페이스와 함수 이름을 이은 것이다(예: `misc.record_finding`).
 
-## B04 선행 상태에 따른 실행 제어 방식
+## E03 원본 변경 방지
 
-**상세 항목.** B04.01 선행 결과 존재 대조†, B04.02 조사 단계 검사†, B04.03 앞선 점검·판정 결과 대조†, B04.04 반복 호출 제한†
+**상세 항목.** E03.01 실행 환경의 읽기 전용 강제†, E03.02 서버 코드의 원본 쓰기 제한†
 
-### B04.01 선행 결과 존재 대조
+### E03.01 실행 환경의 읽기 전용 강제
+
+**구현.** `mount_full_image`는 E01을 `ewfmount`로 붙인 뒤 파티션을 찾아 NTFS 파일시스템을 마운트한다 [1].
+NTFS 마운트는 늘 `ro,loop,norecover` 옵션을 쓴다 [2].
+코드 설명은 `norecover`를 마운트할 때 NTFS 저널을 다시 적용하지 않게 하는 옵션으로 적는다 [2].
+`mount_ntfs`는 `read_only=False`를 받으면 마운트하지 않고 거부한다 [2].
+이 마운트 아래 파일을 읽는 도구가 쓰려고 하면 운영체제가 거부한다.
+
+**예외.** 읽기 전용 옵션은 NTFS 마운트에만 붙는다.
+서버는 `ewfmount`에 읽기 전용 옵션을 넘기지 않고 도구가 내놓는 FUSE 장치의 성질에 맡긴다 [3].
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 채팅 DB를 여는 `open_ro`는 SQLite를 `mode=ro&immutable=1` URI로 연다 [4].
+이 모드는 `-wal`·`-shm` 파일을 만들지 않고 잠금도 걸지 않는다 [4].
+서버 코드에서 SQLite를 여는 곳은 이 함수 하나다 [4].
+
+서버는 출력 경로를 실제 경로로 푼 뒤 `/cases/`·`/mnt/`·`/media/`로 시작하거나 경로 조각 하나가 `evidence`이면 증거 위치로 보고 거부한다 [5][6].
+도구 함수에 붙는 `@output_safe`는 인자 이름이 `output_path`·`output_dir` 같은 출력 인자 8개 가운데 하나일 때 그 값을 검사한다 [7].
+외부 도구 실행기도 출력 폴더와 출력 파일 경로를 한 번 더 검사한다 [7].
+
+**예외.** SQLite 증거를 외부 도구에 넘기는 `ez.sqlecmd`·`ez.wxtcmd`·`misc.hindsight_chrome`에서 그 도구가 어떤 모드로 여는지는 확인하지 못했다 [8].
+
+출력 대상 검사는 증거의 위치에 기댄다.
+설치 안내의 사건 폴더는 `~/cases/<CASE_ID>`이고 사건 지침 견본은 증거를 그 아래 `evidence/`에 둔다 [9].
+`/home/<user>/cases/…`는 `/cases/`로 시작하지 않으므로 기본 배치에서 증거를 지키는 것은 `evidence` 조각 대조 하나다 [6].
+이 대조는 대소문자를 가린다 [6].
+
+`mount_point`·`ewf_mount_point`·`fs_mount_point`는 검사하는 인자 이름에 없다 [7].
+서버는 이 경로에 폴더를 만들고 sudo로 그 위에 마운트한다 [3].
+`misc.batch_run`은 모델이 준 argv를 허용 목록과 출력 경로 검사 없이 실행한다 [10].
+설치 스크립트는 서버 계정에 암호 없는 sudo 전체 권한을 주므로 `sudo`로 시작하는 명령으로 증거를 바꿀 수 있다 [10].
+
+### 근거
+
+[1] R01을 붙이고 NTFS 파티션을 마운트하는 순서다: [`tools/ewf.py:209-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L209-L274).
+
+[2] NTFS 마운트 옵션([`tools/ewf.py:103-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L103-L136)), `norecover`의 설명([`tools/ewf.py:160-163`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L160-L163)), 읽기 쓰기 마운트 거부([`tools/ewf.py:166-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L166-L169)).
+
+```python
+    options = f"ro,loop,norecover,offset={offset_bytes}"
+```
+
+[`tools/ewf.py:118-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L118-L118)
+
+[3] 마운트 지점 폴더를 만들고 sudo로 마운트한다: [`tools/ewf.py:86-87`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L86-L87), [`tools/ewf.py:220-224`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L220-L224).
+
+[4] SQLite를 읽기 전용·immutable로 연다.
+서버 코드의 `sqlite3.connect` 호출은 이 한 곳이다.
+
+```python
+def open_ro(db_path: str) -> sqlite3.Connection:
+    """Open a sqlite db strictly read-only: no -wal/-shm sidecars, no locks."""
+    uri = f"file:{pathname2url(os.path.abspath(db_path))}?mode=ro&immutable=1"
+    return sqlite3.connect(uri, uri=True)
+```
+
+[`core/chat_db.py:34-37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L34-L37)
+
+[5] 보호하는 경로 접두어와 경로 조각이다.
+
+```python
+READ_ONLY_PREFIXES = (
+    "/cases/",
+    "/mnt/",
+    "/media/",
+)
+
+READ_ONLY_SEGMENTS = ("evidence",)
+```
+
+[`core/paths.py:8-14`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L8-L14)
+
+[6] 실제 경로로 풀어 비교하고 걸리면 거부한다.
+
+```python
+def is_evidence_path(path: str) -> bool:
+    """Return True if path is under a protected evidence location."""
+    p = os.path.realpath(path)
+    for prefix in READ_ONLY_PREFIXES:
+        if p.startswith(prefix):
+            return True
+    parts = Path(p).parts
+    return any(seg == "evidence" for seg in parts)
+
+
+def assert_output_safe(path: str) -> None:
+    """Raise ValueError if path resolves inside an evidence directory."""
+    if is_evidence_path(path):
+        raise ValueError(
+            f"Output path '{path}' is inside a protected evidence directory. "
+            "Write outputs to ./analysis/, ./exports/, or ./reports/ only."
+        )
+```
+
+[`core/paths.py:58-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L58-L74)
+
+[7] 검사하는 인자 이름 목록([`core/paths.py:109-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L109-L118))과 데코레이터([`core/paths.py:121-149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L121-L149)).
+실행기의 검사는 [`core/executor.py:136-137`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L136-L137), [`core/executor.py:390`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L390)이다.
+
+[8] 외부 도구에 SQLite 증거 경로를 넘기는 도구: [`tools/eztools.py:568`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L568), [`tools/eztools.py:585`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L585), [`tools/misc.py:331`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L331).
+
+[9] 설치 안내([`install.sh:450-452`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L450-L452))와 사건 지침 견본([`case-template/CLAUDE.md:22-23`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/case-template/CLAUDE.md#L22-L23)).
+
+[10] `misc.batch_run`의 실행([`tools/misc.py:2646-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2646-L2651))과 설치 스크립트의 sudo 설정([`install.sh:236`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L236)).
+## T03 실행 허가 조건 확인
+
+**상세 항목.** T03.01 선행 결과 존재 대조†, T03.02 조사 단계 검사†, T03.03 앞선 점검·판정 결과 대조†, T03.04 반복 호출 제한†
+
+### T03.01 선행 결과 존재 대조
 
 **구현.** 발견사항 기록 도구 `misc.record_finding`은 게이트 목록을 차례로 돌려 첫 거부를 돌려준다 [1].
 `lineage_required` 게이트는 발견사항이 근거로 적은 호출 ID(`input_call_ids`)가 비어 있거나 호출 기록에 없는 ID를 담으면 거부한다 [2].
@@ -27,7 +136,7 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 
 **예외.** 호출 기록 항목이 5개가 되기 전에는 근거 호출 ID가 비어 있어도 `lineage_required`를 통과한다 [2].
 
-### B04.02 조사 단계 검사
+### T03.02 조사 단계 검사
 
 **구현.** 서버는 DAIR 단계를 호출 기록의 `dair_call` 항목으로 정한다 [5].
 `dair_required` 게이트는 `dair_call`이 없으면 발견사항 기록을 거부한다 [6].
@@ -39,22 +148,22 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 DAIR 참여 게이트는 환경변수 `TRUDI_DAIR_NUDGE`로 끈다 [10].
 이름이 `live_`·`velo_`·`monitor_`·`respond_`로 시작하는 도구는 설정과 관계없이 DAIR 참여 게이트를 건너뛴다 [11].
 
-### B04.03 앞선 점검·판정 결과 대조
+### T03.03 앞선 점검·판정 결과 대조
 
 **구현.** 보고서 도구 `misc.write_final_report`와 `misc.export_execution_log`는 호출 기록에서 가장 최근의 `reason.pre_report_check` 항목을 찾는다 [12].
 그 항목이 없거나 `ready_to_report`가 참이 아니거나 그 뒤 호출 기록의 상태가 바뀌었으면 거부한다 [12].
 CONFIRMED·LIKELY 발견사항에는 같은 주장에 검토 모델이 SUPPORTED를 준 `reason.evaluate_finding` 기록을 요구한다 [3].
-SUPPORTED 판정은 서버 안에서 부른 검토 모델이 내고 그 판정을 심사하는 방식은 H10에서 본다 [3].
+SUPPORTED 판정은 서버 안에서 부른 검토 모델이 내고 그 판정을 심사하는 방식은 D05에서 본다 [3].
 
 **예외.** 임의 명령을 실행하는 `misc.batch_run`으로 `reports/`에 파일을 쓰면 준비 점검 없이 보고서 파일이 생긴다 [13].
 
-### B04.04 반복 호출 제한
+### T03.04 반복 호출 제한
 
 **구현.** 미들웨어는 도구 이름과 인자로 만든 키마다 앞선 결과의 해시와 같은 결과가 되풀이된 횟수를 프로세스 메모리의 `_repeat_state`에 둔다 [14].
 같은 인자로 같은 결과가 `TRUDI_REPEAT_BLOCK_AFTER`번(기본 4번) 되풀이된 뒤의 호출은 실행 전에 거부한다 [15].
 거부 문구는 부재를 발견사항으로 한 번 기록하고 다른 질의를 하라고 안내한다 [15].
 이 상태는 메모리에만 있어 서버를 다시 띄우면 비고 키가 512개를 넘으면 오래된 것부터 버린다 [14].
-상태가 얼마나 남는지는 A05에서 본다.
+상태가 얼마나 남는지는 P04에서 본다.
 
 **예외.** 환경변수 `TRUDI_REPEAT_GATE`나 `TRUDI_REPEAT_BLOCK_AFTER`로 이 게이트를 끈다 [10].
 이름이 `live_`·`velo_`·`monitor_`·`respond_`로 시작하는 도구는 설정과 관계없이 이 게이트를 건너뛴다 [11].
@@ -238,122 +347,11 @@ DAIR_NUDGE_ENABLED = (os.environ.get("TRUDI_DAIR_NUDGE") or "1").strip().lower()
 ```
 
 [`core/middleware.py:264-268`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L264-L268)
-## C04 원본 변경 방지 방식
+## R02 대량 결과 전달
 
-**상세 항목.** C04.02 증거 파일시스템 읽기 전용 마운트†, C04.03 읽기 전용 접근 API†, C04.04 출력 대상 검사†
+**상세 항목.** R02.01 문자·항목 상한†, R02.02 전체·반환 건수 표시†, R02.06 값 단위 잘림, R02.07 건수 없는 잘림 표시, R02.08 보관한 출력의 일부 재조회†
 
-### C04.02 증거 파일시스템 읽기 전용 마운트
-
-**구현.** `mount_full_image`는 E01을 `ewfmount`로 붙인 뒤 파티션을 찾아 NTFS 파일시스템을 마운트한다 [1].
-NTFS 마운트는 늘 `ro,loop,norecover` 옵션을 쓴다 [2].
-코드 설명은 `norecover`를 마운트할 때 NTFS 저널을 다시 적용하지 않게 하는 옵션으로 적는다 [2].
-`mount_ntfs`는 `read_only=False`를 받으면 마운트하지 않고 거부한다 [2].
-이 마운트 아래 파일을 읽는 도구가 쓰려고 하면 운영체제가 거부한다.
-
-**예외.** 읽기 전용 옵션은 NTFS 마운트에만 붙는다.
-서버는 `ewfmount`에 읽기 전용 옵션을 넘기지 않고 도구가 내놓는 FUSE 장치의 성질에 맡긴다 [3].
-
-### C04.03 읽기 전용 접근 API
-
-**구현.** 채팅 DB를 여는 `open_ro`는 SQLite를 `mode=ro&immutable=1` URI로 연다 [4].
-이 모드는 `-wal`·`-shm` 파일을 만들지 않고 잠금도 걸지 않는다 [4].
-서버 코드에서 SQLite를 여는 곳은 이 함수 하나다 [4].
-
-**예외.** SQLite 증거를 외부 도구에 넘기는 `ez.sqlecmd`·`ez.wxtcmd`·`misc.hindsight_chrome`에서 그 도구가 어떤 모드로 여는지는 확인하지 못했다 [5].
-
-### C04.04 출력 대상 검사
-
-**구현.** 서버는 출력 경로를 실제 경로로 푼 뒤 `/cases/`·`/mnt/`·`/media/`로 시작하거나 경로 조각 하나가 `evidence`이면 증거 위치로 보고 거부한다 [6][7].
-도구 함수에 붙는 `@output_safe`는 인자 이름이 `output_path`·`output_dir` 같은 출력 인자 8개 가운데 하나일 때 그 값을 검사한다 [8].
-외부 도구 실행기도 출력 폴더와 출력 파일 경로를 한 번 더 검사한다 [8].
-
-**예외.** 출력 대상 검사는 증거의 위치에 기댄다.
-설치 안내의 사건 폴더는 `~/cases/<CASE_ID>`이고 사건 지침 견본은 증거를 그 아래 `evidence/`에 둔다 [9].
-`/home/<user>/cases/…`는 `/cases/`로 시작하지 않으므로 기본 배치에서 증거를 지키는 것은 `evidence` 조각 대조 하나다 [7].
-이 대조는 대소문자를 가린다 [7].
-
-`mount_point`·`ewf_mount_point`·`fs_mount_point`는 검사하는 인자 이름에 없다 [8].
-서버는 이 경로에 폴더를 만들고 sudo로 그 위에 마운트한다 [3].
-`misc.batch_run`은 모델이 준 argv를 허용 목록과 출력 경로 검사 없이 실행한다 [10].
-설치 스크립트는 서버 계정에 암호 없는 sudo 전체 권한을 주므로 `sudo`로 시작하는 명령으로 증거를 바꿀 수 있다 [10].
-
-### 근거
-
-[1] E01을 붙이고 NTFS 파티션을 마운트하는 순서다: [`tools/ewf.py:209-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L209-L274).
-
-[2] NTFS 마운트 옵션([`tools/ewf.py:103-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L103-L136)), `norecover`의 설명([`tools/ewf.py:160-163`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L160-L163)), 읽기 쓰기 마운트 거부([`tools/ewf.py:166-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L166-L169)).
-
-```python
-    options = f"ro,loop,norecover,offset={offset_bytes}"
-```
-
-[`tools/ewf.py:118-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L118-L118)
-
-[3] 마운트 지점 폴더를 만들고 sudo로 마운트한다: [`tools/ewf.py:86-87`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L86-L87), [`tools/ewf.py:220-224`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L220-L224).
-
-[4] SQLite를 읽기 전용·immutable로 연다.
-서버 코드의 `sqlite3.connect` 호출은 이 한 곳이다.
-
-```python
-def open_ro(db_path: str) -> sqlite3.Connection:
-    """Open a sqlite db strictly read-only: no -wal/-shm sidecars, no locks."""
-    uri = f"file:{pathname2url(os.path.abspath(db_path))}?mode=ro&immutable=1"
-    return sqlite3.connect(uri, uri=True)
-```
-
-[`core/chat_db.py:34-37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L34-L37)
-
-[5] 외부 도구에 SQLite 증거 경로를 넘기는 도구: [`tools/eztools.py:568`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L568), [`tools/eztools.py:585`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L585), [`tools/misc.py:331`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L331).
-
-[6] 보호하는 경로 접두어와 경로 조각이다.
-
-```python
-READ_ONLY_PREFIXES = (
-    "/cases/",
-    "/mnt/",
-    "/media/",
-)
-
-READ_ONLY_SEGMENTS = ("evidence",)
-```
-
-[`core/paths.py:8-14`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L8-L14)
-
-[7] 실제 경로로 풀어 비교하고 걸리면 거부한다.
-
-```python
-def is_evidence_path(path: str) -> bool:
-    """Return True if path is under a protected evidence location."""
-    p = os.path.realpath(path)
-    for prefix in READ_ONLY_PREFIXES:
-        if p.startswith(prefix):
-            return True
-    parts = Path(p).parts
-    return any(seg == "evidence" for seg in parts)
-
-
-def assert_output_safe(path: str) -> None:
-    """Raise ValueError if path resolves inside an evidence directory."""
-    if is_evidence_path(path):
-        raise ValueError(
-            f"Output path '{path}' is inside a protected evidence directory. "
-            "Write outputs to ./analysis/, ./exports/, or ./reports/ only."
-        )
-```
-
-[`core/paths.py:58-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L58-L74)
-
-[8] 검사하는 인자 이름 목록([`core/paths.py:109-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L109-L118))과 데코레이터([`core/paths.py:121-149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L121-L149)).
-실행기의 검사는 [`core/executor.py:136-137`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L136-L137), [`core/executor.py:390`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L390)이다.
-
-[9] 설치 안내([`install.sh:450-452`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L450-L452))와 사건 지침 견본([`case-template/CLAUDE.md:22-23`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/case-template/CLAUDE.md#L22-L23)).
-
-[10] `misc.batch_run`의 실행([`tools/misc.py:2646-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2646-L2651))과 설치 스크립트의 sudo 설정([`install.sh:236`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L236)).
-## E02 대량 결과 전달 방식
-
-**상세 항목.** E02.01 문자·항목 상한†, E02.02 전체·반환 건수 표시†, E02.06 값 단위 잘림, E02.07 건수 없는 잘림 표시, E02.08 보관한 출력의 일부 재조회†
-
-### E02.01 문자·항목 상한
+### R02.01 문자·항목 상한
 
 **구현.** 외부 도구 실행기는 표준 출력을 51,200자에서 자르고 그다음 150줄에서 자른다 [1][2].
 두 상한은 운영자가 환경변수 `TRUDI_OUTPUT_CAP`·`TRUDI_OUTPUT_LINE_CAP`로 정하고 모델은 바꾸지 못한다 [1].
@@ -362,7 +360,7 @@ def assert_output_safe(path: str) -> None:
 
 **예외.** `evtx_filter`의 `max_results`처럼 서버가 만든 목록의 상한은 모델이 인자로 올린다 [3].
 
-### E02.02 전체·반환 건수 표시
+### R02.02 전체·반환 건수 표시
 
 **구현.** 줄 상한에서 자른 출력 끝에는 생략한 줄 수를 적은 꼬리말을 붙인다 [4].
 `strings_grep`은 상한을 넘어서도 센 전체 일치 수 `match_count`와 돌려준 수 `returned`를 나누어 싣고 상한에 걸리면 두 수를 적은 안내를 붙인다 [5].
@@ -371,18 +369,18 @@ def assert_output_safe(path: str) -> None:
 **예외.** 줄 상한 꼬리말의 생략 줄 수는 문자 상한으로 먼저 자른 뒤에 센 값이다 [2][4].
 두 상한이 함께 걸리면 원래 출력의 줄 수를 알 수 없다.
 
-### E02.06 값 단위 잘림
+### R02.06 값 단위 잘림
 
 **구현.** `evtx_filter`는 맞는 이벤트의 XML을 2,000자에서 잘라 싣는다 [3].
 잘린 이벤트에는 표시가 없다 [3].
 
-### E02.07 건수 없는 잘림 표시
+### R02.07 건수 없는 잘림 표시
 
 **구현.** 문자 상한만 걸린 출력에는 `truncated: true`만 붙는다 [2].
 실행기는 원래 길이 `_stdout_chars`를 계산하지만 호출 기록에만 쓰고 응답에서 뺀다 [6].
 `evtx_filter`는 상한에 이르면 `cap_hit`를 싣고 돌려준 개수만 `matches_found`로 적는다 [3].
 
-### E02.08 보관한 출력의 일부 재조회
+### R02.08 보관한 출력의 일부 재조회
 
 **구현.** 실행기는 잘리기 전의 표준 출력 전체를 호출 기록 옆 `analysis/.tool_output/<호출 ID>.txt`에 남긴다 [7].
 도구 응답에는 그 호출 ID `_trudi_call_id`가 실린다 [8].
@@ -487,11 +485,11 @@ def _apply_line_cap(text: str, max_lines: int) -> tuple[str, bool]:
 사이드카가 없을 때의 안내는 [`tools/read_output.py:51-53`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L51-L53)이다.
 
 [10] 클라이언트 PreToolUse 훅의 거부 문구: [`claude/hooks/guard_pretooluse.py:246-249`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/hooks/guard_pretooluse.py#L246-L249).
-## F03 실행 요청 내용 기록 방식
+## L02 기록 내용 구성
 
-**상세 항목.** F03.03 실제 실행 명령 기록†, F03.05 모델 호출의 입력·응답 기록†
+**상세 항목.** L02.03 실제 실행 명령 기록†, L02.05 모델 호출의 입력·응답 기록†
 
-### F03.03 실제 실행 명령 기록
+### L02.03 실제 실행 명령 기록
 
 **구현.** 외부 도구 실행기는 실제로 실행한 argv를 공백으로 이어 결과의 `cmd`에 둔다 [1].
 `sudo`가 붙은 명령이면 `sudo`까지 들어간다 [1].
@@ -503,7 +501,7 @@ Velociraptor는 API 설정 파일 경로를 `<redacted>`로 바꾼다 [4].
 
 **예외.** 외부 도구 실행기의 `cmd`는 argv를 공백으로 이어 공백이 든 인자 하나와 인자 여러 개를 기록에서 가를 수 없다 [1].
 
-### F03.05 모델 호출의 입력·응답 기록
+### L02.05 모델 호출의 입력·응답 기록
 
 **구현.** 서버 안에서 모델을 부르는 `reason.*` 도구는 모델에게 보낸 사용자 메시지 전체와 최대 토큰 수, 시스템 프롬프트 종류를 `inputs`로 만든다 [6].
 호출 전에는 모델 이름을 적은 `call_initiated` 항목을 남긴다 [7].

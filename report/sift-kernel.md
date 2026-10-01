@@ -1,6 +1,6 @@
 # sift-kernel 시범 전환 원고
 
-B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
+E03·T03·R02·L02 4개 셀을 새 보고서 형식으로 쓴 원고다.
 셀과 상세 항목의 정의는 `상세정의.yaml`을 따른다.
 상세 항목마다 **구현**을 쓰고 †가 붙은 항목에는 **예외**를 따로 쓴다.
 본문의 [번호]는 그 절 끝 **근거**의 같은 번호를 가리킨다.
@@ -12,11 +12,105 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 실행 확인은 WSL Ubuntu 26.04와 Node 22.23.3에서 서버를 MCP 클라이언트로 부른 기록(`기록/판정검토_sift-kernel_2026-09-29/`)을 인용한다.
 그 환경에는 `ewfverify`·`foremost`·`tshark`가 없었고 서버를 루트 권한 없이 돌렸다.
 
-## B04 선행 상태에 따른 실행 제어 방식
+## E03 원본 변경 방지
 
-**상세 항목.** B04.01 선행 결과 존재 대조†, B04.02 조사 단계 검사†
+**상세 항목.** E03.03 외부 도구·플랫폼에 위임†
 
-### B04.01 선행 결과 존재 대조
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 서버에는 원본 쓰기를 막는 장치가 없다.
+원본 보호는 서버가 부르는 외부 도구가 이미지를 읽기만 한다는 데 달려 있다.
+이미지를 다루는 연산은 Sleuth Kit(`fls`·`mmls`·`istat`·`icat`·`fsstat`·`img_stat`)에 이미지 경로를 넘기고 결과를 표준 출력으로 받는다 [1].
+Volatility와 YARA 연산도 이미지 경로를 읽기 인자로 받는다 [2].
+파일을 만드는 외부 도구(`tsk_recover`·`foremost`·`bulk_extractor`·`log2timeline`)에는 서버가 출력 폴더 아래 경로를 쓰기 위치로 넣는다 [3].
+외부 도구의 작업 폴더도 출력 폴더라서 쓰기 위치를 따로 받지 않는 도구가 만드는 파일도 출력 폴더에 생긴다 [3].
+분석 연산이 받는 이미지 경로는 `mount_evidence`가 조사 상태에 적은 원래 이미지 파일의 경로다 [4].
+
+원시 이미지는 `mount -o ro,loop,noexec,noatime`으로 읽기 전용 마운트를 시도한다 [5].
+마운트가 실패하면 `fls`로 이미지를 직접 읽을 수 있는지 보고 읽히면 성공으로 처리한다 [6].
+마운트가 성공해도 분석 연산은 마운트 지점이 아니라 이미지 파일 경로를 쓴다 [4].
+R01은 첫 단계인 `ewfmount`만 실행하고 읽기 전용 마운트 명령은 단계 설명 문자열에만 있다 [7].
+분석 경로가 읽기 전용 마운트를 쓰지 않으므로 E03.01에는 연결하지 않는다.
+
+**예외.** `extract_files_from_pcap`은 `tshark --export-objects`의 목적지를 출력 폴더가 아니라 조사 상태의 증거 경로 뒤에 `pcap_export/`를 붙여 정한다 [8].
+pcap 마운트는 받은 경로에 파일이 있는지 보지 않고 조사 상태의 증거 경로로 적는다 [9].
+tshark 3.6.2는 내보내기 목적지 폴더를 부모 폴더까지 만든다 [10].
+그래서 증거 폴더 안의 없는 파일 이름으로 pcap을 마운트한 뒤 이 연산을 부르면 증거 폴더 안에 새 폴더와 내보낸 파일이 생긴다.
+이 경로는 tshark가 없는 환경이라 실행하지 못했다.
+원본 파일을 고치지는 않지만 증거 폴더에 새 자료를 만든다.
+
+### 근거
+
+[1] Sleuth Kit 연산은 이미지 경로 `ev`를 읽기 인자로 받는다.
+
+```typescript
+    list_directory: { binary: "fls", buildArgs: (p, ev, off) => [...(p["recursive"] ? ["-r"] : []), "-l", "-p", ...(p["show_deleted"] ? ["-d"] : []), "-o", String(off), ev, ...(p["inode"] ? [String(p["inode"])] : [])] },
+    list_partitions: { binary: "mmls", buildArgs: (_, ev) => [ev] },
+    get_file_metadata: { binary: "istat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
+    extract_file: { binary: "icat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
+```
+
+[`src/server.ts:161-164`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L161-L164)
+
+[2] Volatility 연산([`src/server.ts:206-216`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L206-L216))과 YARA 연산([`src/server.ts:191`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L191))의 인자 구성.
+
+[3] 파일을 만드는 도구의 쓰기 위치는 출력 폴더 `out` 아래다.
+`tsk_recover`는 [`src/server.ts:171`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L171), `log2timeline`은 [`src/server.ts:181`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L181)에 있다.
+실행기의 기본 작업 폴더는 출력 폴더다([`src/adapters/process-executor.ts:153`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L153)).
+
+```typescript
+    carve_files: { binary: "foremost", buildArgs: (p, ev, _off, out) => ["-o", `${out}/carved/`, ...(p["file_types"] ? ["-t", (p["file_types"] as string[]).join(",")] : []), "-i", ev] },
+    analyze_unallocated: { binary: "bulk_extractor", buildArgs: (_, ev, _off, out) => ["-o", `${out}/be_out/`, ev] },
+```
+
+[`src/server.ts:176-177`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L176-L177)
+
+[4] 분석 연산은 조사 상태의 이미지 경로로 인자를 만든다: [`src/server.ts:1848-1849`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1848-L1849), [`src/server.ts:1939`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1939).
+마운트가 성공하면 조사 상태에 원래 이미지 경로를 적는다: [`src/server.ts:1744-1749`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1744-L1749).
+
+[5] 원시 이미지의 마운트 명령이다.
+
+```typescript
+      } else {
+        // Raw/dd — direct mount
+        mountSteps.push(`mount -o ro,loop,noexec,noatime "${imagePath}" /mnt/evidence/`);
+        mountCommand = { binary: "mount", args: ["-o", "ro,loop,noexec,noatime", imagePath, "/mnt/evidence/"] };
+```
+
+[`src/server.ts:1663-1666`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1663-L1666)
+
+[6] 마운트가 실패하면 `fls`로 직접 읽히는지 본다.
+
+```typescript
+      // FALLBACK: If mount fails, check if the image is directly accessible by sleuthkit
+      // This handles ewfmounted images (/mnt/ewf/ewf1) and raw images that don't need mounting
+      if (!success) {
+        const flsCheck = await executor.execute("fls", ["-o", "0", imagePath]);
+        if (flsCheck.isOk() && flsCheck.value.exitCode === 0 && flsCheck.value.stdout.length > 0) {
+          success = true;
+          rawOutput = `Image accessible directly via Sleuth Kit (no filesystem mount needed).\nRoot entries:\n${flsCheck.value.stdout.slice(0, 2000)}`;
+```
+
+[`src/server.ts:1674-1680`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1674-L1680)
+
+[7] R01의 두 단계 가운데 실행하는 것은 `mountCommand` 하나다: [`src/server.ts:1644-1650`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1644-L1650), [`src/server.ts:1669-1670`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1669-L1670).
+
+[8] 내보내기 목적지는 증거 경로 `ev` 뒤에 붙는다.
+
+```typescript
+    extract_files_from_pcap: { binary: "tshark", buildArgs: (p, ev) => ["-r", String(p["path"] ?? ""), "--export-objects", `http,${ev || "/tmp"}/pcap_export/`] },
+```
+
+[`src/server.ts:197-197`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L197-L197)
+
+[9] pcap 확장자면 파일 확인 없이 조사 상태에 경로를 적고 능력을 준다: [`src/server.ts:1625-1632`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1625-L1632).
+
+[10] [tshark 3.6.2 `ui/cli/tap-exportobject.c`](https://github.com/wireshark/wireshark/blob/wireshark-3.6.2/ui/cli/tap-exportobject.c)의 내보내기 목적지 처리.
+## T03 실행 허가 조건 확인
+
+**상세 항목.** T03.01 선행 결과 존재 대조†, T03.02 조사 단계 검사†
+
+### T03.01 선행 결과 존재 대조
 
 **구현.** 서버는 도구와 분류 도구의 연산마다 실행에 필요한 능력(`requires`)과 성공한 뒤 생기는 능력(`produces`)을 명세로 둔다 [1].
 예를 들어 `list_directory`는 `evidence_mounted`와 `integrity_verified`를 요구하고 성공하면 `filesystem_accessible`을 만든다 [1].
@@ -33,7 +127,7 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 실패한 연산은 능력을 만들지 않는다 [6].
 다음 호출의 대조는 이렇게 늘어난 집합을 쓴다.
 능력은 메모리에만 있어 HTTP 전송처럼 요청마다 서버를 새로 만들면 다음 요청에 남지 않는다 [7].
-상태가 얼마나 남는지는 A05에서 본다.
+상태가 얼마나 남는지는 P04에서 본다.
 
 **예외.** 명세에 요구 능력이 있는 `register_finding`·`register_hypothesis`·`reassess_finding`·`corroborate_finding`·`challenge_finding`·`generate_report`는 능력 대조보다 앞의 분기에서 처리되고 돌아간다 [8].
 마운트 전에 `register_hypothesis`를 부르자 가설이 등록됐다 [8].
@@ -44,7 +138,7 @@ B04·C04·E02·F03 4개 셀을 새 보고서 형식으로 쓴 원고다.
 `list_registry_hives`는 파일 목록 기록이 없어도 성공으로 끝나 `registry_accessible`을 만든다 [10].
 능력은 증거와 묶이지 않고 `held`에 더해지기만 하므로 다른 이미지를 다시 마운트해도 앞의 확인이 그대로 쓰인다 [2][6].
 
-### B04.02 조사 단계 검사
+### T03.02 조사 단계 검사
 
 **구현.** 방법론 상태 기계는 증거 종류별 기준 도구와 상관 분석 도구를 시도하면서 단계를 옮기고 마지막에 `REPORT` 단계에 이른다 [11].
 `generate_report`는 `REPORT` 단계가 아니면 남은 기준 도구 가운데 요구 능력을 채운 도구를 센다 [12].
@@ -200,105 +294,11 @@ function handleListRegistryHives(_params: Record<string, unknown>, ctx: HandlerC
 
 [13] Windows 디스크 기준 도구 목록: [`src/domain/methodology.ts:165-190`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/methodology.ts#L165-L190).
 목록의 도구는 모두 `filesystem_accessible`·`registry_accessible`·`eventlogs_accessible` 가운데 하나 이상을 요구한다([`src/domain/capability-graph.ts:21-171`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/capability-graph.ts#L21-L171)).
-## C04 원본 변경 방지 방식
+## R02 대량 결과 전달
 
-**상세 항목.** C04.06 외부 도구에 의존†
+**상세 항목.** R02.01 문자·항목 상한†, R02.07 건수 없는 잘림 표시
 
-### C04.06 외부 도구에 의존
-
-**구현.** 서버에는 원본 쓰기를 막는 장치가 없다.
-원본 보호는 서버가 부르는 외부 도구가 이미지를 읽기만 한다는 데 달려 있다.
-이미지를 다루는 연산은 Sleuth Kit(`fls`·`mmls`·`istat`·`icat`·`fsstat`·`img_stat`)에 이미지 경로를 넘기고 결과를 표준 출력으로 받는다 [1].
-Volatility와 YARA 연산도 이미지 경로를 읽기 인자로 받는다 [2].
-파일을 만드는 외부 도구(`tsk_recover`·`foremost`·`bulk_extractor`·`log2timeline`)에는 서버가 출력 폴더 아래 경로를 쓰기 위치로 넣는다 [3].
-외부 도구의 작업 폴더도 출력 폴더라서 쓰기 위치를 따로 받지 않는 도구가 만드는 파일도 출력 폴더에 생긴다 [3].
-분석 연산이 받는 이미지 경로는 `mount_evidence`가 조사 상태에 적은 원래 이미지 파일의 경로다 [4].
-
-원시 이미지는 `mount -o ro,loop,noexec,noatime`으로 읽기 전용 마운트를 시도한다 [5].
-마운트가 실패하면 `fls`로 이미지를 직접 읽을 수 있는지 보고 읽히면 성공으로 처리한다 [6].
-마운트가 성공해도 분석 연산은 마운트 지점이 아니라 이미지 파일 경로를 쓴다 [4].
-E01은 첫 단계인 `ewfmount`만 실행하고 읽기 전용 마운트 명령은 단계 설명 문자열에만 있다 [7].
-분석 경로가 읽기 전용 마운트를 쓰지 않으므로 C04.02에는 연결하지 않는다.
-
-**예외.** `extract_files_from_pcap`은 `tshark --export-objects`의 목적지를 출력 폴더가 아니라 조사 상태의 증거 경로 뒤에 `pcap_export/`를 붙여 정한다 [8].
-pcap 마운트는 받은 경로에 파일이 있는지 보지 않고 조사 상태의 증거 경로로 적는다 [9].
-tshark 3.6.2는 내보내기 목적지 폴더를 부모 폴더까지 만든다 [10].
-그래서 증거 폴더 안의 없는 파일 이름으로 pcap을 마운트한 뒤 이 연산을 부르면 증거 폴더 안에 새 폴더와 내보낸 파일이 생긴다.
-이 경로는 tshark가 없는 환경이라 실행하지 못했다.
-원본 파일을 고치지는 않지만 증거 폴더에 새 자료를 만든다.
-
-### 근거
-
-[1] Sleuth Kit 연산은 이미지 경로 `ev`를 읽기 인자로 받는다.
-
-```typescript
-    list_directory: { binary: "fls", buildArgs: (p, ev, off) => [...(p["recursive"] ? ["-r"] : []), "-l", "-p", ...(p["show_deleted"] ? ["-d"] : []), "-o", String(off), ev, ...(p["inode"] ? [String(p["inode"])] : [])] },
-    list_partitions: { binary: "mmls", buildArgs: (_, ev) => [ev] },
-    get_file_metadata: { binary: "istat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
-    extract_file: { binary: "icat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
-```
-
-[`src/server.ts:161-164`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L161-L164)
-
-[2] Volatility 연산([`src/server.ts:206-216`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L206-L216))과 YARA 연산([`src/server.ts:191`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L191))의 인자 구성.
-
-[3] 파일을 만드는 도구의 쓰기 위치는 출력 폴더 `out` 아래다.
-`tsk_recover`는 [`src/server.ts:171`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L171), `log2timeline`은 [`src/server.ts:181`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L181)에 있다.
-실행기의 기본 작업 폴더는 출력 폴더다([`src/adapters/process-executor.ts:153`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L153)).
-
-```typescript
-    carve_files: { binary: "foremost", buildArgs: (p, ev, _off, out) => ["-o", `${out}/carved/`, ...(p["file_types"] ? ["-t", (p["file_types"] as string[]).join(",")] : []), "-i", ev] },
-    analyze_unallocated: { binary: "bulk_extractor", buildArgs: (_, ev, _off, out) => ["-o", `${out}/be_out/`, ev] },
-```
-
-[`src/server.ts:176-177`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L176-L177)
-
-[4] 분석 연산은 조사 상태의 이미지 경로로 인자를 만든다: [`src/server.ts:1848-1849`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1848-L1849), [`src/server.ts:1939`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1939).
-마운트가 성공하면 조사 상태에 원래 이미지 경로를 적는다: [`src/server.ts:1744-1749`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1744-L1749).
-
-[5] 원시 이미지의 마운트 명령이다.
-
-```typescript
-      } else {
-        // Raw/dd — direct mount
-        mountSteps.push(`mount -o ro,loop,noexec,noatime "${imagePath}" /mnt/evidence/`);
-        mountCommand = { binary: "mount", args: ["-o", "ro,loop,noexec,noatime", imagePath, "/mnt/evidence/"] };
-```
-
-[`src/server.ts:1663-1666`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1663-L1666)
-
-[6] 마운트가 실패하면 `fls`로 직접 읽히는지 본다.
-
-```typescript
-      // FALLBACK: If mount fails, check if the image is directly accessible by sleuthkit
-      // This handles ewfmounted images (/mnt/ewf/ewf1) and raw images that don't need mounting
-      if (!success) {
-        const flsCheck = await executor.execute("fls", ["-o", "0", imagePath]);
-        if (flsCheck.isOk() && flsCheck.value.exitCode === 0 && flsCheck.value.stdout.length > 0) {
-          success = true;
-          rawOutput = `Image accessible directly via Sleuth Kit (no filesystem mount needed).\nRoot entries:\n${flsCheck.value.stdout.slice(0, 2000)}`;
-```
-
-[`src/server.ts:1674-1680`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1674-L1680)
-
-[7] E01의 두 단계 가운데 실행하는 것은 `mountCommand` 하나다: [`src/server.ts:1644-1650`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1644-L1650), [`src/server.ts:1669-1670`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1669-L1670).
-
-[8] 내보내기 목적지는 증거 경로 `ev` 뒤에 붙는다.
-
-```typescript
-    extract_files_from_pcap: { binary: "tshark", buildArgs: (p, ev) => ["-r", String(p["path"] ?? ""), "--export-objects", `http,${ev || "/tmp"}/pcap_export/`] },
-```
-
-[`src/server.ts:197-197`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L197-L197)
-
-[9] pcap 확장자면 파일 확인 없이 조사 상태에 경로를 적고 능력을 준다: [`src/server.ts:1625-1632`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1625-L1632).
-
-[10] [tshark 3.6.2 `ui/cli/tap-exportobject.c`](https://github.com/wireshark/wireshark/blob/wireshark-3.6.2/ui/cli/tap-exportobject.c)의 내보내기 목적지 처리.
-## E02 대량 결과 전달 방식
-
-**상세 항목.** E02.01 문자·항목 상한†, E02.07 건수 없는 잘림 표시
-
-### E02.01 문자·항목 상한
+### R02.01 문자·항목 상한
 
 **구현.** 외부 도구 실행기는 표준 출력을 50 MiB와 50만 줄에서 끊는다 [1].
 서버는 연산에 따라 더 작은 줄 상한을 준다.
@@ -312,11 +312,11 @@ tshark 3.6.2는 내보내기 목적지 폴더를 부모 폴더까지 만든다 [
 줄 상한이나 시간 제한에서 끊긴 결과에는 잘림 표시도 건수도 없다 [4][5].
 파일 60,000개가 든 이미지에서 `search_filename`은 50,015건을 잘림 표시 없이 돌려줬다 [7].
 전용 파서를 거친 결과에는 건수 상한이 없다.
-서버는 원래 출력을 `raw` 폴더에 파일로 보관하지만 그 파일을 읽어 주는 도구는 없어 E02.04·E02.08에는 연결하지 않는다 [8].
+서버는 원래 출력을 `raw` 폴더에 파일로 보관하지만 그 파일을 읽어 주는 도구는 없어 R02.04·R02.08에는 연결하지 않는다 [8].
 
 **예외.** regipy 연산은 표준 출력 대신 결과 JSON 파일을 크기 제한 없이 읽으므로 외부 도구 결과인데도 실행기의 출력 상한이 걸리지 않는다 [9].
 
-### E02.07 건수 없는 잘림 표시
+### R02.07 건수 없는 잘림 표시
 
 **구현.** 1만 자에서 자른 출력 끝에는 `...[truncated]`를 붙인다 [6].
 이 표시는 파서가 없는 연산의 1만 자 잘림에만 붙는다 [6].
@@ -413,11 +413,11 @@ const MAX_OUTPUT_LINES = 500_000; // Kill process if output exceeds this many li
 [`src/server.ts:1967-1972`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1967-L1972)
 
 [10] 응답에 넣는 값은 파서 결과의 `data`다: [`src/server.ts:139-142`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L139-L142), [`src/server.ts:2081-2089`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2081-L2089).
-## F03 실행 요청 내용 기록 방식
+## L02 기록 내용 구성
 
-**상세 항목.** F03.02 서버가 바꾼 인자 기록†
+**상세 항목.** L02.02 서버가 바꾼 인자 기록†
 
-### F03.02 서버가 바꾼 인자 기록
+### L02.02 서버가 바꾼 인자 기록
 
 **구현.** 호출 기록 항목은 도구 이름 `tool`과 인자 객체 `params`를 따로 가진다 [1].
 SQLite 저장소는 `params`를 JSON 문자열 열에 넣고 읽을 때 객체로 되돌린다 [2].
@@ -432,8 +432,8 @@ SQLite 저장소는 `params`를 JSON 문자열 열에 넣고 읽을 때 객체�
 
 모델이 보낸 원래 값은 바뀐 뒤 남지 않는다 [6].
 외부 도구에 넘긴 인자 배열과 그때 더하는 증거 경로·파티션 오프셋·출력 폴더도 항목에 없다 [1][7].
-그래서 F03.01·F03.03·F03.04에는 연결하지 않는다.
-경로를 따라가려고 서버가 부른 `fls`·`icat`처럼 호출 기록에 항목이 남지 않는 실행은 F01에서 본다 [5][6].
+그래서 L02.01·L02.03·L02.04에는 연결하지 않는다.
+경로를 따라가려고 서버가 부른 `fls`·`icat`처럼 호출 기록에 항목이 남지 않는 실행은 L01에서 본다 [5][6].
 
 **예외.** `mount_evidence`는 바꾼 인자 대신 `image_path`와 형식만 남긴다 [8].
 

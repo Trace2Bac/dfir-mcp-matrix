@@ -1,6 +1,6 @@
 # dfir-mcp-architecture-matrix-v2
 
-DFIR MCP 서버 구현방식 매트릭스를 새 형식으로 옮기는 시범 전환 자료다. 셀마다 상세 항목(구현 방식)을 두고 MCP 서버마다 그 방식의 **구현**과 **예외**를 기준 커밋 코드 근거와 함께 쓴다. 지금은 B04·C04·E02·F03 4개 셀과 sift-kernel·mcp_dfir·trudi·regipy 4개 서버를 옮겼다.
+DFIR MCP 서버 구현방식 매트릭스를 새 형식으로 옮기는 시범 전환 자료다. 셀마다 상세 항목(구현 방식)을 두고 MCP 서버마다 그 방식의 **구현**과 **예외**를 기준 커밋 코드 근거와 함께 쓴다. 지금은 E03·T03·R02·L02 4개 셀과 sift-kernel·mcp_dfir·trudi·regipy 4개 서버를 옮겼다.
 
 ## 파일
 

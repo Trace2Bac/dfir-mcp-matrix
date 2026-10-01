@@ -64,7 +64,7 @@ def plan_defs():
     text = open(PLAN, encoding="utf-8").read().replace("\r\n", "\n")
     a, b = text.index("\n### 6.2."), text.index("\n### 6.3.")
     out = {}
-    for m in re.finditer(r"^#### ([A-H]\d\d) ([^\n]+)\n((?:(?!#### ).*\n)*)", text[a:b], re.M):
+    for m in re.finditer(r"^#### ([A-Z]\d\d) ([^\n]+)\n((?:(?!#### ).*\n)*)", text[a:b], re.M):
         cid, body = m.group(1), m.group(3)
         d = {"이름": m.group(2).strip(), "적용범위": "", "미구현": "", "비적용": "", "상세": []}
         sm = re.search(r"^\*\*적용 범위\.\*\* (.+)$", body, re.M)
@@ -317,13 +317,13 @@ def plan_cells():
     axes, cells, cur_axis, cond = {}, [], None, False
     for ln in lines:
         if ln.startswith("## ") or ln.startswith("### "):
-            m = re.match(r"^### 10\.([A-H])\. (.+)$", ln)
+            m = re.match(r"^### 10\.([A-Z])\. (.+)$", ln)
             cur_axis = m.group(1) if m else None
             if m:
                 axes[cur_axis] = m.group(2).strip()
             cond = bool(re.match(r"^### 10\.2\. ", ln))
             continue
-        m = re.match(r"^\| ([A-H]\d\d) ([^|]+?) \| (.+) \|$", ln)
+        m = re.match(r"^\| ([A-Z]\d\d) ([^|]+?) \| (.+) \|$", ln)
         if not m or not (cur_axis or cond):
             continue
         cols = [c.strip() for c in m.group(3).split(" | ")]
@@ -332,8 +332,14 @@ def plan_cells():
         else:
             scope, q, cand = "", cols[0], cols[1]
         items, note = split_candidates(cand)
-        cells.append({"id": m.group(1), "name": m.group(2).strip(), "axis": m.group(1)[0], "q": q,
+        cells.append({"id": m.group(1), "name": m.group(2).strip(), "axis": cur_axis or m.group(1)[0], "q": q,
                       "cond": cond, "scope": scope, "cand": items, "note": note})
+    # 축은 셀이 놓인 10절 표로 정한다(12절 38번: 셀 번호를 그대로 둔 채 축을 합칠 수 있게).
+    # 조건부 셀은 같은 글자의 공통 셀이 놓인 축에 붙인다.
+    home = {c["id"][0]: c["axis"] for c in cells if not c["cond"]}
+    for c in cells:
+        if c["cond"]:
+            c["axis"] = home.get(c["id"][0], c["id"][0])
     return axes, cells
 
 
