@@ -7,7 +7,7 @@
   python pilot.py check [표본 ...] 원고 형식·표지·근거·발췌 원문 일치·문장 점검을 본다(표본을 빼면 원고가 있는 표본 전부)
   python pilot.py build            개편안 10절의 전체 셀과 원고에서 연결자료.json과 시범_매트릭스.html을 만든다
 
-원고(보고서/<표본>.md)의 셀 절 모양:
+원고(report/<표본>.md)의 셀 절 모양:
   ## <셀ID> <셀 이름>
   **상세 항목.** <ID 이름>[†], ...   (또는 미구현 / 비적용 하나)
   ### <ID 이름>                       (상세 항목 줄의 차례대로 하나씩)
@@ -93,7 +93,7 @@ LEAD = re.compile(r"^\*\*([^*]+?)\.\*\*\s?")
 
 
 def report_path(name):
-    return os.path.join(PILOT, "보고서", name + ".md")
+    return os.path.join(PILOT, "report", name + ".md")
 
 
 def item_label(iid):
@@ -616,7 +616,7 @@ def build():
                 impl["%s|%s|%s" % (c["id"], n, it["id"])] = {"impl": blocks.get("구현") or blocks.get("판단", ""),
                                                             "exc": blocks.get("예외", ""), "evid": ev}
             link[n][c["id"]] = rows
-    json.dump({"기준": ["개편안 10절(셀 구조)", "개편안 6.2절(상세 정의)", "보고서/*.md(연결)"],
+    json.dump({"기준": ["개편안 10절(셀 구조)", "개편안 6.2절(상세 정의)", "report/*.md(연결)"],
                "연결": {n: {cid: v for cid, v in cs.items() if v[0]["상세"] != "미확인"} for n, cs in link.items()}},
               open(os.path.join(PILOT, "연결자료.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     cells_out = []
