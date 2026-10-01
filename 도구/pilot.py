@@ -12,6 +12,7 @@
   **상세 항목.** <ID 이름>[†], ...   (또는 미구현 / 비적용 하나)
   ### <ID 이름>                       (상세 항목 줄의 차례대로 하나씩)
   **구현.** 그 방식의 구현 [1] ...     (여러 단락이면 이어지는 단락은 머리말 없이)
+  (문장 하나를 한 줄에 쓴다. 단락 사이에만 빈 줄을 둔다)
   **예외.** 그 방식이 걸리지 않는 경로 [2] ...   (†일 때만, †이면 반드시)
   ### 미구현 / ### 비적용
   **판단.** 왜 그 항목인지 [1] ...
@@ -50,10 +51,40 @@ import linkify  # noqa: E402  기준 커밋 읽기와 링크 변환을 그대로
 import style_lint  # noqa: E402
 
 DEF = yaml.safe_load(open(os.path.join(PILOT, "상세정의.yaml"), encoding="utf-8"))
-CELLS = DEF["셀"]
-ORDER = list(CELLS)
 SPECIAL = ("미구현", "비적용", "미확인")
-PLAN = os.path.join(REPO, "기록", "보고서_매트릭스_통합개편안_2026-09-30.md")
+PLAN_NAME = "보고서_매트릭스_통합개편안_2026-09-30.md"
+# 개편안은 이 저장소에 있다. 옛 위치(Claude outputs/기록)는 옮기기 전 사본을 쓸 때만 본다.
+PLAN = next((x for x in (os.path.join(PILOT, PLAN_NAME), os.path.join(REPO, "기록", PLAN_NAME)) if os.path.isfile(x)), None)
+if not PLAN:
+    raise SystemExit("개편안(%s)을 찾지 못했다." % PLAN_NAME)
+
+
+def plan_defs():
+    """개편안 6.2절(상세 항목 정의의 유일한 원본)에서 셀마다 적용 범위·미구현·비적용·상세 항목을 읽는다."""
+    text = open(PLAN, encoding="utf-8").read().replace("\r\n", "\n")
+    a, b = text.index("\n### 6.2."), text.index("\n### 6.3.")
+    out = {}
+    for m in re.finditer(r"^#### ([A-H]\d\d) ([^\n]+)\n((?:(?!#### ).*\n)*)", text[a:b], re.M):
+        cid, body = m.group(1), m.group(3)
+        d = {"이름": m.group(2).strip(), "적용범위": "", "미구현": "", "비적용": "", "상세": []}
+        sm = re.search(r"^\*\*적용 범위\.\*\* (.+)$", body, re.M)
+        if sm:
+            d["적용범위"] = sm.group(1).strip()
+        for row in re.findall(r"^\| (?!상세 \||---)(.+) \|\s*$", body, re.M):
+            cols = [x.strip() for x in row.split(" | ")]
+            cols += [""] * (3 - len(cols))
+            if cols[0] in ("미구현", "비적용"):
+                d[cols[0]] = cols[1]
+                continue
+            im = re.match(r"^(%s\.\d\d) (.+)$" % cid, cols[0])
+            if im:
+                d["상세"].append({"id": im.group(1), "이름": im.group(2), "포함": cols[1], "제외": cols[2]})
+        out[cid] = d
+    return out
+
+
+CELLS = plan_defs()
+ORDER = list(DEF["시범셀"])
 LANG = {".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript", ".mjs": "javascript",
         ".go": "go", ".cs": "csharp", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
         ".md": "markdown", ".sh": "bash", ".ps1": "powershell", ".rs": "rust", ".sql": "sql"}
@@ -197,16 +228,39 @@ def block_text(b):
 
 
 def paragraphs(lines):
+    """빈 줄로 나뉜 단락마다 줄 목록을 돌려준다. 원고는 문장 하나를 한 줄에 쓰므로 줄이 곧 문장이다."""
     out, cur = [], []
     for l in lines:
         if l.strip():
             cur.append(l.strip())
         elif cur:
-            out.append(" ".join(cur))
+            out.append(cur)
             cur = []
     if cur:
-        out.append(" ".join(cur))
+        out.append(cur)
     return out
+
+
+SENT_END = re.compile(r"(?<=[다음됨함]\.)\s+(?=\S)|(?<=\]\.)\s+(?=\S)|(?<=\)\.)\s+(?=\S)")
+
+
+def sentences_in_line(line):
+    """한 줄에 든 문장 수. 코드 백틱 안과 링크 주소의 마침표는 세지 않는다."""
+    t = re.sub(r"`[^`]*`", "C", line)
+    t = re.sub(r"\]\([^)]*\)", "](U)", t)
+    return len(SENT_END.split(t))
+
+
+def prose_lines(lines):
+    """코드 블록·발췌 링크 줄을 뺀 글 줄."""
+    fence = False
+    for ln in lines:
+        if ln.startswith("```"):
+            fence = not fence
+            continue
+        if fence or not ln.strip() or re.match(r"^\[`[^`]+`\]\(https?://", ln):
+            continue
+        yield ln
 
 
 # ───────────────────────── renumber ─────────────────────────
@@ -298,7 +352,13 @@ def split_candidates(col):
 def check_defs():
     errs = []
     plan = {c["id"]: [re.sub(r"\([^)]*\)", "", x).strip() for x in c["cand"]] for c in plan_cells()[1]}
+    for cid in ORDER:
+        if cid not in CELLS:
+            errs.append("%s 시범 셀인데 개편안 6.2절에 정의가 없다" % cid)
     for cid, c in CELLS.items():
+        for k in ("적용범위", "미구현", "비적용"):
+            if not c.get(k):
+                errs.append("%s 6.2절에 %s이 없다" % (cid, "적용 범위" if k == "적용범위" else k))
         ids = [it["id"] for it in c["상세"]]
         if len(set(ids)) != len(ids):
             errs.append("%s 상세 ID 겹침" % cid)
@@ -393,6 +453,9 @@ def check(name, slugs):
                 for sent in SENT.split(block_text(b)):
                     if "`" in sent and not MARK.search(sent):
                         warns.append("%s 표지 없는 코드 문장: %s" % (cid, sent.strip()[:70]))
+                for ln in prose_lines(b["lines"]):
+                    if sentences_in_line(ln) > 1:
+                        errs.append("%s '%s' 한 줄에 문장이 둘 이상이다(문장 하나에 한 줄): %s" % (cid, it["label"], ln[:50]))
         body = " ".join(block_text(b) for u in s["units"] for b in u["blocks"])
         first = []
         for x in MARK.findall(body):
@@ -409,6 +472,9 @@ def check(name, slugs):
             if "](http" not in e_text and "(실행 확인" not in e_text:
                 errs.append("%s 근거 [%d]에 링크가 없다" % (cid, n_))
             errs += ["%s 근거 [%d] %s" % (cid, n_, e) for e in check_blocks(lines, slugs)]
+            for ln in prose_lines([re.sub(r"^\[\d+\] ", "", lines[0])] + lines[1:]):
+                if sentences_in_line(ln) > 1:
+                    errs.append("%s 근거 [%d] 한 줄에 문장이 둘 이상이다(문장 하나에 한 줄): %s" % (cid, n_, ln[:50]))
     raw = text.split("\n")
     fence, clean = False, []
     for ln in raw:
@@ -500,7 +566,7 @@ def md_evidence(lines):
 
     def flush():
         if para:
-            out.append("<p>%s</p>" % md_inline(" ".join(para)))
+            out.append("<p>%s</p>" % "<br>".join(md_inline(x) for x in para))
             para.clear()
     for ln in lines:
         if code is not None:
@@ -542,7 +608,7 @@ def build():
                         if int(x) not in marks:
                             marks.append(int(x))
                 rows.append({"상세": it["id"], "예외": it["dagger"], "근거": marks})
-                blocks = {b["label"]: "".join("<p>%s</p>" % md_inline(p) for p in paragraphs(b["lines"]))
+                blocks = {b["label"]: "".join("<p>%s</p>" % "<br>".join(md_inline(x) for x in p) for p in paragraphs(b["lines"]))
                           for b in u["blocks"]}
                 ev = "".join('<div class="ev" id="EV-%d"><span class="evn">[%d]</span>%s</div>'
                              % (k, k, md_evidence([re.sub(r"^\[\d+\] ", "", s["evid"][k][0])] + s["evid"][k][1:]))
@@ -550,25 +616,20 @@ def build():
                 impl["%s|%s|%s" % (c["id"], n, it["id"])] = {"impl": blocks.get("구현") or blocks.get("판단", ""),
                                                             "exc": blocks.get("예외", ""), "evid": ev}
             link[n][c["id"]] = rows
-    json.dump({"기준": ["개편안 10절", "상세정의.yaml"],
+    json.dump({"기준": ["개편안 10절(셀 구조)", "개편안 6.2절(상세 정의)", "보고서/*.md(연결)"],
                "연결": {n: {cid: v for cid, v in cs.items() if v[0]["상세"] != "미확인"} for n, cs in link.items()}},
               open(os.path.join(PILOT, "연결자료.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    e08 = plan_defs_62()
     cells_out = []
     for c in pcells:
         d = CELLS.get(c["id"])
         if d:
             items = [{"id": it["id"], "name": it["이름"], "inc": it["포함"], "exc": it["제외"]} for it in d["상세"]]
-            meaning = {"미구현": d.get("미구현", ""), "비적용": d.get("비적용", "")}
-            defined = True
-        elif c["id"] in e08:
-            items = e08[c["id"]]["items"]
-            meaning = {"미구현": e08[c["id"]].get("미구현", ""), "비적용": ""}
-            defined = True
+            meaning = {"미구현": d["미구현"], "비적용": d["비적용"]}
+            scope, defined = d["적용범위"], True
         else:
             items = [{"id": "%s.%02d" % (c["id"], k), "name": nm, "inc": "", "exc": ""} for k, nm in enumerate(c["cand"], 1)]
             meaning = {"미구현": "", "비적용": ""}
-            defined = False
+            scope, defined = "", False
         meaning["미확인"] = DEF["공통"]["미확인"]
         rows = []
         for it in items + [{"id": x, "name": x, "inc": meaning[x], "exc": ""} for x in SPECIAL]:
@@ -576,34 +637,14 @@ def build():
             rows.append({"id": it["id"], "name": it["name"], "inc": it["inc"], "exc": it["exc"], "m": members})
         studied = sum(1 for n in names if link[n][c["id"]][0]["상세"] != "미확인")
         cells_out.append({"id": c["id"], "name": c["name"], "axis": c["axis"], "q": c["q"], "cond": c["cond"],
-                          "scope": c["scope"], "note": c["note"], "defined": defined, "studied": studied, "rows": rows})
+                          "scope": c["scope"], "note": c["note"], "defined": defined, "dscope": scope,
+                          "studied": studied, "rows": rows})
     data = {"axes": axes, "cells": cells_out, "impl": impl, "samples": names}
     page = open(os.path.join(HERE, "matrix_template.html"), encoding="utf-8").read()
     page = page.replace("/*DATA*/null", json.dumps(data, ensure_ascii=False).replace("</", "<\\/"))
     open(os.path.join(PILOT, "시범_매트릭스.html"), "w", encoding="utf-8", newline="\n").write(page)
     print("연결자료.json, 시범_매트릭스.html 만듦 (셀 %d, 조건부 %d, 표본 %d, 구현 설명 %d)"
           % (len(cells_out), sum(1 for c in cells_out if c["cond"]), len(names), len(impl)))
-
-
-def plan_defs_62():
-    """개편안 6.2절에 포함·제외 기준이 적힌 셀 가운데 상세정의.yaml에 없는 것(E08)을 읽는다."""
-    text = open(PLAN, encoding="utf-8").read()
-    out = {}
-    for m in re.finditer(r"^#### ([A-H]\d\d) [^\n]+\n\n\| 상세 \|[^\n]+\n\|---[^\n]+\n((?:\|[^\n]+\n)+)", text, re.M):
-        cid = m.group(1)
-        if cid in CELLS:
-            continue
-        items, miss = [], ""
-        for row in m.group(2).strip().split("\n"):
-            cols = [x.strip() for x in row.strip("|").split(" | ")]
-            if cols[0] == "미구현":
-                miss = cols[1]
-                continue
-            mm = re.match(r"^(%s\.\d\d) (.+)$" % cid, cols[0])
-            if mm:
-                items.append({"id": mm.group(1), "name": mm.group(2), "inc": cols[1], "exc": cols[2] if len(cols) > 2 else ""})
-        out[cid] = {"items": items, "미구현": miss}
-    return out
 
 
 def main():
