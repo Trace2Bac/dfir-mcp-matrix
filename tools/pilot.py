@@ -274,8 +274,9 @@ def validate():
                 errs.append("%s: 상세 번호 %s가 셀 번호 %s로 시작하지 않는다" % (f, iid, cid))
         for iid in set(x for x in ids + gone if (ids + gone).count(x) > 1):
             errs.append("%s: 상세 번호 %s가 겹친다(지운 번호는 다시 쓰지 않는다)" % (f, iid))
+        live = {str(d.get("id")) for x in CELL_LIST for d in x.get("details") or []}   # 셀을 나누면 다른 셀의 상세로 옮긴다
         for r in c.get("retired") or []:
-            if r.get("merged_into") and r["merged_into"] not in ids:
+            if r.get("merged_into") and r["merged_into"] not in live:
                 errs.append("%s: retired %s의 merged_into %s가 지금 상세에 없다" % (f, r["id"], r["merged_into"]))
         if c.get("conditional") and not c.get("applies_to"):
             errs.append("%s: 조건부 셀에 applies_to가 없다" % f)
