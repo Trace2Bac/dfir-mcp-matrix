@@ -15,5 +15,5 @@ commit: ea51bec90d4cb543e4aa6063af6e85ae3e4d9396
 줄 번호는 모두 이 커밋 기준이다.
 
 **확인 방법.** 코드는 기준 커밋을 `git show`로 읽었다.
-실행 확인은 WSL Ubuntu 26.04와 Node 22.23.3에서 서버를 MCP 클라이언트로 부른 기록(`기록/판정검토_sift-kernel_2026-09-29/`)을 인용한다.
+근거의 "실행 확인"은 WSL Ubuntu 26.04와 Node 22.23.3에서 서버를 MCP 클라이언트로 불러 본 결과다.
 그 환경에는 `ewfverify`·`foremost`·`tshark`가 없었고 서버를 루트 권한 없이 돌렸다.

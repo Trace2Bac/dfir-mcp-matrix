@@ -22,7 +22,6 @@ import html
 import http.server
 import json
 import os
-import posixpath
 import re
 import shutil
 import socketserver
@@ -38,7 +37,20 @@ REPORTS = os.path.join(ROOT, "reports")
 SITE_SRC = os.path.join(ROOT, "site")
 OUT = os.path.join(ROOT, "_site")
 
-SPECIAL = ("미구현", "비적용", "미확인")
+# ── 원고 표시어 ── 원고(reports/)·화면 데이터에 쓰는 낱말. 다국어로 나눌 때 여기와 site/index.html의 STRINGS만 언어별로 늘린다.
+TERMS = {
+    "not_implemented": "미구현",   # 머리말 details의 id 값
+    "not_applicable": "비적용",
+    "unknown": "미확인",            # 화면에만 쓴다
+    "impl": "구현",                 # 단락 머리 **구현.**
+    "exc": "예외",                  # 단락 머리 **예외.**
+    "judge": "판단",                # 미구현·비적용의 단락 머리 **판단.**
+    "evidence": "근거",             # 소제목 ### 근거
+    "excerpt": "@발췌",             # 근거의 발췌 지시어
+}
+NOT_IMPL, NOT_APPL, UNKNOWN = TERMS["not_implemented"], TERMS["not_applicable"], TERMS["unknown"]
+SPECIAL = (NOT_IMPL, NOT_APPL, UNKNOWN)
+EVID_HEAD = "\n### %s\n" % TERMS["evidence"]
 CELL_ID = re.compile(r"^[A-Z]\d\d$")
 
 
@@ -152,7 +164,7 @@ def parse_cell(path):
     for sub in subs:
         h, _, rest = sub.partition("\n")
         h = h.strip()
-        if h == "근거":
+        if h == TERMS["evidence"]:
             sec["evid_order"], sec["evid"] = split_evidence(rest.split("\n"))
             continue
         unit, cur = {"label": h, "id": h.split(" ", 1)[0], "blocks": []}, None
@@ -309,7 +321,7 @@ def validate():
             ids = [str(d.get("id")) for d in det]
             if any(i in SPECIAL for i in ids) and len(ids) > 1:
                 errs.append("%s: 미구현·비적용은 다른 상세와 함께 쓰지 않는다" % where)
-            if "미확인" in ids:
+            if UNKNOWN in ids:
                 errs.append("%s: 원고에는 미확인을 쓰지 않는다. 조사하지 않은 셀은 파일을 두지 않는다" % where)
             for d in det:
                 iid = str(d.get("id"))
@@ -383,7 +395,7 @@ def repo_by_slug():
 LANG = {".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript", ".mjs": "javascript",
         ".go": "go", ".cs": "csharp", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
         ".md": "markdown", ".sh": "bash", ".ps1": "powershell", ".rs": "rust", ".sql": "sql"}
-PH = re.compile(r"^@발췌 (\S+):(\d+)-(\d+)\s*$")
+PH = re.compile(r"^" + re.escape(TERMS["excerpt"]) + r" (\S+):(\d+)-(\d+)\s*$")
 
 
 def fill(name):
@@ -424,10 +436,10 @@ def renumber(name):
         src = open(p, encoding="utf-8", newline="").read()
         nl = "\r\n" if "\r\n" in src else "\n"
         text = src.replace("\r\n", "\n")
-        i = text.find("\n### 근거\n")
+        i = text.find(EVID_HEAD)
         if i < 0:
             continue
-        body, evid = text[:i], text[i + len("\n### 근거\n"):]
+        body, evid = text[:i], text[i + len(EVID_HEAD):]
         m = FRONT.match(body)
         fm_txt, body = (m.group(0), body[m.end():]) if m else ("", body)
         first = []
@@ -453,7 +465,7 @@ def renumber(name):
             while e and not e[-1].strip():
                 e.pop()
             new += e + [""]
-        res = (fm_txt + body + "\n### 근거\n" + "\n".join(lead + new)).rstrip("\n") + "\n"
+        res = (fm_txt + body + EVID_HEAD + "\n".join(lead + new)).rstrip("\n") + "\n"
         open(p, "w", encoding="utf-8", newline="").write(res.replace("\n", nl))
     print("%s: 표지 번호를 다시 매겼다" % name)
 
@@ -540,9 +552,9 @@ def check_cell(cid, s, slugs):
             warns.append("%s 소제목 '%s'의 이름이 정의 '%s'와 다르다" % (cid, u["label"], it["label"]))
         labs = [b["label"] for b in u["blocks"]]
         if it["id"] in SPECIAL:
-            want_l = ["판단"]
+            want_l = [TERMS["judge"]]
         else:
-            want_l = ["구현", "예외"] if it["dagger"] else ["구현"]
+            want_l = [TERMS["impl"], TERMS["exc"]] if it["dagger"] else [TERMS["impl"]]
         if labs != want_l:
             errs.append("%s '%s'의 머리말이 %s여야 한다(지금 %s). 예외는 exception: true일 때만, 그때는 반드시 쓴다"
                         % (cid, it["label"], want_l, labs))
@@ -566,6 +578,7 @@ def check_cell(cid, s, slugs):
         errs.append("%s 근거 항목 번호가 1부터 차례가 아니다: %s" % (cid, s["evid_order"]))
     if set(first) != set(s["evid_order"]):
         errs.append("%s 본문 표지 %s와 근거 항목 %s가 맞지 않는다" % (cid, sorted(set(first)), s["evid_order"]))
+    warns += ["%s %s" % (cid, w) for w in excerpt_warnings(s["evid"], slugs)]
     for n_, lines in s["evid"].items():
         e_text = "\n".join(lines)
         if "](http" not in e_text and "(실행 확인" not in e_text:
@@ -575,6 +588,47 @@ def check_cell(cid, s, slugs):
             if sentences_in_line(ln) > 1:
                 errs.append("%s 근거 [%d] 한 줄에 문장이 둘 이상이다(문장 하나에 한 줄): %s" % (cid, n_, ln[:50]))
     return errs, warns
+
+
+EXCERPT_MAX = 30          # 이 줄 수 이하의 한 범위는 발췌를 붙인다(reports/README.md 근거 규칙)
+EXCERPT_LINK_ONLY = 3     # 코드 위치가 이만큼 이상이면 링크만 두어도 된다
+NON_CODE = (".md", ".txt", ".rst")
+
+
+def excerpt_warnings(evid, slugs):
+    """발췌를 붙여야 하는데 링크만 둔 근거를 찾는다.
+    링크만 두어도 되는 근거: 코드가 아닌 근거, 코드 위치 3곳 이상, 30줄을 넘는 범위, 같은 파일의 다른 근거에 이미 발췌한 범위."""
+    shown, links = [], {}
+    for n_, lines in evid.items():
+        has_block = any(l.startswith("```") for l in lines)
+        after_block, fence, found = False, False, []
+        for ln in lines:
+            if ln.startswith("```"):
+                fence = not fence
+                after_block = not fence
+                continue
+            if fence:
+                continue
+            for m in LINK.finditer(ln):
+                url, slug, sha, rel, a, b = m.groups()
+                if slug not in slugs or not a:
+                    continue
+                rng = (rel.replace("%20", " "), int(a), int(b or a))
+                (shown if after_block else found).append(rng)
+            if ln.strip():
+                after_block = False
+        links[n_] = (has_block, found)
+    out = []
+    for n_, (has_block, found) in links.items():
+        code = [r for r in found if not r[0].lower().endswith(NON_CODE)]
+        if has_block or not code or len(code) >= EXCERPT_LINK_ONLY:
+            continue
+        need = [r for r in code if r[2] - r[1] + 1 <= EXCERPT_MAX
+                and not any(r[0] == s[0] and s[1] <= r[1] and r[2] <= s[2] for s in shown)]
+        if need:
+            out.append("근거 [%d]에 발췌가 없다(%d줄 이하 한 범위는 `@발췌`를 둔다): %s"
+                       % (n_, EXCERPT_MAX, ", ".join("%s:%d-%d" % r for r in need)))
+    return out
 
 
 def check_blocks(lines, slugs):
@@ -616,7 +670,7 @@ def check_blocks(lines, slugs):
 # ───────────────────────── build ─────────────────────────
 def md_inline(s):
     """원고 한 단락을 HTML로. 링크·굵게·코드 백틱·표지만 다룬다.
-    옛 저장소 안 기록을 가리키는 상대 링크는 화면 밖에서 열리지 않으므로 이름과 저장소 경로만 글자로 보인다."""
+    상대 링크는 화면에서 열리지 않으므로 이름만 글자로 보인다."""
     out, i = [], 0
     pat = re.compile(r"\[`(?P<cl>[^`]+)`\]\((?P<cu>[^)]+)\)"
                      r"|\[(?P<rl>[^\]]+)\]\((?P<ru>\.\.?/[^)]+)\)"
@@ -628,9 +682,7 @@ def md_inline(s):
         if g["cl"]:
             out.append('<a href="%s" target="_blank" rel="noopener"><code>%s</code></a>' % (html.escape(g["cu"]), html.escape(g["cl"])))
         elif g["rl"]:
-            # 원고의 상대 링크는 옛 저장소(Claude outputs)의 기록/시범전환/보고서 기준으로 적혀 있다
-            repo_rel = posixpath.normpath(posixpath.join("기록/시범전환/보고서", g["ru"]))
-            out.append('%s(저장소 <code>%s</code>)' % (html.escape(g["rl"]), html.escape(repo_rel)))
+            out.append(html.escape(g["rl"]))
         elif g["ll"]:
             out.append('<a href="%s" target="_blank" rel="noopener">%s</a>' % (html.escape(g["lu"]), md_inline(g["ll"])))
         elif g["code"]:
@@ -682,7 +734,7 @@ def build_data():
         for c in CELL_LIST:
             s = reports.get(n, {}).get(c["id"])
             if not s or not s["items"]:
-                link[n][c["id"]] = [{"상세": "미확인", "예외": False}]
+                link[n][c["id"]] = [{"상세": UNKNOWN, "예외": False}]
                 continue
             rows = []
             for it, u in zip(s["items"], s["units"]):
@@ -697,16 +749,16 @@ def build_data():
                 ev = "".join('<div class="ev" id="EV-%d"><span class="evn">[%d]</span>%s</div>'
                              % (k, k, md_evidence([re.sub(r"^\[\d+\] ", "", s["evid"][k][0])] + s["evid"][k][1:]))
                              for k in sorted(marks) if k in s["evid"])
-                impl["%s|%s|%s" % (c["id"], n, it["id"])] = {"impl": blocks.get("구현") or blocks.get("판단", ""),
-                                                            "exc": blocks.get("예외", ""), "evid": ev}
+                impl["%s|%s|%s" % (c["id"], n, it["id"])] = {"impl": blocks.get(TERMS["impl"]) or blocks.get(TERMS["judge"], ""),
+                                                            "exc": blocks.get(TERMS["exc"], ""), "evid": ev}
             link[n][c["id"]] = rows
     cells_out = []
     for c in CELL_LIST:
         defined = bool(c.get("scope"))
         items = [{"id": d["id"], "name": d["name"], "inc": d.get("include", ""), "exc": d.get("exclude", ""),
                   "seen": list(d.get("seen_in") or [])} for d in c.get("details") or []]
-        meaning = {"미구현": c.get("not_implemented", ""), "비적용": c.get("not_applicable", ""),
-                   "미확인": CONFIG["labels"]["미확인"]}
+        meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", ""),
+                   UNKNOWN: CONFIG["labels"][UNKNOWN]}
         rows = []
         for it in items + [{"id": x, "name": x, "inc": meaning[x], "exc": ""} for x in SPECIAL]:
             members = [{"s": n, "d": r["예외"]} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
@@ -715,7 +767,7 @@ def build_data():
             if it["id"] not in SPECIAL:
                 row["cand"] = not members and not seen
             rows.append(row)
-        studied = sum(1 for n in names if link[n][c["id"]][0]["상세"] != "미확인")
+        studied = sum(1 for n in names if link[n][c["id"]][0]["상세"] != UNKNOWN)
         cells_out.append({"id": c["id"], "name": c["name"], "axis": c["id"][0], "q": c["question"],
                           "cond": bool(c.get("conditional")), "scope": c.get("applies_to", ""),
                           "note": c.get("boundary", ""), "defined": defined, "dscope": c.get("scope", ""),

@@ -57,3 +57,8 @@ python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온
 ```
 
 필요한 것: Python 3.10 이상과 `requirements.txt`. `check`·`fill`은 옛 매트릭스 저장소(`Claude outputs`)와 분석 대상 서버의 클론도 있어야 한다(CONTRIBUTING.md).
+
+## 라이선스
+
+코드(`tools/`·`site/`·`matrix/schema/`·`.github/`)는 MIT([LICENSE](LICENSE)), 매트릭스 정의·원고·문서는 CC BY 4.0([LICENSE-CONTENT](LICENSE-CONTENT))이다.
+원고에 인용한 분석 대상 서버의 코드 발췌는 각 프로젝트의 라이선스를 따른다. 자세한 범위는 [NOTICE.md](NOTICE.md)에 있다.
