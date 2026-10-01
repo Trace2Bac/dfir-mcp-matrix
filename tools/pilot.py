@@ -2,7 +2,7 @@
 """매트릭스 도구. 저장소 어디서든 돌린다(Windows는 PYTHONUTF8=1).
 
   python tools/pilot.py validate          셀·축·설정·원고 머리말을 스키마와 서로 대조한다(외부 저장소 없이 돈다. CI가 돌린다)
-  python tools/pilot.py check [서버 ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(옛 저장소와 서버 클론이 있어야 한다)
+  python tools/pilot.py check [서버[:셀,셀] ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(옛 저장소와 서버 클론이 있어야 한다)
   python tools/pilot.py build             _site/에 화면(index.html)과 데이터(data/matrix.json)를 만든다
   python tools/pilot.py serve [포트]       build 뒤 _site/를 http://localhost:포트 로 띄운다(기본 8000)
   python tools/pilot.py fill <서버>        원고의 `@발췌 경로:시작-끝` 줄을 기준 커밋 코드 블록과 링크로 바꾸고 백틱 `경로:줄`을 링크로 바꾼다
@@ -399,9 +399,11 @@ LANG = {".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "java
 PH = re.compile(r"^" + re.escape(TERMS["excerpt"]) + r" (\S+):(\d+)-(\d+)\s*$")
 
 
-def fill(name):
+def fill(name, only=None):
     linkify, _ = v1()
     for cid, p in cell_files(name).items():
+        if only and cid not in only:
+            continue
         src = open(p, encoding="utf-8", newline="").read()
         nl = "\r\n" if "\r\n" in src else "\n"
         out, n = [], 0
@@ -432,8 +434,10 @@ def fill(name):
 
 
 # ───────────────────────── renumber ─────────────────────────
-def renumber(name):
+def renumber(name, only=None):
     for cid, p in cell_files(name).items():
+        if only and cid not in only:
+            continue
         src = open(p, encoding="utf-8", newline="").read()
         nl = "\r\n" if "\r\n" in src else "\n"
         text = src.replace("\r\n", "\n")
@@ -476,7 +480,7 @@ LINK = re.compile(r"\]\((https://github\.com/([^/]+/[^/]+)/blob/([0-9a-f]{40})/(
 SENT = re.compile(r"(?<=[다음함됨]\.)\s+|(?<=\]\.)\s+|(?<=\))\.\s+")
 
 
-def check(name, slugs):
+def check(name, slugs, only=None):
     linkify, style_lint = v1()
     errs, warns = [], []
     if not os.path.isdir(report_dir(name)):
@@ -491,6 +495,8 @@ def check(name, slugs):
     if sha0 and subprocess.run(["git", "-C", root, "cat-file", "-e", sha0 + "^{commit}"], capture_output=True).returncode:
         errs.append("클론 %s에 기준 커밋 %s가 없다(git fetch를 한 번 한다)" % (linkify.REPOS[name][2], sha0[:7]))
     for cid, p in cell_files(name).items():
+        if only and cid not in only:
+            continue
         where = "%s.md" % cid
         hit, missing, _ = linkify.run(name, p, write=False)
         if hit:
@@ -817,6 +823,12 @@ def _print(title, errs, warns=()):
         print("  [경고]", x)
 
 
+def target(arg):
+    """'서버' 또는 '서버:셀,셀' → (서버, 셀 집합 또는 None). 여러 사람이 한 서버의 다른 셀을 나눠 고칠 때 쓴다."""
+    name, _, cells = arg.partition(":")
+    return name, (set(cells.split(",")) if cells else None)
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
@@ -832,8 +844,9 @@ def main():
         _print("validate", e, w)
         total = len(e)
         slugs = repo_by_slug()
-        for n in args or reported_servers():
-            e, w = check(n, slugs)
+        for a in args or reported_servers():
+            n, only = target(a)
+            e, w = check(n, slugs, only)
             total += len(e)
             _print(n, e, w)
         sys.exit(1 if total else 0)
@@ -842,11 +855,11 @@ def main():
     elif cmd == "serve":
         serve(int(args[0]) if args else 8000)
     elif cmd == "fill":
-        for n in args:
-            fill(n)
+        for a in args:
+            fill(*target(a))
     elif cmd == "renumber":
-        for n in args:
-            renumber(n)
+        for a in args:
+            renumber(*target(a))
     else:
         raise SystemExit(__doc__)
 
