@@ -1,42 +1,59 @@
 # dfir-mcp-architecture-matrix-v2
 
-DFIR MCP 서버 구현방식 매트릭스를 새 형식으로 옮기는 시범 전환 자료다. 셀마다 상세 항목(구현 방식)을 두고 MCP 서버마다 그 방식의 **구현**과 **예외**를 기준 커밋 코드 근거와 함께 쓴다. 지금은 E03·T03·R02·L02 4개 셀과 sift-kernel·mcp_dfir·trudi·regipy 4개 서버를 옮겼다.
+DFIR MCP 서버가 증거 무결성·실행 통제·결과 전달·기록 같은 문제를 **어떻게 구현하는지** 비교하는 매트릭스다.
+매트릭스는 **축 → 셀(관찰 질문) → 상세 항목(그 질문에 답하는 구현 방식)** 으로 짜이고, MCP 서버마다 어느 상세에 드는지와 그 구현·예외를 기준 커밋 코드 근거와 함께 쓴다.
 
-## 파일
+지금 상태: 7개 축, 공통 셀 40개와 조건부 셀 1개.
+원고는 E03·T03·R02·L02 4개 셀과 sift-kernel·mcp_dfir·trudi·regipy 4개 서버만 썼고 나머지는 화면에서 `미확인`으로 보인다.
 
-| 파일 | 내용 |
-|---|---|
-| `보고서_매트릭스_통합개편안_2026-09-30.md` | 개편안. 10절이 전체 셀 구조와 상세 이름, 6.2절이 상세 항목 정의(적용 범위·미구현·비적용·포함·제외)의 유일한 원본이다 |
-| `매트릭스_셀검토_자료_2026-09-30.md` | 셀 공동 검토 때 쓴 자료 |
-| `상세정의.yaml` | 도구 설정. 매트릭스에 보이는 서버 목록과 원고가 담을 시범 셀 목록 |
-| `report/<서버>.md` | 서버마다 셀 절. 상세 항목마다 **구현**과 †일 때 **예외**를 쓰고 셀 절 끝에 근거(코드 발췌와 줄 링크)를 둔다 |
-| `tools/pilot.py` | `fill`·`renumber`·`check`·`build` 명령 |
-| `tools/matrix_template.html` | 매트릭스 화면 틀 |
-| `시범_매트릭스.html` | 생성물. 위에 전체 셀 구조, 셀을 누르면 상세 항목과 서버, 서버를 누르면 구현·예외·근거가 열린다 |
-| `연결자료.json` | 생성물. 원고의 `**상세 항목.**` 줄에서 뽑은 서버·셀·상세 연결 |
-
-`시범_매트릭스.html`과 `연결자료.json`은 손으로 고치지 않고 `build`로 다시 만든다.
-
-## 고치는 법
-
-- 구현·예외 설명은 `report/<서버>.md`에서 고친다. 문장 하나를 한 줄에 쓰고 단락 사이에만 빈 줄을 둔다. 화면은 그 줄바꿈을 그대로 보여 준다.
-- 어느 상세 항목에 연결하는지와 †는 셀 절 첫 줄 `**상세 항목.**`에서 고친다. †는 구현에 적은 적용 범위 안의 예외가 있을 때만 붙인다(개편안 6.2절 머리).
-- 셀·상세 항목의 이름과 정의는 개편안 10절과 6.2절에서 고친다.
-- 코드 발췌는 그 자리에 `@발췌 경로:시작-끝` 한 줄을 두고 `fill`로 채운다. 발췌를 손으로 고치지 않는다.
-
-`tools/` 폴더에서 `PYTHONUTF8=1`로 돌린다.
+## 보기
 
 ```
-python pilot.py fill <서버>      # 새로 넣은 @발췌를 기준 커밋 코드로 채우고 경로:줄을 링크로 바꾼다
-python pilot.py renumber <서버>  # 문장을 옮겨 [번호] 차례가 바뀌었을 때
-python pilot.py check            # 원고 형식·표지·근거·발췌 원문 일치·문장 점검
-python pilot.py build            # 시범_매트릭스.html과 연결자료.json을 다시 만든다
+pip install -r requirements.txt
+python tools/pilot.py serve        # http://localhost:8000
 ```
 
-## 필요한 것
+위에 전체 셀 구조가 있고 셀을 누르면 상세 항목과 서버, 서버를 누르면 구현·예외·근거가 열린다.
+CI가 PR·`main` 푸시마다 화면을 빌드해 Actions 아티팩트(`matrix-site`)로 올린다. 저장소가 비공개라 GitHub Pages 배포는 꺼 두었다(`.github/workflows/matrix.yml` 머리 참고).
 
-- Python 3.10 이상, `pyyaml`.
-- 옛 매트릭스 저장소(`Claude outputs`). `pilot.py`는 거기서 `tools/linkify.py`·`tools/style_lint.py`와 서버별 저장소·기준 커밋(`판정/*.yaml`)을 읽는다. 개편안은 이 저장소의 것을 읽는다. 이 저장소와 같은 폴더에 `Claude outputs`가 있으면 그것을 쓰고 다른 곳이면 환경변수 `DFIR_V1`에 그 경로를 준다.
-- 분석 대상 서버의 저장소 클론. `fill`과 `check`가 기준 커밋 코드를 `git show`로 읽는다. 위치는 옛 저장소 작업지침 2.2절과 같다(기본은 `Claude outputs`의 부모 폴더, 다르면 환경변수 `DFIR_CLONES`).
+## 축
 
-원고의 실행 기록 링크(`../../판정검토_…`)는 옛 저장소의 `기록/` 폴더를 가리킨다. 화면에서는 저장소 경로를 글자로 보여 준다.
+| 글자 | 축 | 영어 |
+|---|---|---|
+| P | 절차 관리 | Procedure management |
+| E | 원본 증거 관리 | Evidence management |
+| T | 도구 실행 통제 | Tool execution control |
+| R | 실행 결과 전달 | Result delivery |
+| L | 서버 기록 | Logging |
+| D | 파생물 관리 | Derivative management |
+| I | 외부 연동 통제 | Integration control |
+
+## 구조
+
+```
+matrix/          셀 구조와 정의의 원본. 셀 하나 = cells/<ID>.yaml 하나        → matrix/README.md
+reports/         서버별 원고. reports/<서버>/<셀ID>.md                       → reports/README.md
+docs/
+  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR). 지금은 템플릿만  → docs/decisions/README.md
+  redesign-plan-2026-09-30.md   개편 배경·원칙·셀 경계·옛 셀 대응
+  cell-review-2026-09-30.md     셀 공동 검토 자료(옛 번호)
+site/index.html  화면. 빌드한 data/matrix.json을 읽어 그리기만 한다
+tools/pilot.py   validate·check·build·serve·fill·renumber
+.github/workflows/matrix.yml   PR·main 푸시마다 validate·build, 화면을 아티팩트로 올림(Pages는 켜면 배포)
+```
+
+## 고치기
+
+**[CONTRIBUTING.md](CONTRIBUTING.md)** 에 작업별 순서와 판단 기준이 있다.
+LLM에게 고치게 할 때는 [AGENTS.md](AGENTS.md)를 읽힌다(Claude Code는 `CLAUDE.md`를 거쳐 자동으로 읽는다).
+
+```
+python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(CI가 돌린다)
+python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(옛 저장소와 서버 클론 필요)
+python tools/pilot.py build             # _site/에 화면과 데이터를 만든다
+python tools/pilot.py serve [포트]       # build 뒤 로컬에서 띄운다
+python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
+python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
+```
+
+필요한 것: Python 3.10 이상과 `requirements.txt`. `check`·`fill`은 옛 매트릭스 저장소(`Claude outputs`)와 분석 대상 서버의 클론도 있어야 한다(CONTRIBUTING.md).
