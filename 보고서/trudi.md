@@ -44,7 +44,7 @@ DAIR 참여 게이트는 환경변수 `TRUDI_DAIR_NUDGE`로 끈다 [10].
 **구현.** 보고서 도구 `misc.write_final_report`와 `misc.export_execution_log`는 호출 기록에서 가장 최근의 `reason.pre_report_check` 항목을 찾는다 [12].
 그 항목이 없거나 `ready_to_report`가 참이 아니거나 그 뒤 호출 기록의 상태가 바뀌었으면 거부한다 [12].
 CONFIRMED·LIKELY 발견사항에는 같은 주장에 검토 모델이 SUPPORTED를 준 `reason.evaluate_finding` 기록을 요구한다 [3].
-SUPPORTED 판정은 서버 안에서 부른 검토 모델이 내고 그 판정을 심사하는 방식은 H11에서 본다 [3].
+SUPPORTED 판정은 서버 안에서 부른 검토 모델이 내고 그 판정을 심사하는 방식은 H09에서 본다 [3].
 
 **예외.** 임의 명령을 실행하는 `misc.batch_run`으로 `reports/`에 파일을 쓰면 준비 점검 없이 보고서 파일이 생긴다 [13].
 
