@@ -36,4 +36,5 @@
 | 0001 | [근거에 코드 발췌를 붙이는 기준](0001-evidence-excerpt-rule.md) | 2026-10-01 | 채택 |
 | 0002 | [파생물 저장 실패 처리를 D01에서 D09로 나눈다](0002-split-derivative-storage-failure.md) | 2026-10-01 | 채택 |
 | 0003 | [T04 이름을 "실행 형태"로 바꾼다](0003-rename-t04-execution-form.md) | 2026-10-01 | 채택 |
-| 0004 | [L01은 기록 경로, L02는 기록 구성으로 나눈다](0004-split-l01-l02-by-method-and-content.md) | 2026-10-01 | 채택 |
+| 0004 | [L01은 기록 경로, L02는 기록 구성으로 나눈다](0004-split-l01-l02-by-method-and-content.md) | 2026-10-01 | 채택(L01 이름은 0005로 대체) |
+| 0005 | [셀 이름 끝의 "방식"을 막는 검사를 없애고 L01을 "기록 방식"으로 한다](0005-drop-cell-name-suffix-rule.md) | 2026-10-01 | 채택 |

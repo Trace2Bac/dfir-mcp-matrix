@@ -39,7 +39,7 @@ axes:
 
 ```yaml
 id: E03                          # 파일 이름과 같아야 한다
-name: 원본 변경 방지              # 묻는 일을 명사로. 끝에 "방식"을 붙이지 않는다
+name: 원본 변경 방지              # 묻는 일을 명사로
 question: 원본에 닿는 경로에서 누가 어떤 장치로 변경을 막는가?
 conditional: false               # 지원 기능이 있는 서버에만 보는 셀이면 true
 # applies_to: …                  # conditional: true일 때 적용 범위
