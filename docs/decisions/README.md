@@ -39,3 +39,4 @@
 | 0004 | [L01은 기록 경로, L02는 기록 구성으로 나눈다](0004-split-l01-l02-by-method-and-content.md) | 2026-10-01 | 채택(L01 이름은 0005로 대체) |
 | 0005 | [셀 이름 끝의 "방식"을 막는 검사를 없애고 L01을 "기록 방식"으로 한다](0005-drop-cell-name-suffix-rule.md) | 2026-10-01 | 채택 |
 | 0006 | [T04 이름을 "실행 방식"으로 바꾼다](0006-rename-t04-execution-method.md) | 2026-10-01 | 채택 |
+| 0007 | [mulder 원고를 쓰며 셀 정의 37개를 처음 쓴다](0007-first-cell-definitions-from-mulder.md) | 2026-10-01 | 채택 |
