@@ -41,3 +41,4 @@
 | 0006 | [T04 이름을 "실행 방식"으로 바꾼다](0006-rename-t04-execution-method.md) | 2026-10-01 | 채택 |
 | 0007 | [mulder 원고를 쓰며 셀 정의 37개를 처음 쓴다](0007-first-cell-definitions-from-mulder.md) | 2026-10-01 | 채택 |
 | 0008 | [R05는 결과 출처 표시만 보고, 클라이언트 쪽 상세에는 저장소의 클라이언트를 센다](0008-r05-display-only-and-client-side-details.md) | 2026-10-01 | 채택 |
+| 0009 | [T09를 조건부 셀에서 다른 셀과 같은 셀로 바꾼다](0009-t09-regular-cell.md) | 2026-10-02 | 채택 |
