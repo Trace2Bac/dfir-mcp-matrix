@@ -51,6 +51,7 @@ python tools/pilot.py build             # _site/에 화면과 데이터를 만�
 python tools/pilot.py serve [포트]       # build 뒤 로컬에서 띄운다
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
 python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
+python tools/coverage.py <서버>          # reports/<서버>/tools.yaml로 기능→셀 대응표(coverage.md)를 만든다
 ```
 
 필요한 것: Python 3.10 이상과 `requirements.txt`. `check`·`fill`은 옛 매트릭스 저장소(`Claude outputs`)와 분석 대상 서버의 클론도 있어야 한다(CONTRIBUTING.md).
