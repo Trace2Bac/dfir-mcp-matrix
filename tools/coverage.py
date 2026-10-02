@@ -46,12 +46,12 @@ def main(server):
         in_evid = [c for c, (b, e) in cells.items() if c not in in_body and pat.search(e)]
         none += not in_body
         where = "[`%s:%s`](%s%s#L%s)" % (t["path"], t["line"], base, t["path"], t["line"])
-        rows.append("| `%s` | %s | %s | %s |" % (t["name"], where, "·".join(in_body) or "없음", "·".join(in_evid) or ""))
+        rows.append("| `%s` | %s | %s | %s | %s |" % (t["name"], t.get("kind", ""), where, "·".join(in_body) or "없음", "·".join(in_evid) or ""))
     out = ["# %s 기능→셀 대응표" % server, "",
            "`python tools/coverage.py %s`가 `tools.yaml`과 셀 원고로 만든 표다. 손으로 고치지 않는다." % server,
            "등록 도구 %d개 가운데 원고 본문에 이름이 나오지 않는 도구는 %d개다." % (len(tools), none),
            "이름이 나오지 않는다고 그 기능을 조사하지 않았다는 뜻은 아니다. 공통 처리기 설명으로 덮였을 수 있으므로 조사 범위를 다시 볼 때 출발점으로 쓴다.", "",
-           "| 도구 | 정의 위치 | 본문에 나오는 셀 | 근거에만 나오는 셀 |", "|---|---|---|---|"] + rows
+           "| 도구 | 종류 | 정의 위치 | 본문에 나오는 셀 | 근거에만 나오는 셀 |", "|---|---|---|---|---|"] + rows
     open(os.path.join(d, "coverage.md"), "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
     print("%s: 도구 %d개, 본문에 없는 도구 %d개 → reports/%s/coverage.md" % (server, len(tools), none, server))
 

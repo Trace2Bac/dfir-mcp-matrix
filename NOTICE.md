@@ -21,6 +21,7 @@ Those excerpts are **not** covered by this repository's licenses. They remain un
 | regipy (mkorman90/regipy) | `1293544` | MIT |
 | mcp_dfir (Androsh7/mcp_dfir) | `305fcad` | No license file. Excerpts are quoted for commentary only |
 | mulder (calebevans/mulder) | `3164843` | Apache-2.0 |
+| Camel (allisterb/Camel) | `63f4cb2` | MIT |
 
 When you add a server, add a row here with the license found at its base commit.
 
