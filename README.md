@@ -3,9 +3,6 @@
 DFIR MCP 서버가 증거 무결성·실행 통제·결과 전달·기록 같은 문제를 **어떻게 구현하는지** 비교하는 매트릭스다.
 매트릭스는 **축 → 셀(관찰 질문) → 상세 항목(그 질문에 답하는 구현 방식)** 으로 짜이고, MCP 서버마다 어느 상세에 드는지와 그 구현·예외를 기준 커밋 코드 근거와 함께 쓴다.
 
-지금 상태: 7개 축, 셀 42개(조건부 셀 없음, 결정 0009).
-원고는 E03·T03·R02·L02 4개 셀과 sift-kernel·mcp_dfir·trudi·regipy 4개 서버만 썼고 나머지는 화면에서 `미확인`으로 보인다.
-
 ## 보기
 
 ```
@@ -34,7 +31,7 @@ CI가 PR·`main` 푸시마다 화면을 빌드해 Actions 아티팩트(`matrix-s
 matrix/          셀 구조와 정의의 원본. 셀 하나 = cells/<ID>.yaml 하나        → matrix/README.md
 reports/         서버별 원고. reports/<서버>/<셀ID>.md                       → reports/README.md
 docs/
-  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR). 지금은 템플릿만  → docs/decisions/README.md
+  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.md
   redesign-plan-2026-09-30.md   개편 배경·원칙·셀 경계·옛 셀 대응
   cell-review-2026-09-30.md     셀 공동 검토 자료(옛 번호)
 site/index.html  화면. 빌드한 data/matrix.json을 읽어 그리기만 한다
