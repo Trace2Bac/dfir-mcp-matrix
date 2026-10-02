@@ -784,10 +784,12 @@ def build_data():
 
 
 def build():
+    import datetime
     data = build_data()
+    data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
-    shutil.copytree(SITE_SRC, OUT)
+    os.makedirs(OUT, exist_ok=True)
     os.makedirs(os.path.join(OUT, "data"), exist_ok=True)
     with open(os.path.join(OUT, "data", "matrix.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
