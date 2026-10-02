@@ -47,3 +47,4 @@
 | 0012 | [운영자가 정한 원격 분석 호스트 접속도 I축에서 본다](0012-remote-analysis-host-in-i-axis.md) | 2026-10-02 | 채택 |
 | 0013 | [D08에서 같은 저장소의 CLI·훅이 서버 기록으로 만드는 검토 산출물을 센다](0013-d08-counts-repo-cli-artifacts.md) | 2026-10-02 | 채택 |
 | 0014 | [code-mode 서버의 결과는 SDK가 돌려주는 객체로 보고 응답 만들기는 R01 가공으로 본다](0014-code-mode-result-basis.md) | 2026-10-02 | 채택 |
+| 0015 | [R03에 실행 중 알림을 넣고 외부 라이브러리 동작의 근거 기준을 정한다](0015-r03-progress-library-evidence-l04-t04.md) | 2026-10-02 | 채택 |
