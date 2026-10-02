@@ -49,7 +49,7 @@
 | `get_deleted_files` |  | [`src/mulder/server/tools/tsk.py:299`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L299) | 없음 |  |
 | `get_eventlog_anomalies` |  | [`src/mulder/server/tools/core.py:518`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L518) | R01 |  |
 | `get_file_metadata` |  | [`src/mulder/server/tools/tsk.py:531`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L531) | P01·T01 |  |
-| `get_findings` |  | [`src/mulder/server/tools/findings.py:579`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L579) | D05·D07 | D02 |
+| `get_findings` |  | [`src/mulder/server/tools/findings.py:579`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L579) | D05·D07 | D02·D08 |
 | `get_fs_timeline` |  | [`src/mulder/server/tools/tsk.py:353`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L353) | 없음 |  |
 | `get_investigation_summary` |  | [`src/mulder/server/tools/review.py:364`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/review.py#L364) | P02·P03 |  |
 | `get_ioc_summary` |  | [`src/mulder/server/tools/review.py:451`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/review.py#L451) | 없음 |  |
@@ -146,7 +146,7 @@
 | `scan_files_in_memory` |  | [`src/mulder/server/tools/core.py:818`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L818) | 없음 |  |
 | `scan_hidden_processes` |  | [`src/mulder/server/tools/core.py:609`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L609) | R01·R03 |  |
 | `scan_kernel_modules` |  | [`src/mulder/server/tools/core.py:728`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L728) | 없음 |  |
-| `search` |  | [`src/mulder/server/tools/core.py:268`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L268) | D01·D04·L01·R01·R02·R03·R04·R05·R06·R07·T02 | D03·D05·D06·D07·E03·E04·L02·P01·P02·P03·T01·T06·T07·T08 |
+| `search` |  | [`src/mulder/server/tools/core.py:268`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L268) | D01·D04·L01·R01·R02·R03·R04·R05·R06·R07·T02 | D03·D05·D06·D07·D08·E03·E04·L02·P01·P02·P03·T01·T06·T07·T08 |
 | `start_extraction_batch` |  | [`src/mulder/server/tools/jobs.py:41`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L41) | D04·D09·L01·L02·P02·P03·R03·T01·T02·T06·T07·T08 | L03 |
 | `submit_finding` |  | [`src/mulder/server/tools/findings.py:249`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L249) | D02·D05·D07·L01·L02·L04·T01·T03 | P02·T08 |
 | `submit_narrative` |  | [`src/mulder/server/tools/findings.py:539`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L539) | D05 | P02·T03 |
