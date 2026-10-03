@@ -39,7 +39,10 @@ details:
 기준은 메모리·CPU 모두 기본 90%이고 `mulder serve`의 `--mem-limit`·`--cpu-limit`로 바꾼다 [16].
 기다린 뒤에는 공유 `CapacityLimiter`로 동시에 도는 도구 실행을 `--workers` 개수(기본 8개)로 제한한다 [14][17].
 `UNTHROTTLED`로 선언한 작업 조회·대기 도구는 자원 확인과 공유 제한을 건너뛰고 anyio의 기본 스레드 제한으로 돈다 [14].
-비동기 함수로 등록한 도구(`run_parallel`·`enrich_iocs`)는 래퍼로 감싸지지 않아 이 확인을 거치지 않는다 [18].
+비동기 함수로 등록한 도구(`run_parallel`·`enrich_iocs`)는 래퍼로 감싸지지 않아 그 호출 자체는 이 확인을 거치지 않는다 [18].
+`run_parallel`은 하위 도구를 등록 표 `_tool_dispatch`에 든 래퍼로 부르므로 하위 작업은 각자 자원 확인과 공유 제한을 거친다 [18][19].
+`run_parallel`은 `_SEQUENTIAL_ONLY`에 든 `run_bulk_extractor`를 병렬 묶음이 모두 끝난 뒤 하나씩 실행한다 [20].
+이 직렬화는 한 `run_parallel` 호출 안에서만 걸리고 `start_extraction_batch`가 작업을 스레드 풀에 넘기는 경로에는 없다 [20][21].
 배경 작업 스레드는 같은 기준의 동기 함수 `wait_for_resources`로 기다린다 [15].
 
 **예외.** 사용률을 읽지 못하면 값을 -1로 두고 그 값은 기준을 넘지 않은 것으로 보아 확인 없이 실행한다 [15].
@@ -429,3 +432,79 @@ async def async_wait_for_resources(tool_name: str = "") -> None:
 ```
 
 [`src/mulder/server/app.py:84-93`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L84-L93)
+
+[19] `run_parallel`은 하위 도구를 등록 표의 래퍼로 부른다.
+
+```python
+    async def _run_one(idx: int, tool_name: str, arguments: dict[str, Any]) -> None:
+        """Execute a single task and store its result at *idx*."""
+        token = current_batch_id.set(batch_id)
+        try:
+            fn = _tool_dispatch.get(tool_name)
+            if fn is None:
+                results[idx] = {"error": f"Unknown tool: {tool_name}"}
+                return
+            arguments = fill_case_id(fn, arguments, open_case_id)
+            problem = validate_tool_args(fn, arguments)
+            if problem is not None:
+                results[idx] = {"error": f"{tool_name}: {problem}"}
+                return
+            try:
+                results[idx] = await fn(**arguments)
+            except Exception as exc:
+                logger.exception("run_parallel: %s failed", tool_name)
+                results[idx] = {"error": f"{tool_name} failed: {exc}"}
+```
+
+[`src/mulder/server/app.py:695-712`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L695-L712)
+
+[20] 직렬로만 돌릴 도구는 병렬 묶음 뒤에 하나씩 실행한다.
+
+```python
+_SEQUENTIAL_ONLY: set[str] = {
+    "run_bulk_extractor",
+}
+```
+
+[`src/mulder/server/app.py:664-666`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L664-L666)
+```python
+    parallel_tasks = [(i, t) for i, t in valid_tasks if t["tool"] not in _SEQUENTIAL_ONLY]
+    sequential_tasks = [(i, t) for i, t in valid_tasks if t["tool"] in _SEQUENTIAL_ONLY]
+
+    t0 = time.monotonic()
+
+    async with anyio.create_task_group() as tg:
+        for i, task in parallel_tasks:
+            tg.start_soon(_run_one, i, task["tool"], task.get("args", {}))
+
+    for i, task in sequential_tasks:
+        await _run_one(i, task["tool"], task.get("args", {}))
+```
+
+[`src/mulder/server/app.py:725-735`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L725-L735)
+
+[21] 배치 작업은 스레드 풀에 그대로 넘긴다.
+
+```python
+        with self._lock:
+            for task in tasks:
+                job_id = f"job_{uuid4().hex[:8]}"
+                job = Job(
+                    job_id=job_id,
+                    batch_id=batch_id,
+                    tool_name=task["tool"],
+                    args=task.get("args", {}),
+                )
+                self._jobs[job_id] = job
+                job_ids.append(job_id)
+
+            batch = Batch(batch_id=batch_id, job_ids=job_ids)
+            self._batches[batch_id] = batch
+            self._delivered[batch_id] = set()
+
+        for job_id in job_ids:
+            ctx = contextvars.copy_context()
+            self._executor.submit(ctx.run, self._run_job, job_id)
+```
+
+[`src/mulder/server/jobs.py:157-175`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L157-L175)
