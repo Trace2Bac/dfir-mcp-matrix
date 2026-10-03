@@ -1,0 +1,795 @@
+---
+cell: P01
+details:
+- id: P01.01
+  exception: true
+- id: P01.02
+  exception: true
+- id: P01.03
+  exception: true
+- id: P01.04
+  exception: true
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 서버가 사건의 증거 종류를 정하는 공통 코드는 `core/evidence_kinds.py`이다 [1].
+`dair.assess`는 이 판별로 작업 지시에서 뺄 도구를 정하고 IOC 탐지 범위 계산은 이 판별로 적용할 수 없는 항목을 정한다 [2][3].
+`classify_name`은 파일 이름의 확장자로 `memory`·`pcap`·`disk_image`·`triage`를 정한다 [1].
+`.vmem`·`.mem`·`.lime`·`.dmp`는 메모리로, `.pcap`·`.pcapng`·`.cap`은 패킷 캡처로, `.e01`·`.dd`·`.001`·`.vmdk`는 디스크 이미지로 본다 [1].
+`.img`는 파일 이름에 `mem`이 있으면 메모리로, 없으면 디스크 이미지로 본다 [1].
+`.raw`·`.aff4`와 이름에 `mem`이 든 `.bin`은 메모리와 디스크 이미지 둘 다로 센다 [1].
+사건 폴더의 `evidence/`를 훑을 때 파일 이름이 `$MFT`이면 `triage`, `Manifest.db`이면 `mobile`로 본다 [4].
+폴더 경로가 `windows/system32/config`로 끝나면 `triage`, `var/mobile`이나 `data/data`로 끝나면 `mobile`로 본다 [4].
+호출 기록에서도 종류를 더한다 [5].
+성공한 `tool_call`의 namespace가 `vol`이면 메모리, `net`이면 캡처, `tsk`·`ewf`·`img`이면 디스크 이미지, `ez`·`af`이면 `triage`로 보고 명령줄 토큰의 확장자도 같은 규칙으로 읽는다 [5].
+판별은 종류를 더하기만 하고 결과를 `kinds`·`determined`·`live_monitoring`으로 돌려준다 [6].
+`reason.plan`·`reason.audit_findings`를 뺀 `reason.*` 도구는 이와 별도로 호출 기록의 성공한 명령을 정규식으로 훑어 수집한 증거 종류를 검토 모델 입력 머리에 붙인다 [7].
+이 정규식은 `.img`·`.dd`·`.e0N`과 `mmls`·`fsstat`을 디스크 이미지로, `.vmem`·`.dmp`·`.lime`과 `vol`을 메모리 이미지로 본다 [7].
+
+도구 안에서 이름으로 처리 경로를 정하는 곳도 있다.
+`ez.evtxecmd`는 받은 경로가 `.evtx`로 끝나면 파일로 보고 `-f`를, 아니면 폴더로 보고 `-d`를 EvtxECmd에 넘긴다 [8].
+`ez.recmd_batch`는 폴더 아래에서 `ntuser.dat`·`sam`·`system`·`software` 같은 하이브 파일 이름을 대소문자 구별 없이 찾아 하이브마다 RECmd를 돌린다 [9].
+
+**예외.** `ez.evtxecmd`의 확장자 비교는 대소문자를 구별한다 [8].
+그래서 이름이 `.EVTX`로 끝나는 파일도 폴더로 보고 `-d`를 넘긴다 [8].
+`.img` 파일은 `core/evidence_kinds.py`가 이름에 `mem`이 있으면 메모리로 보지만 `reason.*`의 정규식은 늘 디스크 이미지로 본다 [1][7].
+README가 증거 예시로 드는 `memory.img`를 Volatility 도구로 읽으면 `dair.assess`의 판별은 메모리만 더하지만 검토 모델 입력 머리에는 디스크 이미지도 수집했다고 적힌다 [1][5][7][10].
+
+### P01.02 메타데이터 조회
+
+**구현.** `core/evidence_kinds.py`는 사건 폴더의 `mnt/` 아래 하위 폴더를 조회해 디스크 이미지가 있는지 정한다 [11].
+하위 폴더가 마운트 지점이거나 안에 항목이 하나라도 있으면 `disk_image`로 본다 [11].
+`ewf.mount_full_image`는 `ewfmount`로 붙인 장치에서 `mmls`로 파티션 표를 읽는다 [12].
+Meta 줄과 미할당 줄을 뺀 파티션을 설명에 NTFS가 든 것부터, 그다음 크기가 큰 것부터 줄 세운다 [12].
+줄 세운 파티션마다 `fsstat`을 돌려 `File System Type`이 NTFS인 첫 파티션의 오프셋으로 마운트한다 [13].
+`tsk.fsstat` 같은 Sleuth Kit 도구는 파티션을 스스로 고르지 않고 모델이 준 오프셋을 그대로 쓴다 [14].
+디스크 이미지의 OS를 따로 판별하는 코드는 없다.
+
+**예외.** `mnt/` 하위 폴더를 읽다 `PermissionError`가 나면 내용을 확인하지 않고 `disk_image`로 센다 [11].
+다른 `OSError`가 나면 그 폴더를 건너뛰고 판별 결과에 그 사실을 남기지 않는다 [11].
+
+### P01.03 내용·헤더 검사
+
+**구현.** `misc.evtx_dump`와 `misc.evtx_filter`는 입력 파일의 앞 12바이트를 읽어 이벤트 로그 형식을 정한다 [15].
+0번 오프셋이 `ElfFile\x00`이면 EVTX로, 4번 오프셋이 `LfLe`이면 옛 EVT로 보고 둘 다 아니면 `unknown`으로 둔다 [15].
+`ez.evtxecmd`는 같은 이벤트 로그를 받지만 헤더를 보지 않는다 [8].
+
+**예외.** 파일을 열거나 읽다 `OSError`가 나면 `unknown`으로 두고 EVTX 경로로 진행한다 [15].
+`misc.evtx_dump`는 응답의 `log_format`에 `unknown`을 싣는다 [16].
+`misc.evtx_filter`는 판별 결과를 응답에 싣지 않고 `evtx_dump.py`를 그대로 돌린다 [17].
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** `dair.assess`는 처방 모델이 낸 `priority_tools`와 검증 과제를 사건의 증거 종류와 대조한다 [18].
+`tools/tool_capabilities.py`는 도구마다 필요한 증거 종류를 표로 둔다 [19].
+`vol.`은 `memory`, `net.`은 `pcap`, `tsk.`·`ewf.`·`img.`은 `disk_image`, `ez.`·`af.`는 `disk_image`나 `triage`를 요구한다 [19].
+`plaso.create_timeline`·`misc.evtx_filter`처럼 도구 하나하나에 따로 적은 요구도 있다 [19].
+표에 없는 도구는 어느 사건에나 맞는 것으로 본다 [20].
+사건이 요구 종류를 하나도 갖지 않으면 그 도구를 작업 지시에서 빼고 `server_filtered_tools`로 응답과 호출 기록에 남긴다 [18][21].
+검증 과제는 방법 도구가 모두 맞지 않으면 빼고 일부만 맞으면 맞는 도구만 남긴다 [22].
+처방 모델에게 보내는 도구 목록도 사건이 가진 종류에 맞는 도구만 남긴다 [23].
+거르기는 `evidence/`나 `mnt/`에서 종류를 하나라도 찾아 판별이 정해졌을 때만 하고 live-monitoring 호출 기록에서는 하지 않는다 [24].
+작업 지시를 다 돌렸는지 세는 검사도 같은 표로 맞지 않는 도구를 뺀다 [25].
+
+이 대조는 `dair.assess`의 작업 지시에만 적용된다 [18].
+모델이 증거 종류에 맞지 않는 도구를 직접 부르면 서버는 막지 않는다.
+`reason.plan`·`reason.advise`가 돌려주는 `priority_tools`는 증거 종류와 대조하지 않는다 [26].
+증거 종류에는 OS가 없어 Linux 디스크 이미지에도 `ez.`·`af.` 같은 Windows 산출물 도구가 맞는 것으로 남는다 [19].
+
+이벤트 로그 도구는 P01.03의 판별로 방법을 고른다.
+`misc.evtx_dump`는 EVT로 판별한 파일을 `evtx_dump.py` 대신 libevt의 `evtexport`로 돌린다 [16].
+`misc.evtx_filter`는 EVT 파일이면 실행하지 않고 `misc.evtx_dump`를 쓰라고 돌려준다 [17].
+`ewf.mount_full_image`는 NTFS 파티션을 찾지 못하면 마운트하지 않고 조사한 파티션과 파일 시스템 종류를 응답에 싣는다 [13].
+
+**예외.** `evidence/` 탐색은 깊이 8, 폴더 2,000개, 1.5초 가운데 하나에 닿으면 멈추고 그때까지 찾은 종류로 판별을 정한다 [27].
+멈췄다는 사실은 결과에 남지 않아 일부만 훑은 목록으로도 `determined`가 참이 되어 도구를 거른다 [6][27].
+같은 `evidence/` 폴더의 결과는 폴더 수정 시각이 같으면 300초 동안 다시 쓴다 [28].
+사건 폴더는 호출 기록 파일 경로의 두 단계 위로 정한다 [29].
+호출 기록을 `<사건>/analysis/` 밖에 두면 다른 폴더의 `evidence/`·`mnt/`를 보고 판별한다 [29].
+`case_context`에 `live=true`나 `endpoint_host`라는 글자가 있으면 모델이 쓴 문장만으로 `live` 종류를 더한다 [6].
+서버를 다시 띄운 뒤 다른 기록 호출보다 먼저 부른 `dair.assess`는 호출 기록을 다시 읽기 전의 빈 기록으로 판별한다 [30].
+그때는 사건 폴더도 정해지지 않아 판별이 정해지지 않은 것으로 보고 아무 도구도 거르지 않는다 [29][30].
+
+### 근거
+
+[1] 파일 이름의 확장자로 증거 종류를 정한다.
+
+```python
+def classify_name(name: str) -> set:
+    """Kinds a single evidence file NAME implies (by extension)."""
+    n = str(name or "").strip().strip("'\"").lower()
+    if not n or "." not in n:
+        return set()
+    if n.endswith(_PCAP_EXT):
+        return {"pcap"}
+    if n.endswith(_MEM_EXT):
+        return {"memory"}
+    if n.endswith(".img"):
+        return {"memory"} if "mem" in os.path.basename(n) else {"disk_image"}
+    if n.endswith(_DISK_EXT):
+        return {"disk_image"}
+    if n.endswith(_AMBIGUOUS_EXT):
+        if n.endswith(".bin") and "mem" not in os.path.basename(n):
+            return set()
+        return {"memory", "disk_image"}
+    if n.endswith("$mft") or os.path.basename(n) == "$mft":
+        return {"triage"}
+    return set()
+```
+
+[`core/evidence_kinds.py:44-63`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L44-L63)
+
+[2] `dair.assess`는 판별 결과가 정해졌을 때의 종류로 거른다.
+
+```python
+    # Evidence the case holds: tools/challenges needing a missing kind are not
+    # prescribed (and are dropped server-side below). Live-monitoring traces
+    # and an undetermined inventory are never filtered.
+    _ev_profile = _evidence_profile(case_context)
+    from core.evidence_kinds import filter_kinds as _fk_kinds
+    _kinds = _fk_kinds(_ev_profile)
+    if _kinds:
+        user_parts.append(_evidence_line(_kinds))
+```
+
+[`tools/dair.py:971-978`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L971-L978)
+
+[3] IOC 탐지 범위 계산은 사건의 증거 종류에 없는 항목을 `not_applicable`로 둔다.
+
+```python
+                needs = spec.get("requires") if spec else None
+                if not spec:
+                    row["status"] = "unmapped"
+                elif needs and needs not in kinds:
+                    row.update(status="not_applicable",
+                               reason=f"needs {needs} evidence; the case holds none")
+```
+
+[`core/iocs.py:276-281`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/iocs.py#L276-L281)
+
+[4] `evidence/` 탐색에서 파일 이름과 폴더 경로로 종류를 정한다.
+
+```python
+def _dir_marker(rel_lower: str) -> str:
+    """Kind a directory's relative path (lower-case, '/'-joined) marks, or ''."""
+    if rel_lower.endswith("windows/system32/config"):
+        return "triage"
+    # iOS /var is a symlink to /private/var: either spelling may be reached first.
+    if rel_lower.endswith("var/mobile") or rel_lower.endswith("data/data"):
+        return "mobile"
+    return ""
+```
+
+[`core/evidence_kinds.py:66-73`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L66-L73)
+
+```python
+        for de in it:
+            name = de.name
+            low = name.lower()
+            try:
+                is_dir = de.is_dir(follow_symlinks=True)
+            except OSError:
+                is_dir = False
+            if not is_dir:
+                if low == "$mft":
+                    kinds.add("triage")
+                elif low == "manifest.db":
+                    kinds.add("mobile")
+                else:
+                    kinds |= classify_name(low)
+                continue
+            crel = f"{rel}/{low}" if rel else low
+            mark = _dir_marker(crel)
+            if mark:
+                kinds.add(mark)
+                continue                          # the kind is known; do not descend
+```
+
+[`core/evidence_kinds.py:98-117`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L98-L117)
+
+[5] 호출 기록의 namespace와 명령줄 토큰으로 종류를 더한다.
+
+```python
+_NS_KIND = {"vol": "memory", "net": "pcap", "tsk": "disk_image", "ewf": "disk_image",
+            "img": "disk_image", "ez": "triage", "af": "triage", "live": "live",
+            "velo": "live"}
+```
+
+[`core/evidence_kinds.py:176-178`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L176-L178)
+
+```python
+def _trace_kinds(entries) -> set:
+    kinds: set = set()
+    for e in entries or []:
+        if not isinstance(e, dict) or e.get("type") != "tool_call" or e.get("success") is not True:
+            continue
+        if str(e.get("source") or "").startswith("claude_code"):
+            continue                    # agent shell commands are not evidence signals
+        mcp = str(e.get("mcp_tool") or "").lower()
+        ns_kind = _NS_KIND.get(mcp.split("_", 1)[0]) if mcp else None
+        if ns_kind:
+            kinds.add(ns_kind)
+        for tok in str(e.get("cmd") or "").split():
+            if "sectionobject" in tok.lower():
+                continue                # vol.dumpfiles output (…ImageSectionObject….img)
+            k = classify_name(tok)
+            if k == {"memory", "disk_image"} and ns_kind in ("memory", "disk_image"):
+                k = {ns_kind}           # an ambiguous .raw fed to vol/tsk/img says which
+            # Produced output is not evidence — except a capture or RAM image
+            # the agent extracted from an archive in evidence/ (a disk-image
+            # extension there is a carved/dumped file, never a new image).
+            if any(p in tok for p in _PRODUCED_DIRS):
+                k = {x for x in k if x in ("pcap", "memory")} \
+                    if tok.lower().endswith(_PCAP_EXT + _MEM_EXT) else set()
+            kinds |= k
+    return kinds
+```
+
+[`core/evidence_kinds.py:182-206`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L182-L206)
+
+[6] 판별 결과와 `determined`, `live` 문맥 검사다.
+
+```python
+    if case_dir is None:
+        case_dir = case_dir_from_log()
+    base: set = set()
+    if case_dir:
+        base |= _evidence_dir_kinds(case_dir)
+        base |= _mounted_kinds(case_dir)
+    kinds = base | _trace_kinds(entries)
+    live_mon = is_live_monitoring_trace(entries)
+    if live_mon or _LIVE_CTX.search(case_context or ""):
+        kinds.add("live")
+    return {"kinds": sorted(kinds), "determined": bool(base), "live_monitoring": live_mon}
+```
+
+[`core/evidence_kinds.py:231-241`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L231-L241)
+
+[7] `reason.*` 도구의 증거 종류 정규식과 입력 머리다.
+
+```python
+_SCOPE_SKIP_TOOLS = frozenset({"reason_plan", "reason_audit_findings"})
+
+# category -> (compiled cmd/tool regex, human label). Case-agnostic — matches
+# tool namespaces, binaries, and evidence file extensions, never case content.
+_EVIDENCE_SIGNALS = [
+    ("disk",    re.compile(r"\bewf|\.e0\d|mount_full_image|ewfmount|\bmmls\b|\bfsstat\b|vshadow|bdemount|\.dd\b|\.img\b", re.I), "disk image"),
+    ("triage",  re.compile(r"cylr|\btriage\b|\bkape\b", re.I), "triage collection"),
+    ("memory",  re.compile(r"\bvol_|volatility|memprocfs|\.vmem\b|\.dmp\b|\.lime\b|\bvol\b|symbol_check", re.I), "memory image"),
+    ("network", re.compile(r"tcpdump|ngrep|tshark|tcpxtract|\bnet_|\.pcap", re.I), "network capture"),
+]
+```
+
+[`tools/reasoning.py:1064-1073`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1064-L1073)
+
+```python
+def _with_scope(user: str, tool_name: str) -> str:
+    if tool_name in _SCOPE_SKIP_TOOLS:
+        return user
+    scope = _evidence_scope()
+    return f"{scope}\n\n{user}" if scope else user
+```
+
+[`tools/reasoning.py:1109-1113`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1109-L1113)
+
+[8] `ez.evtxecmd`는 대소문자를 구별하는 확장자 비교로 `-f`와 `-d`를 고른다.
+
+```python
+    flag = "-f" if evtx_path.endswith(".evtx") else "-d"
+    args = [flag, evtx_path, "--csv", output_dir, "--csvf", output_file, "--maps", maps_dir]
+```
+
+[`tools/eztools.py:185-186`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L185-L186)
+
+[9] `ez.recmd_batch`가 하이브 파일을 이름으로 찾는다.
+
+```python
+_HIVE_NAMES = ("ntuser.dat", "usrclass.dat", "sam", "system", "software", "security",
+               "amcache.hve", "default")
+
+
+def _find_hives(hives_dir: str, names=_HIVE_NAMES, max_hives: int = 64) -> list[str]:
+    """Registry hive files under `hives_dir` (case-insensitive, transaction
+    logs excluded), sorted, capped."""
+    out: list[str] = []
+    want = {n.lower() for n in names}
+    for dirpath, dirnames, filenames in os.walk(hives_dir, followlinks=False):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            low = fn.lower()
+            if low in want and not low.endswith((".log", ".log1", ".log2", ".regtrans-ms", ".blf")):
+                out.append(os.path.join(dirpath, fn))
+                if len(out) >= max_hives:
+                    return out
+    return out
+```
+
+[`tools/eztools.py:226-243`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L226-L243)
+
+[10] README의 증거 복사 예시다(문서): [`README.md:292-293`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/README.md#L292-L293).
+
+[11] `mnt/` 하위 폴더 조회와 오류 처리다.
+
+```python
+def _mounted_kinds(case_dir: str) -> set:
+    """A filesystem mounted under <case>/mnt/ is a disk image in hand. A
+    mount point the SIFT user cannot list (a root FUSE ewf/bde mount) or one
+    os.path.ismount recognises counts; an empty directory does not."""
+    mnt = os.path.join(case_dir, "mnt")
+    try:
+        subs = list(os.scandir(mnt))
+    except OSError:
+        return set()
+    for de in subs:
+        try:
+            if not de.is_dir(follow_symlinks=True):
+                continue
+            if os.path.ismount(de.path):
+                return {"disk_image"}
+            with os.scandir(de.path) as inner:
+                if next(inner, None) is not None:
+                    return {"disk_image"}
+        except PermissionError:
+            return {"disk_image"}
+        except OSError:
+            continue
+    return set()
+```
+
+[`core/evidence_kinds.py:140-162`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L140-L162)
+
+[12] `mmls` 출력에서 파티션을 뽑아 줄 세운다.
+
+```python
+def _mmls_partitions(stdout: str) -> list[dict]:
+    """Real partitions from an mmls table, largest first.
+
+    Skips the Meta and Unallocated rows and keeps every data partition whatever
+    its description: a GPT table calls them "Basic data partition", so matching
+    the word NTFS in the description finds nothing at all.
+    """
+    out = []
+    for line in (stdout or "").splitlines():
+        m = _MMLS_ROW_RE.match(line.strip())
+        if not m:
+            continue
+        slot, start, end, length, desc = m.groups()
+        if not slot[0].isdigit():      # Meta / ------- rows carry no partition
+            continue
+        out.append({"slot": slot, "start": int(start), "end": int(end),
+                    "length": int(length), "description": desc.strip()})
+    # A description that names the filesystem is the strongest hint; size breaks ties.
+    return sorted(out, key=lambda p: ("ntfs" in p["description"].lower(), p["length"]),
+                  reverse=True)
+```
+
+[`tools/ewf.py:187-206`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L187-L206)
+
+[13] 파티션마다 `fsstat`으로 파일 시스템 종류를 읽고 NTFS가 없으면 마운트하지 않는다.
+
+```python
+    # Confirm with fsstat which candidate actually holds NTFS. A GPT table
+    # labels its partitions "Basic data partition", so the description does not
+    # name the filesystem; guessing from it mounted nothing and left the agent
+    # deriving an offset by hand.
+    offset_sectors = None
+    checked = []
+    for part in candidates:
+        probe = run(["fsstat", "-o", str(part["start"]), ewf_device], needs_sudo=True)
+        fs_type = ""
+        for line in (probe.get("stdout") or "").splitlines():
+            if line.lower().startswith("file system type:"):
+                fs_type = line.split(":", 1)[1].strip()
+                break
+        checked.append({**part, "fs_type": fs_type})
+        if "ntfs" in fs_type.lower():
+            offset_sectors = part["start"]
+            break
+
+    if offset_sectors is None:
+        return {"success": False,
+                "stderr": ("No NTFS filesystem found in any partition (fsstat probed "
+                           + ", ".join(f"sector {c['start']}: {c['fs_type'] or 'unreadable'}"
+                                       for c in checked) + ")."),
+                "partitions": checked, "mmls": mmls_result["stdout"]}
+```
+
+[`tools/ewf.py:242-265`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L242-L265)
+
+[14] `tsk.fsstat`은 모델이 준 오프셋을 넘긴다.
+
+```python
+def tsk_fsstat(image: str, offset_sectors: Optional[int] = None) -> dict:
+    """
+    Filesystem metadata: NTFS version, cluster size, MFT offset, volume ID.
+    offset_sectors: sector offset from mmls output (required for partitioned images).
+    """
+    cmd = ["fsstat"]
+    if offset_sectors:
+        cmd += ["-o", str(offset_sectors)]
+    cmd.append(image)
+    return run(cmd, needs_sudo=True)
+```
+
+[`tools/sleuthkit.py:24-33`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L24-L33)
+
+[15] 앞 12바이트로 EVTX와 EVT를 가르고 읽기 오류는 `unknown`이다.
+
+```python
+_EVTX_MAGIC = b"ElfFile\x00"   # EVTX file header, offset 0
+_EVT_MAGIC = b"LfLe"           # legacy EVT: ELF_LOG_SIGNATURE at offset 4
+
+
+def _sniff_event_log(path: str) -> str:
+    """'evtx' | 'evt' | 'unknown'. Lenient: an unreadable/missing file or an
+    unrecognised header is 'unknown' and the caller proceeds as before, so
+    only a POSITIVE legacy-EVT detection changes behaviour."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return "unknown"
+    if head.startswith(_EVTX_MAGIC):
+        return "evtx"
+    if len(head) >= 8 and head[4:8] == _EVT_MAGIC:
+        return "evt"
+    return "unknown"
+```
+
+[`tools/misc.py:28-45`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L28-L45)
+
+[16] `misc.evtx_dump`는 EVT를 `evtexport`로 돌리고 `log_format`을 싣는다.
+
+```python
+    fmt = _sniff_event_log(evtx_file)
+    if fmt == "evt":
+        cmd = ["evtexport", "-m", "all", evtx_file]
+    else:
+        cmd = ["/usr/local/bin/evtx_dump.py", evtx_file]
+    if output_path:
+        r = run_with_output_file(cmd, output_path=output_path, mode="w", timeout=300)
+    else:
+        r = run(cmd, timeout=300)
+    if isinstance(r, dict):
+        r["log_format"] = fmt
+        if fmt == "evt":
+            r["note"] = ("legacy EVT parsed with libevt evtexport (text records, not "
+                         "EVTX XML); ez.evtxecmd / misc.evtx_filter do not apply")
+    return r
+```
+
+[`tools/misc.py:60-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L60-L74)
+
+[17] `misc.evtx_filter`는 EVT만 거부하고 응답에 형식을 싣지 않는다.
+
+```python
+    # python-evtx cannot read legacy EVT; streaming it would yield zero
+    # events and look like an empty log. Refuse loudly instead.
+    if _sniff_event_log(evtx_file) == "evt":
+        return {
+            "success": False,
+            "error": (f"{evtx_file} is a legacy EVT log (NT/2000/XP/2003); "
+                      "python-evtx parses EVTX only, so an ID filter here would "
+                      "return zero events regardless of content"),
+            "log_format": "evt",
+            "hint": "Use misc.evtx_dump (routes EVT to libevt evtexport) and grep the text records.",
+            "event_ids_requested": sorted(ids),
+            "events_scanned": 0, "matches": [],
+        }
+```
+
+[`tools/misc.py:109-121`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L109-L121)
+
+```python
+    return {
+        "success": success,
+        "event_ids_requested": sorted(ids),
+        "events_scanned": events_scanned,
+        "matches_found": len(results),
+        "events": results,
+        "oversized_events_dropped": oversized_dropped,
+        "cap_hit": cap_hit,
+        "wall_clock_timed_out": timed_out,
+        "elapsed_seconds": elapsed,
+    }
+```
+
+[`tools/misc.py:247-257`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L247-L257)
+
+[18] 작업 지시의 도구를 증거 종류와 대조해 빼는 함수와 그 적용이다.
+
+```python
+def _filter_tools(tools, kinds) -> tuple[list, list]:
+    """(kept, dropped) — dropped items {tool, needs} need an evidence kind the
+    case lacks. Nothing is dropped when `kinds` is empty (undetermined)."""
+    from tools.tool_capabilities import tool_fits_evidence, tool_evidence_needs, canonical_tool_id
+    kept, dropped = [], []
+    for t in tools or []:
+        if kinds and not tool_fits_evidence(t, kinds):
+            dropped.append({"tool": canonical_tool_id(t),
+                            "needs": sorted(tool_evidence_needs(t) or [])})
+        else:
+            kept.append(t)
+    return kept, dropped
+```
+
+[`tools/dair.py:761-772`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L761-L772)
+
+```python
+    _filtered_tools: list = []
+    try:
+        _d0 = assessment.get("directives") or {}
+        _pt0 = list(_d0.get("priority_tools") or [])
+        if _kinds and _pt0:
+            _kept0, _filtered_tools = _filter_tools(_pt0, _kinds)
+            if _filtered_tools:
+                _d0["priority_tools"] = _kept0
+                assessment["directives"] = _d0
+    except Exception:
+        _filtered_tools = []
+```
+
+[`tools/dair.py:1386-1396`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1386-L1396)
+
+[19] 도구가 요구하는 증거 종류 표다: [`tools/tool_capabilities.py:274-304`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L274-L304).
+
+```python
+_WINDOWS_ARTIFACTS = frozenset({"disk_image", "triage"})
+_EVIDENCE_NEEDS_PREFIX: tuple[tuple[str, frozenset], ...] = (
+    ("vol.", frozenset({"memory"})),
+    ("net.", frozenset({"pcap"})),
+    ("tsk.", frozenset({"disk_image"})),
+    ("ewf.", frozenset({"disk_image"})),
+    ("img.", frozenset({"disk_image"})),
+    ("ez.", _WINDOWS_ARTIFACTS),
+    ("af.", _WINDOWS_ARTIFACTS),           # every detector reads a disk-artifact parse
+    ("live.", frozenset({"live"})),
+    ("velo.", frozenset({"live"})),
+    ("monitor.", frozenset({"live"})),
+    ("respond.", frozenset({"live"})),
+)
+```
+
+[`tools/tool_capabilities.py:274-287`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L274-L287)
+
+[20] 요구 종류가 없거나 사건의 종류를 모르면 맞는 것으로 본다.
+
+```python
+def tool_evidence_needs(tool) -> frozenset | None:
+    """Evidence kinds `tool` needs (any one), or None when it is generic."""
+    t = canonical_tool_id(tool)
+    if t in _EVIDENCE_NEEDS_TOOL:
+        return _EVIDENCE_NEEDS_TOOL[t]
+    for prefix, needs in _EVIDENCE_NEEDS_PREFIX:
+        if t.startswith(prefix):
+            return needs
+    return None
+
+
+def tool_fits_evidence(tool, evidence_kinds) -> bool:
+    """True unless the case's evidence kinds are KNOWN (non-empty) and hold
+    none of the kinds `tool` needs. An empty/None kind set is undetermined —
+    everything fits (fail-open)."""
+    if not evidence_kinds:
+        return True
+    needs = tool_evidence_needs(tool)
+    return needs is None or bool(needs & set(evidence_kinds))
+```
+
+[`tools/tool_capabilities.py:323-341`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L323-L341)
+
+[21] 뺀 도구를 호출 기록과 응답에 남긴다.
+
+```python
+    _ev_extra = {"evidence_kinds": _ev_profile.get("kinds") or [],
+                 "evidence_determined": bool(_kinds)}
+    if _filtered_tools:
+        _ev_extra["server_filtered_tools"] = _filtered_tools
+    if _filtered_challenges:
+```
+
+[`tools/dair.py:1456-1460`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1456-L1460)
+
+```python
+    if _filtered_tools:
+        result["server_filtered_tools"] = _filtered_tools
+        result["prescription_filtered"] = [f["tool"] for f in _filtered_tools]
+```
+
+[`tools/dair.py:1483-1485`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1483-L1485)
+
+[22] 검증 과제의 방법 도구를 대조한다.
+
+```python
+def _filter_challenges(challenges, kinds) -> tuple[list, list]:
+    """(kept, dropped). A challenge whose challenge_method tools ALL need a
+    missing evidence kind is dropped — it could never be run, so it must never
+    become an open challenge that blocks Report. A multi-tool method keeps
+    only its runnable tools."""
+    from tools.tool_capabilities import (tool_fits_evidence, tool_evidence_needs,
+                                         challenge_method_tools)
+    if not kinds:
+        return list(challenges or []), []
+    kept, dropped = [], []
+    for c in challenges or []:
+        if not isinstance(c, dict):
+            kept.append(c)
+            continue
+        methods = challenge_method_tools(c.get("challenge_method"))
+        fit = [m for m in methods if tool_fits_evidence(m, kinds)]
+        if methods and not fit:
+            dropped.append({"claim": str(c.get("claim") or "")[:200],
+                            "challenge_method": str(c.get("challenge_method") or ""),
+                            "needs": sorted({k for m in methods
+                                             for k in (tool_evidence_needs(m) or [])})})
+            continue
+        if methods and len(fit) < len(methods):
+            dropped.append({"claim": str(c.get("claim") or "")[:200],
+                            "challenge_method": str(c.get("challenge_method") or ""),
+                            "removed_methods": [m for m in methods if m not in fit]})
+            c = {**c, "challenge_method": ", ".join(fit)}
+        kept.append(c)
+    return kept, dropped
+```
+
+[`tools/dair.py:775-803`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L775-L803)
+
+[23] 처방 모델의 시스템 지시에 넣는 도구 목록을 증거 종류로 줄인다.
+
+```python
+def _dair_system(kinds) -> str:
+    """System prompt whose tool manifest lists only tools the case's evidence
+    can feed (the full manifest when the evidence inventory is undetermined)."""
+    if not kinds:
+        return _DAIR_SYS
+    return _DAIR_SYS_BASE + "\n\n" + format_tool_manifest_for_prompt(evidence_kinds=kinds)
+```
+
+[`tools/dair.py:679-684`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L679-L684)
+
+[24] 판별이 정해지고 live-monitoring이 아닐 때만 거른다.
+
+```python
+def filter_kinds(profile: dict) -> set:
+    """The kind set tool filtering may act on: empty (filter nothing) unless
+    the inventory is determined and this is not a live-monitoring trace."""
+    if not profile or not profile.get("determined") or profile.get("live_monitoring"):
+        return set()
+    return set(profile.get("kinds") or [])
+```
+
+[`core/evidence_kinds.py:249-254`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L249-L254)
+
+[25] 작업 지시 완료 검사도 맞지 않는 도구를 뺀다.
+
+```python
+def unfit_for_evidence(tool, kinds) -> bool:
+    """A prescribed tool the case's evidence cannot feed — never an unrun
+    work-order item (DAIR drops it; this covers orders recorded before)."""
+    if not kinds:
+        return False
+    from tools.tool_capabilities import tool_fits_evidence
+    return not tool_fits_evidence(tool, kinds)
+```
+
+[`tools/_gates/work_order.py:225-231`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/work_order.py#L225-L231)
+
+[26] `reason.plan`과 `reason.advise`는 모델 답을 증거 종류와 대조하지 않고 돌려준다.
+
+```python
+    capped = _cap_lines(evidence_available, 300)
+    user = f"CASE:\n{case_description}\n\nEVIDENCE AVAILABLE:\n{capped}"
+    if case_question and case_question.strip():
+        user = f"CASE QUESTION:\n{case_question.strip()}\n\n" + user
+    result = _ask(_PLAN_SYS, user, max_tokens=MAX_TOKENS_PLAN, _tool_name="reason_plan",
+                  input_call_ids=input_call_ids)
+    if case_question and case_question.strip():
+        result["case_question"] = case_question.strip()
+        try:
+            from core.execution_log import log as _elog
+            _elog.update_reason_call(result.get("_trudi_call_id", 0),
+                                     case_question=case_question.strip())
+        except Exception:
+            pass
+    return result
+```
+
+[`tools/reasoning.py:2087-2101`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L2087-L2101)
+
+```python
+    user = f"QUESTION:\n{question}\n\nSITUATION:\n{situation}"
+    result = _ask(_ADVISE_SYS, user, max_tokens=MAX_TOKENS_DRAFT_COMMAND,
+                  _tool_name="reason_advise", input_call_ids=input_call_ids)
+    rb = result.get("result_block")
+    advice = rb.get("advice") if isinstance(rb, dict) else None
+    result["advice"] = str(advice).strip() if advice \
+        else (result.get("conclusion") or "").strip()
+    return result
+```
+
+[`tools/reasoning.py:3562-3569`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3562-L3569)
+
+[27] `evidence/` 탐색의 한도다.
+
+```python
+_MAX_DEPTH = 8
+_MAX_DIRS = 2000
+_MAX_SECONDS = 1.5
+```
+
+[`core/evidence_kinds.py:37-39`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L37-L39)
+
+```python
+    visited = 0
+    deadline = time.monotonic() + _MAX_SECONDS
+    while q and visited < _MAX_DIRS and time.monotonic() < deadline:
+```
+
+[`core/evidence_kinds.py:82-84`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L82-L84)
+
+[28] 탐색 결과를 300초 동안 다시 쓴다.
+
+```python
+def _evidence_dir_kinds(case_dir: str) -> set:
+    evd = os.path.join(case_dir, "evidence")
+    if not os.path.isdir(evd):
+        return set()
+    try:
+        key = (os.path.realpath(evd), os.stat(evd).st_mtime)
+    except OSError:
+        return set()
+    hit = _CACHE.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _CACHE_TTL:
+        return set(hit[1])
+    kinds = _scan_evidence_dir(evd)
+    _CACHE[key] = (now, frozenset(kinds))
+    return kinds
+```
+
+[`core/evidence_kinds.py:123-137`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L123-L137)
+
+[29] 사건 폴더는 호출 기록 경로의 두 단계 위다.
+
+```python
+def case_dir_from_log() -> str | None:
+    """<case> for the active trace at <case>/analysis/<trace>.json."""
+    try:
+        from core.execution_log import log
+        if log._path:
+            return os.path.dirname(os.path.dirname(os.path.abspath(log._path)))
+    except Exception:
+        pass
+    return None
+```
+
+[`core/evidence_kinds.py:212-220`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L212-L220)
+
+[30] `dair.assess`는 메모리의 호출 기록으로 판별하고 호출 기록을 다시 읽는 `_auto_recover`는 기록 함수 안에서만 돈다.
+
+```python
+def _evidence_profile(case_context: str = "") -> dict:
+    """core.evidence_kinds profile of the active case (fail-open: undetermined
+    on any error)."""
+    try:
+        from core.execution_log import log as _elog
+        from core.evidence_kinds import evidence_profile
+        return evidence_profile(getattr(_elog, "_entries", None) or [], None, case_context)
+    except Exception:
+        return {"kinds": [], "determined": False, "live_monitoring": False}
+```
+
+[`tools/dair.py:737-745`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L737-L745)
+
+```python
+    def _auto_recover(self) -> None:
+        # Must be called under self._lock.
+        if self._path is not None:
+            return
+
+```
+
+[`core/execution_log.py:1005-1009`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1005-L1009)

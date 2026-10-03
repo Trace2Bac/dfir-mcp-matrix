@@ -1,0 +1,468 @@
+---
+cell: L03
+details:
+- id: L03.02
+  exception: false
+- id: L03.03
+  exception: false
+- id: L03.05
+  exception: false
+---
+
+# L03 기록 실패 처리
+
+### L03.02 실행 후 응답 차단
+
+**구현.** 이 방식은 외부 도구 실행기 `run`·`run_with_progress`·`run_with_output_file`로 명령을 돌리는 도구에 적용된다 [1].
+`misc.evtx_filter`·`strings.grep`처럼 명령을 직접 띄운 뒤 실행기의 `_log_tool`을 감싸지 않고 부르는 도구와 `hash.file`도 같다 [2][3].
+모든 기록 함수는 항목을 메모리 목록에 넣은 뒤 `_flush`로 trace 파일 전체를 임시 파일에 써서 바꿔 놓는다 [4].
+`_flush`는 쓰기가 실패하면 표준 오류에 경고를 찍고 예외를 다시 올린다 [4].
+`_log_tool`은 명령이 끝난 뒤 불리고 이 예외를 표준 오류 경고와 함께 다시 올린다 [1].
+`hash.file`은 해시를 계산한 뒤 `record_tool_call`과 `annotate_tool_call`을 감싸지 않고 부른다 [3].
+
+이 예외는 도구 본문 밖으로 나간다.
+FastMCP 3.4.7은 이 예외를 `ToolError`로 바꾸고 클라이언트에는 `isError` 결과로 오류 문구를 돌려준다 [5].
+미들웨어는 `ToolError`를 항목 없이 그대로 넘긴다 [6].
+그래서 기록 쓰기가 실패한 호출은 명령 결과를 돌려주지 않고 오류로 끝난다.
+서버 안 백그라운드 작업으로 돈 도구도 작업이 이 예외로 끝나 `misc.job_status`가 결과 대신 오류를 돌려준다 [7].
+`misc.batch_run`은 명령 하나의 기록이 실패하면 다른 명령이 모두 끝날 때까지 기다린 뒤 전체 호출이 오류로 끝나 이미 끝난 명령의 결과도 돌려주지 않는다 [8].
+
+명령이 남긴 부수 효과는 되돌리지 않는다.
+`run_with_output_file`이 출력 파일에 쓴 내용과 sudo로 실행한 명령의 결과는 기록 없이 남는다 [9].
+쓰지 못한 항목이 어떻게 되는지는 L03.05에서 본다.
+
+### L03.03 경고 후 계속
+
+**구현.** 이 방식은 SSH 실행기, Velociraptor 실행기, 미들웨어의 기본 항목, 모델 호출 기록, 분리 실행 carve 수집, 게이트 거부 기록에 적용된다.
+SSH 실행기의 `_log_ssh_tool`과 Velociraptor 실행기의 `_log_velo_tool`은 쓰기 예외를 잡아 표준 오류에 경고를 찍고 `_trudi_call_id`를 0으로 둔 결과를 돌려준다 [10][11].
+`live.*`, `respond.execute_action`, `velo.*`가 이 실행기를 쓴다 [12].
+`respond.execute_action`은 원격 단말에 격리 조치를 실행한 뒤 기록하므로 기록이 실패해도 조치는 이미 실행되었고 결과를 그대로 돌려준다 [12][13].
+
+스스로 기록하지 않는 도구의 기본 항목은 미들웨어가 쓰고 쓰기 예외는 표준 오류 경고로 끝난다 [14].
+이때 결과에는 호출 ID가 붙지 않는다 [14].
+`reason.*`와 `dair.assess`의 기록 함수와 모델 호출 전의 `call_initiated` 쓰기도 예외를 잡아 표준 오류에 경고만 찍는다 [15][16].
+`misc.job_status`는 끝난 carve 작업을 거둘 때 `_log_tool`이 올린 예외를 잡아 `_trudi_call_id`를 비운 결과를 돌려준다 [17].
+`_log_tool`이 그 전에 표준 오류에 경고를 찍는다 [1].
+
+게이트 거부를 쓰는 `record_tool_blocked`의 예외는 아무것도 하지 않고 넘기고 거부 응답을 그대로 올린다 [18].
+쓰기 실패가 파일 쓰기 오류이면 `_flush`가 예외를 올리기 전에 표준 오류에 경고를 찍는다 [4].
+
+어느 경우에도 응답에는 기록 실패를 알리는 필드가 없다 [10][11][14].
+실패 사실은 서버의 표준 오류에만 남는다.
+쓰지 못한 항목이 어떻게 되는지는 L03.05에서 본다.
+
+`misc.start_execution_log`는 trace를 열며 파일을 처음 쓰고 `run_profile` 항목을 써 본 뒤 그 쓰기가 실패하면 `success: false`를 돌려준다 [19].
+이 검사는 사건을 열 때 한 번이고 그 뒤 호출의 기록 실패를 막지 않는다.
+
+### L03.05 재시도·별도 저장
+
+**구현.** 이 방식은 기록 함수가 항목을 메모리 목록에 넣은 뒤 trace 파일 전체를 다시 쓰는 구조에서 생기고 L03.02·L03.03의 모든 경로에 적용된다 [4].
+쓰기가 실패해도 항목은 메모리 목록에 남고 다음 기록의 `_flush`가 성공하면 파일 전체를 다시 쓸 때 함께 들어간다 [4].
+쓰지 못한 항목이 남아 있다는 표시도, 그 항목만 다시 쓰려는 코드도 없다 [4].
+그래서 다음 기록이 성공하기 전에 서버 프로세스가 끝나면 그 항목은 사라진다 [4].
+L03.02의 경로에서는 그 항목의 호출 ID가 모델에게 돌아가지 않았다 [1].
+
+### 근거
+
+[1] 실행기의 기록 함수는 쓰기 예외를 다시 올리고 성공했을 때만 호출 ID를 결과에 넣는다.
+
+```python
+    try:
+        from core.execution_log import log
+        parent = [log._last_dair_cid] if log._last_dair_cid else None
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+            input_call_ids=parent,
+            stdout_full=stdout_full,
+            output_path=result.get("output_path"),
+            exit_meaning=result.get("exit_meaning", ""),
+        )
+        result["_trudi_call_id"] = cid
+    except Exception as e:
+        import sys
+        print(f"[TRUDI WARN] _log_tool failed for {result.get('cmd', '?')[:80]}: {e}",
+              file=sys.stderr)
+        raise
+```
+
+[`core/executor.py:78-101`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L78-L101)
+
+[2] 직접 띄운 명령의 기록이다.
+
+```python
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+    except OSError as e:
+        _log_tool({"success": False, "stdout": "", "stderr": str(e),
+                   "exit_code": -1, "truncated": False, "cmd": " ".join(cmd),
+                   "retries": 0, "elapsed_seconds": 0.0})
+        return {"success": False, "error": f"failed to spawn evtx_dump: {e}"}
+```
+
+[`tools/misc.py:127-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L127-L136)
+
+```python
+    def _trace(success: bool, matches: list[str], stderr: str, exit_code: int,
+               truncated: bool) -> int:
+        tc = {
+            "success": success,
+            "stdout": "\n".join(matches)[:OUTPUT_CAP],
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "truncated": truncated,
+            "cmd": " ; ".join(" ".join(c) for c in cmds),
+            "retries": 0,
+            "elapsed_seconds": round(time.perf_counter() - start, 1),
+        }
+        _log_tool(tc)
+        # Echo the id inline so the result is citable without a trace lookup.
+        return tc.get("_trudi_call_id", 0)
+```
+
+[`tools/strings_tools.py:138-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L138-L152)
+
+[3] `hash.file`의 기록은 예외 처리 없이 부른다.
+
+```python
+    cid = log.record_tool_call(cmd=f"hash.file {result['file']}", success=True,
+                               truncated=False, retries=0, exit_code=0,
+                               stdout_full=json.dumps(payload), stdout_excerpt=json.dumps(payload))
+    log.annotate_tool_call(cid, hash_result=payload, source_version=source_version,
+                           hashed_file_version=version,
+                           source_hashes={result['file']: result['sha256']})
+    return {**result, '_trudi_call_id': cid}
+```
+
+[`tools/hashing.py:68-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L68-L74)
+
+[4] 항목을 메모리에 넣은 뒤 파일을 쓴다.
+파일 쓰기가 실패하면 경고 뒤 예외를 다시 올린다.
+
+```python
+    def _append_entry(self, entry: dict) -> None:
+        """Append `entry` and flush. Must be called under self._lock.
+
+        Stamps `dair_phase` + `dair_depth` when phase state is known.
+        setdefault() so callers can override (e.g. dair_call post-transition).
+        """
+        if self._current_phase:
+            entry.setdefault("dair_phase", self._current_phase)
+            entry.setdefault("dair_depth", len(self._phase_stack))
+        self._entries.append(entry)
+        self._index_version += 1
+        self._flush()
+```
+
+[`core/execution_log.py:605-616`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L605-L616)
+
+```python
+            # 3) Atomic write via temp + rename.
+            dir_ = os.path.dirname(os.path.abspath(self._path))
+            try:
+                fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        f.write(data)
+                        f.flush()
+                        if _TRACE_FSYNC:
+                            os.fsync(f.fileno())
+                    os.replace(tmp, self._path)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            except OSError as e:
+                _warn(f"trace flush failed ({self._path}): {e}")
+                # Trace integrity is non-negotiable — bubble up so callers
+                # (record_*, _log_tool, middleware) can surface a clear
+                # ToolError instead of silently losing the entry.
+                raise
+```
+
+[`core/execution_log.py:1153-1175`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1153-L1175)
+
+[5] FastMCP 3.4.7은 도구가 낸 예외를 `ToolError`로 바꾼다: [`fastmcp_slim/fastmcp/server/server.py:1342-1358`](https://github.com/PrefectHQ/fastmcp/blob/758397efa66e2cedac95ada540001bc44a95a646/fastmcp_slim/fastmcp/server/server.py#L1342-L1358).
+FastMCP 3.4.7은 도구 호출 요청 처리기를 MCP Python SDK의 `call_tool` 처리기로 등록하고([`fastmcp_slim/fastmcp/server/mixins/mcp_operations.py:76-78`](https://github.com/PrefectHQ/fastmcp/blob/758397efa66e2cedac95ada540001bc44a95a646/fastmcp_slim/fastmcp/server/mixins/mcp_operations.py#L76-L78)) mcp 1.30.0의 처리기는 처리 중 난 예외를 `isError`가 참인 결과로 돌려준다([`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L473-L480)).
+
+[6] 미들웨어는 `ToolError`를 그대로 넘긴다.
+
+```python
+        async def _invoke(concurrent: bool):
+            try:
+                res = await call_next(context)
+            except ToolError:
+                raise
+```
+
+[`core/middleware.py:733-737`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L733-L737)
+
+[7] 백그라운드 작업이 예외로 끝나면 결과 대신 오류를 돌려준다.
+
+```python
+    exc = task.exception()
+    if exc is not None:
+        return {**base, "success": False, "error": f"{type(exc).__name__}: {exc}"}
+```
+
+[`core/jobs.py:274-276`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L274-L276)
+
+[8] `misc.batch_run`은 모든 작업이 끝날 때까지 기다리며 작업의 예외를 `fut.result()`에서 다시 올린다.
+
+```python
+    results = [None] * len(tool_calls)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as ex:
+        futures = {ex.submit(_one, spec): i for i, spec in enumerate(tool_calls)}
+        for fut in concurrent.futures.as_completed(futures):
+            results[futures[fut]] = fut.result()
+```
+
+[`tools/misc.py:2658-2662`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2658-L2662)
+
+[9] `run_with_output_file`은 출력 파일에 쓴 뒤 기록하고 실행기는 `needs_sudo`이면 `sudo`를 붙인다: [`core/executor.py:398-399`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L398-L399).
+
+```python
+    try:
+        with open(output_path, mode) as f:
+            proc = subprocess.run(
+                cmd,
+                stdout=f,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=env,
+                cwd=cwd,
+            )
+        _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
+        result["stdout"] = f"Output written to {output_path}"
+        stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        result["stderr"], result["progress_lines"] = _parse_stderr(stderr_raw)
+
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        result["timed_out"] = True
+
+    except FileNotFoundError as e:
+        result["stderr"] = f"Tool not found: {e}"
+
+    except Exception as e:
+        result["stderr"] = f"Executor error: {e}"
+
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_tool(result)
+    return result
+```
+
+[`core/executor.py:416-443`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L416-L443)
+
+[10] SSH 실행기의 기록 함수다.
+
+```python
+def _log_ssh_tool(result: dict) -> None:
+    """Mirror core.executor._log_tool — writes a tool_call trace entry."""
+    try:
+        from core.execution_log import log
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+        )
+        result["_trudi_call_id"] = cid
+    except Exception as e:  # noqa: BLE001
+        import sys
+        print(f"[TRUDI WARN] _log_ssh_tool failed: {e}", file=sys.stderr)
+        result.setdefault("_trudi_call_id", 0)
+```
+
+[`core/ssh.py:123-142`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L123-L142)
+
+[11] Velociraptor 실행기의 기록 함수다.
+
+```python
+def _log_velo_tool(result: dict) -> None:
+    """Write a tool_call trace entry — mirror of core.executor._log_tool /
+    core.ssh._log_ssh_tool. On failure we still set _trudi_call_id=0 so the
+    caller's result dict stays well-formed."""
+    try:
+        from core.execution_log import log
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+        )
+        result["_trudi_call_id"] = cid
+    except Exception as e:  # noqa: BLE001
+        import sys
+        print(f"[TRUDI WARN] _log_velo_tool failed: {e}", file=sys.stderr)
+        result.setdefault("_trudi_call_id", 0)
+```
+
+[`tools/velo.py:57-78`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L57-L78)
+
+[12] `respond.execute_action`은 SSH 쓰기 실행기를 부르고 그 결과로 응답을 만든다: [`tools/respond.py:357-358`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L357-L358).
+`live.*`는 `ssh_run`을, `velo.*`는 `_velo_run`을 부른다: [`tools/live.py:49`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L49), [`tools/velo.py:164-171`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L164-L171).
+
+[13] SSH 쓰기 실행기는 명령을 실행한 뒤 기록한다.
+
+```python
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"ssh write timed out after {timeout}s on host {host!r}"
+        result["timed_out"] = True
+    except FileNotFoundError as e:
+        result["stderr"] = f"ssh binary not found: {e}"
+    except Exception as e:  # noqa: BLE001
+        result["stderr"] = f"ssh_run_write error: {e}"
+
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_ssh_tool(result)
+    return result
+```
+
+[`core/ssh_exec.py:331-341`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L331-L341)
+
+[14] 기본 항목 쓰기의 예외는 경고로 끝나고 호출 ID 0을 돌려준다.
+호출 ID가 0이면 결과에 붙이지 않는다([`core/middleware.py:564-568`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L564-L568)).
+
+```python
+            return log.record_tool_call(
+                cmd=f"<py>:{tool_name}",
+                success=ok,
+                truncated=False,
+                retries=0,
+                exit_code=0 if ok else 1,
+                stderr=err,
+                elapsed_seconds=elapsed,
+                input_call_ids=_parent_cids(),
+                gate=str(payload.get("gate") or "") if not ok else "",
+                **({"stdout_full": body, "stdout_excerpt": body[:600]} if body else {}),
+            ) or 0
+    except Exception as err:
+        print(f"[TRUDI WARN] success-baseline log failed for {tool_name}: "
+              f"{err!r}", file=sys.stderr)
+    return 0
+```
+
+[`core/middleware.py:546-561`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L546-L561)
+
+[15] `reason.*`와 `dair.assess`의 기록 함수는 예외를 잡아 경고만 찍는다.
+
+```python
+    except Exception as e:
+        import sys
+        print(f"[TRUDI WARN] _log_reason failed for {tool_name}: {e}", file=sys.stderr)
+```
+
+[`tools/reasoning.py:1881-1883`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1881-L1883)
+
+```python
+    except Exception as e:
+        import sys
+        print(f"[TRUDI WARN] _log_dair failed: {e}", file=sys.stderr)
+        return 0
+```
+
+[`tools/dair.py:420-423`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L420-L423)
+
+[16] 모델 호출 전의 `call_initiated` 쓰기도 같다.
+
+```python
+        if _log:   # evidence-request rounds ≥ 2 stay off the trace window
+            try:
+                from core.execution_log import log as _elog
+                _elog.record_call_initiated(tool_name, "openai-compat", initiated,
+                                            input_call_ids=input_call_ids)
+            except Exception as _e:
+                import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
+```
+
+[`tools/reasoning.py:708-714`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L708-L714)
+
+```python
+    if _log:
+        try:
+            from core.execution_log import log as _elog
+            _elog.record_call_initiated(_tool_name, "claude", {"model": model},
+                                        input_call_ids=input_call_ids)
+        except Exception as _e:
+            import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
+```
+
+[`tools/reasoning.py:938-944`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L938-L944)
+
+[17] 분리 실행 작업을 거둘 때 기록 예외를 잡는다.
+
+```python
+    try:
+        from core.executor import _log_tool
+        _log_tool(res)
+        cid = res.get("_trudi_call_id")
+    except Exception:
+        cid = None
+
+    state["status"] = "finished"
+    state["collected"] = True
+    state["call_id"] = cid
+```
+
+[`core/jobs.py:147-156`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L147-L156)
+
+[18] 게이트 거부 기록의 예외는 넘기고 거부만 올린다(같은 모양이 [`core/middleware.py:693-698`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L693-L698)·[`core/middleware.py:701-706`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L701-L706)에도 있다).
+
+```python
+            if should_block:
+                # Record the block so a blocked-then-dropped tool is auditable.
+                try:
+                    from core.execution_log import log
+                    log.record_tool_blocked(tool_name, f"dair_phase_gate: {reason}")
+                except Exception:
+                    pass
+                raise ToolError(f"Tool {tool_name} blocked: {reason}.")
+```
+
+[`core/middleware.py:676-683`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L676-L683)
+
+[19] trace를 연 직후 쓰기를 시험하고 실패하면 오류로 돌려준다.
+
+```python
+    # Self-test: configure flushes the initial empty trace, and our explicit
+    # sentinel write confirms record_* works end-to-end. Either failure
+    # surfaces as a clean error return rather than an unhandled exception.
+    try:
+        recovered = log.configure(case_id, output_path)
+        log.record_system_error("trace_initialized",
+                                f"trace path {output_path}")
+        log.record_run_profile(_CODE_IDENTITY)
+    except Exception as e:
+        return {
+            "success": False,
+            "case_id": case_id,
+            "log_path": output_path,
+            "error": (f"trace setup failed — cannot write to {output_path}: {e}. "
+                      f"Fix the path/permissions and retry start_execution_log."),
+        }
+```
+
+[`tools/misc.py:1109-1124`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1109-L1124)

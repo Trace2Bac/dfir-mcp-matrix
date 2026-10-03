@@ -1,0 +1,137 @@
+---
+cell: I02
+details:
+- id: I02.03
+  exception: true
+---
+
+# I02 분석 도구 통신 차단
+
+### I02.03 DNS 조회 끄기
+
+**구현.** 이 방식은 pcap을 글로 읽어 내는 `net.*` 도구 7곳의 `tcpdump` 실행에 있다 [1].
+`net.tcpdump_read`·`net.tcpdump_extract_http`·`net.tcpdump_extract_dns`·`net.tcpdump_list_connections`·`net.tcpdump_extract_ips`·`net.http_session_inventory`·`net.pcap_identity_timeline`은 모두 `tcpdump`에 `-nn`을 넘긴다 [1].
+Ubuntu 22.04의 tcpdump 4.99.1에서 `-n`은 호스트 주소와 포트 번호를 이름으로 바꾸지 않게 한다 [2].
+그래서 이 도구들은 pcap 안의 주소를 읽을 때 역방향 DNS 조회를 하지 않는다 [1][2].
+
+서버가 실행하는 다른 분석 도구에는 통신을 끊거나 끄는 장치가 없다.
+외부 도구 실행기는 `subprocess.run`에 호출한 쪽이 준 `env`만 넘기고 네트워크를 끊는 설정을 두지 않는다 [3].
+저장소에는 분석 도구를 네트워크 없는 컨테이너나 network namespace에서 실행하는 구성이 없다.
+
+Volatility 3 도구는 `vol`에 심볼 폴더 `-s`만 넘기고 오프라인 옵션 `--offline`을 넘기지 않는다 [4].
+Volatility 3 2.28.2는 `--offline`이 없고 Windows 커널의 PDB 심볼 표가 로컬 심볼 폴더와 캐시에 없으면 Microsoft 심볼 서버에서 PDB를 받아 변환한다 [5].
+원격 ISF 목록 주소 `REMOTE_ISF_URL`은 기본값이 `None`이어서 `-u`를 주지 않으면 그 목록은 조회하지 않는다 [5].
+`vol.symbol_check`는 심볼 캐시가 비어 있으면 `vol.info`를 한 번 불러 인터넷에서 심볼을 받으라고 모델에게 안내한다 [6].
+SIFT Workstation 설치 정의 v2026.04.21은 Volatility 3를 pip로 버전 없이 설치하고 `/usr/local/bin/vol`에 링크를 둔다 [7].
+
+`misc.batch_run`은 모델이 준 argv를 허용 목록 없이 같은 실행기로 실행하므로 모델이 고른 프로그램이 여는 통신도 서버가 막지 않는다 [8].
+machinae 조회, SSH 접속, Velociraptor 연동은 서버가 일부러 여는 연결이어서 I01에서 본다.
+
+**예외.** 모델이 `misc.batch_run`으로 `tcpdump`를 직접 실행하면 `-nn` 없이 pcap을 읽을 수 있어 역방향 DNS 조회를 막지 못한다 [8][2].
+
+### 근거
+
+[1] `tcpdump`로 pcap을 글로 읽는 7곳은 모두 `-nn`을 넘긴다: [`tools/network.py:79`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L79), [`tools/network.py:91`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L91), [`tools/network.py:99`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L99), [`tools/network.py:107`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L107), [`tools/network.py:148`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L148), [`tools/network.py:214`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L214), [`tools/network.py:465`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L465).
+
+[2] tcpdump 4.99.1의 `-n` 설명이다: [`tcpdump.1.in:610-611`](https://github.com/the-tcpdump-group/tcpdump/blob/5f552b5e6e9fe05f7ad9681d51d0303233daba6a/tcpdump.1.in#L610-L611).
+Ubuntu 22.04 저장소의 tcpdump 패키지 버전은 4.99.1-3ubuntu0.2다.
+
+[3] 외부 도구 실행기는 `env`와 `cwd`만 넘겨 `subprocess.run`을 부른다.
+
+```python
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+        )
+```
+
+[`core/executor.py:162-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L162-L169)
+
+[4] Volatility 3 실행 인자다.
+
+```python
+def _vol(image: str, plugin: str, extra: list[str] | None = None,
+         output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
+    # -o OUTPUT_DIR is a global Volatility flag — must come before the plugin name.
+    # Plugin-specific args (--pid, --dump, etc.) go in extra, after the plugin.
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)   # Volatility refuses a missing -o dir
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin] + (extra or [])
+    return run(cmd, timeout=timeout)
+```
+
+[`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22)
+
+```python
+async def _vol_progress(image: str, plugin: str, ctx: Any,
+                        output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
+    """Async variant of _vol() with FastMCP Context progress reporting."""
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin]
+    return await run_with_progress(cmd, ctx, timeout=timeout)
+```
+
+[`tools/volatility.py:49-56`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L49-L56)
+
+[5] Volatility 3 2.28.2의 `--offline`·`-u` 인자, 온라인 접근 기본값, 심볼 서버 주소, 심볼 표가 없을 때 PDB를 받는 경로, 오프라인일 때 HTTP 요청을 막는 처리다: [`volatility3/cli/__init__.py:222-236`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/cli/__init__.py#L222-L236), [`volatility3/cli/__init__.py:310-313`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/cli/__init__.py#L310-L313), [`volatility3/framework/constants/__init__.py:58`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/constants/__init__.py#L58), [`volatility3/framework/constants/__init__.py:122-125`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/constants/__init__.py#L122-L125), [`volatility3/framework/symbols/windows/pdbutil.py:109-121`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/symbols/windows/pdbutil.py#L109-L121), [`volatility3/framework/symbols/windows/pdbconv.py:945-974`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/symbols/windows/pdbconv.py#L945-L974), [`volatility3/framework/layers/resources.py:331-335`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/layers/resources.py#L331-L335).
+
+[6] `vol.symbol_check`의 설명과 응답 안내 문구다.
+
+```python
+    If symbols_ready is False, call vol_info once (requires internet) to
+    trigger the download for this kernel build, then retry memory plugins.
+```
+
+[`tools/volatility.py:76-77`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L76-L77)
+
+```python
+        "note": (
+            "Symbol cache is populated — proceed with memory plugins."
+            if cached else
+            "Symbol cache is empty — call vol_info once to download symbols (requires internet)."
+        ),
+```
+
+[`tools/volatility.py:100-104`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L100-L104)
+
+[7] SIFT Workstation 설치 정의 v2026.04.21의 Volatility 3 설치다: [`sift/python3-packages/volatility3.sls:32-49`](https://github.com/teamdfir/sift-saltstack/blob/96b7d9898bc55264679b9ea50949ddc919f76f59/sift/python3-packages/volatility3.sls#L32-L49).
+
+[8] `misc.batch_run`은 모델이 준 argv를 실행기에 그대로 넘긴다.
+
+```python
+@mcp.tool()
+@output_safe
+def batch_run(tool_calls: list[dict], max_concurrent: int = 4) -> dict:
+    """
+    Execute multiple independent shell tool calls concurrently and return all
+    results. Use this when DAIR's priority_tools contains several commands that
+    don't depend on each other.
+
+    tool_calls: list of {"cmd": ["binary", "arg1", ...], "timeout": optional int}
+    max_concurrent: maximum parallel workers (default 4).
+
+    Returns: {"success": all_succeeded, "results": [per-call dicts]}.
+
+    Note: this runs raw subprocess commands. For typed MCP forensic tools, the
+    agent should still call them one at a time (or use the MCP client's own
+    parallel-call mechanism). This helper is for low-level batches like
+    "hash these 10 files" or "strings on these 5 binaries".
+    """
+    import concurrent.futures
+
+    def _one(spec):
+        cmd = spec.get("cmd")
+        if not cmd or not isinstance(cmd, list):
+            return {"success": False, "error": "missing or invalid 'cmd' (must be list)"}
+        timeout = int(spec.get("timeout") or 300)
+        return run(cmd, timeout=timeout)
+```
+
+[`tools/misc.py:2626-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2626-L2651)

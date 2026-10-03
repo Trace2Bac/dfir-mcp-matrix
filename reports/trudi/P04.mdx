@@ -1,0 +1,839 @@
+---
+cell: P04
+details:
+- id: P04.01
+  exception: true
+- id: P04.03
+  exception: true
+- id: P04.04
+  exception: true
+- id: P04.06
+  exception: true
+- id: P04.08
+  exception: false
+- id: P04.09
+  exception: false
+- id: P04.10
+  exception: true
+- id: P04.11
+  exception: false
+---
+
+# P04 조사 문맥 관리
+
+### P04.01 사건 시작 시 ID 확정
+
+**구현.** 조사 단위는 사건이고 사건 ID는 `misc.start_execution_log`가 받은 `case_id`다 [1].
+이 도구는 `case_id`와 호출 기록 경로를 `log.configure`에 넘긴다 [1].
+`configure`는 그 경로에 같은 `case_id`의 호출 기록이 있으면 다시 읽어 이어 쓰고 없으면 새 호출 기록을 시작한다 [2].
+그 뒤 기록 함수는 모두 모듈 전역 객체 `log`에 설정된 호출 기록 하나에 쓰고 증거 도구는 사건 인자를 받지 않는다 [3].
+`configure`는 `case_id`와 호출 기록의 절대 경로를 캐시 폴더의 `session.json`에 적는다 [4].
+
+live-monitoring 도구는 같은 `configure`로 호출 기록을 바꾼다 [5][6].
+`monitor.start_investigation`은 `<사건>/analysis/<사건>_<INV-NNN>_trace.json`으로, `monitor.end_investigation`은 사건 전체 호출 기록으로 `configure`를 다시 부른다 [5][6].
+`monitor.*`·`respond.*` 도구는 호출마다 `case_id`를 받아 폴더를 정하지만 열린 호출 기록의 사건과 대조하지 않아 P04.02에는 연결하지 않는다 [7][8].
+
+**예외.** 서버는 정적 사건의 `case_id` 값을 검사하지 않아 빈 문자열도 받는다 [1][2].
+이미 있는 호출 기록 경로에 다른 `case_id`를 주면 `configure`는 경고만 쓰고 빈 목록으로 새로 시작한다 [2].
+그러나 파일에 쓸 때 메모리에 없는 디스크 항목을 훅이 쓴 항목으로 보고 모두 합쳐 쓰므로 앞 사건의 항목이 새 `case_id` 아래에 남는다 [9].
+
+### P04.03 폴더·DB·manifest에 사건 ID 연결
+
+**구현.** 호출 기록 JSON 파일의 머리에 `case_id`를 적는다 [10].
+`misc.export_execution_log`가 쓰는 JSON 머리와 Markdown 제목에도 `case_id`가 들어간다 [11][12].
+발견사항 검토에 쓰는 근거 묶음은 `case_id`와 호출 기록의 실제 경로를 사건 식별값으로 싣는다 [13].
+live-monitoring 사건은 `<사건>_<INV-NNN>_trace.json`처럼 사건 ID를 호출 기록과 보고서 파일 이름에 넣는다 [6].
+
+**예외.** 호출 기록 안의 `tool_call` 항목에는 사건 필드가 없고 그 파일 안에 있다는 사실로만 사건에 이어진다 [14].
+원래 출력 사본은 `.tool_output/<call_id>.txt`라 이름에 사건 ID가 없다 [15].
+백그라운드 작업 상태 파일과 해시 캐시 항목에도 사건 필드가 없다 [16][17].
+도구 출력 파일과 최종 보고서는 모델이 준 경로와 내용으로 쓰고 서버가 사건 ID를 붙이지 않는다 [18].
+
+### P04.04 사건별 폴더·DB 분리
+
+**구현.** live-monitoring 도구는 `case_id`로 `TRUDI_CASES_ROOT/<case_id>` 폴더를 정하고 그 아래 `monitoring/`·`analysis/`·`reports/`에 상태와 호출 기록을 둔다 [7][6].
+`case_id`에 `/`나 `..`가 있으면 거부한다 [7].
+정적 사건은 운영자가 `case-template`을 `~/cases/<CASE_ID>`로 복사해 사건 폴더를 만든다 [19].
+서버는 모델이 준 호출 기록 경로를 쓰고 원래 출력 사본은 그 호출 기록과 같은 폴더의 `.tool_output/`에 둔다 [15].
+그래서 사건마다 다른 폴더의 호출 기록을 쓰면 원래 출력도 사건마다 나뉜다 [15].
+
+**예외.** 캐시 폴더는 기계 전체에 하나이고 `session.json`, 호출 번호 카운터, 해시 캐시, 파일 기반 작업 상태가 모두 여기에 놓인다 [20].
+호출 번호는 기계 전체에서 한 순서로 매겨 한 사건의 번호가 1부터 이어지지 않는다 [21].
+해시 캐시는 경로, 크기, 시각, inode를 키로 써서 앞 사건에서 계산한 해시가 지금 사건의 호출 기록에 캐시 적중으로 들어간다 [17].
+파일 기반 작업은 끝난 결과를 `misc.job_status`를 부른 때 설정된 호출 기록에 쓴다 [16].
+사건 A에서 시작한 `net.tcpxtract_streams` 작업을 사건 B로 바꾼 뒤 조회하면 결과가 B의 호출 기록에 들어간다 [16][22].
+P04.01에서 본 대로 같은 경로에 다른 사건 ID를 주면 두 사건의 항목이 한 파일에 합쳐진다 [9].
+
+### P04.06 동시 작업의 사건 문맥 검사
+
+**구현.** `misc.submit_finding`은 시작할 때 사건 식별값(`case_id`와 호출 기록 실제 경로)을 잡는다 [23].
+근거를 모은 뒤와 검토 모델의 답을 받은 뒤 이 값을 다시 비교하고 다르면 발견사항을 기록하지 않는다 [23][24].
+같은 제출 키의 검토가 1시간 lease 안에 진행 중이면 다시 받지 않고 기록 직전에 lease 주인이 바뀌었으면 기록하지 않는다 [25].
+
+**예외.** 백그라운드 작업은 시작한 사건을 기억하지 않는다.
+서버 프로세스 안의 작업은 끝날 때 그때 설정된 호출 기록에 결과를 쓴다 [26].
+파일 기반 작업도 `misc.job_status`를 부른 때의 호출 기록에 쓴다 [16].
+그래서 작업 중에 사건을 바꾸면 결과가 바뀐 사건에 기록되고 이를 막는 검사는 없다 [16][26].
+
+### P04.08 프로세스 메모리에만 보관
+
+**구현.** 다음 상태는 서버 프로세스 메모리에만 있고 프로세스가 끝나면 사라진다 [27].
+알림 판단 상태 `_ritual`, 반복 호출 상태 `_repeat_state`, 작업 상태 연속 조회 수 `_poll_run`이 미들웨어에 있다 [27].
+서버 프로세스 안에서 도는 백그라운드 작업 목록 `_TASK_JOBS`, 증거 종류 탐색 결과 캐시, 마지막 `dair_call` 번호 `_last_dair_cid`도 메모리에만 있다 [27].
+호출 기록 항목과 단계 스택도 메모리의 `log`에 있지만 P04.09처럼 파일에도 쓴다 [3].
+서버는 stdio로 클라이언트 하나와 연결하고 이 상태를 모듈 전역 객체에 두어 세션마다 나누지 않으므로 P04.05에는 연결하지 않는다 [3][28].
+
+### P04.09 조사 상태를 파일·DB에 저장
+
+**구현.** 호출 기록은 사건 ID, 항목 수, 모든 항목을 담은 JSON 파일이고 항목을 더할 때마다 임시 파일에 쓴 뒤 이름을 바꿔 덮어쓴다 [10][29].
+`TRUDI_TRACE_FSYNC`가 `0`이 아니면 쓸 때마다 fsync한다 [29].
+단계 전이는 `dair_call`과 `phase_transition` 항목으로 이 파일에 남는다 [30].
+도구의 전체 표준 출력은 `.tool_output/<call_id>.txt`에 쓴다 [15].
+캐시 폴더에는 마지막 사건을 가리키는 `session.json`, 호출 번호 카운터, 해시 캐시, 파일 기반 작업 상태가 남는다 [4][20].
+live-monitoring 사건은 열린 조사 `_open_investigation.json`과 조사 번호 카운터를 `monitoring/`에 둔다 [31].
+발견사항 저장은 D05에서 본다.
+
+### P04.10 재시작 뒤 자동 복구
+
+**구현.** 서버를 다시 띄우면 메모리의 `log`는 비어 있다 [3].
+기록 함수가 처음 불릴 때 `_auto_recover`가 `session.json`의 `case_id`와 경로로 `configure`를 불러 호출 기록을 다시 읽는다 [32].
+`session.json`이 없으면 현재 폴더에 `CLAUDE.md`와 `analysis/*_trace.json`이 있을 때 그 호출 기록을 다시 읽는다 [33].
+다시 읽을 때 항목을 메모리로 올리고 `dair_call`과 `phase_transition`을 차례로 다시 적용해 단계 스택을 되살리고 호출 번호 카운터를 맞춘다 [2][30][34].
+`_last_dair_cid`, 반복 호출 상태, 서버 프로세스 안의 백그라운드 작업은 되살리지 않는다 [27].
+파일 기반 작업은 상태 파일이 남아 다시 띄운 뒤에도 `misc.job_status`로 조회한다 [16].
+
+**예외.** 다시 읽기는 기록 함수 안에서만 돈다 [32].
+도구를 부르기 전에 미들웨어가 하는 단계 검사와 `dair.assess`의 입력 구성은 메모리의 `log`를 바로 읽는다 [35][36].
+그래서 다시 띄운 뒤 다른 기록 호출보다 먼저 온 증거 도구 호출은 Report 단계였어도 빈 호출 기록으로 보고 통과한다 [35].
+같은 때 부른 `dair.assess`는 에이전트가 보낸 단계 스택으로 처방 모델을 부른다 [36].
+`session.json`으로 되살릴 때 현재 폴더와 대조하지 않아 마지막으로 연 다른 사건의 호출 기록에 이어 쓴다 [32].
+현재 폴더로 되살릴 때는 `analysis/*_trace.json` 가운데 이름순 첫 파일을 고르고 파일 이름에서 `_trace.json`을 뗀 값을 사건 ID로 쓴다 [33].
+live-monitoring 사건에서는 `<사건>_INV-001_trace.json`이 `<사건>_trace.json`보다 앞에 와 `<사건>_INV-001`을 사건 ID로 쓴다 [6][33].
+그 파일 머리의 `case_id`와 다르므로 `configure`는 새 호출 기록으로 시작하고 디스크 항목을 합쳐 쓴다 [2][9].
+
+### P04.11 만료
+
+**구현.** 반복 호출 상태는 키 512개를 넘으면 가장 오래된 키를 버린다 [37].
+증거 종류 탐색 결과는 300초가 지나면 다시 탐색한다 [38].
+`misc.submit_finding`의 검토 lease는 3,600초가 지나면 같은 제출 키로 다시 검토할 수 있다 [25].
+호출 기록, 해시 캐시, 파일 기반 작업 상태에는 유효 시간이나 개수 한도가 없다 [10][17][16].
+
+### 근거
+
+[1] `misc.start_execution_log`는 받은 `case_id`를 검사 없이 `configure`에 넘긴다.
+
+```python
+    from core.execution_log import log
+    # Normalize: the dashboard discovers traces by *_trace.json — an
+    # extension-less output_path (models omit it) would make the run
+    # invisible there while writing fine.
+    if not output_path.endswith(".json"):
+        output_path = output_path + ".json"
+    # Self-test: configure flushes the initial empty trace, and our explicit
+    # sentinel write confirms record_* works end-to-end. Either failure
+    # surfaces as a clean error return rather than an unhandled exception.
+    try:
+        recovered = log.configure(case_id, output_path)
+        log.record_system_error("trace_initialized",
+                                f"trace path {output_path}")
+        log.record_run_profile(_CODE_IDENTITY)
+```
+
+[`tools/misc.py:1103-1116`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1103-L1116)
+
+[2] `configure`는 같은 사건이면 다시 읽고 다르면 경고 뒤 새로 시작한다: [`core/execution_log.py:845-921`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L845-L921).
+
+```python
+        with self._lock:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                existing_id = data.get("case_id")
+                if existing_id == case_id:
+                    entries = data.get("entries", [])
+                    self._entries = entries
+                    self._seq = max((e.get("call_id", 0) for e in entries), default=0)
+                    self._case_id = case_id
+                    self._path = path
+                    self._index_version += 1  # invalidate any cached LogIndex
+                    self._cached_index = None
+                    self._rehydrate_phase_state()
+                    self._sync_shared_counter()
+                    self._owns_beacon = bool(save_session)
+                    self._flush_count = 0
+                    self._trace_missing_noted = False
+                    self._flush()
+                    if save_session:
+                        self._save_session()
+                    return len(entries)
+                elif existing_id:
+                    _warn(
+                        f"existing trace has case_id={existing_id!r}, "
+                        f"overwriting with {case_id!r} at {path}"
+                    )
+            except OSError:
+                pass  # file doesn't exist — normal for a new case
+            except (json.JSONDecodeError, ValueError) as e:
+```
+
+[`core/execution_log.py:864-893`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L864-L893)
+
+[3] 호출 기록은 모듈 전역 객체 하나다.
+
+```python
+log = ExecutionLog()  # module-level singleton
+```
+
+[`core/execution_log.py:2039-2039`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L2039-L2039)
+
+[4] `session.json`에 사건 ID와 절대 경로를 쓴다.
+
+```python
+            abs_path = os.path.abspath(self._path) if self._path else self._path
+            with open(_SESSION_FILE, "w") as f:
+                json.dump({"case_id": self._case_id, "path": abs_path}, f)
+```
+
+[`core/execution_log.py:999-1001`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L999-L1001)
+
+[5] `monitor.start_investigation`이 조사별 호출 기록으로 바꾼다.
+
+```python
+    from core.execution_log import log
+    recovered = log.configure(case_id, str(trace_path), save_session=True)
+```
+
+[`tools/monitor.py:786-787`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L786-L787)
+
+[6] 조사별 호출 기록과 보고서 경로, `monitor.end_investigation`의 전환이다: [`tools/monitor.py:116-131`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L116-L131), [`tools/monitor.py:1228-1246`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1228-L1246).
+
+```python
+def _case_wide_trace_path(case_id: str) -> Path:
+    """The orchestration trace — `analysis/<case>_trace.json`."""
+    return _analysis_dir(case_id) / f"{case_id}_trace.json"
+
+
+def _investigation_trace_path(case_id: str, investigation_id: str) -> Path:
+    """Per-investigation trace — `analysis/<case>_<inv>_trace.json`.
+    Flat under analysis/ so the dashboard's non-recursive scan picks it
+    up alongside the case-wide trace."""
+    return _analysis_dir(case_id) / f"{case_id}_{investigation_id}_trace.json"
+
+
+def _investigation_report_base(case_id: str, investigation_id: str) -> Path:
+    """Per-investigation report base (no extension) —
+    `reports/<case>_<inv>`. `log.export()` appends `.json` and `.md`."""
+    return _reports_dir(case_id) / f"{case_id}_{investigation_id}"
+```
+
+[`tools/monitor.py:116-131`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L116-L131)
+
+```python
+    case_wide = _case_wide_trace_path(case_id)
+    case_wide.parent.mkdir(parents=True, exist_ok=True)
+    log.configure(case_id, str(case_wide), save_session=True)
+```
+
+[`tools/monitor.py:1244-1246`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1244-L1246)
+
+[7] live-monitoring 사건 폴더는 `case_id`로 정한다.
+
+```python
+CASES_ROOT = Path(os.environ.get("TRUDI_CASES_ROOT") or os.path.expanduser("~/cases"))
+```
+
+[`tools/monitor.py:36-36`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L36-L36)
+
+```python
+def _case_dir(case_id: str) -> Path:
+    if not case_id or "/" in case_id or ".." in case_id:
+        raise ValueError(f"case_id invalid: {case_id!r}")
+    return CASES_ROOT / case_id
+```
+
+[`tools/monitor.py:54-57`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L54-L57)
+
+[8] `monitor.check_alerts`는 받은 `case_id`로 폴더를 읽기만 한다.
+
+```python
+def check_alerts(case_id: str, since_seq: int = 0, max_alerts: int = 50) -> dict:
+    """Return alerts with seq > since_seq, oldest first, capped at max_alerts.
+
+    Does NOT mark consumed — that's `ack_alert`'s job. Idempotent reads
+    are useful for the /loop pattern: each tick pulls the same un-acked
+    alerts until they're processed.
+    """
+    _ensure_layout(case_id)
+    alerts_dir = _alerts_dir(case_id)
+```
+
+[`tools/monitor.py:633-641`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L633-L641)
+
+[9] 파일에 쓸 때 메모리에 없는 디스크 항목을 모두 합친다.
+
+```python
+            our_ids = {e.get("call_id") for e in self._entries}
+            hook_entries = [
+                e for e in disk_entries
+                if e.get("call_id") not in our_ids
+            ]
+
+            # 2) Merge: our in-memory entries + hook entries on disk we don't
+            # already have. Sort chronologically by ts so the dashboard view
+            # is correct. call_ids stay intact (hook uses 1e9+ range, we use
+            # monotonic 1, 2, 3, … so no collisions).
+            if hook_entries:
+                def _ts_sort(e: dict) -> float:
+                    ts = e.get("ts", "") or ""
+                    try:
+                        return datetime.datetime.fromisoformat(
+                            ts.replace("Z", "+00:00")
+                        ).timestamp()
+                    except (ValueError, AttributeError):
+                        return 0.0
+                merged = sorted(list(self._entries) + hook_entries, key=_ts_sort)
+                data_dict = {
+                    "schema_version": "2.0",
+                    "case_id": self._case_id,
+                    "entry_count": len(merged),
+                    "entries": merged,
+                }
+            else:
+                data_dict = self.to_json()
+```
+
+[`core/execution_log.py:1122-1149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1122-L1149)
+
+[10] 호출 기록 JSON의 머리다.
+
+```python
+    def to_json(self) -> dict:
+        # Must be called under self._lock when used from _flush().
+        return {
+            "schema_version": "2.0",
+            "case_id": self._case_id,
+            "entry_count": len(self._entries),
+            "entries": list(self._entries),  # snapshot
+        }
+```
+
+[`core/execution_log.py:1981-1988`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1981-L1988)
+
+[11] 내보내기 JSON과 Markdown 제목에 사건 ID가 들어간다.
+
+```python
+def _render_entries(case_id: str | None, entries: list[dict]) -> str:
+    """Shared markdown renderer used by both to_markdown() and export()."""
+    lines = [f"# Execution Trace — {case_id or 'unknown'}\n"]
+```
+
+[`core/execution_log.py:178-180`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L178-L180)
+
+```python
+        try:
+            with open(path + ".json", "w") as f:
+                json.dump(data, f, indent=2)
+            json_ok = True
+        except OSError as e:
+            _warn(f"export JSON write failed ({path}.json): {e}")
+        try:
+            with open(path + ".md", "w") as f:
+                f.write(_render_entries(data.get("case_id"), data.get("entries", [])))
+```
+
+[`core/execution_log.py:2019-2027`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L2019-L2027)
+
+[12] `misc.export_execution_log`는 `log.export`를 부른다.
+
+```python
+    result = log.export(output_path)
+```
+
+[`tools/misc.py:1995-1995`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1995-L1995)
+
+[13] 근거 묶음의 사건 식별값이다.
+
+```python
+def case_identity(log):
+    return [log._case_id, os.path.realpath(log._path or '')]
+```
+
+[`core/evidence_packets.py:40-41`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L40-L41)
+
+[14] `tool_call` 항목의 필드다.
+
+```python
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"tool_call: {cmd[:80]}")
+            cid = self._next_id()
+            entry: dict = {
+                "call_id": cid,
+                "type": "tool_call",
+                "ts": _utcnow(),
+                "cmd": cmd,
+                "success": success,
+                "truncated": truncated,
+                "retries": retries,
+                "exit_code": exit_code,
+                "elapsed_seconds": elapsed_seconds,
+                "stderr": stderr[:512] if stderr else "",
+            }
+```
+
+[`core/execution_log.py:1486-1501`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1486-L1501)
+
+[15] 원래 출력 사본은 호출 기록 옆 `.tool_output/`에 호출 번호 이름으로 둔다.
+
+```python
+    def stdout_sidecar_dir(self) -> str | None:
+        """`<dirname(trace)>/.tool_output` — inside analysis/, so it is a
+        readable produced-output location and is wiped with the case run."""
+        if not self._path:
+            return None
+        return os.path.join(os.path.dirname(os.path.abspath(self._path)), ".tool_output")
+```
+
+[`core/execution_log.py:1542-1547`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1542-L1547)
+
+```python
+        final, partial, err = self._write_sidecar_text(f"{cid}.txt", text)
+```
+
+[`core/execution_log.py:1555-1555`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1555-L1555)
+
+[16] 파일 기반 작업 상태와 조회 때의 기록이다.
+
+```python
+    state = {
+        "job_id": job_id, "tool": tool, "cmd": inner, "timeout": int(timeout),
+        "output_dir": output_dir, "pid": proc.pid,
+        "stdout_file": stdout_file, "stderr_file": stderr_file,
+        "exit_file": exit_file, "started": time.time(),
+        "status": "running", "collected": False, "call_id": None,
+    }
+    with open(_job_path(job_id), "w") as f:
+        json.dump(state, f)
+```
+
+[`core/jobs.py:77-85`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L77-L85)
+
+```python
+    # Log the underlying command as a normal, citable tool_call (once).
+    res = {
+        "success": rc == 0, "stdout": stdout[:2000], "stderr": stderr[:2000],
+        "exit_code": rc, "truncated": len(stdout) > 2000, "retries": 0,
+        "elapsed_seconds": elapsed, "timed_out": timed_out,
+        "cmd": state["cmd"], "output_path": state["output_dir"],
+        "_stdout_full": stdout, "_stdout_chars": len(stdout),
+    }
+    try:
+        from core.executor import _log_tool
+        _log_tool(res)
+        cid = res.get("_trudi_call_id")
+    except Exception:
+        cid = None
+```
+
+[`core/jobs.py:139-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L139-L152)
+
+[17] 해시 캐시의 위치와 키, 캐시 적중 기록이다.
+
+```python
+_HASH_CACHE_PATH = os.path.expanduser(
+    os.environ.get("TRUDI_HASH_CACHE")
+    or os.path.join(trudi_cache_dir(), "hash_cache.json")
+)
+```
+
+[`tools/hashing.py:19-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L19-L22)
+
+```python
+    key = _cache_key(stat, abs_path)
+    with _HASH_CACHE_LOCK:
+        cache = _load_hash_cache()
+        hit = cache.get(key)
+        if hit:
+            return _record_hash_result({**hit, "cache_hit": True, "file": file_path}, key)
+```
+
+[`tools/hashing.py:93-98`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L93-L98)
+
+[18] `misc.write_final_report`는 모델이 준 경로에 모델이 준 내용과 서버가 붙인 절을 쓴다.
+
+```python
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+```
+
+[`tools/misc.py:2206-2207`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2206-L2207)
+
+[19] 운영자가 사건 폴더를 만든다(문서): [`README.md:268-286`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/README.md#L268-L286).
+
+[20] 캐시 폴더는 기계 전체에 하나다.
+
+```python
+def trudi_cache_dir() -> str:
+    """Return the TRUDI shared cache dir: $TRUDI_CACHE_DIR, else ~/.cache/trudi.
+
+    Single resolution point for session.json, call_id.counter, hook.lock,
+    hash_cache.json, jobs/ and dashboard.url. The default dir is SHARED with
+    any live investigation (the MCP server and the Claude hooks) — the call-id
+    counter there is machine-global. Test suites and ad-hoc smoke scripts MUST
+    set TRUDI_CACHE_DIR to a temp dir before importing core/tools modules, or
+    they consume call ids from (and can reroute the beacon of) a live run.
+    Module-level path constants are resolved at import time.
+    """
+    return os.path.expanduser(os.environ.get("TRUDI_CACHE_DIR") or "~/.cache/trudi")
+```
+
+[`core/paths.py:44-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L44-L55)
+
+[21] 호출 번호 카운터는 캐시 폴더의 파일 하나다.
+
+```python
+# Shared call_id counter — single monotonic sequence across MCP server + hook
+# so call_ids are dense and reflect global write order.
+_CALL_ID_COUNTER_FILE = os.path.join(trudi_cache_dir(), "call_id.counter")
+```
+
+[`core/execution_log.py:27-29`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L27-L29)
+
+[22] `net.tcpxtract_streams`는 파일 기반 작업으로 돈다.
+
+```python
+    from core.jobs import start_job
+    return start_job(cmd, tool="net.tcpxtract_streams", timeout=1800,
+                     output_dir=output_dir, needs_sudo=True)
+```
+
+[`tools/network.py:667-669`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L667-L669)
+
+[23] 제출을 시작할 때 사건 식별값을 잡고 근거를 모은 뒤 다시 비교한다.
+
+```python
+    request_hash = request_identity([request, selectors or []])
+    owner = uuid.uuid4().hex
+    configured = case_identity(log)
+    try:
+        with log.transaction():
+            if not log._path:
+                raise PacketError('Start the case execution log before submission')
+            previous = _existing(log, key, request_hash)
+```
+
+[`core/finding_submission.py:192-199`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L192-L199)
+
+```python
+        with log.transaction():
+            if case_identity(log) != configured or not packet_current(log, packet):
+                raise PacketError('Evidence changed during preflight; retry', 'retryable-review-failure')
+```
+
+[`core/finding_submission.py:217-219`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L217-L219)
+
+[24] 검토 모델의 답을 받은 뒤 사건 식별값을 다시 비교한다.
+
+```python
+        with log.transaction():
+            if case_identity(log) != configured:
+                return _failure('retryable-review-failure', 'Active case changed; no finding committed')
+```
+
+[`core/finding_submission.py:254-256`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L254-L256)
+
+[25] 제출 lease다: [`core/finding_submission.py:16`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L16), [`core/finding_submission.py:162-164`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L162-L164), [`core/finding_submission.py:228-229`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L228-L229), [`core/finding_submission.py:265-266`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L265-L266).
+
+[26] 서버 프로세스 안의 작업은 호출 문맥 그대로 돌고 끝날 때 기록한다.
+
+```python
+async def _run_as_job(jobs, mode: str, tool_name: str, args: dict, invoke):
+    """Run a long tool as an in-process background task. Returns ("done",
+    result) when it finishes within the inline wait (a short run stays a
+    normal call), else a job handle. The task is created while this call's
+    context (tool identity) is set, so it logs exactly as a synchronous run."""
+    started = {"flag": False}
+    job_id = {"id": None}
+
+    async def body():
+        async with jobs.slots():
+            started["flag"] = True
+            if job_id["id"]:
+                jobs.mark_state(job_id["id"], "running")
+            return await invoke(True)
+
+    task = asyncio.create_task(body())
+    wait = 0 if mode == "always" else jobs.INLINE_WAIT
+    if wait > 0:
+        await asyncio.wait({task}, timeout=wait)
+    if task.done():
+        return ("done", task.result())          # re-raises a ToolError as before
+    jid = jobs.register_task(tool_name, task, _arg_shapes(args))
+    job_id["id"] = jid
+    status = "running" if started["flag"] else "queued"
+    jobs.mark_state(jid, status)
+```
+
+[`core/middleware.py:581-605`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L581-L605)
+
+[27] 메모리에만 있는 상태다: [`core/middleware.py:128`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L128), [`core/middleware.py:235`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L235), [`core/middleware.py:320`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L320), [`core/jobs.py:227`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L227), [`core/evidence_kinds.py:40-41`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L40-L41), [`core/execution_log.py:562-567`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L562-L567).
+
+[28] stdio로 서버를 띄운다.
+
+```python
+    mcp.run(transport="stdio")
+```
+
+[`server.py:90-90`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/server.py#L90-L90)
+
+[29] 임시 파일에 쓰고 이름을 바꾸며 fsync한다.
+
+```python
+            data = json.dumps(data_dict, indent=2)
+
+            # 3) Atomic write via temp + rename.
+            dir_ = os.path.dirname(os.path.abspath(self._path))
+            try:
+                fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        f.write(data)
+                        f.flush()
+                        if _TRACE_FSYNC:
+                            os.fsync(f.fileno())
+                    os.replace(tmp, self._path)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            except OSError as e:
+                _warn(f"trace flush failed ({self._path}): {e}")
+                # Trace integrity is non-negotiable — bubble up so callers
+                # (record_*, _log_tool, middleware) can surface a clear
+                # ToolError instead of silently losing the entry.
+                raise
+```
+
+[`core/execution_log.py:1151-1175`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1151-L1175)
+
+```python
+_TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
+```
+
+[`core/execution_log.py:26-26`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L26-L26)
+
+[30] 다시 읽을 때 단계 전이를 다시 적용한다.
+
+```python
+    def _rehydrate_phase_state(self) -> None:
+        """Replay the dair_call history to reconstruct current phase state.
+        Used after configure() rehydrates an existing trace."""
+        self._current_phase = ""
+        self._phase_stack = []
+        self._dair_seen = False
+        for e in self._entries:
+            if e.get("type") == "phase_transition":
+                self._apply_server_transition(e.get("to_phase", ""), e.get("reason", ""))
+                continue
+            if e.get("type") != "dair_call":
+                continue
+            self._apply_dair_transition(
+                current_phase=e.get("current_phase", "") or "",
+                stack_action=e.get("stack_action", "") or "",
+                next_phase=e.get("next_phase", "") or "",
+                transition_rationale=e.get("transition_rationale", "") or "",
+                verification_satisfied=bool(e.get("verification_satisfied")),
+            )
+        # If no dair_call has happened yet on the rehydrated trace, default
+        # to Triage so subsequent entries are phased.
+        if not self._current_phase:
+            self._current_phase = "Triage"
+            self._phase_stack = [{
+                "phase": "Triage",
+                "entry_reason": "session_resume_default",
+                "depth": 0,
+            }]
+```
+
+[`core/execution_log.py:799-826`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L799-L826)
+
+[31] live-monitoring 상태 파일이다.
+
+```python
+# State files:
+#   monitoring/_inv_seq.txt         monotonic per-case INV counter
+#   monitoring/_open_investigation.json  tracker for an investigation
+#                                        that spans /loop ticks (e.g.
+#                                        awaiting operator approval)
+```
+
+[`tools/monitor.py:102-106`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L102-L106)
+
+```python
+def _open_investigation_path(case_id: str) -> Path:
+    """Tracker file for an in-flight investigation. Present iff an
+    investigation is open across /loop ticks."""
+    return _monitoring_dir(case_id) / "_open_investigation.json"
+
+
+def _inv_seq_path(case_id: str) -> Path:
+    """Monotonic per-case INV counter file."""
+    return _monitoring_dir(case_id) / "_inv_seq.txt"
+```
+
+[`tools/monitor.py:134-142`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L134-L142)
+
+[32] `session.json`으로 되살린다.
+
+```python
+    def _auto_recover(self) -> None:
+        # Must be called under self._lock.
+        if self._path is not None:
+            return
+
+        # 1) Session-file recovery (preserves cross-CWD MCP-server restart cases).
+        try:
+            with open(_SESSION_FILE) as f:
+                s = json.load(f)
+            case_id, path = s.get("case_id"), s.get("path")
+            if case_id and path:
+                # Reject stale sessions pointing to deleted directories
+                # (e.g. pytest temp dirs).
+                parent = os.path.dirname(os.path.abspath(path))
+                if os.path.isdir(parent):
+                    # save_session=False — we already read it from disk;
+                    # rewriting under contention with another process can
+                    # race on the file.
+                    self.configure(case_id, path, save_session=False)
+                    if self._path is not None:
+                        return
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+```
+
+[`core/execution_log.py:1005-1027`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1005-L1027)
+
+[33] 현재 폴더의 호출 기록으로 되살린다.
+
+```python
+        try:
+            cwd = os.getcwd()
+            if not os.path.exists(os.path.join(cwd, "CLAUDE.md")):
+                return
+            analysis_dir = os.path.join(cwd, "analysis")
+            if not os.path.isdir(analysis_dir):
+                return
+            import glob as _glob
+            traces = sorted(_glob.glob(os.path.join(analysis_dir, "*_trace.json")))
+            if not traces:
+                return
+            trace_path = traces[0]
+            basename = os.path.basename(trace_path)
+            suffix = "_trace.json"
+            if not basename.endswith(suffix):
+                return
+            case_id = basename[: -len(suffix)]
+            # save_session=False — cwd-based recovery is best-effort and
+            # shouldn't claim the session beacon out from under an
+            # explicit start_execution_log running elsewhere.
+            self.configure(case_id, trace_path, save_session=False)
+```
+
+[`core/execution_log.py:1036-1056`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1036-L1056)
+
+[34] 호출 번호 카운터를 맞춘다: [`core/execution_log.py:923-967`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L923-L967).
+
+```python
+            # Never move the shared counter BACKWARDS — a concurrent session
+            # (hook or second server) may already have advanced it past our
+            # trace max; rewinding would mint duplicate call_ids under it.
+            target = max(expected, existing_counter or 1)
+            tmp = _CALL_ID_COUNTER_FILE + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump({"next": target}, f)
+                os.replace(tmp, _CALL_ID_COUNTER_FILE)
+```
+
+[`core/execution_log.py:957-965`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L957-L965)
+
+[35] 미들웨어의 단계 검사는 메모리의 호출 기록을 바로 읽는다.
+
+```python
+def _gate_decision() -> tuple[bool, str]:
+    """Return (should_block, reason). Fail-open on gate errors, but log them."""
+    try:
+        from core.execution_log import log
+        if not log._entries:
+            return False, "cold start (empty trace)"
+        phase = getattr(log, "_current_phase", "") or ""
+        if not phase:
+            return False, "cold start (DAIR not yet engaged)"
+        if phase in _DAIR_ACTIVE_PHASES:
+            return False, f"active DAIR phase ({phase})"
+```
+
+[`core/middleware.py:376-386`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L376-L386)
+
+[36] `dair.assess`는 메모리의 항목으로 DAIR가 돌았는지 정한다.
+
+```python
+    current = stack[-1].get("phase", "Triage") if stack else "Triage"
+    # The server owns phase state. The agent's phase_stack is only used before
+    # DAIR has ever run; afterwards the recorded stack is what the model sees
+    # (an agent passing "[]" otherwise made the model believe it was in Triage).
+    try:
+        from core.execution_log import log as _plog
+        _ran = any(e.get("type") == "dair_call" for e in (getattr(_plog, "_entries", None) or []))
+        if _ran and getattr(_plog, "_current_phase", ""):
+            current = _plog._current_phase
+            stack = [dict(f) for f in (getattr(_plog, "_phase_stack", None) or [])]
+    except Exception:
+        pass
+```
+
+[`tools/dair.py:953-964`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L953-L964)
+
+[37] 반복 호출 상태의 키 한도다.
+
+```python
+_REPEAT_MAX_KEYS = 512
+# key -> {"result_hash": str, "identical": int}
+_repeat_state: dict = {}
+```
+
+[`core/middleware.py:233-235`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L233-L235)
+
+```python
+        st = _repeat_state.get(key)
+        if st is None or st["result_hash"] != h:
+            if len(_repeat_state) >= _REPEAT_MAX_KEYS and key not in _repeat_state:
+                _repeat_state.pop(next(iter(_repeat_state)), None)
+            _repeat_state[key] = {"result_hash": h, "identical": 0}
+```
+
+[`core/middleware.py:289-293`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L289-L293)
+
+[38] 증거 종류 탐색 결과의 유효 시간이다.
+
+```python
+def _evidence_dir_kinds(case_dir: str) -> set:
+    evd = os.path.join(case_dir, "evidence")
+    if not os.path.isdir(evd):
+        return set()
+    try:
+        key = (os.path.realpath(evd), os.stat(evd).st_mtime)
+    except OSError:
+        return set()
+    hit = _CACHE.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _CACHE_TTL:
+        return set(hit[1])
+    kinds = _scan_evidence_dir(evd)
+    _CACHE[key] = (now, frozenset(kinds))
+    return kinds
+```
+
+[`core/evidence_kinds.py:123-137`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L123-L137)

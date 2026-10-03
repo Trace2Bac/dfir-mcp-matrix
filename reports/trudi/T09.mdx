@@ -1,0 +1,428 @@
+---
+cell: T09
+details:
+- id: T09.02
+  exception: true
+- id: T09.03
+  exception: true
+- id: T09.04
+  exception: true
+- id: T09.05
+  exception: false
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### T09.02 변경 내역 기록
+
+**구현.** 이 방식은 대응 조치를 실행하는 `respond.execute_action`과 되돌리는 `respond.revert_action`에 있다 [1][2].
+`respond.execute_action`은 서버 코드의 명령표로 만든 명령을 SSH로 단말에 실행한 뒤 사건 폴더의 `monitoring/response/executions/<action_id>.json`에 실행 기록을 쓴다 [1].
+실행 기록에는 조치 템플릿, 분류, 모드, 대상 호스트, 실행한 명령 배열과 문자열, 표준 출력, 표준 오류, 종료 코드, 성공 여부, 조치 인자, 승인 토큰, 실행 시각이 들어간다 [1].
+대상 호스트는 사건 감시 설정의 `host`이고 값이 없으면 하나만 등록된 호스트다 [3].
+`ssh_run_write`는 실행한 명령을 호출 기록에 `tool_call` 항목으로 남긴다 [4].
+`respond.execute_action`은 조치 이름, 분류, 명령, 호스트, 결과, 되돌림 명령을 한 줄로 적은 서술 항목도 호출 기록에 남긴다 [5].
+`respond.revert_action`은 같은 실행 기록에 `reverted`, `reverted_at_utc`, `revert_stderr`를 더해 다시 쓴다 [2].
+`monitor.end_investigation`은 실행 기록으로 만든 대응 조치 표를 조사 보고서에 붙인다 [6].
+
+조치하기 전과 뒤에 대상의 프로세스, 연결, 차단 규칙 같은 상태를 읽어 남기는 코드는 없어 T09.01에는 연결하지 않는다.
+대응 조치 도구는 사건에 기준선 파일이 있어야 실행되지만 그 기준선은 감시를 시작할 때 한 번 모으는 것이고 조치마다 읽는 상태가 아니다 [7].
+`velo.update_client_event_table`은 Velociraptor의 단말 감시 표를 바꾸고 `velo.upload_artifact_yaml`은 Velociraptor 서버에 아티팩트를 등록한다 [8].
+`velo.collect_artifact`와 `velo.query`는 수집할 아티팩트 이름과 VQL을 제한하지 않는다 [8].
+이 경로들은 실행 기록 파일과 되돌림 명령을 남기지 않고 호출 기록 항목만 남긴다 [8].
+
+**예외.** `ssh_run_write`가 쓰는 `_log_ssh_tool`은 호출 기록 쓰기가 실패하면 표준 오류에 경고만 찍고 호출 ID를 0으로 둔다 [9].
+`_log_narration`은 서술 항목을 쓰지 못하면 예외를 호출한 쪽으로 넘기지 않고 `None`을 돌려주며 응답은 조치의 성공 여부를 그대로 싣는다 [10].
+
+### T09.03 되돌림 명령 기록
+
+**구현.** `respond.suggest_containment`가 쓰는 조치 제안 기록은 조치마다 되돌림 템플릿 `revert_template`을 담는다 [11].
+되돌림 템플릿은 서버 코드의 표가 조치 템플릿마다 정한다 [12].
+`respond.execute_action`은 실행 기록에 `rollback_template`과 실제 인자를 넣은 되돌림 명령 `rollback_command`를 쓰고 응답과 서술 항목에도 되돌림 명령을 싣는다 [1][5][13].
+프로세스 종료와 메모리 덤프는 되돌림 템플릿이 없고 서술 항목에 되돌림이 없다고 적는다 [5][12].
+조사 보고서의 대응 조치 표에도 조치마다 되돌림 명령이 들어간다 [6].
+
+**예외.** 실행 파일 격리와 cron 항목 삭제는 단말의 `/var/quarantine/`에 원래 파일 이름으로 옮기거나 복사해 두고 되돌림은 그 이름의 파일을 원래 자리로 되돌린다 [14].
+이름이 같은 파일을 두 번 격리하거나 삭제하면 앞의 사본을 덮어쓰므로 먼저 기록한 되돌림 명령은 다른 파일을 되돌린다 [14].
+격리의 되돌림 명령은 원래 권한을 기록하지 않고 `chmod 755`로 권한을 정한다 [14].
+이 경우에도 되돌림 명령은 종료 코드 0으로 끝나 성공으로 기록된다 [2][14].
+`velo.update_client_event_table`은 등록된 모든 단말의 감시 표를 바꾸지만 되돌림 명령을 남기지 않는다 [8].
+`velo.query`·`velo.collect_artifact`는 VQL과 아티팩트를 제한하지 않아 단말을 바꾸는 질의나 아티팩트도 실행할 수 있고 그 경우에도 되돌림 명령을 남기지 않는다 [8].
+
+### T09.04 되돌림 실행
+
+**구현.** `respond.revert_action`은 실행 기록의 되돌림 템플릿과 조치 인자로 명령을 만들어 같은 SSH 실행 경로로 단말에 실행한다 [2].
+이미 되돌린 조치, 성공하지 못한 조치, 되돌림 템플릿이 없는 조치는 실행하지 않고 거부한다 [2].
+되돌림도 조치 실행과 같은 승인 확인을 거치고 그 확인은 T03에서 본다 [2].
+
+**예외.** 실행 파일 격리와 cron 항목 삭제는 여러 명령을 `&&`로 이은 셸 명령이라 앞 명령만 실행된 채 실패할 수 있다 [14].
+이렇게 일부만 실행된 조치는 실패로 기록되고 `respond.revert_action`은 성공하지 못한 조치라며 되돌림을 거부한다 [1][2].
+SSH 실행이 시간 제한을 넘은 조치도 단말에서 끝났는지와 관계없이 실패로 기록되어 같은 거부를 받는다 [2][15].
+T09.03의 예외와 같이 `velo.update_client_event_table`과 임의 VQL로 바꾼 단말 설정은 되돌리는 도구가 없다 [8].
+
+### T09.05 실패·부분 복구 기록
+
+**구현.** 조치가 실패하면 실행 기록에 `success: false`, 종료 코드, 표준 오류가 남고 서술 항목에 `FAILED`와 오류 앞부분이 적힌다 [1][5].
+되돌림이 실패하면 실행 기록의 `reverted`를 거짓으로 두고 `revert_stderr`와 시각을 남긴다 [2].
+조사 보고서의 대응 조치 표는 실패한 조치를 `execution FAILED`로 적는다 [6].
+실패나 일부 실행 뒤에 단말에 남은 상태는 읽어 남기지 않는다.
+
+### 근거
+
+[1] 조치를 실행하고 실행 기록을 쓴다.
+
+```python
+    raw_evidence = suggestion.get("raw_evidence") or {}
+    result = ssh_exec.ssh_run_write(case_id, host, action_template, raw_evidence)
+```
+
+[`tools/respond.py:357-358`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L357-L358)
+
+```python
+    execution = {
+        "action_id": action_id,
+        "case_id": case_id,
+        "detector": suggestion.get("detector"),
+        "action_template": action_template,
+        "classification": classification,
+        "mode": mode,
+        "host": host,
+        "command_argv": command_argv,
+        "command_str": _command_string(command_argv) if command_argv else result.get("cmd", ""),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "exit_code": result.get("exit_code"),
+        "success": bool(result.get("success")),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+        "rollback_template": revert_template,
+        "rollback_command": rollback_command,
+        "raw_evidence": raw_evidence,
+        "approval_token": (approval or {}).get("approval_token"),
+        "executed_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "reverted": False,
+    }
+    _ensure_layout(case_id)
+    (_executions_dir(case_id) / f"{action_id}.json").write_text(json.dumps(execution, indent=2))
+```
+
+[`tools/respond.py:369-392`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L369-L392)
+
+[2] 되돌림을 거부하는 조건과 되돌림 실행이다.
+
+```python
+    execution = _load_execution(case_id, action_id)
+    if execution is None:
+        return {"success": False, "error": f"no execution record for {action_id!r}; nothing to revert."}
+    if execution.get("reverted"):
+        return {"success": False, "error": f"{action_id} was already reverted."}
+    if not execution.get("success"):
+        return {"success": False, "error": f"{action_id} did not execute successfully; nothing to revert."}
+
+    revert_template = execution.get("rollback_template")
+    if not revert_template:
+        return {"success": False, "error": f"{action_id} is irreversible — no rollback available."}
+
+    suggestion = _load_suggestion(case_id, action_id) or {}
+    refusal = response_gates.check_execution_permitted(case_id, action_id, suggestion, mode="operator")
+    if refusal:
+        return refusal
+```
+
+[`tools/respond.py:426-441`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L426-L441)
+
+```python
+    host = execution.get("host") or _resolve_host_for_case(case_id)
+    raw_evidence = execution.get("raw_evidence") or {}
+    result = ssh_exec.ssh_run_write(case_id, host, revert_template, raw_evidence)
+
+    execution["reverted"] = bool(result.get("success"))
+    execution["reverted_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    execution["revert_stderr"] = result.get("stderr", "")
+    (_executions_dir(case_id) / f"{action_id}.json").write_text(json.dumps(execution, indent=2))
+
+    status = "OK" if result.get("success") else f"FAILED ({result.get('stderr','')[:120]})"
+    revert_cmd = _rollback_command(revert_template, raw_evidence) or revert_template
+    _log_narration(
+        f"{action_id} reverted via `{revert_cmd}` on {host} → {status}.",
+        input_call_ids=[result.get("_trudi_call_id")],
+    )
+```
+
+[`tools/respond.py:443-457`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L443-L457)
+
+[3] 대상 호스트를 정한다.
+
+```python
+def _resolve_host_for_case(case_id: str) -> Optional[str]:
+    """The live-host alias to act on: explicit config.json 'host', else the sole
+    entry in live_hosts.json (the common single-endpoint case)."""
+    h = policy.configured_host(case_id)
+    if h:
+        return h
+    try:
+        from core.ssh import list_configured_hosts
+        hosts = list_configured_hosts()
+    except Exception:  # noqa: BLE001
+        hosts = []
+    return hosts[0] if len(hosts) == 1 else None
+```
+
+[`tools/respond.py:250-261`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L250-L261)
+
+[4] 쓰기용 SSH 실행이 명령을 기록한다.
+
+```python
+    argv = _build_ssh_argv(resolved, remote_argv)
+    # Recorded cmd never leaks the identity path.
+    result["cmd"] = (
+        f"ssh {resolved['user']}@{resolved['host']}:{resolved['port']} -- "
+        + " ".join(shlex.quote(a) for a in remote_argv)
+    )
+
+    start = time.perf_counter()
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+        result["exit_code"] = proc.returncode
+        result["success"] = proc.returncode == 0
+```
+
+[`core/ssh_exec.py:305-316`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L305-L316)
+
+```python
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_ssh_tool(result)
+    return result
+```
+
+[`core/ssh_exec.py:339-341`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L339-L341)
+
+[5] 실행 결과를 서술 항목으로 남기고 응답을 돌려준다.
+
+```python
+    verb = "auto-executed" if classification == policy.AUTO and mode == "auto" else "executed"
+    status = "OK" if execution["success"] else f"FAILED ({result.get('stderr','')[:120]})"
+    rb = f"; rollback `{rollback_command}`" if rollback_command else " (irreversible — no rollback)"
+    cid = _log_narration(
+        f"{action_id} [{classification}] {verb} `{execution['command_str']}` on {host} → {status}{rb}.",
+        input_call_ids=[result.get("_trudi_call_id"), suggestion.get("finding_id")],
+    )
+    execution["trace_call_id"] = cid
+
+    return {
+        "success": execution["success"],
+        "case_id": case_id,
+        "action_id": action_id,
+        "classification": classification,
+        "mode": mode,
+        "execution": execution,
+        "rollback_command": rollback_command,
+    }
+```
+
+[`tools/respond.py:394-411`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L394-L411)
+
+[6] 조사 보고서에 대응 조치 표를 붙인다.
+
+```python
+def _append_response_section(case_id: str, report_base: Path) -> int:
+    """Append an 'Autonomous Response Actions' section to the report `.md` and
+    mirror a structured ledger into the `.json`. Records what TRUDI actually
+    did (auto-executed / approved / reverted / awaiting approval), each with its
+    verbatim rollback/undo command. Returns the number of action rows written.
+
+```
+
+[`tools/monitor.py:1026-1031`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1026-L1031)
+
+```python
+    for s in suggestions:
+        aid = s.get("action_id")
+        e = exec_by_id.get(aid)
+        if e:
+            cls = e.get("classification", "?")
+            if e.get("reverted"):
+                status = "reverted"
+            elif e.get("success"):
+                status = "auto-executed" if e.get("mode") == "auto" else "executed (approved)"
+            else:
+                status = "execution FAILED"
+            cmd = e.get("command_str", "")
+            result = f"exit {e.get('exit_code')}"
+            rollback = e.get("rollback_command") or "—"
+```
+
+[`tools/monitor.py:1047-1060`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1047-L1060)
+
+[7] 대응 조치는 기준선 파일이 있어야 진행한다.
+
+```python
+def check_live_monitoring_scope(case_id: str, client_id: Optional[str] = None) -> Optional[dict]:
+    """Refuse if `case_id` isn't a live-monitoring case (no baselines)."""
+    baselines = _baseline_dir(case_id)
+    if not baselines.exists() or not any(baselines.iterdir()):
+        return _refuse(
+            "live_monitoring_scope",
+            f"respond.* is restricted to active live-monitoring cases. "
+            f"No baselines found under {baselines}. "
+            f"Run monitor.baseline_capture against a client first.",
+        )
+```
+
+[`response/gates.py:52-61`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/response/gates.py#L52-L61)
+
+[8] 대응 조치 밖에서 Velociraptor 설정과 수집을 다루는 도구다: [`tools/velo.py:229-246`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L229-L246), [`tools/velo.py:373-392`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L373-L392), [`tools/velo.py:463-484`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L463-L484), [`tools/velo.py:489-506`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L489-L506).
+
+[9] SSH 실행의 호출 기록 쓰기다.
+
+```python
+def _log_ssh_tool(result: dict) -> None:
+    """Mirror core.executor._log_tool — writes a tool_call trace entry."""
+    try:
+        from core.execution_log import log
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+        )
+        result["_trudi_call_id"] = cid
+    except Exception as e:  # noqa: BLE001
+        import sys
+        print(f"[TRUDI WARN] _log_ssh_tool failed: {e}", file=sys.stderr)
+        result.setdefault("_trudi_call_id", 0)
+```
+
+[`core/ssh.py:123-142`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L123-L142)
+
+[10] 서술 항목 쓰기다.
+
+```python
+def _log_narration(content: str, input_call_ids: list[int]) -> Optional[int]:
+    try:
+        from core.execution_log import log
+        cids = [c for c in input_call_ids if isinstance(c, int) and c > 0]
+        return log.record_agent_message(content=content, input_call_ids=cids or None)
+    except Exception:  # noqa: BLE001
+        return None
+```
+
+[`tools/respond.py:282-288`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L282-L288)
+
+[11] 조치 제안 기록에 되돌림 템플릿을 넣는다.
+
+```python
+        action_template = action.get("action_template")
+        record = {
+            "action_id": action_id,
+            "case_id": case_id,
+            "finding_id": finding_id,
+            "detector": detector,
+            "description": description,
+            "manual_command": manual_command,
+            "risk": action.get("risk", "medium"),
+            "reversible": bool(action.get("reversible")),
+            "unresolved_placeholders": unresolved,
+            "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            # Self-contained execution metadata (additive — existing consumers
+            # ignore these). action_template selects the validated argv builder;
+            # raw_evidence carries the typed values execute/revert validate.
+            "action_template": action_template,
+            "revert_template": ssh_exec.revert_template_for(action_template),
+            "raw_evidence": dict(evidence_lc),
+        }
+```
+
+[`tools/respond.py:173-191`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L173-L191)
+
+[12] 조치 템플릿별 되돌림 템플릿이다.
+
+```python
+# Forward action_template -> its revert template (None = irreversible / no-op).
+FORWARD_TO_REVERT_TEMPLATE: dict[str, str | None] = {
+    "pause_pid": "resume_pid",
+    "block_egress_to_endpoint": "unblock_egress",
+    "disable_systemd_unit": "enable_systemd_unit",
+    "quarantine_image": "restore_quarantined_image",
+    "remove_cron_entry": "restore_cron_entry",
+    "dump_process_memory": None,   # forensic capture; nothing to undo
+    "kill_pid": None,              # irreversible
+    "kill_owning_pid": None,       # irreversible
+}
+```
+
+[`core/ssh_exec.py:205-215`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L205-L215)
+
+[13] 되돌림 명령 문자열을 만든다.
+
+```python
+def _rollback_command(revert_template: Optional[str], raw_evidence: dict) -> Optional[str]:
+    """Build the verbatim undo command string, or None if irreversible/no-op."""
+    if not revert_template:
+        return None
+    try:
+        return _command_string(ssh_exec.build_argv(revert_template, raw_evidence or {}))
+    except ssh_exec.ParamValidationError:
+        return None
+```
+
+[`tools/respond.py:272-279`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L272-L279)
+
+[14] 격리와 cron 삭제, 그 되돌림 명령이다.
+
+```python
+def _quarantine_argv(p: dict) -> list[str]:
+    path = p["image_path"]
+    base = os.path.basename(path)
+    cmd = (
+        f"mkdir -p /var/quarantine && chmod 000 {shlex.quote(path)} && "
+        f"mv {shlex.quote(path)} /var/quarantine/{shlex.quote(base)}"
+    )
+    return ["/bin/sh", "-c", cmd]
+
+
+def _restore_image_argv(p: dict) -> list[str]:
+    path = p["image_path"]
+    base = os.path.basename(path)
+    cmd = (
+        f"mv /var/quarantine/{shlex.quote(base)} {shlex.quote(path)} && "
+        f"chmod 755 {shlex.quote(path)}"
+    )
+    return ["/bin/sh", "-c", cmd]
+```
+
+[`core/ssh_exec.py:129-146`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L129-L146)
+
+```python
+def _remove_cron_argv(p: dict) -> list[str]:
+    path = p["path"]
+    base = os.path.basename(path)
+    cmd = (
+        f"mkdir -p /var/quarantine && "
+        f"cp {shlex.quote(path)} /var/quarantine/cron_backup_{shlex.quote(base)} && "
+        f"rm -f {shlex.quote(path)}"
+    )
+    return ["/bin/sh", "-c", cmd]
+
+
+def _restore_cron_argv(p: dict) -> list[str]:
+    path = p["path"]
+    base = os.path.basename(path)
+    cmd = f"cp /var/quarantine/cron_backup_{shlex.quote(base)} {shlex.quote(path)}"
+    return ["/bin/sh", "-c", cmd]
+```
+
+[`core/ssh_exec.py:149-164`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L149-L164)
+
+[15] 쓰기용 SSH 실행의 시간 초과 처리다.
+
+```python
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"ssh write timed out after {timeout}s on host {host!r}"
+        result["timed_out"] = True
+```
+
+[`core/ssh_exec.py:331-333`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L331-L333)

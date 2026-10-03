@@ -1,0 +1,252 @@
+---
+cell: L04
+details:
+- id: L04.03
+  exception: true
+---
+
+# L04 기록 위변조 방지
+
+### L04.03 일련번호
+
+**구현.** 이 방식은 호출 기록 trace의 모든 항목에 적용된다 [1].
+항목의 `call_id`는 캐시 폴더의 `call_id.counter` 하나에서 받는 번호로 늘어나기만 한다 [1].
+그래서 번호 차례로 항목의 순서가 바뀐 것을 볼 여지가 있다.
+번호만으로는 끝 항목을 지우거나 파일 전체를 새로 만든 것은 드러나지 않는다.
+
+이 밖의 위변조 방지 장치는 없다.
+호출 기록은 사건마다 하나인 trace JSON 파일이고 `schema_version`·`case_id`·`entry_count`·`entries`로 이루어진다 [2].
+항목에는 앞 항목과 잇는 해시도 서명도 없다 [3].
+서버는 기록할 때마다 디스크의 파일을 읽어 메모리 목록과 합친 뒤 파일 전체를 임시 파일에 써서 바꿔 놓으므로 덧붙이기 전용 파일도 아니다 [4].
+`entry_count`는 같은 파일 안의 값이라 항목과 함께 고칠 수 있다 [2].
+서버도 이미 쓴 항목에 필드를 더하고 고친 발견사항의 앞 항목에 `superseded_by`를 단다 [5].
+
+실행 중인 서버는 자기 메모리 사본으로 파일을 다시 쓴다.
+`_flush`는 파일이 사라졌으면 메모리 목록으로 파일을 다시 만들고 `trace_file_missing_at_flush` 범주의 `system_error` 항목을 남긴다 [6].
+디스크에서 고친 서버 항목은 같은 `call_id`의 메모리 사본으로 덮인다 [7].
+새 `call_id`로 끼워 넣은 항목은 훅 항목으로 보고 그대로 합친다 [7].
+발견사항 기록처럼 `transaction()`을 쓰는 쓰기에서는 반대로 같은 `call_id`의 디스크 사본이 메모리 사본을 덮는다 [8].
+이 동작은 그 서버 프로세스가 도는 동안만 있고 서버를 다시 띄우면 `configure`가 디스크의 파일을 그대로 읽는다 [9].
+지운 파일을 다시 만들 때 디스크에만 있던 훅 항목은 돌아오지 않는다 [6].
+이 동작은 실행 중에 trace가 사라진 경우를 복구하는 운영 장치이고 위변조를 막는 장치로 세지 않는다.
+
+저장소의 Claude Code PreToolUse 훅은 trace를 가진 세션의 `Write`·`Edit`·`MultiEdit`·`NotebookEdit`가 사건의 `analysis/`·`exports/`·`reports/`에 쓰는 것을 거부한다 [10].
+Bash에서는 이 폴더로 가는 리다이렉트와 `tee`·`cp`·`mv`·`install`·`rsync`를 거부한다 [10].
+`rm`은 이 정규식에 없고 `TRUDI_GUARD_DISABLE=1`이면 훅이 꺼진다 [10].
+이 훅은 클라이언트 구성이고 서버 프로세스와 MCP 도구의 쓰기는 막지 않는다.
+
+**예외.** `TRUDI_CACHE_DIR`를 정하지 않으면 이 카운터를 기계 전체가 함께 쓴다 [1][11].
+실시간 감시 도구는 사건 전체 trace와 조사별 trace를 오가며 같은 카운터를 이어 쓰므로 정상 동작에서도 한 trace 안의 번호가 빈다 [12].
+번호가 빈 곳이나 차례를 검사하는 코드는 찾지 못했다.
+그래서 빈 번호로 중간 항목의 삭제를 가를 수 없다.
+모델이 부를 수 있는 도구로 trace를 지우는 경로도 있다(P05.01).
+`misc.clear_case_run`은 받은 사건 폴더의 `analysis/`·`exports/`·`reports/` 안을 숨김 항목까지 모두 지우고 `session.json`도 지운다 [13].
+`misc.batch_run`은 모델이 준 argv를 허용 목록 없이 `run`으로 실행한다 [14].
+trace는 사건 폴더 안의 보통 파일이고 서버 밖의 훅 프로세스도 같은 파일 전체를 다시 쓴다 [15].
+
+### 근거
+
+[1] 번호는 공유 카운터와 trace·메모리의 최댓값 가운데 큰 값이다: [`core/execution_log.py:93-131`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L93-L131).
+
+```python
+# Shared call_id counter — single monotonic sequence across MCP server + hook
+# so call_ids are dense and reflect global write order.
+_CALL_ID_COUNTER_FILE = os.path.join(trudi_cache_dir(), "call_id.counter")
+```
+
+[`core/execution_log.py:27-29`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L27-L29)
+
+[2] trace 파일의 구성이다.
+
+```python
+    def to_json(self) -> dict:
+        # Must be called under self._lock when used from _flush().
+        return {
+            "schema_version": "2.0",
+            "case_id": self._case_id,
+            "entry_count": len(self._entries),
+            "entries": list(self._entries),  # snapshot
+        }
+```
+
+[`core/execution_log.py:1981-1988`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1981-L1988)
+
+[3] `tool_call` 항목의 필드다.
+다른 `record_*` 함수의 항목도 앞 항목의 값을 넣지 않는다.
+
+```python
+            entry: dict = {
+                "call_id": cid,
+                "type": "tool_call",
+                "ts": _utcnow(),
+                "cmd": cmd,
+                "success": success,
+                "truncated": truncated,
+                "retries": retries,
+                "exit_code": exit_code,
+                "elapsed_seconds": elapsed_seconds,
+                "stderr": stderr[:512] if stderr else "",
+            }
+```
+
+[`core/execution_log.py:1490-1501`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1490-L1501)
+
+[4] 디스크의 항목을 읽어 합친 뒤 파일 전체를 임시 파일로 바꿔 쓴다: [`core/execution_log.py:1060-1175`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1060-L1175).
+
+[5] 기존 항목에 필드를 더하는 함수([`core/execution_log.py:1655-1693`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1655-L1693))와 앞 발견사항에 `superseded_by`를 다는 곳이다.
+
+```python
+            if supersedes:
+                entry["supersedes"] = int(supersedes)
+                for prior in self._entries:
+                    if prior.get("call_id") == supersedes and prior.get("type") == "finding":
+                        prior["superseded_by"] = cid
+                        break
+```
+
+[`core/execution_log.py:1951-1956`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1951-L1956)
+
+[6] 파일이 사라졌으면 메모리로 다시 만들고 `system_error`를 남긴다: [`core/execution_log.py:1084-1117`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1084-L1117).
+
+[7] 메모리에 있는 `call_id`의 디스크 항목은 버리고 나머지 디스크 항목만 합친다.
+
+```python
+            our_ids = {e.get("call_id") for e in self._entries}
+            hook_entries = [
+                e for e in disk_entries
+                if e.get("call_id") not in our_ids
+            ]
+```
+
+[`core/execution_log.py:1122-1126`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1122-L1126)
+
+[8] `transaction()`은 디스크 항목으로 같은 `call_id`의 메모리 항목을 덮는다.
+
+```python
+        with self._lock, _hook_flock():
+            if self._path and os.path.exists(self._path):
+                with open(self._path) as f:
+                    disk = json.load(f).get("entries", [])
+                anonymous = [e for e in self._entries if e.get("call_id") is None]
+                merged = {e["call_id"]: e for e in self._entries if e.get("call_id") is not None}
+                merged.update({e["call_id"]: e for e in disk if e.get("call_id") is not None})
+                self._entries = sorted(merged.values(), key=lambda e: e["call_id"]) + anonymous
+                self._index_version += 1
+            yield
+```
+
+[`core/execution_log.py:584-593`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L584-L593)
+
+[9] 서버를 띄운 뒤 trace를 열 때는 디스크의 항목을 그대로 읽는다.
+
+```python
+        with self._lock:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                existing_id = data.get("case_id")
+                if existing_id == case_id:
+                    entries = data.get("entries", [])
+                    self._entries = entries
+                    self._seq = max((e.get("call_id", 0) for e in entries), default=0)
+                    self._case_id = case_id
+                    self._path = path
+                    self._index_version += 1  # invalidate any cached LogIndex
+```
+
+[`core/execution_log.py:864-875`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L864-L875)
+
+[10] 쓰기 거부 정규식([`claude/hooks/guard_pretooluse.py:74-79`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/hooks/guard_pretooluse.py#L74-L79)), 끄는 환경변수([`claude/hooks/guard_pretooluse.py:157-158`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/hooks/guard_pretooluse.py#L157-L158)), 파일 도구 쓰기 거부([`claude/hooks/guard_pretooluse.py:171-182`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/hooks/guard_pretooluse.py#L171-L182))다.
+
+[11] 캐시 폴더는 `TRUDI_CACHE_DIR`가 없으면 `~/.cache/trudi`이고 기계 전체가 함께 쓴다.
+
+```python
+def trudi_cache_dir() -> str:
+    """Return the TRUDI shared cache dir: $TRUDI_CACHE_DIR, else ~/.cache/trudi.
+
+    Single resolution point for session.json, call_id.counter, hook.lock,
+    hash_cache.json, jobs/ and dashboard.url. The default dir is SHARED with
+    any live investigation (the MCP server and the Claude hooks) — the call-id
+    counter there is machine-global. Test suites and ad-hoc smoke scripts MUST
+    set TRUDI_CACHE_DIR to a temp dir before importing core/tools modules, or
+    they consume call ids from (and can reroute the beacon of) a live run.
+    Module-level path constants are resolved at import time.
+    """
+    return os.path.expanduser(os.environ.get("TRUDI_CACHE_DIR") or "~/.cache/trudi")
+```
+
+[`core/paths.py:44-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L44-L55)
+
+[12] 조사를 열 때와 닫을 때 trace 파일을 바꿔 연다: [`tools/monitor.py:786-787`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L786-L787), [`tools/monitor.py:1230-1234`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1230-L1234), [`tools/monitor.py:1244-1246`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L1244-L1246).
+
+[13] `misc.clear_case_run`이 지우는 대상이다.
+
+```python
+    for subdir in ("analysis", "exports", "reports"):
+        target = os.path.join(case_dir, subdir)
+        # os.listdir, not glob("*"): glob skips dotfiles, which left stale
+        # .tool_output/ sidecars behind for the next run to read.
+        try:
+            names = sorted(os.listdir(target))
+        except OSError:
+            names = []
+        for name in names:
+            item = os.path.join(target, name)
+            try:
+                if os.path.isdir(item) and not os.path.islink(item):
+                    shutil.rmtree(item)
+                else:
+                    os.remove(item)
+                cleared.append(item)
+            except OSError as e:
+                errors.append(str(e))
+
+    session = os.path.join(trudi_cache_dir(), "session.json")
+    if os.path.exists(session):
+        try:
+            os.remove(session)
+            cleared.append(session)
+        except OSError as e:
+            errors.append(str(e))
+```
+
+[`tools/misc.py:2391-2416`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2391-L2416)
+
+[14] `misc.batch_run`은 받은 명령을 그대로 실행기에 넘긴다.
+
+```python
+    def _one(spec):
+        cmd = spec.get("cmd")
+        if not cmd or not isinstance(cmd, list):
+            return {"success": False, "error": "missing or invalid 'cmd' (must be list)"}
+        timeout = int(spec.get("timeout") or 300)
+        return run(cmd, timeout=timeout)
+```
+
+[`tools/misc.py:2646-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2646-L2651)
+
+[15] trace 경로는 `analysis/`·`exports/`·`reports/` 아래로 받고([`tools/misc.py:1088-1089`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1088-L1089)) PostToolUse 훅도 trace 파일 전체를 다시 쓴다.
+
+```python
+    try:
+        trace_now = json.loads(Path(trace_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        trace_now = trace
+    existing_entries = trace_now.get("entries", []) or []
+
+    for entry in new_entries:
+        if real_sid:
+            entry["_source_session_id"] = real_sid
+        entry["call_id"] = _next_shared_id(trace_path)
+
+    merged = existing_entries + new_entries
+    merged.sort(key=_ts_key)
+    trace_now["entries"] = merged
+    trace_now["entry_count"] = len(merged)
+
+    tmp_trace = Path(trace_path).with_suffix(".json.hook.tmp")
+    tmp_trace.write_text(json.dumps(trace_now, indent=2))
+    os.replace(tmp_trace, trace_path)
+```
+
+[`claude/hooks/log_narration.py:259-277`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/hooks/log_narration.py#L259-L277)

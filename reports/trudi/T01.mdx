@@ -1,0 +1,838 @@
+---
+cell: T01
+details:
+- id: T01.01
+  exception: false
+- id: T01.02
+  exception: false
+- id: T01.03
+  exception: true
+- id: T01.04
+  exception: true
+- id: T01.05
+  exception: true
+- id: T01.06
+  exception: true
+- id: T01.07
+  exception: true
+- id: T01.08
+  exception: false
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 서버 코드가 인자 값을 실행 전에 검사하는 곳은 일부 도구다.
+`live.recent_logins`·`live.read_file`·`live.event_log_tail`은 `hours`·`max_bytes`·`lines`가 정한 범위 밖이면 SSH 명령을 보내지 않고 거부한다 [1].
+`velo.client_info`·`velo.collect_artifact`·`velo.get_client_event_table`·`velo.update_client_event_table`은 `client_id`가 `C.`로 시작하지 않으면 거부한다 [2].
+`velo.wait_for_flow`·`velo.get_collection_results`는 `flow_id`가 `F.`로 시작하는지만 보고 `client_id`는 검사하지 않고 VQL 문자열 값으로 넣는다 [2].
+`velo.collect_artifact`는 아티팩트 이름이 비었거나 `/`를 담으면 거부하고 `velo.query`는 `fmt`가 `jsonl`·`json`·`csv`가 아니면 거부한다 [2].
+`strings.grep`은 `pattern`이 정규식으로 컴파일되지 않거나 `encoding`이 코드의 표에 없으면 `strings`를 실행하지 않고 거부한다 [3].
+`hash.directory`는 `algorithm`이 `md5`·`sha1`·`sha256`·`sha512`가 아니면 거부한다 [4].
+`misc.evtx_filter`는 `event_ids`에서 숫자를 하나도 읽지 못하면 거부한다 [5].
+`misc.hindsight_chrome`은 `output_format`이 허용한 세 값과 별칭에 없으면 `jsonl`로 바꿔 실행한다 [6].
+`ewf.mount_ntfs`는 `read_only`가 거짓이면 마운트하지 않고 거부한다 [7].
+
+대응 조치를 실행하는 `respond.execute_action`·`respond.revert_action`은 원격 명령을 만들기 전에 조치에 필요한 증거 값을 검사한다 [8].
+조치 종류마다 필요한 값을 정해 두고 값이 없거나 형식 검사에 어긋나면 SSH 명령을 만들지 않고 거부한다 [8].
+PID와 포트는 정수 범위로, IPv4 주소와 systemd 유닛 이름은 앵커를 건 정규식으로 검사한다 [9].
+경로 값의 검사는 T01.05에서 본다.
+
+그 밖의 도구 대부분은 인자를 검사하지 않고 외부 도구의 인자 목록에 넣으며 그 목록의 구조는 T02.06에서 본다.
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 실행 전에 입력이 있는지 보고 없으면 실행하지 않는 도구는 일부다.
+`strings.extract`·`strings.grep`은 파일 경로를 대소문자를 가리지 않고 찾은 뒤 그 파일이 없으면 `strings`를 실행하지 않고 오류를 돌려준다 [10].
+`misc.cs_beacon_config`는 `path`가 없거나 `memmap_listing`이 파일이 아니면 분석 함수를 부르지 않는다 [11].
+`af.timestomp_drift`·`af.sysmon_evasion`·`af.usn_gaps`는 받은 CSV 경로가 없으면 거부한다 [12].
+`hash.directory`는 `directory`가 폴더가 아니면 거부한다 [4].
+`read.output`·`read.mail`은 T01.04의 대조를 통과한 경로에 파일이 없으면 거부한다 [13].
+
+나머지 도구는 입력 경로가 있는지 보지 않고 외부 도구나 라이브러리에 넘긴다 [14].
+
+### T01.03 백엔드 지원·설정 검사
+
+**구현.** `live.*`와 대응 조치 실행은 `host`를 호스트 주소가 아니라 운영자 설정 파일 `live_hosts.json`의 키로 받는다 [15].
+서버는 그 키가 설정에 없거나 `user`·`host`가 비었거나 인증 키 파일이 정해지지 않았으면 SSH를 실행하지 않고 거부한다 [15].
+설정 파일이 없거나 JSON으로 읽히지 않으면 빈 설정으로 보고 모든 호스트를 거부한다 [15].
+대응 조치는 사건 설정 `monitoring/config.json`의 `host`나 `live_hosts.json`에 하나뿐인 호스트를 대상으로 삼고 그런 호스트가 없으면 거부한다 [16].
+
+`misc.evtx_filter`는 파일 머리 12바이트를 읽어 python-evtx가 읽지 못하는 옛 EVT 형식이면 `evtx_dump.py`를 실행하지 않고 거부한다 [17].
+
+**예외.** 파일 머리를 읽다 `OSError`가 나면 `_sniff_event_log`는 `unknown`을 돌려주고 `misc.evtx_filter`는 형식을 확인하지 못한 채 `evtx_dump.py`를 실행한다 [17].
+
+### T01.04 실제 경로로 풀어 허용 폴더 대조
+
+**구현.** 이 방식은 서버가 만든 출력을 다시 읽는 `read.output`·`read.mail`에 있다 [13].
+두 도구는 경로를 `assert_readable_output`으로 검사한다 [13].
+이 함수는 경로를 절대 경로로 바꿔 대소문자를 가리지 않고 찾은 뒤 `os.path.realpath`로 `..`과 심볼릭 링크를 푼다 [18].
+푼 경로가 `/cases/`·`/mnt/`·`/media/`로 시작하거나 경로 조각에 `evidence`가 있으면 거부한다 [18].
+푼 경로의 조각 가운데 `analysis`·`exports`·`reports`가 하나도 없어도 거부한다 [18].
+허용하는 곳은 사건 폴더의 세 폴더가 아니라 이름이 그 셋 가운데 하나인 폴더 어디나다 [18].
+두 도구는 검사를 통과한 푼 경로로 파일을 연다 [13].
+
+증거·룰 경로를 받는 다른 도구는 이 대조를 하지 않고 받은 경로를 외부 도구나 라이브러리에 넘긴다 [14].
+`vol.*`·`tsk.*`의 `image`, `plaso.*`의 `evidence_path`, `yara.*`의 `rules_path`, `live.read_file`의 원격 `path`가 그 예다 [14].
+
+**예외.** `read.mail`에 폴더를 주면 그 아래의 `.eml`·`.mbox` 파일과 `Message*` 폴더를 `glob`로 찾아 열고 찾은 파일마다 허용 폴더 대조를 다시 하지 않는다 [19].
+찾은 파일을 고르는 `os.path.isfile`과 여는 `open`은 심볼릭 링크를 따라가므로 그 폴더 안의 링크가 가리키는 바깥 파일도 읽는다 [19].
+
+### T01.05 문자열 경로 검사
+
+**구현.** 이 방식은 대응 조치 실행의 경로 값에 있다 [20].
+`quarantine_image`·`restore_quarantined_image`의 `image_path`와 `remove_cron_entry`·`restore_cron_entry`의 `path`는 원격 단말에서 옮기거나 지울 파일의 경로다 [20].
+서버는 이 값이 `/`로 시작하는지, 글자·숫자와 `_./@+-`만 담는지, `..`이 없는지를 문자열로 본다 [20].
+격리 대상 경로는 `/tmp/`·`/var/tmp/`·`/home/`·`/opt/`·`/srv/`·`/usr/local/` 가운데 하나로 시작해야 하고 cron 경로는 `/etc/cron.`이나 `/etc/cron/`으로 시작해야 한다 [20].
+어긋나면 SSH 명령을 만들지 않고 거부한다 [8].
+검사는 원격 파일시스템을 보지 않으므로 허용 접두어 아래의 심볼릭 링크를 풀지 않는다 [20].
+조치의 기록과 되돌림은 T09에서 본다.
+
+**예외.** 모델이 `misc.batch_run`으로 `ssh`를 직접 실행하면 이 경로 검사 없이 원격 단말의 파일을 옮기거나 지울 수 있다 [21].
+이 경로는 코드로만 따라갔다.
+
+### T01.06 등록된 증거 ID로만 조회
+
+**구현.** 이 방식은 발견사항을 검토하는 `reason.evaluate_finding`과 검토해 기록하는 `misc.submit_finding`에 있다 [22][23].
+두 도구는 근거를 파일 경로가 아니라 호출 기록의 호출 ID(`input_call_ids`, `linked_call_id`, 주장 안의 호출 ID 목록)로 받는다 [22].
+서버는 그 ID가 이 사건의 호출 기록에 없으면 거부한다 [22].
+검토할 글은 인용한 호출의 저장된 출력과 그 호출이 쓴 출력 파일에서 읽는다 [22].
+바이트 범위 선택자도 인용한 호출과 그 호출의 출력 경로만 가리킬 수 있다 [22].
+인용한 호출이 실패했거나 모델이 직접 쓴 파일을 가리키면 거부한다 [22].
+`misc.submit_finding`은 검토 묶음을 만들기 전에 인용한 ID가 기록에 있는지 한 번 더 본다 [23].
+
+**예외.** `reason.evaluate_finding`을 `input_call_ids` 없이 부르면 호출 ID 대조 없이 모델이 넘긴 `supporting_evidence` 글을 검토 모델에 보낸다 [24].
+
+### T01.07 고정 입력 경로 사용
+
+**구현.** 이 방식은 앞선 도구 출력을 서로 잇는 `correlate.process_to_file`·`correlate.network_to_process`와 `af.event_log_clear`·`af.prefetch_deletion`에 있다 [25][26].
+이 도구들은 입력 경로 인자를 받지 않고 지금 사건의 호출 기록에서 앞선 도구 호출 항목을 골라 읽는다 [25][26].
+두 `correlate` 도구는 명령 문자열에 `vol`·`fls`·`MFTECmd`·`netscan`·`pslist` 같은 글자가 든 최근 항목을 글자마다 50개까지 고른다 [25].
+두 `af` 도구는 EZ Tools 도구 이름으로 색인한 항목을 고르고 없으면 명령 문자열에 그 이름이 든 항목을 찾는다 [26].
+읽는 내용은 각 항목에 남은 출력 앞 600자다 [25][27].
+고를 항목이 없으면 두 `af` 도구는 거부하고 두 `correlate` 도구는 빈 결과를 돌려준다 [25][26].
+
+**예외.** 항목을 명령 문자열로 고르므로 모델이 인자 목록 전체를 정하는 `misc.batch_run`으로 남긴 호출 항목도 그 글자를 담으면 입력이 된다 [25][21].
+실행기는 `misc.batch_run`의 명령도 같은 형식의 호출 항목으로 남긴다 [21].
+
+### T01.08 입력 부재 시 다른 입력으로 대체
+
+**구현.** 이 방식은 `strings.extract`·`strings.grep`과 `read.output`·`read.mail`의 경로 풀이에 있다 [10][18].
+`resolve_path_ci`는 경로 조각마다 이름이 같은 항목이 있으면 그 항목을 쓰고 없으면 대소문자만 다른 항목 가운데 `os.listdir`이 먼저 돌려준 것으로 바꾼다 [28].
+그래서 요청한 경로가 없을 때 거부하지 않고 대소문자만 다른 경로의 파일을 입력으로 읽는다 [28].
+대소문자를 가리는 파일시스템에서는 그 파일이 요청한 파일과 다른 파일이다.
+`strings.extract`는 바꾼 경로를 `path_resolved`로 응답에 싣는다 [29].
+`strings.grep`은 응답의 `file`에 바꾼 경로를 싣지만 바꿨다는 표시는 두지 않는다 [10].
+`read.*`는 응답의 `path`에 바꾼 경로를 싣는다 [13].
+네 도구 모두 실행 명령이나 호출 기록의 명령 문자열에 바꾼 경로가 남는다 [10][13].
+
+### 근거
+
+[1] 범위 밖의 값이면 `ssh_run`을 부르지 않는다.
+
+```python
+def live_recent_logins(host: str, hours: int = 24) -> dict:
+    """journalctl ssh logins within the last `hours` hours + lastlog snapshot."""
+    if hours < 1 or hours > 720:
+        return {"success": False, "error": "hours must be between 1 and 720"}
+```
+
+[`tools/live.py:107-110`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L107-L110)
+
+```python
+def live_read_file(host: str, path: str, max_bytes: int = 65536) -> dict:
+    """Read a remote file, capped at max_bytes.
+
+    Use for small text artifacts (config files, logs, /etc/* checks).
+    For binaries or large files, consider live_yara_scan or copy via separate
+    tooling — this is a defensive cap to keep the trace bounded.
+    """
+    if max_bytes < 1 or max_bytes > 1_048_576:
+        return {"success": False, "error": "max_bytes must be 1..1048576"}
+    return ssh_run(host, ["head", "-c", str(max_bytes), path], timeout=30)
+
+
+@mcp.tool()
+@output_safe
+def live_event_log_tail(host: str, unit: str, lines: int = 200) -> dict:
+    """journalctl -u <unit> -n <lines> for a systemd-managed unit's log tail."""
+    if lines < 1 or lines > 5000:
+        return {"success": False, "error": "lines must be 1..5000"}
+    return ssh_run(
+        host,
+        ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"],
+        timeout=60,
+    )
+```
+
+[`tools/live.py:191-213`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L191-L213)
+
+[2] `velo.*`의 인자 검사다: [`tools/velo.py:215-216`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L215-L216), [`tools/velo.py:243-246`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L243-L246), [`tools/velo.py:290-291`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L290-L291), [`tools/velo.py:330-331`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L330-L331), [`tools/velo.py:356-357`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L356-L357), [`tools/velo.py:393-394`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L393-L394), [`tools/velo.py:501-502`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L501-L502).
+`velo.wait_for_flow`·`velo.get_collection_results`는 `client_id`를 `json.dumps`로 감싸 VQL에 넣는다: [`tools/velo.py:297-301`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L297-L301), [`tools/velo.py:332-337`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L332-L337).
+
+[3] 정규식과 인코딩 이름을 검사한다.
+
+```python
+    flags = re.IGNORECASE if case_insensitive else 0
+    try:
+        rx = re.compile(pattern, flags)
+    except re.error as e:
+        return {"success": False, "error": f"Invalid regex: {e}", "matches": []}
+
+    enc = _GREP_ENCODINGS.get(str(encoding or "ascii").strip().lower().replace("-", "").replace("_", ""))
+    if enc is None:
+        return {"success": False, "matches": [],
+                "error": f"invalid encoding {encoding!r}: use 'ascii', 'utf16le' or 'both'"}
+```
+
+[`tools/strings_tools.py:122-131`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L122-L131)
+
+[4] 알고리즘 이름과 폴더를 검사한다.
+
+```python
+    algo_map = {
+        "md5": hashlib.md5,
+        "sha1": hashlib.sha1,
+        "sha256": hashlib.sha256,
+        "sha512": hashlib.sha512,
+    }
+    if algorithm not in algo_map:
+        return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
+    if not os.path.isdir(directory):
+        return {"success": False, "error": f"not a directory: {directory}"}
+```
+
+[`tools/hashing.py:198-207`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L198-L207)
+
+[5] 숫자로 읽은 사건 ID가 없으면 거부한다.
+
+```python
+    ids = {int(x.strip()) for x in event_ids.split(",") if x.strip().isdigit()}
+    if not ids:
+        return {"success": False, "error": "no valid event_ids parsed",
+                "event_ids_requested": []}
+```
+
+[`tools/misc.py:104-107`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L104-L107)
+
+[6] 허용 값 밖이면 `jsonl`로 바꾼다.
+
+```python
+    _VALID = {"jsonl", "sqlite", "xlsx"}
+    _ALIAS = {"json": "jsonl", "csv": "xlsx", "xls": "xlsx", "db": "sqlite", "sqlite3": "sqlite"}
+    fmt = (output_format or "").strip().lower()
+    fmt = _ALIAS.get(fmt, fmt)
+    if fmt not in _VALID:
+        fmt = "jsonl"
+```
+
+[`tools/misc.py:348-353`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L348-L353)
+
+[7] 쓰기 마운트 요청을 거부한다.
+
+```python
+    os.makedirs(mount_point, exist_ok=True)
+    if not read_only:
+        return {"success": False, "stderr": "Read-only mount is required for evidence integrity."}
+    return _mount_ntfs_ro(ewf_device, mount_point, offset_bytes)
+```
+
+[`tools/ewf.py:166-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L166-L169)
+
+[8] 조치에 필요한 값을 모두 검사한 뒤에야 인자 목록을 만들고 검사에 어긋나면 실행하지 않는다.
+두 도구는 이 함수를 [`tools/respond.py:358`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L358)과 [`tools/respond.py:445`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L445)에서 부른다.
+
+```python
+def build_argv(action_template: str, raw_params: dict) -> list[str]:
+    """Validate every required evidence value, then build the structured remote
+    argv. `raw_params` may carry extra keys (the whole evidence dict) — only the
+    keys the template needs are read and validated.
+
+    Raises ParamValidationError on an unknown template or any failed validation.
+    """
+    spec = ACTION_BUILDERS.get(action_template)
+    if spec is None:
+        raise ParamValidationError(f"unknown action_template {action_template!r}")
+    validated: dict[str, str] = {}
+    for key, validator in spec["params"].items():
+        if key not in (raw_params or {}) or raw_params[key] is None:
+            raise ParamValidationError(
+                f"action {action_template!r} requires evidence key {key!r}")
+        validated[key] = validator(raw_params[key])
+    return spec["argv"](validated)
+```
+
+[`core/ssh_exec.py:218-234`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L218-L234)
+
+```python
+    # 2. Validate + build the structured remote argv.
+    try:
+        remote_argv = build_argv(action_template, raw_params or {})
+    except ParamValidationError as e:
+        result["stderr"] = f"parameter validation failed: {e}"
+        result["cmd"] = f"ssh_write {action_template} (validation-refused)"
+        _log_ssh_tool(result)
+        return result
+```
+
+[`core/ssh_exec.py:287-294`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L287-L294)
+
+[9] 값 형식마다 검사 함수가 있다: [`core/ssh_exec.py:59-91`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L59-L91).
+
+[10] 대소문자를 가리지 않고 찾은 경로에 파일이 없으면 거부하고 찾은 경로로 실행한다.
+
+```python
+    resolved, corrected = resolve_path_ci(file_path)
+    if not os.path.exists(resolved):
+        return {
+            "success": False,
+            "error": f"file not found on mounted filesystem: {file_path}",
+            "hint": "File may have been deleted post-execution. Use vol_dumpfiles --pid <PID> to extract from memory.",
+            "ascii_lines": 0,
+            "unicode_lines": 0,
+            "ascii_stdout": "",
+            "unicode_stdout": "",
+            "output_path": output_path,
+        }
+    file_path = resolved
+```
+
+[`tools/strings_tools.py:27-39`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L27-L39)
+
+```python
+    resolved, _ = resolve_path_ci(file_path)
+    if not os.path.exists(resolved):
+        return {
+            "success": False,
+            "error": f"file not found: {file_path}",
+            "hint": "Use vol_dumpfiles to extract from memory.",
+            "matches": [],
+        }
+    file_path = resolved
+```
+
+[`tools/strings_tools.py:112-120`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L112-L120)
+
+`strings.grep`의 응답은 `file`에 그 경로를 싣는다: [`tools/strings_tools.py:225-229`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L225-L229).
+
+[11] 입력이 없으면 분석 함수 대신 오류를 돌려준다.
+
+```python
+    err = None
+    if not os.path.exists(path):
+        err = f"input not found: {path}"
+    elif memmap_listing and not os.path.isfile(memmap_listing):
+        err = f"memmap_listing not found: {memmap_listing}"
+    res = extract(path, memmap_listing=memmap_listing, max_seconds=max_seconds) \
+        if err is None else {"success": False, "error": err}
+```
+
+[`tools/misc.py:796-802`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L796-L802)
+
+[12] 받은 CSV가 없으면 거부한다: [`tools/antiforensics.py:64-65`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L64-L65), [`tools/antiforensics.py:198-199`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L198-L199), [`tools/antiforensics.py:262-263`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L262-L263).
+
+[13] `read.*`는 경로를 검사하고 없으면 거부한다.
+`read.output`은 [`tools/read_output.py:109`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L109)에서, `read.mail`은 [`tools/read_output.py:199`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L199)에서 이 함수를 부르고 응답에 푼 경로를 싣는다: [`tools/read_output.py:130-139`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L130-L139).
+
+```python
+def _guard(path: str):
+    """Resolve+validate a produced-output path. Returns (resolved, None) or
+    (None, error_dict)."""
+    try:
+        resolved = assert_readable_output(path)
+    except ValueError as e:
+        return None, {"success": False, "error": str(e),
+                      "hint": "Extract the artifact via its typed wrapper first, "
+                              "then read the produced file under analysis/exports/reports."}
+    if not os.path.exists(resolved):
+        corrected, _ = resolve_path_ci(resolved)
+        hint = (f"nearest match: {corrected}" if corrected != resolved else
+                "check the extractor's output_dir/output_file.")
+        m = _re.search(r"/\.tool_output/(\d+)\.txt$", resolved)
+        if m:
+            hint = _sidecar_hint(int(m.group(1))) or hint
+        return None, {"success": False, "error": f"file not found: {path}", "hint": hint}
+    return resolved, None
+```
+
+[`tools/read_output.py:38-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L38-L55)
+
+[14] 경로를 대조하지 않고 외부 도구나 라이브러리에 넘기는 예다: [`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22), [`tools/sleuthkit.py:15-19`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L15-L19), [`tools/plaso.py:26-30`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/plaso.py#L26-L30), [`tools/yara_tools.py:12-24`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L12-L24), [`tools/live.py:191-200`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L191-L200).
+
+[15] 설정 파일을 읽고 호스트 키를 대조한다.
+`live.*`는 [`core/ssh.py:189-195`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L189-L195)에서, 대응 조치 실행은 [`core/ssh_exec.py:296-303`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L296-L303)에서 이 함수를 부른다.
+
+```python
+def _load_hosts(path: Optional[str] = None) -> dict:
+    # Resolve LIVE_HOSTS_CONFIG at call time (not def time) so monkeypatch in
+    # tests + runtime env changes both take effect.
+    if path is None:
+        path = LIVE_HOSTS_CONFIG
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+```
+
+[`core/ssh.py:62-73`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L62-L73)
+
+```python
+def _resolve_host(host: str) -> dict:
+    hosts = _load_hosts()
+    cfg = hosts.get(host)
+    if not cfg:
+        raise SSHConfigError(
+            f"host {host!r} not found in {LIVE_HOSTS_CONFIG}. "
+            f"Available: {sorted(hosts.keys()) or '(none configured)'}"
+        )
+    if not cfg.get("user") or not cfg.get("host"):
+        raise SSHConfigError(
+            f"host {host!r} config is missing required keys (user, host)"
+        )
+    identity = cfg.get("identity") or os.environ.get("TRUDI_LIVE_SSH_KEY")
+    if not identity:
+        raise SSHConfigError(
+            f"host {host!r}: no identity file in config and TRUDI_LIVE_SSH_KEY env unset"
+        )
+    return {
+        "user": cfg["user"],
+        "host": cfg["host"],
+        "port": int(cfg.get("port") or 22),
+        "identity": os.path.expanduser(identity),
+    }
+```
+
+[`core/ssh.py:76-98`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L76-L98)
+
+[16] 대응 조치의 대상 호스트를 고르고 없으면 거부한다.
+
+```python
+def _resolve_host_for_case(case_id: str) -> Optional[str]:
+    """The live-host alias to act on: explicit config.json 'host', else the sole
+    entry in live_hosts.json (the common single-endpoint case)."""
+    h = policy.configured_host(case_id)
+    if h:
+        return h
+    try:
+        from core.ssh import list_configured_hosts
+        hosts = list_configured_hosts()
+    except Exception:  # noqa: BLE001
+        hosts = []
+    return hosts[0] if len(hosts) == 1 else None
+```
+
+[`tools/respond.py:250-261`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L250-L261)
+
+```python
+    host = _resolve_host_for_case(case_id)
+    if host is None:
+        return {
+            "success": False,
+            "error": "no live host configured — set 'host' in monitoring/config.json "
+                     "or register exactly one host in ~/cases/.common/live_hosts.json.",
+        }
+```
+
+[`tools/respond.py:349-355`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L349-L355)
+
+[17] 파일 머리로 형식을 가리고 EVT면 거부한다.
+읽지 못하면 `unknown`을 돌려준다.
+
+```python
+def _sniff_event_log(path: str) -> str:
+    """'evtx' | 'evt' | 'unknown'. Lenient: an unreadable/missing file or an
+    unrecognised header is 'unknown' and the caller proceeds as before, so
+    only a POSITIVE legacy-EVT detection changes behaviour."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return "unknown"
+    if head.startswith(_EVTX_MAGIC):
+        return "evtx"
+    if len(head) >= 8 and head[4:8] == _EVT_MAGIC:
+        return "evt"
+    return "unknown"
+```
+
+[`tools/misc.py:32-45`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L32-L45)
+
+```python
+    # python-evtx cannot read legacy EVT; streaming it would yield zero
+    # events and look like an empty log. Refuse loudly instead.
+    if _sniff_event_log(evtx_file) == "evt":
+        return {
+            "success": False,
+            "error": (f"{evtx_file} is a legacy EVT log (NT/2000/XP/2003); "
+                      "python-evtx parses EVTX only, so an ID filter here would "
+                      "return zero events regardless of content"),
+            "log_format": "evt",
+            "hint": "Use misc.evtx_dump (routes EVT to libevt evtexport) and grep the text records.",
+            "event_ids_requested": sorted(ids),
+            "events_scanned": 0, "matches": [],
+        }
+
+    cmd = ["/usr/local/bin/evtx_dump.py", evtx_file]
+```
+
+[`tools/misc.py:109-123`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L109-L123)
+
+[18] 출력 읽기 경로의 검사다.
+
+```python
+def assert_readable_output(path: str) -> str:
+    """Resolve `path` and assert it is a PRODUCED-OUTPUT file under analysis/,
+    exports/, or reports/ — never raw evidence, /mnt, /media, or an arbitrary
+    system path. Returns the resolved absolute path; raises ValueError otherwise.
+
+    The read-side mirror of assert_output_safe: read tools inspect parsed output,
+    never raw evidence (extract that through a typed wrapper first)."""
+    resolved, _ = resolve_path_ci(os.path.abspath(os.path.expanduser(path)))
+    resolved = os.path.realpath(resolved)
+    if is_evidence_path(resolved):
+        raise ValueError(
+            f"'{path}' is under a protected evidence/mounted location. Read tools "
+            "inspect PRODUCED output only — extract the artifact through its typed "
+            "wrapper (ez.*, plaso.*, misc.readpst_extract, …) first, then read the "
+            "output under analysis/ exports/ reports/."
+        )
+    parts = {seg.lower() for seg in Path(resolved).parts}
+    if not (parts & set(READABLE_OUTPUT_SEGMENTS)):
+        raise ValueError(
+            f"'{path}' is not under analysis/ exports/ reports/. Read tools may "
+            "only read produced output in those directories."
+        )
+    return resolved
+```
+
+[`core/paths.py:80-102`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L80-L102)
+
+[19] 폴더 아래 파일을 `glob`로 찾아 연다.
+Ubuntu 22.04의 Python 3.10.12에서 `os.path.isfile`은 링크를 따라가는 `os.stat`으로 판단한다: [`Lib/genericpath.py:27-33`](https://github.com/python/cpython/blob/b4e48a444ea02921ce4b701fe165e6cfd4cf5845/Lib/genericpath.py#L27-L33).
+
+```python
+    if os.path.isdir(resolved):
+        item_dirs = sorted(
+            d for d in glob.glob(os.path.join(glob.escape(resolved), "**", "Message*"),
+                                 recursive=True)
+            if os.path.isfile(os.path.join(d, "InternetHeaders.txt")))
+        if item_dirs:
+            for d in item_dirs:
+                if n >= scan_cap:
+                    return
+                m = pff_item(d)
+                if m is not None:
+                    yield m, os.path.relpath(d, resolved)
+                    n += 1
+            return
+        for f in sorted(glob.glob(os.path.join(glob.escape(resolved), "**", "*"),
+                                  recursive=True)):
+            if n >= scan_cap:
+                return
+            fl = f.lower()
+            if fl.endswith(".eml") and os.path.isfile(f):
+                try:
+                    with open(f, "rb") as fh:
+                        yield (email.message_from_binary_file(fh, policy=policy.default),
+                               os.path.relpath(f, resolved))
+                    n += 1
+                except Exception:
+                    continue
+            elif fl.endswith(".mbox") and os.path.isfile(f):
+```
+
+[`core/mail_roster.py:197-224`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/mail_roster.py#L197-L224)
+
+[20] 경로 값은 문자열로만 검사한다.
+
+```python
+def _v_safe_path(raw: Any) -> str:
+    s = str(raw).strip()
+    if not s.startswith("/") or not _PATH_CHARS_RE.match(s) or ".." in s:
+        raise ParamValidationError(f"{raw!r} is not a safe absolute path")
+    return s
+
+
+def _v_path_quarantine(raw: Any) -> str:
+    s = _v_safe_path(raw)
+    if not s.startswith(_QUARANTINE_PREFIXES):
+        raise ParamValidationError(
+            f"{s!r} is not under an allowed prefix {_QUARANTINE_PREFIXES}"
+        )
+    return s
+
+
+def _v_path_cron(raw: Any) -> str:
+    s = _v_safe_path(raw)
+    if not re.match(r"^/etc/cron(\.|/)", s):
+        raise ParamValidationError(f"{s!r} is not an /etc/cron* path")
+    return s
+```
+
+[`core/ssh_exec.py:101-121`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L101-L121)
+
+[21] `misc.batch_run`은 받은 인자 목록을 실행기로 실행하고 실행기는 인자를 이은 명령 문자열로 호출 항목을 남긴다.
+실행기가 항목을 쓰는 부분은 [`core/executor.py:78-95`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L78-L95)이다.
+
+```python
+    def _one(spec):
+        cmd = spec.get("cmd")
+        if not cmd or not isinstance(cmd, list):
+            return {"success": False, "error": "missing or invalid 'cmd' (must be list)"}
+        timeout = int(spec.get("timeout") or 300)
+        return run(cmd, timeout=timeout)
+```
+
+[`tools/misc.py:2646-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2646-L2651)
+
+```python
+    result: dict[str, Any] = {
+        "success": False,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "elapsed_seconds": 0.0,
+        "truncated": False,
+        "cmd": " ".join(cmd),
+        "retries": 0,
+        "progress_lines": [],
+    }
+```
+
+[`core/executor.py:148-158`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L148-L158)
+
+[22] 인용한 호출 ID를 기록과 대조하고 선택자를 인용한 호출로 제한한다.
+출력을 읽는 부분은 [`core/evidence_packets.py:224-242`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L224-L242), 선택자를 출력 경로와 맞추는 부분은 [`core/evidence_packets.py:287-290`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L287-L290)이다.
+실패한 호출과 모델이 쓴 출력을 거부하는 부분은 [`core/evidence_packets.py:213-216`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L213-L216)과 [`core/evidence_packets.py:254-257`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L254-L257)이다.
+
+```python
+def cited_ids(request):
+    claim = request.get('claim') or {}
+    values = list(request.get('input_call_ids') or [])
+    if request.get('linked_call_id'):
+        values.append(request['linked_call_id'])
+    for key in ('session_binding_call_ids', 'transfer_call_ids', 'receipt_call_ids'):
+        values += claim.get(key) or []
+    for item in claim.get('rule_outs') or []:
+        values += item.get('call_ids') or []
+    if any(type(c) is not int or c <= 0 for c in values):
+        raise PacketError('Evidence references must be positive integer call IDs')
+    return sorted(set(values))
+```
+
+[`core/evidence_packets.py:44-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L44-L55)
+
+```python
+    ids = cited_ids(request)
+    if not ids:
+        raise PacketError('Cite at least one evidence-producing call')
+    by_id = {e['call_id']: e for e in log._entries if e.get('call_id') is not None}
+    unknown = [cid for cid in ids if cid not in by_id]
+    if unknown:
+        raise PacketError(f'Unknown/future evidence call IDs in this case: {unknown}')
+    selectors = selectors or []
+    if not isinstance(selectors, list) or any(not isinstance(s, dict) for s in selectors):
+        raise PacketError('selectors must be a list of byte-selection objects')
+    allowed = {'call_id', 'path', 'start_byte', 'end_byte'}
+    for sel in selectors:
+        if (set(sel) - allowed or type(sel.get('call_id')) is not int
+                or sel['call_id'] not in ids
+                or ('path' in sel and not isinstance(sel['path'], str))):
+            raise PacketError('Each selector must name a cited call and only path/start_byte/end_byte')
+```
+
+[`core/evidence_packets.py:179-194`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L179-L194)
+
+[23] 제출 도구는 기록에 없는 ID를 거부한다.
+`misc.submit_finding`은 [`tools/misc.py:1626-1630`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1626-L1630)에서 이 함수로 넘긴다.
+
+```python
+            if previous:
+                return previous
+            known = log.index().by_call_id
+            if any(cid not in known for cid in cited_ids(request)):
+                raise PacketError('Unknown/future evidence call IDs in this case')
+```
+
+[`core/finding_submission.py:200-204`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L200-L204)
+
+[24] `input_call_ids`가 있을 때만 검토 묶음을 만들고 없으면 받은 글을 보낸다.
+
+```python
+    packet = review_packet.get()
+    if packet is None and input_call_ids:
+        try:
+            from tools._gates._claims import normalize_claim
+            packet = build_packet(log, {
+                'description': finding.strip(), 'claim': claim_now or normalize_claim(),
+                'input_call_ids': input_call_ids, 'linked_call_id': linked_call_id,
+                'supersedes': supersedes, 'case_context': case_context})
+        except PacketError as exc:
+            return {'success': False, 'status': exc.status, 'gate': 'evidence_packet', 'error': str(exc)}
+```
+
+[`tools/reasoning.py:2561-2570`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L2561-L2570)
+
+```python
+    user = (f"FINDING:\n{finding}\n\nThe attached packet contains the primary evidence and full typed claim."
+            if packet is not None else f"FINDING:\n{finding}\n\nSUPPORTING EVIDENCE:\n{supporting_evidence}")
+```
+
+[`tools/reasoning.py:2636-2637`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L2636-L2637)
+
+[25] 명령 문자열의 글자로 최근 호출 항목을 고르고 그 출력 앞부분을 읽는다.
+`correlate.network_to_process`의 글자는 [`tools/correlate.py:180-181`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L180-L181), 빈 결과를 돌려주는 부분은 [`tools/correlate.py:153-158`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L153-L158)이다.
+
+```python
+def _recent_tool_stdouts(tool_substring: str, max_entries: int = 50) -> list[dict]:
+    """Return recent tool_call entries whose cmd contains tool_substring.
+
+    Used by correlation tools to look up the actual output the agent collected.
+    Returns a list of {call_id, cmd, stdout_excerpt, success} dicts.
+    """
+    from core.execution_log import log
+    matches = []
+    for e in reversed(log._entries):
+        if e.get("type") != "tool_call":
+            continue
+        cmd = e.get("cmd", "") or ""
+        if tool_substring not in cmd:
+            continue
+        matches.append({
+            "call_id": e.get("call_id"),
+            "cmd": cmd,
+            "stdout_excerpt": e.get("stdout_excerpt", "") or "",
+            "success": e.get("success", False),
+        })
+        if len(matches) >= max_entries:
+            break
+    return list(reversed(matches))
+```
+
+[`tools/correlate.py:27-49`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L27-L49)
+
+```python
+    # Pull recent vol process listings + recent disk listings from the trace.
+    vol_entries = _recent_tool_stdouts("vol")
+    disk_entries = (
+        _recent_tool_stdouts("fls")
+        + _recent_tool_stdouts("MFTECmd")
+        + _recent_tool_stdouts("mftecmd")
+    )
+```
+
+[`tools/correlate.py:90-96`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L90-L96)
+
+[26] 색인한 항목이 없으면 명령 문자열로 찾고 그래도 없으면 거부한다.
+`af.event_log_clear`의 거부는 [`tools/antiforensics.py:138-143`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L138-L143)이다.
+
+```python
+    from core.execution_log import log
+    idx = log.index()
+    # by_tool['ez_evtxecmd'] is populated by the executor when evtxecmd runs.
+    candidates = idx.by_tool.get("ez_evtxecmd") or idx.by_tool.get("EvtxECmd.dll") or []
+    # Also accept by_tool['dotnet'] entries whose cmd mentions EvtxECmd
+    if not candidates:
+        for e in idx.by_type.get("tool_call", []):
+            cmd = e.get("cmd", "") or ""
+            if "EvtxECmd" in cmd or "evtxecmd" in cmd.lower():
+                candidates.append(e)
+
+```
+
+[`tools/antiforensics.py:127-137`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L127-L137)
+
+```python
+    from core.execution_log import log
+    idx = log.index()
+
+    pecmd_entries = idx.by_tool.get("ez_pecmd") or idx.by_tool.get("PECmd.dll") or []
+    appcompat_entries = idx.by_tool.get("ez_appcompatcacheparser") or []
+    amcache_entries = idx.by_tool.get("ez_amcacheparser") or []
+    # Fallback: scan tool_call entries for the matching binaries
+    if not pecmd_entries or not (appcompat_entries or amcache_entries):
+        for e in idx.by_type.get("tool_call", []):
+            cmd = (e.get("cmd") or "").lower()
+            if "pecmd" in cmd: pecmd_entries.append(e)
+            if "appcompatcacheparser" in cmd: appcompat_entries.append(e)
+            if "amcacheparser" in cmd: amcache_entries.append(e)
+
+    if not pecmd_entries:
+        return {
+            "success": False,
+            "error": "No recent ez.pecmd run in trace. Parse prefetch first.",
+        }
+    if not (appcompat_entries or amcache_entries):
+        return {
+            "success": False,
+            "error": "No appcompat/amcache run in trace. Need at least one to "
+                     "cross-reference against prefetch.",
+        }
+```
+
+[`tools/antiforensics.py:316-340`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L316-L340)
+
+[27] 호출 기록 항목은 출력 앞 600자를 남긴다.
+
+```python
+            if stdout_excerpt:
+                entry["stdout_excerpt"] = stdout_excerpt[:600]
+```
+
+[`core/execution_log.py:1507-1508`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1507-L1508)
+
+[28] 경로 조각마다 이름이 같은 항목이 없으면 대소문자만 다른 첫 항목으로 바꾼다.
+
+```python
+def resolve_path_ci(path: str) -> tuple[str, bool]:
+    """Walk path components case-insensitively on the real filesystem.
+
+    Returns (resolved_path, was_corrected). was_corrected=True means at least
+    one component was case-folded to match an actual directory entry.
+    If a component has no match the original path is returned with was_corrected=False
+    so callers can report a clean not-found error.
+    """
+    path = os.path.normpath(os.path.expanduser(path))
+    parts = Path(path).parts          # e.g. ('/', 'mnt', 'rd01', 'Windows', ...)
+    current = parts[0]                # '/'
+    corrected = False
+    for part in parts[1:]:
+        try:
+            entries = os.listdir(current)
+        except (PermissionError, NotADirectoryError, FileNotFoundError):
+            return path, False
+        if part in entries:
+            current = os.path.join(current, part)
+        else:
+            lower = part.lower()
+            matches = [e for e in entries if e.lower() == lower]
+            if matches:
+                current = os.path.join(current, matches[0])
+                corrected = True
+            else:
+                return path, False    # component missing — caller handles not-found
+    return current, corrected
+```
+
+[`core/paths.py:152-179`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L152-L179)
+
+[29] 바꾼 경로를 응답에 싣는다.
+
+```python
+    return {
+        "success": results["ascii"]["success"],
+        "ascii_lines": len(results["ascii"].get("stdout", "").splitlines()),
+        "unicode_lines": len(results.get("unicode", {}).get("stdout", "").splitlines()),
+        "ascii_stdout": results["ascii"].get("stdout", ""),
+        "unicode_stdout": results.get("unicode", {}).get("stdout", ""),
+        "output_path": output_path,
+        "stderr": results["ascii"].get("stderr", ""),
+        "path_resolved": file_path if corrected else None,
+    }
+```
+
+[`tools/strings_tools.py:59-68`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L59-L68)

@@ -1,0 +1,447 @@
+---
+cell: I04
+details:
+- id: I04.01
+  exception: false
+- id: I04.04
+  exception: true
+---
+
+# I04 서버 자격증명 처리
+
+### I04.01 환경변수·설정 파일에 분리 보관
+
+**구현.** 서버가 외부 연동에 쓰는 자격증명은 모델 백엔드와 IOC 조회의 API 키, 원격 단말 SSH 키 파일, Velociraptor API 설정 파일이다 [1][2][3].
+API 키는 환경변수 `ANTHROPIC_API_KEY`·`REASON_API_KEY`·`DAIR_API_KEY`·`VIRUSTOTAL_API_KEY`·`ABUSEIPDB_API_KEY`에서 읽는다 [1].
+`REASON_API_KEY`·`DAIR_API_KEY`가 비어 있으면 옛 이름 `HF_TOKEN`을 읽는다 [1].
+`server.py`는 도구 모듈을 불러오기 전에 `load_dotenv()`를 부른다 [4].
+python-dotenv 1.2.3의 `load_dotenv()`는 인자가 없으면 부른 파일의 폴더부터 위로 올라가며 `.env`를 찾는다 [5].
+이미 있는 환경변수는 덮지 않고 나머지 값을 환경변수로 올린다 [5].
+`install.sh`는 `.env.example`을 복사해 저장소 폴더에 `.env`를 만들고 운영자에게 그 파일에 키를 넣으라고 안내한다 [6].
+`.gitignore`는 `.env`를 저장소에서 빼고 `.env.example`의 키 칸은 비어 있다 [6][7].
+코드에는 키 값이 없다 [1].
+
+SSH는 `live_hosts.json` 항목의 `identity`나 환경변수 `TRUDI_LIVE_SSH_KEY`에 적은 키 파일 경로를 `ssh -i`로 넘기고 키 내용은 읽지 않는다 [2].
+`ssh`는 `BatchMode=yes`로 실행해 암호를 묻지 않는다 [2].
+Velociraptor 도구는 API 설정 파일 경로를 `velociraptor --api_config`로 넘긴다 [3].
+저장소의 데모 구성은 이 파일을 `administrator` 역할로 만들고 파일 권한을 644로 둔다 [8].
+서버는 키 파일이나 설정 파일의 소유자와 권한을 검사하지 않는다.
+
+호출 기록에 남는 SSH 명령은 키 파일 경로를 빼고 적는다 [9].
+Velociraptor 명령은 API 설정 파일 경로를 `<redacted>`로 바꿔 적는다 [3].
+API 설정 파일이 없을 때 돌려주는 오류 문구에는 그 경로가 그대로 들어간다 [3].
+
+### I04.04 도구 인자 수신 금지
+
+**구현.** 어느 도구도 API 키·키 파일 경로·API 설정 파일 경로를 인자로 받지 않고 서버가 환경변수와 설정 파일에서 직접 읽는다 [10].
+`live.*` 도구는 접속할 호스트를 `live_hosts.json`의 이름으로만 받고 `live.hosts`도 이름만 돌려준다 [11].
+API 키는 요청 헤더(`x-apikey`·`Key`·`Authorization`)와 Anthropic SDK 클라이언트에만 넣는다 [12].
+조회 도구의 응답은 조회 결과 필드만 담고 키는 담지 않는다 [13].
+모델 호출 기록은 모델 이름과 OpenAI 호환 주소, 보낸 사용자 메시지를 남기고 키는 남기지 않는다 [14].
+검토 정책 식별값도 모델 주소를 해시로만 넣고 키는 넣지 않는다 [15].
+조회나 모델 호출이 실패하면 서버는 예외 문구를 응답의 `error`와 기록에 그대로 싣고 문구에서 비밀값을 찾아 지우는 처리는 없다 [16].
+
+**예외.** 외부 도구 실행기는 `env`를 따로 받지 않으면 `subprocess.run`에 `env=None`을 넘긴다 [17].
+Python 3.10의 `subprocess`는 이때 서버 프로세스의 환경변수를 그대로 자식 프로세스에 물려준다 [17].
+`load_dotenv()`가 `.env`의 키를 환경변수로 올렸으므로 서버가 실행하는 외부 도구는 모두 API 키를 물려받는다 [4][17].
+`misc.batch_run`은 모델이 준 argv를 허용 목록 없이 이 실행기로 실행한다 [18].
+실행기는 표준 출력을 응답에 담고 전체 표준 출력을 호출 기록에 남긴다 [19].
+그래서 모델이 `misc.batch_run`으로 `env` 같은 명령을 실행하면 키 값이 응답과 호출 기록에 들어간다 [18][19].
+
+### 근거
+
+[1] 모델 백엔드와 IOC 조회의 키 변수다.
+`dair.assess`의 변수는 [`tools/dair.py:36-42`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L36-L42)에 있다.
+
+```python
+REASON_BACKEND   = os.environ.get("REASON_BACKEND") or ""
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or ""
+
+# openai-compat vars — FOUNDATION_SEC_URL / HF_TOKEN are deprecated aliases
+REASON_URL       = (os.environ.get("REASON_URL")
+                    or os.environ.get("FOUNDATION_SEC_URL") or "")
+REASON_API_KEY   = (os.environ.get("REASON_API_KEY")
+                    or os.environ.get("HF_TOKEN") or "")
+REASON_MODEL     = os.environ.get("REASON_MODEL") or ""
+```
+
+[`tools/reasoning.py:37-45`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L37-L45)
+
+```python
+VT_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY")
+ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
+```
+
+[`tools/enrichment.py:8-9`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L8-L9)
+
+[2] SSH 실행기는 키 파일 경로를 `-i`로 넘기고 `BatchMode=yes`로 실행한다.
+
+```python
+_SSH_OPTS = [
+    "-o", "BatchMode=yes",                       # never prompt for password
+    "-o", "StrictHostKeyChecking=accept-new",    # accept-then-pin
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=15",
+]
+```
+
+[`core/ssh.py:50-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L50-L55)
+
+```python
+    identity = cfg.get("identity") or os.environ.get("TRUDI_LIVE_SSH_KEY")
+    if not identity:
+        raise SSHConfigError(
+            f"host {host!r}: no identity file in config and TRUDI_LIVE_SSH_KEY env unset"
+        )
+    return {
+        "user": cfg["user"],
+        "host": cfg["host"],
+        "port": int(cfg.get("port") or 22),
+        "identity": os.path.expanduser(identity),
+    }
+
+
+def _build_ssh_argv(resolved: dict, cmd_argv: list[str]) -> list[str]:
+    """Construct the full local argv: ssh + opts + user@host + -- + remote argv.
+
+    The `--` separator tells SSH that everything after is the remote command
+    as discrete argv tokens, not a single shell string. SSH still concatenates
+    them, but each token is properly shell-quoted by ssh's own quoting layer,
+    so an operand like `'; rm -rf /'` is passed as a literal filename, not
+    parsed as a separator.
+    """
+    argv = ["ssh"] + _SSH_OPTS + [
+        "-i", resolved["identity"],
+        "-p", str(resolved["port"]),
+        f"{resolved['user']}@{resolved['host']}",
+        "--",
+    ]
+```
+
+[`core/ssh.py:88-115`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L88-L115)
+
+[3] Velociraptor 실행기는 API 설정 파일 경로를 넘기고 기록용 명령에서는 경로를 바꾸며 파일이 없으면 경로를 담은 오류를 돌려준다.
+
+```python
+    bin_path = _resolve_bin()
+    api_config = _resolve_api_config()
+
+    full_argv = [bin_path, "--api_config", api_config] + argv
+
+    # Redact api_config in the recorded cmd — its path is sensitive on a
+    # real deployment; the operator can recover it from env if needed.
+    safe_cmd = (
+        f"{bin_path} --api_config <redacted> " +
+        " ".join(shlex.quote(a) for a in argv)
+    )
+```
+
+[`tools/velo.py:93-103`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L93-L103)
+
+```python
+    if not os.path.exists(api_config):
+        result["stderr"] = (
+            f"Velociraptor API config not found at {api_config}. "
+            f"Set TRUDI_VELO_API_CONFIG or run "
+            f"`docker compose cp velo-server:/config/api.config.yaml {api_config}`."
+        )
+        _log_velo_tool(result)
+        return result
+```
+
+[`tools/velo.py:118-125`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L118-L125)
+
+[4] `server.py`는 도구 모듈을 불러오기 전에 `.env`를 읽는다.
+
+```python
+import os
+from dotenv import load_dotenv
+load_dotenv()  # must run before tool modules read os.environ
+
+from fastmcp import FastMCP
+from core.middleware import NarrationMiddleware
+
+from tools.imaging import mcp as imaging_mcp
+```
+
+[`server.py:5-12`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/server.py#L5-L12)
+
+[5] python-dotenv 1.2.3의 `.env` 찾기, `load_dotenv()`, 환경변수 올리기다: [`src/dotenv/main.py:337-385`](https://github.com/theskumar/python-dotenv/blob/49515afee2d50c33cad9419b3800b3a0dc93fc59/src/dotenv/main.py#L337-L385), [`src/dotenv/main.py:388-435`](https://github.com/theskumar/python-dotenv/blob/49515afee2d50c33cad9419b3800b3a0dc93fc59/src/dotenv/main.py#L388-L435), [`src/dotenv/main.py:97-110`](https://github.com/theskumar/python-dotenv/blob/49515afee2d50c33cad9419b3800b3a0dc93fc59/src/dotenv/main.py#L97-L110).
+
+[6] `install.sh`는 `.env`를 만들고 키를 넣으라고 안내하며 `.gitignore`는 `.env`를 뺀다.
+
+```bash
+if [ ! -f "$TRUDI_DIR/.env" ]; then
+    cp "$TRUDI_DIR/.env.example" "$TRUDI_DIR/.env"
+    ok "Created .env from .env.example"
+    warn "Edit $TRUDI_DIR/.env to add API keys (VirusTotal, AbuseIPDB); set REASON_URL / DAIR_URL for a local reasoning backend"
+else
+    ok ".env already exists — skipping"
+```
+
+[`install.sh:299-304`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L299-L304)
+
+```text
+# secrets
+.env
+```
+
+[`.gitignore:1-2`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/.gitignore#L1-L2)
+
+[7] `.env.example`의 키 칸이다.
+
+```text
+# TRUDI MCP Server — environment configuration
+
+# IOC Enrichment (optional — server degrades gracefully without these)
+VIRUSTOTAL_API_KEY=
+ABUSEIPDB_API_KEY=
+
+# ── Reasoning backend ──────────────────────────────────────────────────────
+# REASON_BACKEND selects which model powers the adversarial review loop.
+# Auto-detected from available keys if not set explicitly.
+
+# Default: Claude API (best quality, no server required).
+# Recommended: Claude Opus on both reasoning surfaces (reason.* + dair.*).
+# Add your key below and you're ready for a full-quality run from a fresh install.
+REASON_BACKEND=claude
+ANTHROPIC_API_KEY=                       # required — paste your sk-ant-... key here
+REASON_MODEL=claude-opus-4-8             # the recommended default
+```
+
+[`.env.example:1-16`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/.env.example#L1-L16)
+
+[8] 데모 구성은 API 설정 파일을 `administrator` 역할로 만들고 권한을 644로 둔다.
+
+```bash
+    velociraptor --config "${CONFIG}" config api_client \
+        --name trudi-mcp --role administrator \
+        "${API}"
+
+    chmod 644 "${CONFIG}" "${CLIENT}" "${API}"
+```
+
+[`demo/live-monitoring/scripts/velo-server-entrypoint.sh:65-69`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/demo/live-monitoring/scripts/velo-server-entrypoint.sh#L65-L69)
+
+[9] SSH 실행기의 기록용 명령에는 키 파일 경로가 없다.
+
+```python
+    argv = _build_ssh_argv(resolved, cmd_argv)
+    # The recorded cmd should not leak the identity path — clean it.
+    result["cmd"] = (
+        f"ssh {resolved['user']}@{resolved['host']}:{resolved['port']} -- "
+        + " ".join(shlex.quote(a) for a in cmd_argv)
+    )
+```
+
+[`core/ssh.py:197-202`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh.py#L197-L202)
+
+[10] 외부 연동 도구의 인자다: [`tools/enrichment.py:20`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L20), [`tools/enrichment.py:59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L59), [`tools/enrichment.py:94`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L94), [`tools/enrichment.py:129`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L129), [`tools/enrichment.py:163`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L163), [`tools/velo.py:229-234`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L229-L234), [`tools/velo.py:491`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L491), [`tools/respond.py:316`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L316).
+
+[11] `live.hosts`는 이름만 돌려주고 `live.*` 도구는 `host` 이름을 받는다.
+
+```python
+@mcp.tool()
+@output_safe
+def live_hosts() -> dict:
+    """List configured live endpoints.
+
+    Reads ~/cases/.common/live_hosts.json — returns just the host names so
+    connection details (user, identity path) stay server-side.
+    """
+    hosts = list_configured_hosts()
+    return {"success": True, "hosts": hosts, "count": len(hosts)}
+
+
+@mcp.tool()
+@output_safe
+def live_processes(host: str) -> dict:
+    """Snapshot the full process list on a live endpoint.
+
+    Returns: ps -eo pid,ppid,user,etimes,start,cmd output. Use as the live
+    equivalent of vol.pslist for memory images.
+    """
+    return ssh_run(host, ["ps", "-eo", "pid,ppid,user,etimes,start,cmd", "--no-headers"])
+```
+
+[`tools/live.py:29-49`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L29-L49)
+
+[12] 키를 싣는 곳이다: [`tools/enrichment.py:32`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L32), [`tools/enrichment.py:142`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L142), [`tools/reasoning.py:648`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L648), [`tools/reasoning.py:946`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L946).
+
+[13] VirusTotal 해시 조회의 응답이다.
+나머지 조회 도구도 같은 모양이다([`tools/enrichment.py:77-88`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L77-L88), [`tools/enrichment.py:112-123`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L112-L123), [`tools/enrichment.py:146-157`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L146-L157)).
+
+```python
+        if resp.status_code == 404:
+            return {"success": True, "found": False, "hash": file_hash, "message": "Not found in VirusTotal."}
+        data = resp.json()
+        attrs = data.get("data", {}).get("attributes", {})
+        stats = attrs.get("last_analysis_stats", {})
+        return {
+            "success": True,
+            "found": True,
+            "hash": file_hash,
+            "malicious": stats.get("malicious", 0),
+            "suspicious": stats.get("suspicious", 0),
+            "undetected": stats.get("undetected", 0),
+            "total_engines": sum(stats.values()),
+            "names": attrs.get("names", [])[:10],
+            "type_description": attrs.get("type_description"),
+            "first_submission": attrs.get("first_submission_date"),
+            "last_analysis_date": attrs.get("last_analysis_date"),
+            "full_stats": stats,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "hash": file_hash}
+```
+
+[`tools/enrichment.py:35-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L35-L55)
+
+[14] 모델 호출 기록에 넣는 값이다.
+
+```python
+        initiated = {"model": model, "url": url, "max_tokens": budget,
+                     "thinking": thinking_on,
+                     "thinking_guidance": thinking_on and bool(COMPAT_THINKING_GUIDANCE)}
+        if attempt > 1:
+            initiated["attempt"] = attempt
+            initiated["retry_reason"] = "thinking exhausted output budget (finish_reason=length, empty answer)"
+        if _log:   # evidence-request rounds ≥ 2 stay off the trace window
+            try:
+                from core.execution_log import log as _elog
+                _elog.record_call_initiated(tool_name, "openai-compat", initiated,
+                                            input_call_ids=input_call_ids)
+            except Exception as _e:
+                import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
+```
+
+[`tools/reasoning.py:702-714`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L702-L714)
+
+```python
+    _inputs = {
+        "user_message": user,
+        "max_tokens": max_tokens,
+        "system_prompt_kind": _tool_name,
+    }
+```
+
+[`tools/reasoning.py:921-925`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L921-L925)
+
+[15] 검토 정책 식별값은 주소의 해시를 넣는다.
+
+```python
+def review_policy():
+    # No secrets/endpoints in the receipt. The model and deliberate review
+    # settings participate in identity; source hashes cover prompt/gate changes.
+    from tools import reasoning as R
+    root = Path(__file__).resolve().parents[1]
+    policy = {}
+    for pattern in ('core/evidence_packets.py', 'core/finding_submission.py',
+                    'tools/reasoning.py', 'tools/_llm_parse.py', 'tools/_output_reader.py',
+                    'tools/_gates/*.py', 'data/fk/**/*.yaml'):
+        for path in root.glob(pattern):
+            policy[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digest([VERSION, policy, R._active_backend(), R.REASON_MODEL,
+                   R.MAX_TOKENS_EVALUATE, R.COMPAT_EVIDENCE_ROUNDS, R.COMPAT_EVIDENCE_MODE,
+                   digest(R.REASON_URL), R.COMPAT_EXTRA_BODY_RAW, R.REASON_FK,
+                   R.COMPAT_THINKING_BUDGET, R.COMPAT_NO_THINK_MODE,
+                   sorted(R.COMPAT_NO_THINK_TOOLS), R.COMPAT_EVIDENCE_ROUND_CHARS])
+```
+
+[`core/evidence_packets.py:58-73`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L58-L73)
+
+[16] 예외 문구를 그대로 싣는 곳이다: [`tools/enrichment.py:54-55`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/enrichment.py#L54-L55), [`tools/reasoning.py:735-739`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L735-L739), [`tools/reasoning.py:974-989`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L974-L989), [`tools/dair.py:320-332`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L320-L332).
+
+[17] 외부 도구 실행기는 받은 `env`를 그대로 넘기고 기본값은 `None`이다.
+`env`가 `None`이면 현재 프로세스의 환경을 물려준다: [Python 3.10 `subprocess.Popen`](https://docs.python.org/3.10/library/subprocess.html#subprocess.Popen).
+
+```python
+def run(
+    cmd: list[str] | str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    output_dir: str | None = None,
+    needs_sudo: bool = False,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+```
+
+[`core/executor.py:104-111`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L104-L111)
+
+```python
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+        )
+```
+
+[`core/executor.py:162-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L162-L169)
+
+[18] `misc.batch_run`은 모델이 준 argv를 실행기에 그대로 넘긴다.
+
+```python
+@mcp.tool()
+@output_safe
+def batch_run(tool_calls: list[dict], max_concurrent: int = 4) -> dict:
+    """
+    Execute multiple independent shell tool calls concurrently and return all
+    results. Use this when DAIR's priority_tools contains several commands that
+    don't depend on each other.
+
+    tool_calls: list of {"cmd": ["binary", "arg1", ...], "timeout": optional int}
+    max_concurrent: maximum parallel workers (default 4).
+
+    Returns: {"success": all_succeeded, "results": [per-call dicts]}.
+
+    Note: this runs raw subprocess commands. For typed MCP forensic tools, the
+    agent should still call them one at a time (or use the MCP client's own
+    parallel-call mechanism). This helper is for low-level batches like
+    "hash these 10 files" or "strings on these 5 binaries".
+    """
+    import concurrent.futures
+
+    def _one(spec):
+        cmd = spec.get("cmd")
+        if not cmd or not isinstance(cmd, list):
+            return {"success": False, "error": "missing or invalid 'cmd' (must be list)"}
+        timeout = int(spec.get("timeout") or 300)
+        return run(cmd, timeout=timeout)
+```
+
+[`tools/misc.py:2626-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2626-L2651)
+
+[19] 실행기는 전체 표준 출력을 호출 기록에 넘긴다.
+
+```python
+    # The complete stdout is persisted to the trace sidecar, never returned to
+    # the client (the agent-facing `stdout` keeps its caps). Pop the private
+    # keys BEFORE the trace write so a logging failure cannot leak them.
+    stdout_full = result.pop("_stdout_full", None)
+    result.pop("_stdout_chars", None)
+    if stdout_full is None:
+        stdout_full = result.get("stdout", "")
+    try:
+        from core.execution_log import log
+        parent = [log._last_dair_cid] if log._last_dair_cid else None
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+            input_call_ids=parent,
+            stdout_full=stdout_full,
+            output_path=result.get("output_path"),
+            exit_meaning=result.get("exit_meaning", ""),
+        )
+```
+
+[`core/executor.py:71-95`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L71-L95)

@@ -1,0 +1,618 @@
+---
+cell: T07
+details:
+- id: T07.01
+  exception: true
+- id: T07.02
+  exception: true
+- id: T07.04
+  exception: false
+- id: T07.05
+  exception: false
+- id: T07.06
+  exception: false
+- id: T07.07
+  exception: false
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 방식은 선택 실행 파일 표 `_OPTIONAL_BINARIES`에 든 도구 11개에 적용된다 [1].
+표에 든 도구는 Chainsaw, capa, FLOSS, olevba, mraptor, densityscout, Hindsight, usnparser, pffexport, readpst, esedbexport를 실행하는 도구다 [1].
+이 도구들은 실행 전에 `shutil.which`로 표의 후보 이름이나 경로를 찾고 하나도 없으면 외부 도구를 부르지 않고 `tool_unavailable` 결과를 돌려준다 [2][3].
+찾은 경우에는 찾은 실행 파일 경로로 명령을 만든다 [3].
+서버는 같은 표로 설치되지 않은 도구를 DAIR와 추론 도구가 받는 도구 목록에서 뺀다 [4].
+
+그 밖의 도구는 실행 전에 실행 파일이 있는지 보지 않는다.
+Volatility는 `/usr/local/bin/vol`, EZ Tools는 `dotnet`과 `/opt/zimmermantools` 아래 DLL, `misc.analyzemft_parse`는 `/usr/local/bin/analyzemft`를 바로 실행한다 [5].
+실행 파일이 없으면 실행기는 `FileNotFoundError`를 잡아 표준 오류에 `Tool not found:` 문구를 담은 실패를 돌려준다 [6].
+yara-python은 `yara.*` 도구 안에서 불러오고 불러오지 못하면 그 예외 문구를 실패로 돌려준다 [7].
+capa 룰, ClamAV 시그니처, EZ Tools 맵과 배치 파일 같은 참조 자료도 실행 전에 있는지 보지 않는다.
+
+**예외.** `misc.chainsaw_hunt`는 실행 파일만 확인하고 Sigma 룰 폴더를 찾지 못하면 그 사실을 알리지 않고 룰과 매핑 없이 실행한다 [8].
+`misc.batch_run`은 모델이 준 명령 배열을 실행기로 바로 실행하므로 표에 든 실행 파일도 이 경로로는 확인 없이 실행된다 [9].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 표에 든 도구의 `tool_unavailable` 결과는 `status`, `binary`, 설치 안내를 담은 `error`, 도구가 없다는 사실로는 증거에 대해 아무것도 정할 수 없다는 `note`를 싣는다 [2].
+이 결과는 외부 도구를 실행하지 않은 응답이라 미들웨어가 실패 항목으로 호출 기록에 남긴다 [10].
+EZ Tools 래퍼는 실행이 실패하고 DLL 파일이 없으면 결과에 `tool_unavailable`과 설치되지 않았다는 `error`를 붙인다 [11].
+PECmd, AmcacheParser, AppCompatCacheParser의 DLL이 없으면 같은 증거를 읽을 다른 도구 이름을 `fallback` 문구로 알리고 서버가 그 도구를 대신 실행하지는 않는다 [11][12].
+EZ Tools가 네이티브 라이브러리를 불러오지 못해 .NET 예외를 출력하면 서버는 출력에서 이를 읽어 `tool_unavailable`로 표시한다 [13].
+`ez.pecmd`는 대체 파서가 쓰는 `pyscca`도 없으면 Prefetch 파서가 없다는 `tool_unavailable` 결과를 돌려준다 [14].
+
+**예외.** `misc.batch_run`으로 실행하면 표에 든 실행 파일이 없어도 실행기의 일반 실패만 돌아오고 `tool_unavailable` 표시가 없다 [6][9].
+
+### T07.04 알림 없는 대체 실행
+
+**구현.** 이 방식은 `ewf.mount_ntfs`와 `ewf.mount_full_image`가 쓰는 NTFS 읽기 전용 마운트에 있다 [15].
+`-t` 없이 마운트하는 시도가 실패하면 서버는 `-t ntfs-3g`로 다시 마운트한다 [15].
+두 번째 시도가 성공하면 응답은 두 번째 실행의 결과이고 첫 시도의 오류는 싣지 않는다 [15].
+바꿔 실행했다는 사실은 응답의 명령 문자열 `cmd`와 호출 기록에 따로 남은 두 실행 항목으로만 알 수 있다 [15][16].
+
+### T07.05 실행 환경별 경로 분기
+
+**구현.** NTFS 마운트는 `/usr/bin/lowntfs-3g`가 있을 때만 대소문자를 가리지 않는 `lowntfs-3g` 마운트를 먼저 시도한다 [15][17].
+`misc.chainsaw_hunt`는 Sigma 룰 폴더 세 곳을 정해 둔 차례로 찾는다 [8].
+`misc.olevba_scan`과 `misc.mraptor_scan`은 이름 뒤에 `3`이 붙은 실행 파일도 후보로 두고 `misc.densityscout_scan`은 PATH의 이름과 `/usr/local/bin` 경로를 차례로 본다 [1].
+`tsk.indxparse`는 PATH에서 `INDXParse.py`를 찾고 없으면 `/usr/local/bin/INDXParse.py`를 실행한다 [18].
+`ez.pecmd`의 대체 파서는 가상 환경에서 `pyscca`를 불러오지 못하면 `/usr/lib/python3/dist-packages`에서 불러온다 [14][19].
+고른 실행 파일과 Sigma 룰 폴더는 명령 문자열에 남는다 [3][8].
+`pyscca`를 어느 폴더에서 불러왔는지는 응답과 호출 기록에 남지 않는다 [20].
+
+### T07.06 대체 사실을 응답·기록에 표시
+
+**구현.** `ez.pecmd`는 PECmd가 플랫폼을 이유로 실행을 거부하거나 `tool_unavailable`이거나 실패하면 같은 입력으로 `pyscca` 파서를 실행한다 [21].
+그 응답은 `parser: libscca`, PECmd가 실행되지 않았다는 `parser_note`, `pecmd_unavailable`, `pecmd_reason`과 PECmd 결과의 `tool_unavailable`·`fallback` 값을 싣는다 [20].
+호출 기록에는 실패한 PECmd 실행 항목과 명령 문자열이 `pyscca prefetch parse`인 대체 실행 항목이 따로 남는다 [11][20].
+PECmd가 플랫폼 문구 없이 실패하고 `error` 값도 없으면 `pecmd_reason`은 빈 문자열이다 [20].
+NTFS 마운트는 `lowntfs-3g` 시도가 실패해 다른 마운트로 넘어가면 그 오류를 `lowntfs_attempt_stderr`로 싣는다 [22].
+
+### T07.07 대체에 따른 검증·입력 범위 변화 표시
+
+**구현.** NTFS 마운트가 `lowntfs-3g`가 아닌 방법으로 성공하면 응답은 `case_insensitive: false`와 `path_case_note`를 싣는다 [22].
+`path_case_note`는 Windows 경로를 찾지 못해도 대소문자가 다른 이름으로 있을 수 있으니 상위 폴더를 먼저 보라고 적는다 [22].
+`ez.pecmd`의 대체 파서는 Prefetch 파일 수 `files_seen`, 읽은 파일 수 `files_parsed`, 파일마다의 실패 `parse_failures`를 싣는다 [20].
+대체 파서가 쓰는 CSV의 열은 서버 코드가 정한 10개다 [23].
+
+### 근거
+
+[1] 선택 실행 파일 표다.
+
+```python
+# Wrappers that shell out to an OPTIONAL binary (not on every SIFT build).
+# tool id -> (candidate names/paths — any one present = installed, install hint).
+# A tool whose binary is missing fails fast with a typed `tool_unavailable`
+# result and is left out of the manifest, so DAIR never prescribes it.
+_OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
+    "misc.chainsaw_hunt": (("chainsaw",), "see install.sh for the binary release "
+                                         "(github.com/WithSecureLabs/chainsaw)"),
+    "misc.capa_analyze": (("capa",), "pip install flare-capa"),
+    "strings.floss_extract": (("floss",), "pip install flare-floss"),
+    "misc.olevba_scan": (("olevba", "olevba3"), "pip install oletools"),
+    "misc.mraptor_scan": (("mraptor", "mraptor3"), "pip install oletools"),
+    "misc.densityscout_scan": (("densityscout", "/usr/local/bin/densityscout"),
+                               "install densityscout (cert.at) to /usr/local/bin"),
+    "misc.hindsight_chrome": (("/usr/local/bin/hindsight.py",), "pip install pyhindsight"),
+    "misc.usnparser_parse": (("/usr/local/bin/usnparser",), "install usnparser to /usr/local/bin"),
+    "misc.pff_export": (("pffexport",), "apt install pff-tools"),
+    "misc.readpst_extract": (("readpst",), "sudo apt install pst-utils"),
+    "misc.srum_export": (("esedbexport",), "apt install libesedb-utils"),
+}
+```
+
+[`tools/tool_capabilities.py:356-374`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L356-L374)
+
+[2] 실행 파일을 찾고 없으면 `tool_unavailable` 결과를 만든다.
+
+```python
+def optional_binary(tool_id: str, which=None) -> str | None:
+    """Resolved binary for an optional-binary tool; None when none is installed.
+    Tools outside the table are always considered available ("")."""
+    spec = _OPTIONAL_BINARIES.get(tool_id)
+    if not spec:
+        return ""
+    which = which or shutil.which
+    return next((b for b in (which(n) for n in spec[0]) if b), None)
+
+
+def tool_unavailable_result(tool_id: str, which=None) -> dict | None:
+    """Typed fail-fast result when `tool_id`'s binary is missing, else None."""
+    if optional_binary(tool_id, which) is not None:
+        return None
+    names, hint = _OPTIONAL_BINARIES[tool_id]
+    return {"success": False, "status": "tool_unavailable", "tool_unavailable": True,
+            "binary": names[0],
+            "error": f"{names[0].rsplit('/', 1)[-1]} not installed — {hint}",
+            "note": ("An uninstalled tool establishes nothing about the evidence; "
+                     "settle it with misc.record_disposition(target_kind='tool', "
+                     "reason='inapplicable') or use another parser.")}
+```
+
+[`tools/tool_capabilities.py:377-397`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L377-L397)
+
+[3] Chainsaw 도구가 확인 뒤 찾은 실행 파일을 쓴다.
+
+```python
+    if output_path:
+        assert_output_safe(output_path)
+    missing = tool_unavailable_result("misc.chainsaw_hunt", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.chainsaw_hunt", _bin_or_warn)
+```
+
+[`tools/misc.py:2528-2533`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2528-L2533)
+
+[4] 설치되지 않은 도구를 도구 목록에서 뺀다.
+
+```python
+def unavailable_tools() -> set[str]:
+    """Optional-binary tools whose binary is not installed on this host."""
+    return {t for t in _OPTIONAL_BINARIES if optional_binary(t) is None}
+
+
+def _installed(tools: list[str]) -> list[str]:
+    missing = unavailable_tools()
+    return [t for t in tools if t not in missing]
+
+
+def tool_capability_manifest() -> dict:
+    """Return a copy of the structured manifest."""
+    return {
+        "version": MANIFEST_VERSION,
+        "capabilities": copy.deepcopy(_CAPABILITIES),
+        "substitutions": copy.deepcopy(_SUBSTITUTIONS),
+    }
+
+
+def allowed_tool_names(evidence_kinds=None) -> set[str]:
+    """Return every tool ID that DAIR/reasoning may place in priority_tools —
+    only those the case's evidence can feed when `evidence_kinds` is known."""
+    names: set[str] = set()
+    for cap in _CAPABILITIES:
+        names.update(cap.get("tools", []))
+    return {t for t in names - unavailable_tools() if tool_fits_evidence(t, evidence_kinds)}
+```
+
+[`tools/tool_capabilities.py:400-425`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L400-L425)
+
+[5] 확인 없이 정해진 경로로 실행하는 도구다.
+
+```python
+def vol3_bin() -> str:
+    return "/usr/local/bin/vol"
+
+
+def vol3_symbols() -> str:
+    """Return writable Volatility 3 symbol cache directory, creating it if needed."""
+    # Use `or` so an empty VOLATILITY_SYMBOLS env var falls back to the default
+    path = os.environ.get("VOLATILITY_SYMBOLS") or os.path.expanduser("~/.cache/volatility3/symbols")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def ez_tool(name: str, subdir: str | None = None) -> str:
+    base = "/opt/zimmermantools"
+    if subdir:
+        return f"dotnet {base}/{subdir}/{name}.dll"
+    return f"dotnet {base}/{name}.dll"
+```
+
+[`core/paths.py:182-198`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L182-L198)
+
+```python
+@mcp.tool()
+@output_safe
+def analyzemft_parse(mft_path: str, output_csv: str) -> dict:
+    """
+    Parse $MFT file using analyzeMFT (Python-based alternative to MFTECmd).
+    mft_path: path to extracted $MFT.
+    output_csv: destination CSV file.
+    """
+    return run(
+        ["/usr/local/bin/analyzemft", "-f", mft_path, "-o", output_csv],
+        timeout=600,
+        output_dir=output_csv,
+    )
+```
+
+[`tools/misc.py:312-324`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L312-L324)
+
+[6] 실행기가 실행 파일이 없을 때 돌려주는 문구다.
+
+```python
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        result["timed_out"] = True
+
+    except FileNotFoundError as e:
+        result["stderr"] = f"Tool not found: {e}"
+
+    except Exception as e:
+        result["stderr"] = f"Executor error: {e}"
+
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_tool(result)
+    return result
+```
+
+[`core/executor.py:196-208`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L196-L208)
+
+[7] yara-python을 도구 안에서 불러온다.
+
+```python
+@mcp.tool()
+@output_safe
+def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
+    """
+    Scan a single file with YARA rules.
+    rules_path: path to a .yar file or a directory of .yar/.yara files.
+    Returns all matching rules with offsets and string identifiers.
+    """
+    try:
+        import yara
+        rules = _compile_rules(rules_path)
+        matches = rules.match(file_path, timeout=timeout)
+        return {
+            "success": True,
+            "file": file_path,
+            "match_count": len(matches),
+            "matches": [_match_to_dict(m) for m in matches],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "file": file_path, "matches": []}
+```
+
+[`tools/yara_tools.py:40-59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L40-L59)
+
+[8] Sigma 룰 폴더를 찾지 못하면 `-s`와 `--mapping` 없이 실행한다.
+
+```python
+    if sigma_dir is None:
+        for candidate in ("/opt/chainsaw/sigma", "/usr/local/share/chainsaw/sigma",
+                          "/usr/share/chainsaw/sigma"):
+            if os.path.isdir(candidate):
+                sigma_dir = candidate
+                break
+    cmd = [binary, "hunt", evtx_dir]
+    if sigma_dir:
+        cmd += ["-s", sigma_dir, "--mapping", sigma_dir + "/../mappings/sigma-event-logs-all.yml"]
+    if output_path:
+        cmd += ["--csv", "--output", output_path]
+    return run(cmd, timeout=3600)
+```
+
+[`tools/misc.py:2534-2545`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2534-L2545)
+
+[9] 일괄 실행은 명령 배열을 실행기에 바로 넘긴다.
+
+```python
+    import concurrent.futures
+
+    def _one(spec):
+        cmd = spec.get("cmd")
+        if not cmd or not isinstance(cmd, list):
+            return {"success": False, "error": "missing or invalid 'cmd' (must be list)"}
+        timeout = int(spec.get("timeout") or 300)
+        return run(cmd, timeout=timeout)
+```
+
+[`tools/misc.py:2644-2651`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2644-L2651)
+
+[10] 스스로 기록하지 않은 도구의 실패 결과를 호출 기록에 남긴다.
+
+```python
+        if not self_logged:
+            payload = _result_payload(result) or {}
+            ok = payload.get("success", True) is not False
+            err = "" if ok else str(payload.get("error") or "")[:512]
+            # A successful pure-Python tool's result IS its output: retain it
+            # so the call can be cited and its rows reviewed like any other.
+            try:
+                import json as _json
+                body = _json.dumps(payload, default=str) if ok and payload else ""
+            except Exception:
+                body = ""
+            return log.record_tool_call(
+                cmd=f"<py>:{tool_name}",
+                success=ok,
+                truncated=False,
+                retries=0,
+                exit_code=0 if ok else 1,
+                stderr=err,
+                elapsed_seconds=elapsed,
+                input_call_ids=_parent_cids(),
+                gate=str(payload.get("gate") or "") if not ok else "",
+                **({"stdout_full": body, "stdout_excerpt": body[:600]} if body else {}),
+            ) or 0
+```
+
+[`core/middleware.py:535-557`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L535-L557)
+
+[11] EZ Tools DLL이 없을 때의 표시다.
+
+```python
+def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: int = 300) -> dict:
+    if output_dir:
+        assert_output_safe(output_dir)
+    result = run_dotnet(dll, args, timeout=timeout, output_dir=output_dir,
+                        classify=_classify_dotnet_crash)
+    # Missing-binary detection: the .dll not being on disk is the unambiguous
+    # signal (dotnet's exit 145 also fires for genuine runtime faults). Augment
+    # the recorded result — the failed tool_call still lands in the trace, but
+    # now with an actionable fallback instead of a raw dotnet stack.
+    if not result.get("success") and not os.path.exists(dll):
+        name = os.path.basename(dll)
+        result["tool_unavailable"] = True
+        result["error"] = f"{name} is not installed in this deployment ({dll} not found)"
+        fb = _EZ_FALLBACKS.get(name)
+        if fb:
+            result["fallback"] = fb
+    return result
+```
+
+[`tools/eztools.py:61-77`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L61-L77)
+
+[12] DLL이 없을 때 알리는 다른 도구 문구다.
+
+```python
+# When an EZ Tool .dll is absent from a deployment, dotnet fails with a cryptic
+# "The application '<dll>' does not exist" / exit 145. Surface that as a clear
+# `tool_unavailable` result and, where the same artifact can be reached another
+# way, name the fallback so the agent redirects instead of dropping the step.
+_EZ_FALLBACKS = {
+    "PECmd.dll": (
+        "Prefetch parser unavailable — recover EXECUTION evidence from other "
+        "artifacts instead: UserAssist (ez.recmd_hive on the user's NTUSER.DAT), "
+        "Amcache (ez.amcacheparser), and AppCompatCache/ShimCache "
+        "(ez.appcompatcacheparser). Prefetch existence/last-run can also be read "
+        "from $MFT (ez.mftecmd on C:\\Windows\\Prefetch)."
+    ),
+    "AmcacheParser.dll": (
+        "Amcache parser unavailable — use UserAssist (ez.recmd_hive) and "
+        "AppCompatCache (ez.appcompatcacheparser) for execution/presence evidence."
+    ),
+    "AppCompatCacheParser.dll": (
+        "ShimCache parser unavailable — use Amcache (ez.amcacheparser) and "
+        "UserAssist (ez.recmd_hive) for presence/execution evidence."
+    ),
+}
+```
+
+[`tools/eztools.py:13-33`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L13-L33)
+
+[13] .NET 예외 출력을 읽어 실패와 `tool_unavailable`을 정한다.
+
+```python
+def _classify_dotnet_crash(result: dict, stdout: str, stderr: str) -> None:
+    """EZ tools print an .NET 'Unhandled exception' and can still exit 0 (SQLECmd
+    without a native SQLite.Interop on Linux): the run parsed nothing, so it
+    must not be recorded as a success."""
+    text = f"{stdout}\n{stderr}"
+    if "Unhandled exception" not in text and "DllNotFoundException" not in text:
+        return
+    result["success"] = False
+    m = re.search(r"DllNotFoundException: Unable to load shared library '([^']+)'", text)
+    if m:
+        result["status"] = "tool_unavailable"
+        result["tool_unavailable"] = True
+        dll = next((t for t in str(result.get("cmd", "")).split()
+                    if t.lower().endswith(".dll")), "EZ tool")
+        result["error"] = (f"{os.path.basename(dll)} "
+                           f"crashed: native library {m.group(1)!r} is not available "
+                           f"on this host — NOTHING was parsed.")
+    else:
+        m = re.search(r"Unhandled exception[.:]?\s*([^\n]{0,200})", text)
+        result["status"] = "error"
+        result["error"] = ("EZ tool crashed with an unhandled .NET exception — "
+                           "output is incomplete: " + (m.group(1).strip() if m else ""))
+    result["exit_meaning"] = result["error"][:200]
+```
+
+[`tools/eztools.py:36-58`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L36-L58)
+
+[14] `pyscca`가 없을 때의 결과다.
+
+```python
+    try:
+        import pyscca
+    except ImportError:
+        pyscca = _import_system_pyscca()
+    if pyscca is None:
+        pecmd_result["error"] = (
+            "PECmd cannot run on this platform and libscca (pyscca) is not installed — "
+            "no Prefetch parser is available. Install libscca-python, or recover "
+            "execution evidence from UserAssist / Amcache / AppCompatCache. "
+            "An unavailable parser does not establish absence of Prefetch evidence.")
+        pecmd_result["tool_unavailable"] = True
+        pecmd_result["status"] = "tool_unavailable"
+        return pecmd_result
+```
+
+[`tools/eztools.py:375-387`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L375-L387)
+
+[15] NTFS 읽기 전용 마운트의 시도 순서다.
+
+```python
+    options = f"ro,loop,norecover,offset={offset_bytes}"
+    low = None
+    if _lowntfs_available():
+        low = run(["mount", "-t", "lowntfs-3g", "-o", options + ",ignore_case",
+                   ewf_device, mount_point], needs_sudo=True)
+        if low["success"]:
+            low["case_insensitive"] = True
+            return low
+    first = run(["mount", "-o", options, ewf_device, mount_point], needs_sudo=True)
+    if first["success"]:
+        return _case_sensitive(first, low)
+    second = run(
+        ["mount", "-t", "ntfs-3g", "-o", options, ewf_device, mount_point],
+        needs_sudo=True,
+    )
+    if second["success"]:
+        return _case_sensitive(second, low)
+    second["first_attempt_stderr"] = first.get("stderr", "")
+    return _case_sensitive(second, low)
+```
+
+[`tools/ewf.py:118-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L118-L136)
+
+[16] 실행마다 명령 문자열을 결과에 담고 호출 기록 항목을 쓴다.
+
+```python
+    result: dict[str, Any] = {
+        "success": False,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "elapsed_seconds": 0.0,
+        "truncated": False,
+        "cmd": " ".join(cmd),
+        "retries": 0,
+        "progress_lines": [],
+    }
+```
+
+[`core/executor.py:148-158`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L148-L158)
+
+[17] `lowntfs-3g`가 있는지 본다.
+
+```python
+_LOWNTFS = "/usr/bin/lowntfs-3g"
+
+
+def _lowntfs_available() -> bool:
+    return os.path.exists(_LOWNTFS)
+```
+
+[`tools/ewf.py:96-100`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L96-L100)
+
+[18] INDXParse 실행 파일을 고른다.
+
+```python
+    binary = shutil.which("INDXParse.py") or "/usr/local/bin/INDXParse.py"
+    cmd = [binary, "-d", "-f", mft_path]
+    result = run(cmd, timeout=600)
+```
+
+[`tools/sleuthkit.py:364-366`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L364-L366)
+
+[19] 시스템 패키지 폴더에서 `pyscca`를 불러온다.
+
+```python
+def _import_system_pyscca():
+    """pyscca ships as a Debian package (python3-libscca) in the system
+    dist-packages, which a venv does not see. Borrow it from there when the
+    interpreter matches; None when libscca is genuinely absent."""
+    import sys
+    sysdir = "/usr/lib/python3/dist-packages"
+    if not os.path.isdir(sysdir):
+        return None
+    added = sysdir not in sys.path
+    if added:
+        sys.path.append(sysdir)
+    try:
+        import pyscca
+        return pyscca
+    except ImportError:
+        return None
+    finally:
+        if added:
+            sys.path.remove(sysdir)
+```
+
+[`tools/eztools.py:342-360`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L342-L360)
+
+[20] 대체 파서의 결과와 호출 기록 항목이다.
+
+```python
+    summary = (f"libscca parsed {rows} of {len(files)} prefetch file(s) -> {out_path}"
+               + (f"; {len(failures)} failed: " + "; ".join(failures[:5]) if failures else ""))
+    result = {"success": rows > 0, "stdout": summary,
+              "stderr": "" if rows else "no prefetch file could be parsed",
+              "exit_code": 0 if rows else 1, "truncated": False, "retries": 0,
+              "elapsed_seconds": 0.0,
+              "cmd": f"pyscca prefetch parse {prefetch_path} --csv {out_path}"}
+    _log_tool(result)
+    return {**result, "parser": "libscca",
+            "parser_note": ("PECmd did not run here; libscca parsed the same Prefetch "
+                            "artifacts into the same CSV."),
+            # Keep PECmd's own diagnosis visible — the substitution is recorded,
+            # never silent.
+            "pecmd_unavailable": True,
+            "pecmd_reason": (pecmd_result.get("error")
+                             or ("PECmd does not run on non-Windows platforms"
+                                 if _pecmd_platform_refusal(pecmd_result) else "")),
+            # Carry PECmd's own diagnosis (missing DLL, named alternatives) so a
+            # substitution never hides that the primary parser was unavailable.
+            **{k: pecmd_result[k] for k in ("tool_unavailable", "fallback", "installation_hint")
+               if pecmd_result.get(k)},
+            "output_path": out_path, "files_seen": len(files), "files_parsed": rows,
+            "parse_failures": failures,
+            # Neither parser produced rows: surface PECmd's own error first.
+            **({"error": pecmd_result.get("error") or "no prefetch file could be parsed"}
+               if not rows else {})}
+```
+
+[`tools/eztools.py:444-469`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L444-L469)
+
+[21] PECmd가 실패하면 대체 파서로 넘어간다.
+
+```python
+@mcp.tool()
+@output_safe
+def ez_pecmd(
+    prefetch_path: str,
+    output_dir: str,
+    output_file: str = "prefetch.csv",
+) -> dict:
+    """
+    Parse Windows Prefetch files — execution timestamps (up to 8 last run times), file references.
+    prefetch_path: path to a single .pf file or the Prefetch directory.
+
+    Off Windows PECmd cannot decompress; libscca writes the same CSV (`parser`).
+    """
+    flag = "-f" if prefetch_path.endswith(".pf") else "-d"
+    args = [flag, prefetch_path, "--csv", output_dir, "--csvf", output_file]
+    result = _ez(f"{EZ}/PECmd.dll", args, output_dir=output_dir)
+    if (_pecmd_platform_refusal(result) or result.get("tool_unavailable")
+            or not result.get("success")):
+        return _prefetch_libscca(prefetch_path, output_dir, output_file, result)
+    result.setdefault("parser", "PECmd")
+    return result
+```
+
+[`tools/eztools.py:472-492`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L472-L492)
+
+[22] 마운트 방법에 따라 대소문자 표시와 앞선 시도의 오류를 붙인다.
+
+```python
+def _case_sensitive(result: dict, low: Optional[dict]) -> dict:
+    """Mark a fallback mount case-sensitive so a path miss is not read as absence."""
+    result["case_insensitive"] = False
+    if low is not None:
+        result["lowntfs_attempt_stderr"] = low.get("stderr", "")
+    if result.get("success"):
+        result["path_case_note"] = ("Mounted case-SENSITIVE: a Windows path that is not "
+                                    "found may exist with different case (e.g. "
+                                    "Windows/appcompat) — list the parent directory "
+                                    "before concluding it is absent.")
+    return result
+```
+
+[`tools/ewf.py:139-149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L139-L149)
+
+[23] 대체 파서가 쓰는 CSV 머리글이다.
+
+```python
+    rows, failures = 0, []
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["SourceFilename", "ExecutableName", "Hash", "Version", "RunCount",
+                         "LastRun", "PreviousRunTimes", "Volumes", "FileCount", "FilesLoaded"])
+```
+
+[`tools/eztools.py:405-409`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L405-L409)

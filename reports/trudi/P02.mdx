@@ -1,0 +1,957 @@
+---
+cell: P02
+details:
+- id: P02.02
+  exception: true
+- id: P02.03
+  exception: true
+- id: P02.04
+  exception: false
+---
+
+# P02 다음 작업 결정
+
+### P02.02 규칙·조사 상태로 추천
+
+**구현.** 모든 도구 호출을 지나는 `NarrationMiddleware`가 단계와 호출 기록의 상태를 보고 응답에 다음 작업을 붙인다 [1][2].
+단계 값이 비어 있고 `reason.hypothesize`도 `reason.plan`도 없으면 증거 도구 응답마다 `dair_notice`로 `reason.hypothesize`, `reason.plan`, `dair.assess`를 차례로 부르라고 적는다 [1].
+`reason.hypothesize`만 있으면 남은 두 단계를 부르라고 적고 `reason.plan`까지 있으면 증거 도구를 막고 `dair.assess`를 부르라고 돌려준다 [1].
+Analyze·Scan 단계에서 기록한 발견사항이 하나도 없으면 60초에 한 번 `finding_notice`로 `misc.record_finding`을 부르라고 적는다 [2].
+같은 인자로 같은 결과가 되풀이되면 `repeat_notice`로 다른 질의나 `dair.assess`를 권한다 [3].
+`misc.job_status`를 다른 일 없이 연달아 부르면 `poll_advisory`로 다른 분석을 먼저 하라고 적는다 [4].
+Report 단계에서 증거 도구를 부르면 Collect로 옮기고 `phase_transition`으로 끝나면 `dair.assess`로 Report에 돌아가라고 적는다 [5].
+
+`dair.assess`는 처방 모델의 답을 규칙으로 고친 뒤 작업 지시를 돌려준다 [6].
+발견사항이 없는데 모델이 Report를 고르면 전이를 막고 `misc.record_finding`을 작업 지시 맨 앞에 넣는다 [6].
+Collect·Analyze(후보 호스트가 있으면 Scan까지)를 거치지 않았는데 Report를 고르면 빠진 단계로 넣는다 [7].
+Collect 단계의 작업 지시가 비면 공격 단계 다섯 가지 가운데 아직 보지 않은 단계의 수집 도구로 채운다 [8][9].
+수집 도구로 채우는 목록은 Windows 디스크 산출물 도구이고 P01.04의 증거 종류 대조만 거친다 [8][9].
+증거 종류에 OS가 없어 Linux 디스크 이미지 사건에도 `ez.recmd_hive`·`ez.pecmd` 같은 Windows 도구를 권한다 [8][9].
+단계를 떠나려 할 때 그 단계에서 처방한 도구가 돌지도 처분되지도 않았으면 전이를 막고 그 도구를 다시 작업 지시에 넣는다 [10].
+이 고친 내용은 `server_override`로 응답과 호출 기록에 남는다 [6].
+`reason.pre_report_check`는 보고를 막는 사유를 `blocking_issues`로 돌려주고 Report 단계에서 준비가 안 됐으면 Collect로 옮긴다 [11].
+사유 문장은 돌려야 할 도구나 남겨야 할 처분을 적고 그 판단은 P03.03에서 본다.
+
+고정 절차 문서를 돌려주는 경로는 없어 P02.01에는 연결하지 않는다.
+서버 지침은 증거를 읽기만 한다는 것과 출력 폴더, 시각 기준만 적는다 [12].
+조사 순서를 적은 `claude/CLAUDE.md`는 `install.sh`가 Claude Code 전역 지침으로 설치하는 클라이언트 구성이다 [13].
+도구 응답의 `_metadata`에 붙는 교차 확인 도구는 R04에서 본다 [14].
+
+**예외.** `dair_notice`와 `reason.plan` 뒤의 차단은 단계 값이 비어 있을 때만 적용된다 [1].
+미들웨어 주석은 DAIR가 아직 돌지 않은 Triage를 빈 단계 값으로 적는다 [15].
+그러나 `misc.start_execution_log`가 부르는 `configure`는 새 호출 기록이든 다시 읽은 호출 기록이든 `dair_call`이 없으면 단계 값을 `Triage`로 정한다 [16].
+그래서 호출 기록을 연 뒤에는 `dair.assess`를 한 번도 부르지 않아도 이 알림과 차단이 적용되지 않고 기록을 열기 전의 호출에만 적용된다 [1][16].
+`TRUDI_DAIR_NUDGE`를 `0`·`off`·`false`·`none`으로 두면 `dair_notice`, `finding_notice`, 차단이 모두 꺼진다 [17].
+알림 판단 중 예외가 나면 알림 없이 통과시킨다 [1][2].
+`finding_notice`가 세는 발견사항 수는 프로세스 메모리의 `_ritual`이 호출 기록을 어디까지 읽었는지 기억해 이어 센 값이다 [18].
+항목 수가 줄 때만 처음부터 다시 세므로 호출 기록을 항목이 더 많은 다른 사건의 기존 파일로 바꾸면 앞 사건의 발견사항 수가 남고 새 파일의 앞부분은 세지 않는다 [18].
+그래서 새 사건에 기록한 발견사항이 없어도 `finding_notice`가 붙지 않을 수 있다 [2][18].
+
+### P02.03 모델 계획 생성
+
+**구현.** `dair.assess`는 서버 안에서 처방 모델을 불러 다음 작업 지시를 만든다 [19].
+처방 모델은 `ANTHROPIC_API_KEY`가 있으면 Anthropic API로, `DAIR_URL`만 있으면 OpenAI 호환 API로 부르고 `DAIR_BACKEND`로 고를 수 있다 [19].
+모델 입력에는 에이전트가 쓴 결과 요약, 서버가 가진 단계 스택과 현재 단계, 증거 종류, 아직 돌지 않은 작업 지시, IOC 탐지 범위의 열린 항목이 들어간다 [20].
+이 입력에는 결과 요약 안의 증거 글을 데이터로 표시하는 머리말이 없다 [20].
+DAIR가 한 번이라도 돈 뒤에는 에이전트가 보낸 단계 스택 대신 서버가 기록한 스택을 보낸다 [21].
+시스템 지시는 `priority_tools`를 빠짐없는 작업 지시로 정의하고 에이전트는 그 목록만 돌린다고 적는다 [22].
+서버는 모델 답의 형식을 검사해 한 번 고쳐 달라고 다시 묻고 그래도 틀리면 `dair_schema`로 실패를 돌려준다 [23].
+작업 지시에 도구 목록에 없는 이름이 있으면 `unknown_priority_tools`에 적기만 하고 빼지 않는다 [24].
+그 뒤 P02.02의 규칙과 P01.04의 증거 종류 대조로 작업 지시를 고친다.
+
+`reason.plan`은 에이전트가 준 사건 설명과 사전 조사 출력으로 모델에게 우선순위가 있는 조사 계획과 처음 돌릴 도구 3~5개를 받는다 [25].
+`reason.advise`는 분석가의 질문과 상황으로 모델의 조언과 `priority_tools`를 받는다 [26].
+두 도구의 모델은 `REASON_BACKEND`·`ANTHROPIC_API_KEY`·`REASON_URL`로 정한다 [27].
+`reason.plan`·`reason.advise`의 `priority_tools`는 증거 종류와 대조하지 않고 돌려준다 [25][26].
+`reason.draft_command`는 분석가의 작업 문장을 도구 호출 후보로 바꾸기만 하고 실행하지 않는다 [28].
+서버 밖 클라이언트 모델이 세우는 계획은 이 상세에 넣지 않는다.
+
+**예외.** 서버를 다시 띄운 뒤 다른 기록 호출보다 먼저 부른 `dair.assess`는 호출 기록을 다시 읽기 전에 모델 입력을 만든다 [21][29].
+그때는 에이전트가 보낸 단계 스택을 쓰고 증거 종류와 남은 작업 지시 없이 모델에게 계획을 받는다 [20][29].
+P01.04에서 본 대로 증거 종류 판별이 일부만 훑었거나 다른 폴더를 봤으면 처방 모델은 그 종류 목록에 맞춰 작업을 권한다 [20].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** `ewf.mount_full_image`는 E01 이미지를 분석할 수 있게 마운트하는 단계를 묶은 도구다 [30].
+`ewfmount`로 장치를 붙인 뒤 `mmls`로 파티션 표를 읽는다 [30].
+파티션마다 `fsstat`으로 NTFS를 찾아 그 오프셋으로 읽기 전용 마운트를 한다 [31].
+모델은 이미지 경로와 마운트 지점 두 곳만 고른다 [30].
+`ez.recmd_batch`는 폴더 아래 하이브 파일을 찾아 하이브마다 RECmd 배치를 따로 돌리고 하이브별 결과를 합쳐 돌려준다 [32].
+모델은 폴더, 배치 파일, 출력 폴더, 최대 하이브 수를 고른다 [32].
+묶음 안의 단계가 실패했을 때 무엇을 알리는지는 T08에서 본다.
+
+### 근거
+
+[1] 단계와 호출 기록 상태로 알림과 차단을 정한다: [`core/middleware.py:149-188`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L149-L188).
+
+```python
+        if phase:
+            return "allow", ""            # engaged: DAIR directs; Report handled above
+        _scan_ritual()
+        if _ritual.has_plan:
+            return "block", (
+                "DAIR PROTOCOL: Triage is complete (reason.plan recorded) but "
+                "DAIR has not been engaged. Call " + _DAIR_CALL_SHAPE + " to "
+                "receive the Collect work order before any further forensic "
+                "tools. Findings cannot be recorded until DAIR is engaged "
+                "(gate dair_required)."
+            )
+        if _ritual.has_hypothesize:
+            return "notice", (
+                "DAIR PROTOCOL: Triage ritual in progress — after the baseline "
+                "batch, run reason.plan(case_description=..., "
+                "evidence_available=..., case_question=...), then "
+                + _DAIR_CALL_SHAPE + ". Findings cannot be recorded until DAIR "
+                "is engaged."
+            )
+        # Ritual not yet started: standing notice on every forensic result —
+        # persistent instruction pressure, no counter, no block.
+        return "notice", (
+            "DAIR PROTOCOL: the Triage ritual has not started. After the "
+            "baseline batch: (1) reason.hypothesize(hypothesis_kind="
+            "\"case_question\", observation=<the case question>), then "
+            "(2) reason.plan(case_description=..., evidence_available=..., "
+            "case_question=...), then (3) " + _DAIR_CALL_SHAPE + ". Findings "
+            "cannot be recorded until DAIR is engaged (gate dair_required)."
+        )
+    except Exception:
+        return "allow", ""
+```
+
+[`core/middleware.py:158-188`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L158-L188)
+
+[2] 발견사항이 없을 때의 알림이다.
+
+```python
+def _finding_nudge() -> str:
+    """Advisory, phase-conditioned: in Analyze/Scan with zero recorded findings."""
+    if not DAIR_NUDGE_ENABLED:
+        return ""
+    try:
+        from core.execution_log import log
+        phase = getattr(log, "_current_phase", "") or ""
+        if phase not in ("Analyze", "Scan"):
+            return ""
+        _scan_ritual()
+        if _ritual.findings:
+            return ""
+        now = time.monotonic()
+        if now - _ritual.last_finding_notice < _FINDING_NOTICE_INTERVAL_S:
+            return ""
+        _ritual.last_finding_notice = now
+        return (
+            f"FINDINGS: the investigation is in {phase} with 0 recorded "
+            f"findings. For each confirmed observation call "
+            f"misc.record_finding(description=..., confidence=..., "
+            f"linked_call_id=<this call's _trudi_call_id>, claim_kind=..., "
+            f"category=..., act=..., input_call_ids=[...]). Analysis that is "
+            f"never recorded cannot reach the report."
+        )
+```
+
+[`core/middleware.py:191-214`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L191-L214)
+
+[3] 같은 호출이 같은 결과를 내면 알린다.
+
+```python
+        st["identical"] += 1
+        n = st["identical"] + 1
+        return (
+            f"REPEAT CALL: this exact call has now run {n}x with an identical "
+            f"result — re-running it cannot produce new evidence. If it is a "
+            f"negative, record it once (misc.record_finding, "
+            f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", with "
+            f"scope) and move to a DIFFERENT query, or call dair.assess "
+            f"for the next work order."
+        )
+```
+
+[`core/middleware.py:295-304`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L295-L304)
+
+[4] 작업 상태를 연달아 물으면 알린다.
+
+```python
+def _note_poll_and_advise(payload: dict) -> str:
+    """Called on a job_status result. Returns an advisory once the model has
+    polled several times in a row without doing other work."""
+    try:
+        _poll_run["count"] += 1
+        n = _poll_run["count"]
+        if n <= POLL_ADVISORY_AFTER:
+            return ""
+        if not isinstance(payload, dict) or payload.get("status") != "running":
+            return ""
+        files = payload.get("output_files_so_far", "?")
+        secs = payload.get("elapsed_seconds", "?")
+        return (
+            f"POLLING LOOP: you have called job_status {n}x in a row with no "
+            f"other work — the carve is still running ({secs}s, {files} files) "
+            f"and polling does not speed it up. Do OTHER analysis NOW (query "
+            f"the http_session_inventory / ngrep patterns you have not tried, "
+            f"read.output on produced files, record findings, or call "
+            f"dair.assess); poll job_status again only AFTER a real step. "
+            f"The finished result will be waiting."
+        )
+```
+
+[`core/middleware.py:323-343`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L323-L343)
+
+[5] Report 단계의 증거 도구 호출을 Collect로 옮기고 알린다.
+
+```python
+            if (should_block and _report_phase()
+                    and not tool_name.endswith(("record_finding", "submit_finding"))):
+                # Report work that needs evidence goes to Collect (above Report,
+                # so a DAIR pop resumes it) instead of a refusal plus a manual
+                # dair_assess round trip.
+                try:
+                    from core.execution_log import log
+                    log.record_phase_transition("Collect", "report_follow_up", trigger=tool_name)
+                    notices.append(("phase_transition",
+                                    f"Report -> Collect: {tool_name} is evidence work. Finish it, "
+                                    f"then dair_assess with stack_action='pop' to resume Report."))
+```
+
+[`core/middleware.py:662-672`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L662-L672)
+
+[6] 발견사항이 없으면 Report를 막고 `misc.record_finding`을 앞에 넣는다.
+
+```python
+    # Server-side refusal: Report with ZERO findings in the trace is never a
+    # valid transition — a report has nothing to say. The model's decision is
+    # overridden, the override is persisted on the entry, and the work order
+    # asks for findings.
+    server_override = None
+    try:
+        from core.execution_log import log as _flog
+        _n_findings = len(_flog.index().active_findings) if getattr(_flog, "_path", None) else 0
+    except Exception:
+        _n_findings = 0
+    if assessment.get("next_phase") == "Report" and _n_findings == 0:
+        server_override = {"kind": "report_refused_zero_findings",
+                           "detail": "no finding entries in trace",
+                           "model_next_phase": "Report",
+                           "model_stack_action": assessment.get("stack_action")}
+        assessment["transition_recommended"] = False
+        assessment["next_phase"] = ""
+        assessment["stack_action"] = "stay"
+        assessment["transition_rationale"] = (
+            "Server override: Report refused — the trace holds no finding entries. "
+            "Record findings (misc.record_finding with a typed claim) from a collection "
+            "phase, then re-assess."
+        )
+        d = assessment.get("directives") or {}
+        pt = [t for t in (d.get("priority_tools") or []) if t != "misc.record_finding"]
+        d["priority_tools"] = ["misc.record_finding"] + pt
+        assessment["directives"] = d
+```
+
+[`tools/dair.py:1192-1218`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1192-L1218)
+
+[7] 거치지 않은 단계가 있으면 Report 대신 그 단계로 넣는다.
+
+```python
+def missing_report_phases(entries) -> list:
+    """Phases a static investigation must have transited before Report:
+    Collect AND Analyze always; Scan additionally when host candidate pivots
+    exist (a lead to other hosts demands the sweep). [] when satisfied or when
+    this is a live-monitoring investigation trace."""
+    if _is_live_monitoring_trace(entries):
+        return []
+    entered = _phases_entered(entries)
+    required = ["Collect", "Analyze"]
+    if any(isinstance(pv, dict) and str(pv.get("kind") or "").lower() == "host"
+           for e in (entries or []) if isinstance(e, dict) and e.get("type") == "dair_call"
+           for pv in (e.get("candidate_pivots") or [])):
+        required.append("Scan")
+    return [ph for ph in required if ph not in entered]
+```
+
+[`tools/dair.py:834-847`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L834-L847)
+
+```python
+    _missing_phases: list = []
+    if assessment.get("next_phase") == "Report":
+        try:
+            from core.execution_log import log as _phlog
+            if getattr(_phlog, "_path", None):
+                _missing_phases = missing_report_phases(getattr(_phlog, "_entries", None) or [])
+        except Exception:
+            _missing_phases = []
+    if assessment.get("next_phase") == "Report" and _missing_phases and server_override is None:
+        server_override = {"kind": "report_refused_phase_coverage",
+                           "detail": f"phases never entered: {', '.join(_missing_phases)}",
+                           "model_next_phase": "Report",
+                           "model_stack_action": assessment.get("stack_action")}
+        _next = _missing_phases[0]
+        assessment["transition_recommended"] = True
+        assessment["next_phase"] = _next
+        assessment["stack_action"] = "push"
+        assessment["transition_rationale"] = (
+            f"Server override: Report refused — the investigation never entered "
+            f"{', '.join(_missing_phases)}. A defensible report requires the full "
+            f"DAIR cycle (Triage → Collect → Analyze{' → Scan' if 'Scan' in _missing_phases else ''} "
+            f"→ Report); transitioning to {_next} to run the systematic collection "
+            f"the phase exists for."
+        )
+```
+
+[`tools/dair.py:1225-1248`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1225-L1248)
+
+[8] Collect 작업 지시가 비면 보지 않은 공격 단계의 도구로 채운다.
+
+```python
+            elif _cur3 == "Collect":
+                _backfill = _filter_tools(prescribe_for_gaps(_entries3), _kinds)[0]
+                if _backfill:
+                    server_override = {"kind": "lifecycle_backfill",
+                                       "detail": f"empty Collect work order backfilled from "
+                                                 f"uncovered lifecycle phases: {', '.join(_backfill)}"}
+                    _d3 = assessment.get("directives") or {}
+                    _d3["priority_tools"] = _backfill
+                    assessment["directives"] = _d3
+                    assessment["investigation_focus"] = (
+                        "Examine the uncovered attack-lifecycle phase(s) — persistence, "
+                        "privilege escalation, lateral movement, evidence of execution, "
+                        "exfiltration — with the prescribed tools.")
+```
+
+[`tools/dair.py:1328-1340`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1328-L1340)
+
+[9] 공격 단계별 수집 도구와 채우는 함수다.
+
+```python
+# MCP collection tools per phase — disk / event-log based, so they apply to any
+# Windows disk image (the evidence-aware prescription in dair_assess filters out
+# memory/pcap tools). dair_assess backfills an empty work order from these for
+# the phases still not examined, so the director always has a concrete agenda.
+COLLECT_TOOLS: dict = {
+    "persistence": ["ez.recmd_hive", "misc.parse_scheduled_tasks", "ez.evtxecmd",
+                    "misc.regripper_hive"],
+    "privilege_escalation": ["ez.evtxecmd", "misc.evtx_filter"],
+    "lateral_movement": ["ez.evtxecmd", "misc.evtx_filter"],
+    "execution": ["ez.pecmd", "ez.amcacheparser", "ez.appcompatcacheparser", "ez.sqlecmd"],
+    "exfil": ["misc.usnparser_parse", "ez.lecmd", "misc.device_install_inventory",
+              "misc.chat_db_export"],
+}
+```
+
+[`tools/_gates/_lifecycle.py:184-196`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/_lifecycle.py#L184-L196)
+
+```python
+def prescribe_for_gaps(entries) -> list:
+    """Collection tools for the lifecycle phases still `not_examined`, deduped and
+    filtered to those not already run (by binary signature). Empty when every
+    phase is at least examined — the signal that the phase's work is done and the
+    investigation can advance rather than backfill."""
+    cov = coverage(entries)
+    from tools._gates.work_order import _binary_sig
+    succ = [(e.get("cmd") or "").lower() for e in (entries or [])
+            if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
+    out: list = []
+    for pid in LIFECYCLE:
+        if cov[pid]["status"] != "not_examined":
+            continue
+        for t in COLLECT_TOOLS.get(pid, []):
+            if t in out:
+                continue
+            sig = _binary_sig(t)
+            if sig and any(sig in c for c in succ):     # tool already ran anywhere
+                continue
+            out.append(t)
+    return out
+```
+
+[`tools/_gates/_lifecycle.py:199-219`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/_lifecycle.py#L199-L219)
+
+[10] 처방한 도구가 남았으면 단계 전이를 막고 다시 넣는다: [`tools/dair.py:1398-1432`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1398-L1432).
+
+```python
+    if (server_override is None and assessment.get("transition_recommended")
+            and str(assessment.get("stack_action")) in ("push", "pop")
+            and str(assessment.get("next_phase") or "") != "Report"):
+        try:
+            from tools._gates.work_order import _display as _display6
+            _entries6 = getattr(_flog, "_entries", None) or []
+            # Every tool prescribed in this phase, not just the latest order:
+            # listing one at a time drip-fed the work order a round per tool.
+            _outstanding = _unrun_phase_tools(_entries6, current, _kinds)
+            if _outstanding:
+                server_override = {"kind": "work_order_incomplete",
+                                   "detail": f"unrun prescribed tools: {', '.join(_outstanding)}",
+                                   "model_next_phase": assessment.get("next_phase"),
+                                   "model_stack_action": assessment.get("stack_action")}
+                assessment["transition_recommended"] = False
+                assessment["stack_action"] = "stay"
+                _d6 = assessment.get("directives") or {}
+                _cur = list(_d6.get("priority_tools") or [])
+                _d6["priority_tools"] = _outstanding + [t for t in _cur
+                                                        if _display6(t) not in _outstanding]
+                assessment["directives"] = _d6
+```
+
+[`tools/dair.py:1403-1423`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1403-L1423)
+
+[11] `reason.pre_report_check`는 막는 사유를 남기고 Report 단계면 Collect로 옮긴다.
+
+```python
+        conclusion = (f"READY_TO_REPORT: {str(ready).lower()}\n"
+                      f"BLOCKING_ISSUES: {'; '.join(result['blocking_issues']) or 'none'}")
+        if not ready and log._current_phase == "Report":
+            result["phase_returned_to"] = "Collect"
+        log.record_reason_call(
+            tool="reason_pre_report_check", success=True, conclusion=conclusion,
+            directives={}, blockers=result["blocking_issues"],
+            input_call_ids=[e['call_id'] for e in active_findings(log._entries)],
+            extra=result)
+        if not ready and log._current_phase == "Report":
+            # Evidence gaps go back to Collect, above Report: a DAIR pop resumes
+            # Report once the work is done. Recorded, so a restart replays it.
+            log.record_phase_transition("Collect", "pre_report_not_ready",
+                                        trigger="reason_pre_report_check")
+        return result
+```
+
+[`tools/reasoning.py:3433-3447`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3433-L3447)
+
+[12] 서버 지침이다.
+
+```python
+mcp = FastMCP(
+    "trudi-sift",
+    instructions=(
+        "TRUDI SIFT MCP Server — exposes SANS SIFT Workstation forensic tools as typed MCP tools. "
+        "All tools are read-only with respect to evidence. "
+        "Output paths must be within analysis/, exports/, or reports/ directories. "
+        "Timestamps are always UTC."
+    ),
+)
+```
+
+[`server.py:38-46`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/server.py#L38-L46)
+
+[13] 클라이언트 전역 지침의 조사 반복 순서(문서): [`claude/CLAUDE.md:260-268`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/CLAUDE.md#L260-L268).
+`install.sh`가 이 파일을 Claude Code 설정 폴더에 설치한다.
+
+```bash
+cp "$CLAUDE_MD_SRC" "$CLAUDE_MD_DEST"
+ok "Installed TRUDI orchestrator to $CLAUDE_MD_DEST"
+```
+
+[`install.sh:319-320`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L319-L320)
+
+[14] 도구 응답의 `_metadata`에 교차 확인 도구를 붙인다.
+
+```python
+        # DECAY: discovery guidance — full first 3 calls per tool, then every 10th
+        _fk_counts[tool_name] += 1
+        if _fk_counts[tool_name] <= 3 or _fk_counts[tool_name] % 10 == 0:
+            if advisories:
+                meta["advisories"] = advisories
+            if corroboration:
+                meta["corroboration"] = corroboration
+```
+
+[`tools/_enrich.py:130-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L130-L136)
+
+[15] 미들웨어 주석은 DAIR가 돌기 전 단계 값을 빈 값으로 적는다.
+
+```python
+#
+#   Triage (DAIR not yet engaged, _current_phase == ""):
+#     baseline collection        → allow + standing protocol notice (a session
+#                                  that never STARTS the ritual would otherwise
+#                                  stay in baseline freedom forever — observed
+#                                  live within minutes of the first deploy:
+#                                  48 calls, no hypothesize, tcpdump_read x38)
+#     after reason_hypothesize   → notice: finish the ritual (reason.plan → dair)
+#     after reason_plan          → BLOCK forensic tools: call dair_assess to
+#                                  enter Collect. Measured 2026-08-28: 10/11
+#                                  compliant historical runs make ZERO MCP
+#                                  forensic calls between plan and first dair,
+#                                  so this boundary never fires on a compliant
+#                                  driver. dair/reason/record tools are
+#                                  allowlisted — the way forward is always open.
+```
+
+[`core/middleware.py:81-95`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L81-L95)
+
+[16] `configure`는 새 호출 기록과 `dair_call` 없는 기존 호출 기록의 단계 값을 `Triage`로 정한다.
+
+```python
+        # If no dair_call has happened yet on the rehydrated trace, default
+        # to Triage so subsequent entries are phased.
+        if not self._current_phase:
+            self._current_phase = "Triage"
+            self._phase_stack = [{
+                "phase": "Triage",
+                "entry_reason": "session_resume_default",
+                "depth": 0,
+            }]
+```
+
+[`core/execution_log.py:818-826`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L818-L826)
+
+```python
+            # Default to Triage — the DAIR spec says every investigation starts
+            # there ("with a confirmed positive detection already in hand"),
+            # so every entry from session start should be stamped with a phase.
+            # The first dair_assess will reconcile if the agent's declared
+            # current_phase differs.
+            self._dair_seen = False
+            self._current_phase = "Triage"
+            self._phase_stack = [{
+                "phase": "Triage",
+                "entry_reason": "session_start_default",
+                "depth": 0,
+            }]
+```
+
+[`core/execution_log.py:900-911`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L900-L911)
+
+[17] 알림을 끄는 환경 변수다.
+
+```python
+DAIR_NUDGE_ENABLED = (os.environ.get("TRUDI_DAIR_NUDGE") or "1").strip().lower() not in (
+    "0", "off", "false", "none")
+```
+
+[`core/middleware.py:100-101`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L100-L101)
+
+[18] 알림 판단 상태와 다시 읽는 조건이다.
+
+```python
+class _RitualState:
+    """Incremental view of the trace's Triage-ritual facts. Per-process; a
+    trace reset (new case / shorter entry list) clears it."""
+    def __init__(self) -> None:
+        self.scanned_idx = 0
+        self.has_hypothesize = False
+        self.has_plan = False
+        self.findings = 0
+        self.last_finding_notice = 0.0
+
+
+_ritual = _RitualState()
+
+
+def _scan_ritual() -> None:
+    from core.execution_log import log
+    entries = log._entries
+    if len(entries) < _ritual.scanned_idx:      # trace reset / new case
+        _ritual.__init__()
+    for e in entries[_ritual.scanned_idx:]:
+        t = e.get("type")
+        if t == "reason_call":
+            tool = e.get("tool", "")
+            if tool == "reason_hypothesize":
+                _ritual.has_hypothesize = True
+            elif tool == "reason_plan":
+                _ritual.has_plan = True
+        elif t == "finding":
+            _ritual.findings += 1
+    _ritual.scanned_idx = len(entries)
+```
+
+[`core/middleware.py:117-146`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L117-L146)
+
+[19] 처방 모델을 고르고 부른다.
+
+```python
+def _active_backend() -> str:
+    if DAIR_BACKEND:
+        return DAIR_BACKEND
+    if ANTHROPIC_API_KEY:
+        return "claude"
+    if DAIR_URL:
+        return "openai-compat"
+    return "claude"
+```
+
+[`tools/dair.py:52-59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L52-L59)
+
+```python
+def _ask(system: str, user: str, max_tokens: int = 2048) -> dict:
+    backend = _active_backend()
+    if backend == "claude":
+        return _ask_claude(system, user, max_tokens)
+    return _ask_openai_compat(system, user, max_tokens)
+```
+
+[`tools/dair.py:364-368`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L364-L368)
+
+[20] 처방 모델에게 보내는 입력이다: [`tools/dair.py:942-1008`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L942-L1008).
+
+```python
+    user_parts = [f"TOOL RESULTS SUMMARY:\n{summary}"]
+    user_parts.append(f"\nCURRENT PHASE STACK (newest last):\n{json.dumps(stack, indent=2)}")
+    user_parts.append(f"\nCURRENT PHASE: {current}")
+    if context:
+        user_parts.append(f"\nCASE CONTEXT:\n{context}")
+    # Evidence the case holds: tools/challenges needing a missing kind are not
+    # prescribed (and are dropped server-side below). Live-monitoring traces
+    # and an undetermined inventory are never filtered.
+    _ev_profile = _evidence_profile(case_context)
+    from core.evidence_kinds import filter_kinds as _fk_kinds
+    _kinds = _fk_kinds(_ev_profile)
+    if _kinds:
+        user_parts.append(_evidence_line(_kinds))
+    try:
+        from core.execution_log import log as _wlog
+        _unrun_now = (_unrun_phase_tools(getattr(_wlog, "_entries", None) or [], current, _kinds)
+                      if getattr(_wlog, "_path", None) else [])
+    except Exception:
+        _unrun_now = []
+    if _unrun_now:
+        user_parts.append(f"\nWORK ORDER STATUS ({current}): prescribed but not yet run or "
+                          f"dispositioned: {', '.join(_unrun_now)}. The phase cannot be left "
+                          f"until each is run or dispositioned.")
+    ioc_leads = _ioc_coverage_block(current)
+    if ioc_leads:
+        user_parts.append(ioc_leads)
+    user = "\n".join(user_parts)
+```
+
+[`tools/dair.py:966-992`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L966-L992)
+
+[21] DAIR가 돈 뒤에는 서버의 스택을 쓴다.
+
+```python
+    current = stack[-1].get("phase", "Triage") if stack else "Triage"
+    # The server owns phase state. The agent's phase_stack is only used before
+    # DAIR has ever run; afterwards the recorded stack is what the model sees
+    # (an agent passing "[]" otherwise made the model believe it was in Triage).
+    try:
+        from core.execution_log import log as _plog
+        _ran = any(e.get("type") == "dair_call" for e in (getattr(_plog, "_entries", None) or []))
+        if _ran and getattr(_plog, "_current_phase", ""):
+            current = _plog._current_phase
+            stack = [dict(f) for f in (getattr(_plog, "_phase_stack", None) or [])]
+    except Exception:
+        pass
+```
+
+[`tools/dair.py:953-964`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L953-L964)
+
+[22] 처방 모델의 시스템 지시다.
+
+```python
+YOUR ROLE AS INVESTIGATION PLANNER:
+You do not merely assess what was found — you prescribe exactly what to investigate \
+next. The investigator executes ONLY what you list in directives.priority_tools. \
+Nothing outside that list will be run.
+- Non-Report phases: priority_tools MUST always be non-empty. If you have nothing \
+  new to prescribe for the current phase, transition to the next phase instead of \
+  emitting stay with an empty list. An empty priority_tools with stack_action "stay" \
+  is invalid and stalls the investigation.
+- investigation_focus: one sentence stating the question this batch answers.
+- Report phase only: priority_tools is empty; populate recommended_actions instead.
+- priority_tools is the complete work order — not a priority ranking. List every \
+  tool needed to answer investigation_focus. The investigator runs them all.
+- List the WHOLE work order for the phase in ONE response. The server refuses to \
+  leave a phase while any tool prescribed in it is unrun and re-issues all of them, \
+  so a tool held back for a later round costs a full round trip. Never drip-feed \
+  one tool per round.
+```
+
+[`tools/dair.py:432-447`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L432-L447)
+
+[23] 모델 답의 형식을 검사하고 한 번 다시 묻는다: [`tools/dair.py:1029-1074`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1029-L1074).
+
+```python
+        err = err or validate_assessment(assessment)
+        if not err:
+            break
+        if attempt == 0:
+            repaired = _ask(_system, user + "\nFORMAT REPAIR: " + err +
+                            ". Return the required RESULT assessment.", max_tokens=MAX_TOKENS_DAIR)
+            for key in ('input_tokens', 'output_tokens'):
+                repaired[key] = backend_result.get(key, 0) + repaired.get(key, 0)
+            backend_result = repaired
+        else:
+            cid = _log_dair({}, backend_result.get('input_tokens', 0),
+                            backend_result.get('output_tokens', 0), inputs=call_inputs,
+                            input_call_ids=input_call_ids, error=err, parse_path=PARSE_NONE,
+                            raw_answer=str(backend_result.get("raw") or "")[:20000])
+            return {'success': False, 'error': err, 'gate': 'dair_schema',
+                    'retryable': True, '_trudi_call_id': cid, 'schema_repair_attempted': True}
+```
+
+[`tools/dair.py:1059-1074`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1059-L1074)
+
+[24] 도구 목록에 없는 이름은 적기만 한다.
+
+```python
+def unknown_priority_tools(priority_tools: list[str] | None) -> list[str]:
+    """Return priority tool names not present in the manifest."""
+    allowed = allowed_tool_names()
+    return [t for t in (priority_tools or []) if isinstance(t, str) and t not in allowed]
+
+
+def annotate_directives_with_manifest(directives: dict) -> dict:
+    """Add manifest metadata to directives without changing the work order."""
+    out = copy.deepcopy(directives)
+    priority_tools = out.get("priority_tools") or []
+    out["tool_manifest_version"] = MANIFEST_VERSION
+    out["unknown_priority_tools"] = unknown_priority_tools(priority_tools)
+    out["priority_tool_capabilities"] = [
+        {"tool": t, "capability": capability_for_tool(t)}
+        for t in priority_tools
+        if isinstance(t, str)
+    ]
+    return out
+```
+
+[`tools/tool_capabilities.py:436-453`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L436-L453)
+
+[25] `reason.plan`의 시스템 지시와 처리다.
+
+```python
+_PLAN_SYS = (
+    "You are a senior DFIR analyst receiving a new case. Given the case description "
+    "and available evidence, produce a prioritized investigation plan:\n"
+    "1. Most likely threat scenarios based on the evidence profile\n"
+    "2. Highest-yield artifacts to examine first and why\n"
+    "3. Specific TTPs to hunt for given the scenario\n"
+    "4. Recommended tool sequence (memory → disk → network → enrichment or adjusted)\n"
+    "5. Red flags that would change the priority order mid-investigation\n\n"
+    "Be specific and opinionated. The investigator will follow this plan.\n"
+    "The DIRECTIVES block is the primary output — populate priority_tools with the "
+    "first 3-5 concrete tool calls the investigator should run, in order.\n\n"
+    "EXHAUSTIVE COLLECTION: for each artifact category in the plan, the tool sequence "
+    "must collect ALL instances, not just the first. Explicitly name: all registry hive "
+    "variants needed (SOFTWARE, SYSTEM, SAM, NTUSER.DAT per user profile), all event "
+    "log channels relevant to the TTP, all HTTP session types (Cookie headers, URL auth "
+    "params: login=, email=, user=, gausr=, Y=, T=), all browser profiles present. "
+    "If the case description includes a suspect list (class roster, employee directory, "
+    "user accounts), include a cross-reference step as a named plan item — it is "
+    "mandatory, not optional. The plan is incomplete if it names an identity-bearing "
+    "artifact category without specifying the full collection sequence for that category."
+    + _DIRECTIVES_INSTRUCTION
+    + _result_suffix("reason_plan")
+)
+```
+
+[`tools/reasoning.py:1902-1924`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1902-L1924)
+
+```python
+    capped = _cap_lines(evidence_available, 300)
+    user = f"CASE:\n{case_description}\n\nEVIDENCE AVAILABLE:\n{capped}"
+    if case_question and case_question.strip():
+        user = f"CASE QUESTION:\n{case_question.strip()}\n\n" + user
+    result = _ask(_PLAN_SYS, user, max_tokens=MAX_TOKENS_PLAN, _tool_name="reason_plan",
+                  input_call_ids=input_call_ids)
+    if case_question and case_question.strip():
+        result["case_question"] = case_question.strip()
+        try:
+            from core.execution_log import log as _elog
+            _elog.update_reason_call(result.get("_trudi_call_id", 0),
+                                     case_question=case_question.strip())
+        except Exception:
+            pass
+    return result
+```
+
+[`tools/reasoning.py:2087-2101`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L2087-L2101)
+
+[26] `reason.advise`의 처리다.
+
+```python
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_advise")
+def reason_advise(question: str, situation: str,
+                  input_call_ids: list[int] | None = None) -> dict:
+    """
+    Free-form mid-investigation guidance for the human analyst — the answer
+    to "what should I do next?" when it needs reasoning, not a work order.
+
+    question: the analyst's ask, in their words.
+    situation: auto-assembled by the caller — case question, current phase,
+        recent tool results, open work-order items.
+
+    Returns: advice (str) + the standard reason fields; any suggested
+    priority_tools land in directives for the caller to merge into the
+    work order. Advisory only — never executes or records anything.
+    """
+    user = f"QUESTION:\n{question}\n\nSITUATION:\n{situation}"
+    result = _ask(_ADVISE_SYS, user, max_tokens=MAX_TOKENS_DRAFT_COMMAND,
+                  _tool_name="reason_advise", input_call_ids=input_call_ids)
+    rb = result.get("result_block")
+    advice = rb.get("advice") if isinstance(rb, dict) else None
+    result["advice"] = str(advice).strip() if advice \
+        else (result.get("conclusion") or "").strip()
+    return result
+```
+
+[`tools/reasoning.py:3546-3569`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3546-L3569)
+
+[27] `reason.*` 모델 백엔드 선택이다.
+
+```python
+def _active_backend() -> str:
+    """Resolve which backend to use, with auto-detection from available keys."""
+    if REASON_BACKEND:
+        return REASON_BACKEND
+    if ANTHROPIC_API_KEY:
+        return "claude"
+    if REASON_URL:
+        return "openai-compat"
+    return "claude"  # will fail gracefully with a clear error if no key
+```
+
+[`tools/reasoning.py:148-156`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L148-L156)
+
+[28] `reason.draft_command`는 실행하지 않는 후보를 돌려준다: [`tools/reasoning.py:3493-3527`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3493-L3527).
+
+```python
+def reason_draft_command(task: str, tool_briefs: str, context: str = "",
+                         input_call_ids: list[int] | None = None) -> dict:
+    """
+    Draft runnable TRUDI commands for a natural-language task. NEVER executes
+    anything — returns candidates for the analyst to select and edit.
+
+    task: the analyst's plain-English request ("pull MFT entry 12345 from
+        evidence.csv into another csv").
+    tool_briefs: caller-selected candidate tools, one per line (name,
+        purpose, parameters) — the caller does lexical retrieval over the
+        full catalog so a small model is not drowned in 278 schemas.
+    context: case paths, evidence files, produced-output listing.
+
+    Returns: candidates=[{command, why}] plus the standard reason fields.
+    """
+```
+
+[`tools/reasoning.py:3495-3509`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3495-L3509)
+
+[29] 호출 기록을 다시 읽는 `_auto_recover`는 기록 함수 안에서만 돈다.
+
+```python
+    def _auto_recover(self) -> None:
+        # Must be called under self._lock.
+        if self._path is not None:
+            return
+
+```
+
+[`core/execution_log.py:1005-1009`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1005-L1009)
+
+```python
+def _evidence_profile(case_context: str = "") -> dict:
+    """core.evidence_kinds profile of the active case (fail-open: undetermined
+    on any error)."""
+    try:
+        from core.execution_log import log as _elog
+        from core.evidence_kinds import evidence_profile
+        return evidence_profile(getattr(_elog, "_entries", None) or [], None, case_context)
+    except Exception:
+        return {"kinds": [], "determined": False, "live_monitoring": False}
+```
+
+[`tools/dair.py:737-745`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L737-L745)
+
+[30] `ewf.mount_full_image`의 단계다: [`tools/ewf.py:209-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L209-L274).
+
+```python
+@mcp.tool()
+def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) -> dict:
+    """
+    Convenience: mount an E01 image end-to-end.
+    1. ewfmount the E01 to ewf_mount_point (exposes ewf1)
+    2. Read partition table via mmls
+    3. Probe candidate partitions with fsstat and mount the NTFS one
+
+    Returns the mount result and the detected NTFS offset in bytes.
+    """
+
+    os.makedirs(ewf_mount_point, exist_ok=True)
+    os.makedirs(fs_mount_point, exist_ok=True)
+
+    # Step 1: ewfmount
+    ewf_result = run(["ewfmount", image_e01, ewf_mount_point], needs_sudo=True)
+    if not ewf_result["success"]:
+        return ewf_result
+
+    ewf_device = os.path.join(ewf_mount_point, "ewf1")
+
+    # Step 2: mmls to find NTFS partition
+    mmls_result = run(["mmls", ewf_device], needs_sudo=True)
+    if not mmls_result["success"]:
+        return mmls_result
+
+    sector_size = _mmls_sector_size(mmls_result["stdout"])
+    candidates = _mmls_partitions(mmls_result["stdout"])
+```
+
+[`tools/ewf.py:209-236`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L209-L236)
+
+[31] 파티션마다 `fsstat`으로 NTFS를 찾고 마운트한다.
+
+```python
+    # deriving an offset by hand.
+    offset_sectors = None
+    checked = []
+    for part in candidates:
+        probe = run(["fsstat", "-o", str(part["start"]), ewf_device], needs_sudo=True)
+        fs_type = ""
+        for line in (probe.get("stdout") or "").splitlines():
+            if line.lower().startswith("file system type:"):
+                fs_type = line.split(":", 1)[1].strip()
+                break
+        checked.append({**part, "fs_type": fs_type})
+        if "ntfs" in fs_type.lower():
+            offset_sectors = part["start"]
+            break
+
+    if offset_sectors is None:
+        return {"success": False,
+                "stderr": ("No NTFS filesystem found in any partition (fsstat probed "
+                           + ", ".join(f"sector {c['start']}: {c['fs_type'] or 'unreadable'}"
+                                       for c in checked) + ")."),
+                "partitions": checked, "mmls": mmls_result["stdout"]}
+
+    offset_bytes = offset_sectors * sector_size
+
+    # Step 3: mount NTFS (read-only, explicit ntfs-3g fallback)
+    mount_result = _mount_ntfs_ro(ewf_device, fs_mount_point, offset_bytes)
+    mount_result["ntfs_offset_bytes"] = offset_bytes
+    mount_result["ntfs_offset_sectors"] = offset_sectors
+    mount_result["ewf_device"] = ewf_device
+    return mount_result
+```
+
+[`tools/ewf.py:245-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L245-L274)
+
+[32] `ez.recmd_batch`의 하이브별 실행과 합치기다: [`tools/eztools.py:246-295`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L246-L295).
+
+```python
+    assert_output_safe(output_dir)
+    hives = _find_hives(hives_dir, max_hives=max(1, int(max_hives)))
+    if not hives:
+        return {"success": False, "error": f"no registry hives found under {hives_dir}",
+                "looked_for": list(_HIVE_NAMES)}
+    runs: list[dict] = []
+    for hive in hives:
+        parent = os.path.basename(os.path.dirname(hive)) or "root"
+        sub = os.path.join(output_dir, f"{parent}_{os.path.basename(hive)}".replace(" ", "_"))
+        args = ["-f", hive, "--bn", batch_file, "--csv", sub]
+        r = _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=sub, timeout=DEFAULT_TIMEOUT)
+        runs.append({"hive": hive, "success": bool(r.get("success")), "output_dir": sub,
+                     "elapsed_seconds": r.get("elapsed_seconds"),
+                     "_trudi_call_id": r.get("_trudi_call_id"),
+                     "error": (r.get("error") or (r.get("stderr") or "")[:200]) if not r.get("success") else ""})
+        if r.get("tool_unavailable"):
+            return {"success": False, "tool_unavailable": True, "error": r.get("error"),
+                    "fallback": r.get("fallback"), "hives": runs}
+    ok = [x for x in runs if x["success"]]
+    return {
+        "success": bool(ok),
+        "hives_found": len(hives),
+        "hives_ok": len(ok),
+        "hives_failed": len(runs) - len(ok),
+        "capped": len(hives) >= max(1, int(max_hives)),
+        "hives": runs,
+        "output_dir": output_dir,
+    }
+```
+
+[`tools/eztools.py:268-295`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L268-L295)

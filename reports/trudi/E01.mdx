@@ -1,0 +1,329 @@
+---
+cell: E01
+details:
+- id: 미구현
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 디스크 이미지·메모리 이미지·pcap·수집한 산출물 폴더를 경로 인자로 받아 외부 도구에 넘기지만 증거를 식별하는 목록이나 등록 정보를 따로 남기지 않는다 [1].
+증거를 등록하는 MCP 도구는 없고 분석 도구는 받은 경로가 어느 증거인지 확인하지 않는다 [1].
+
+등록 정보에 가장 가까운 것은 해시 도구의 기록 항목이다.
+`hash.file`과 `hash.verify_evidence_hash`는 호출마다 기록 항목에 경로·바이트 크기·MD5·SHA-1·SHA-256과 파일 상태 값을 annotation으로 남긴다 [2].
+이 항목은 모델이 해시 도구를 부른 파일에만 생기고 그 파일이 증거인지 표시하지 않는다 [2].
+경로는 모델이 준 문자열 그대로라 상대 경로일 수 있다 [3].
+항목의 시각은 해시를 계산한 호출의 시각이고 기록 항목에는 등록한 주체를 적는 칸이 없다 [4].
+이 기록은 호출 기록에 남은 도구 결과이므로 등록 목록으로 세지 않았다.
+전역 지침은 증거 파일마다 사건당 한 번 `hash.verify_evidence_hash`를 부르라고 모델에게 적는다 [5].
+기록된 검증을 찾는 `has_evidence_been_verified`가 있지만 서버 코드에서 부르는 곳은 없다 [6].
+
+사건 지침 견본 `case-template/CLAUDE.md`에는 증거 경로·시스템·설명 표와 증거를 받은 날짜·`Investigator` 칸이 있다 [7].
+이 표는 운영자가 채우고 모델이 읽는 문서이고 서버가 이 파일에서 읽는 값은 대시보드 링크에 쓰는 `Case ID` 하나다 [8].
+`reason.extract_case`는 서버가 부르는 모델로 사건 문서에서 `evidence_root`를 뽑아 응답으로 돌려줄 뿐 저장하지 않는다 [9].
+`dair.assess`는 사건 폴더의 `evidence/`와 `mnt/`를 훑어 증거 종류를 정하고 그 목록을 호출 기록에 남긴다 [10].
+이 값은 메모리·pcap·디스크 이미지 같은 종류의 집합이고 증거 항목을 하나씩 구별하지 않는다 [10].
+
+서버가 시작하는 살아 있는 단말 수집도 서버 쪽 목록에 오르지 않는다.
+`velo.collect_artifact`는 Velociraptor 수집을 시작하고 `flow_id`를 응답으로 돌려줄 뿐이다 [11].
+수집의 상태는 Velociraptor 서버의 flow 기록에 있고 `velo.wait_for_flow`는 그것을 조회한다 [12].
+`monitor.baseline_capture`는 단말 하나의 수집 결과를 요약한 기준선 JSON을 사건 폴더에 쓰고 그 안에 `client_id`·수집 시각·`flow_ids`를 적는다 [13].
+이 파일은 실시간 감시 탐지 규칙이 쓰는 기준선이고 다시 부르면 덮어쓰며 수집에 실패하면 쓰지 않는다 [13].
+그래서 이 파일도 증거 등록 목록으로 세지 않았다.
+
+같은 저장소의 `pilot/mirror.py`는 운영자가 돌리는 CLI로 trace를 .vera 사건으로 옮기면서 명령에 `verify_evidence_hash`가 든 `tool_call`마다 Evidence 행을 만든다 [14].
+이 CLI는 서버 밖 구성이라 E01 구현으로 세지 않았다.
+
+### 근거
+
+[1] 분석 도구는 받은 경로를 외부 도구 인자로 넘긴다: [`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22), [`tools/sleuthkit.py:15-19`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L15-L19), [`tools/plaso.py:26-30`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/plaso.py#L26-L30).
+
+[2] 해시 결과를 그 호출의 기록 항목에 annotation으로 붙인다.
+
+```python
+def _record_hash_result(result: dict, source_version: str) -> dict:
+    """Retain the typed hash result as evidence, rather than an invocation log."""
+    from core.execution_log import log
+    try:
+        path = os.path.abspath(result['file'])
+        stat = os.stat(path)
+    except OSError as exc:
+        return {'success': False, 'error': str(exc), 'file': result['file']}
+    if _cache_key(stat, path) != source_version:
+        return {'success': False, 'error': 'File changed while hashing; retry', 'file': result['file']}
+    version = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    payload = {k: result[k] for k in ('file', 'size_bytes', 'md5', 'sha1', 'sha256')}
+    cid = log.record_tool_call(cmd=f"hash.file {result['file']}", success=True,
+                               truncated=False, retries=0, exit_code=0,
+                               stdout_full=json.dumps(payload), stdout_excerpt=json.dumps(payload))
+    log.annotate_tool_call(cid, hash_result=payload, source_version=source_version,
+                           hashed_file_version=version,
+                           source_hashes={result['file']: result['sha256']})
+    return {**result, '_trudi_call_id': cid}
+```
+
+[`tools/hashing.py:56-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L56-L74)
+
+[3] 기록되는 `file`은 모델이 준 `file_path`다.
+
+```python
+        result = {
+            "success": True,
+            "file": file_path,
+            "size_bytes": size,
+            "md5": md5.hexdigest(),
+            "sha1": sha1.hexdigest(),
+            "sha256": sha256.hexdigest(),
+        }
+```
+
+[`tools/hashing.py:111-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L111-L118)
+
+[4] 기록 항목의 칸이다.
+
+```python
+            entry: dict = {
+                "call_id": cid,
+                "type": "tool_call",
+                "ts": _utcnow(),
+                "cmd": cmd,
+                "success": success,
+                "truncated": truncated,
+                "retries": retries,
+                "exit_code": exit_code,
+                "elapsed_seconds": elapsed_seconds,
+                "stderr": stderr[:512] if stderr else "",
+            }
+```
+
+[`core/execution_log.py:1490-1501`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1490-L1501)
+
+[5] 전역 지침의 해시 지시다: [`claude/CLAUDE.md:37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/CLAUDE.md#L37).
+
+[6] 기록된 검증을 찾는 함수다.
+
+```python
+    def has_evidence_been_verified(self, evidence_path: str) -> bool:
+        """True if a successful hash_verify_evidence_hash exists in the trace
+        for this evidence_path. Used by the hash-verification feature to
+        avoid re-running the check on the same evidence in one session."""
+        with self._lock:
+            for e in self._entries:
+                if e.get("type") != "reason_call":
+                    continue
+                if e.get("tool") != "hash_verify_evidence_hash":
+                    continue
+                if not e.get("success"):
+                    continue
+                conclusion = e.get("conclusion", "") or ""
+                if conclusion.startswith("VERIFIED:") and evidence_path in conclusion:
+                    return True
+            return False
+```
+
+[`core/execution_log.py:828-843`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L828-L843)
+
+[7] 사건 지침 견본의 사건 정보와 증거 표다: [`case-template/CLAUDE.md:7-23`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/case-template/CLAUDE.md#L7-L23).
+
+[8] 서버가 사건 지침에서 읽는 값이다.
+
+```python
+def _detect_case_id(case_dir: str) -> str:
+    """Best-effort case_id discovery: look for `**Case ID**` in CLAUDE.md."""
+    md = os.path.join(case_dir, "CLAUDE.md")
+    if os.path.exists(md):
+        try:
+            with open(md) as f:
+                text = f.read(8192)
+            m = re.search(r"\*\*Case ID\*\*[:\s|]+([A-Za-z0-9_\-]+)", text)
+            if m:
+                return m.group(1)
+            m = re.search(r"case[_\s]id[:\s|]+([A-Za-z0-9_\-]+)", text, re.IGNORECASE)
+            if m:
+                return m.group(1)
+        except OSError:
+            pass
+    return os.path.basename(os.path.abspath(case_dir))
+```
+
+[`tools/misc.py:2679-2694`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2679-L2694)
+
+[9] `reason.extract_case`는 뽑은 값을 응답으로 돌려준다.
+
+```python
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_extract_case")
+def reason_extract_case(case_md: str,
+                        input_call_ids: list[int] | None = None) -> dict:
+    """
+    Extract typed case metadata from a case briefing document — the pilot
+    calls this at first boot so the case question, roster, and evidence
+    root prefill commands regardless of the briefing's formatting (a regex
+    parser only catches the canonical layout).
+
+    Returns: case_id, case_question, evidence_root, roster (list),
+    scenario_summary — empty where the document is silent.
+    """
+```
+
+[`tools/reasoning.py:3589-3601`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3589-L3601)
+
+```python
+    for key in ("case_id", "case_question", "evidence_root",
+                "scenario_summary"):
+        result[key] = str(rb.get(key) or "").strip()
+    result["roster"] = str_list(rb.get("roster"))
+    return result
+```
+
+[`tools/reasoning.py:3627-3631`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3627-L3631)
+
+[10] 증거 종류를 정하는 함수와 `dair.assess`가 그 값을 기록에 넘기는 곳이다.
+
+```python
+def evidence_profile(entries=None, case_dir: str | None = None, case_context: str = "") -> dict:
+    """{"kinds": sorted kinds, "determined": bool, "live_monitoring": bool}.
+
+    `determined` is True only when the case's evidence/ or mnt/ directory
+    showed at least one kind — the trace alone is a PARTIAL view (a memory
+    tool that ran first says nothing about the disk image not yet touched),
+    so trace signals only ever add kinds to a determined inventory. Callers
+    filter tools only when determined and not live-monitoring."""
+    if case_dir is None:
+        case_dir = case_dir_from_log()
+    base: set = set()
+    if case_dir:
+        base |= _evidence_dir_kinds(case_dir)
+        base |= _mounted_kinds(case_dir)
+    kinds = base | _trace_kinds(entries)
+    live_mon = is_live_monitoring_trace(entries)
+    if live_mon or _LIVE_CTX.search(case_context or ""):
+        kinds.add("live")
+    return {"kinds": sorted(kinds), "determined": bool(base), "live_monitoring": live_mon}
+```
+
+[`core/evidence_kinds.py:223-241`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_kinds.py#L223-L241)
+
+```python
+    _ev_extra = {"evidence_kinds": _ev_profile.get("kinds") or [],
+                 "evidence_determined": bool(_kinds)}
+    if _filtered_tools:
+        _ev_extra["server_filtered_tools"] = _filtered_tools
+    if _filtered_challenges:
+        _ev_extra["server_filtered_challenges"] = _filtered_challenges
+    call_id = _log_dair(assessment, tok_in, tok_out, inputs=call_inputs,
+                        input_call_ids=input_call_ids,
+                        candidate_pivots=candidate_pivots,
+                        extra=_ev_extra,
+```
+
+[`tools/dair.py:1456-1465`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/dair.py#L1456-L1465)
+
+[11] 수집을 시작하고 `flow_id`를 돌려준다.
+
+```python
+    res = _velo_query(vql, timeout=timeout)
+    if res["success"]:
+        rows = _parse_jsonl(res["stdout"])
+        res["rows"] = rows
+        for row in rows:
+            # rows shaped as {"flow": {"flow_id": "F.xxx", ...}}
+            flow = row.get("flow") if isinstance(row.get("flow"), dict) else None
+            fid = (flow or {}).get("flow_id") or row.get("flow_id")
+            if fid:
+                res["flow_id"] = fid
+                break
+    return res
+```
+
+[`tools/velo.py:263-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L263-L274)
+
+[12] flow 상태를 Velociraptor에 조회한다.
+
+```python
+        # has to match session_id, not flow_id.
+        res = _velo_query(
+            f"SELECT session_id AS flow_id, state, total_collected_rows, status "
+            f"FROM flows(client_id={json.dumps(client_id)}) "
+            f"WHERE session_id = {json.dumps(flow_id)}",
+        )
+        rows = _parse_jsonl(res["stdout"]) if res["success"] else []
+        if rows:
+            last_state = rows[0].get("state")
+            if last_state in ("FINISHED", "ERROR"):
+                res["rows"] = rows
+                res["final_state"] = last_state
+                return res
+```
+
+[`tools/velo.py:296-308`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L296-L308)
+
+[13] 기준선 수집의 설명과 기준선 파일을 쓰는 곳이다.
+
+```python
+@mcp.tool()
+@output_safe
+def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -> dict:
+    """Snapshot processes / persistence / network for `client_id`; write baseline JSON.
+
+    Runs each artifact in BASELINE_ARTIFACTS via `velo.collect_artifact`,
+    waits for completion, and assembles a baseline document with the
+    fields the detector templates expect (process_names, image_paths,
+    persistence_paths, endpoints).
+
+    Idempotent: re-running overwrites the existing baseline.
+    """
+```
+
+[`tools/monitor.py:307-318`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L307-L318)
+
+```python
+    baseline = {
+        "client_id": client_id,
+        "case_id": case_id,
+        "captured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "flow_ids": flow_ids,
+        "process_names": sorted(process_names),
+        "image_paths": sorted(image_paths),
+        "persistence_paths": sorted(persistence_paths),
+        "endpoints": endpoints,
+        "yara_rules_path": "/rules/trudi-demo.yar",
+    }
+
+    path = _baseline_path(case_id, client_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(baseline, indent=2))
+```
+
+[`tools/monitor.py:414-428`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L414-L428)
+
+[14] pilot 미러가 Evidence 행을 만드는 곳이다.
+
+```python
+def _mirror_evidence(case: Case, entry: dict, known_labels: set[str]) -> bool:
+    """A verify_evidence_hash call is the custody record: one Evidence row."""
+    cmd = entry.get("cmd", "")
+    parts = cmd.split()
+    label = next((p for p in parts[1:] if not p.startswith("-")), "")
+    if not label or label in known_labels:
+        return False
+    sha = _SHA256.search(entry.get("stdout_excerpt", "") or "")
+    case.add_evidence(label=label, kind="image",
+                      source="TRUDI hash.verify_evidence_hash",
+                      sha256=sha.group(0) if sha else "",
+                      notes=f"[trudi:cid {entry.get('call_id')}]")
+    known_labels.add(label)
+    return True
+```
+
+[`pilot/mirror.py:150-163`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/pilot/mirror.py#L150-L163)
+
+```python
+                if "verify_evidence_hash" in cmd:
+                    counts["evidence"] += _mirror_evidence(case, entry,
+                                                           known_evidence)
+```
+
+[`pilot/mirror.py:209-211`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/pilot/mirror.py#L209-L211)

@@ -1,0 +1,475 @@
+---
+cell: D09
+details:
+- id: D09.01
+  exception: false
+- id: D09.03
+  exception: false
+- id: D09.04
+  exception: false
+---
+
+# D09 파생물 저장 실패 처리
+
+### D09.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 표준 출력을 파일로 받는 외부 도구 실행, 오래 걸리는 카빙 작업, 서버 코드가 파생물이나 보고 산출물을 직접 쓰는 도구에 있다 [1][2][3][4][5][6][7].
+`run_with_output_file`은 출력 파일을 열거나 도구를 실행하다 난 예외를 잡아 `success`를 거짓으로 두고 그 내용을 표준 오류 칸에 담아 호출 기록에 남긴 뒤 돌려준다 [1].
+시간 제한에 걸리면 `timed_out`을 참으로 두지만 그때까지 쓴 파일은 `output_path`에 남고 결과와 호출 기록 항목에도 그 경로가 남는다 [1][8].
+카빙 작업은 셸이 도구의 종료 코드를 `exit` 파일에 쓰고 `misc.job_status`는 그 값이 0이 아니면 `success`를 거짓으로 두어 호출 기록에 남긴다 [2].
+종료 코드가 124(시간 제한)이면 결과에 `timed_out`과 그때까지 만든 파일 수를 알리는 `partial_output`을 싣는다 [9].
+`misc.write_final_report`는 보고서 파일을 `w` 모드로 열어 쓰고 쓰기 예외를 잡지 않는다 [3].
+미들웨어는 도구가 던진 예외를 `success`가 거짓인 `tool_call` 항목으로 남기고 `ToolError`로 바꿔 다시 던진다 [10].
+FastMCP 3.4.7에서 도구 호출 중 난 `ToolError`는 `isError`가 참인 도구 결과가 된다 [11].
+그래서 보고서 파일을 쓰지 못하면 `misc.write_final_report` 호출은 오류로 끝나고 경로를 담은 성공 응답은 나가지 않는다 [3][10][11].
+`accuracy.export_report`는 쓰기 `OSError`를 잡아 `success`가 거짓인 결과와 오류 문구를 돌려준다 [4].
+`misc.chat_db_export`와 `misc.cs_beacon_config`는 CSV·JSON 쓰기 `OSError`를 잡아 응답에 경고를 싣는다 [5].
+`misc.cs_beacon_config`는 그때 응답의 `output_path`를 비운다 [5].
+`misc.capa_analyze`는 쓰기 실패를 응답의 `write_error`에 싣고 `success`는 바꾸지 않는다 [6].
+`hash.hashdeep_compute`·`hash.md5deep_scan`·`net.http_session_inventory`·`net.pcap_identity_timeline`·`misc.knowns_pattern_generate`와 PECmd 대신 libscca로 프리페치를 읽는 경로는 `misc.write_final_report`처럼 파일 쓰기 예외를 잡지 않아 호출이 오류로 끝난다 [7][10][11].
+
+### D09.03 저장 확인·검증
+
+**구현.** 이 방식은 호출 기록의 저장 출력 파일과 카빙 작업의 완료 표시에 있다 [12][13].
+호출 기록은 도구의 전체 표준 출력을 임시 파일에 다 쓴 뒤 `<호출 ID>.txt`로 이름을 바꾸고 이름 바꾸기까지 끝난 경우에만 항목에 `stdout_path`를 남긴다 [12][14].
+출력이 상한(기본 8MB)을 넘어 앞부분만 썼으면 항목에 `stdout_partial`을 남긴다 [14][15].
+검토 모델에게 보내는 근거 묶음은 `stdout_partial`이 있는 출력을 `retained_output_complete`가 거짓인 출처로 싣는다 [16].
+카빙 작업은 셸이 도구가 끝난 뒤에 `exit` 파일을 쓰고 `misc.job_status`는 그 파일이 생기기 전까지 `running`으로 답하며 결과를 호출 기록에 올리지 않는다 [2][13].
+결과를 올린 작업은 상태 파일에 `collected`를 남겨 같은 결과를 한 번만 호출 기록에 올린다 [17].
+
+### D09.04 알림 없이 계속
+
+**구현.** 이 방식은 `misc.export_execution_log`, 호출 기록의 저장 출력 쓰기, `misc.device_install_inventory`의 CSV 쓰기에 있다 [18][12][19].
+`ExecutionLog.export`는 JSON과 markdown 파일 쓰기의 `OSError`를 잡아 표준 오류에 경고만 쓰고 `json_wrote`·`md_wrote`를 거짓으로 돌려준다 [18].
+`misc.export_execution_log`는 이 두 값을 보지 않고 `success`를 참으로 두어 두 파일 경로를 응답에 싣는다 [20].
+저장 출력 쓰기가 실패하면 호출 기록 항목에 `stdout_sidecar_error`만 남기고 항목을 그대로 쓴다 [12].
+외부 도구 실행기는 이 항목의 호출 ID만 결과에 넣으므로 도구 응답에는 저장 실패가 실리지 않는다 [21].
+`misc.device_install_inventory`는 전체 목록 CSV를 쓰다 난 `OSError`를 잡은 뒤 알리지 않고 응답에 요청한 `output_path`를 그대로 싣는다 [19].
+
+### 근거
+
+[1] 출력 파일로 받는 실행은 예외를 잡아 실패로 기록하고 시간 제한도 표시한다.
+
+```python
+    start = time.perf_counter()
+
+    try:
+        with open(output_path, mode) as f:
+            proc = subprocess.run(
+                cmd,
+                stdout=f,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=env,
+                cwd=cwd,
+            )
+        _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
+        result["stdout"] = f"Output written to {output_path}"
+        stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        result["stderr"], result["progress_lines"] = _parse_stderr(stderr_raw)
+
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        result["timed_out"] = True
+
+    except FileNotFoundError as e:
+        result["stderr"] = f"Tool not found: {e}"
+
+    except Exception as e:
+        result["stderr"] = f"Executor error: {e}"
+
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_tool(result)
+    return result
+```
+
+[`core/executor.py:414-443`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L414-L443)
+
+[2] 카빙 작업의 종료 코드 파일과 결과 수집이다.
+
+```python
+    inner = " ".join(shlex.quote(c) for c in cmd)
+    prefix = ("sudo timeout" if needs_sudo else "timeout") + f" {int(timeout)}"
+    script = (f"{prefix} {inner} > {shlex.quote(stdout_file)} "
+              f"2> {shlex.quote(stderr_file)}; echo $? > {shlex.quote(exit_file)}")
+    proc = subprocess.Popen(
+        ["sh", "-c", script], stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+```
+
+[`core/jobs.py:68-75`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L68-L75)
+
+```python
+    rc_text = _read(state["exit_file"]).strip()
+    try:
+        rc = int(rc_text)
+    except ValueError:
+        rc = -1
+    timed_out = rc == 124
+    stdout = _read(state["stdout_file"])
+    stderr = _read(state["stderr_file"])
+    if timed_out:
+        stderr = (f"Command timed out after {state['timeout']}s"
+                  + (f"\n{stderr}" if stderr else ""))
+
+    # Log the underlying command as a normal, citable tool_call (once).
+    res = {
+        "success": rc == 0, "stdout": stdout[:2000], "stderr": stderr[:2000],
+        "exit_code": rc, "truncated": len(stdout) > 2000, "retries": 0,
+        "elapsed_seconds": elapsed, "timed_out": timed_out,
+        "cmd": state["cmd"], "output_path": state["output_dir"],
+        "_stdout_full": stdout, "_stdout_chars": len(stdout),
+    }
+```
+
+[`core/jobs.py:127-146`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L127-L146)
+
+[3] 최종 보고서 파일 쓰기다.
+
+```python
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+```
+
+[`tools/misc.py:2206-2207`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2206-L2207)
+
+[4] `accuracy.export_report`의 쓰기 실패 처리다.
+
+```python
+    try:
+        with open(output_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        return {"success": False, "error": f"write failed: {e}"}
+```
+
+[`tools/accuracy.py:240-244`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/accuracy.py#L240-L244)
+
+[5] 대화 저장소 내보내기와 Cobalt Strike 설정 추출은 쓰기 실패를 경고로 싣는다.
+
+```python
+            for name, rows, header in specs:
+                p = os.path.join(out_dir, name)
+                with open(p, "w", newline="", encoding="utf-8") as fh:
+                    w = _csv.DictWriter(fh, fieldnames=header)
+                    w.writeheader()
+                    for r in rows:
+                        w.writerow({k: r.get(k, "") for k in header})
+                output_paths[name] = p
+        except OSError as e:
+            parsed["warning"] = f"CSV write failed: {e}"
+```
+
+[`tools/misc.py:585-594`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L585-L594)
+
+```python
+    if ok and output_path:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as fh:
+                fh.write(full)
+        except OSError as e:
+            res["warning"] = f"JSON write failed: {e}"
+            output_path = None
+```
+
+[`tools/misc.py:820-827`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L820-L827)
+
+[6] `capa_analyze`는 쓰기 실패를 `write_error`로 싣는다.
+
+```python
+    if output_path and result.get("success") and result.get("stdout"):
+        try:
+            with open(output_path, "w") as f:
+                f.write(result["stdout"])
+            result["output_path"] = output_path
+        except OSError as e:
+            result["write_error"] = str(e)
+```
+
+[`tools/misc.py:2572-2578`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2572-L2578)
+
+[7] 예외를 잡지 않고 파일을 쓰는 곳이다: [`tools/hashing.py:413-416`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L413-L416), [`tools/hashing.py:453-455`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L453-L455), [`tools/network.py:365-369`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L365-L369), [`tools/network.py:638-642`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L638-L642), [`tools/misc.py:2921-2925`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2921-L2925), [`tools/eztools.py:406-407`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L406-L407).
+
+[8] 호출 기록 항목에 `output_path`를 남긴다.
+
+```python
+            if output_path:
+                entry["output_path"] = str(output_path)
+```
+
+[`core/execution_log.py:1522-1523`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1522-L1523)
+
+[9] 시간 제한으로 끝난 작업의 결과다.
+
+```python
+def _finished_result(state: dict, elapsed: float, cached: bool) -> dict:
+    n = _count_outputs(state["output_dir"])
+    out = {
+        "success": state["exit_code"] == 0, "status": "finished",
+        "job_id": state["job_id"], "exit_code": state["exit_code"],
+        "elapsed_seconds": elapsed, "timed_out": state["timed_out"],
+        "stdout": state.get("stdout_excerpt", ""),
+        "stderr": state.get("stderr_final", ""),
+        "output_files": n, "output_dir": state["output_dir"],
+        "_trudi_call_id": state.get("call_id"),
+        "note": ("already collected — cite _trudi_call_id for findings from "
+                 "this carve" if cached else
+                 "collected. Cite _trudi_call_id for findings from this carve; "
+                 "read specific carved files with read.output."),
+    }
+    if state["timed_out"]:
+        out["partial_output"] = (
+            f"{n} files already produced in {state['output_dir']} — usable "
+            f"despite the timeout")
+    return out
+```
+
+[`core/jobs.py:166-185`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L166-L185)
+
+[10] 미들웨어는 도구 예외를 기록하고 `ToolError`로 다시 던진다.
+
+```python
+        async def _invoke(concurrent: bool):
+            try:
+                res = await call_next(context)
+            except ToolError:
+                raise
+            except asyncio.CancelledError:
+                _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
+                raise
+            except Exception as e:
+                _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
+                if _is_input_validation(e):
+                    # A typed refusal shape, like the gates: name the fields so the
+                    # agent fixes the kwarg instead of guessing from a 500.
+                    raise ToolError(
+                        f"{tool_name} rejected its input (gate: input_validation): "
+                        f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
+                    ) from e
+                raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+```
+
+[`core/middleware.py:733-750`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L733-L750)
+
+[11] FastMCP 3.4.7은 도구 호출 요청 처리기를 MCP Python SDK의 `call_tool` 처리기로 등록하고([`fastmcp_slim/fastmcp/server/mixins/mcp_operations.py:76-78`](https://github.com/PrefectHQ/fastmcp/blob/758397efa66e2cedac95ada540001bc44a95a646/fastmcp_slim/fastmcp/server/mixins/mcp_operations.py#L76-L78)) mcp 1.30.0의 처리기는 처리 중 난 예외를 `isError`가 참인 결과로 돌려준다([`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L473-L480)).
+`ToolError`는 `FastMCPError`의 하위 클래스다: [`fastmcp_slim/fastmcp/exceptions.py:38`](https://github.com/PrefectHQ/fastmcp/blob/758397efa66e2cedac95ada540001bc44a95a646/fastmcp_slim/fastmcp/exceptions.py#L38).
+
+[12] 저장 출력은 쓰기에 성공했을 때만 `stdout_path`를 남기고 실패하면 오류만 적는다.
+
+```python
+    def _write_stdout_sidecar(self, cid: int, text: str, entry: dict) -> None:
+        """Persist the complete stdout for `cid`. Called from record_tool_call
+        between _next_id() and _append_entry() — no lock is held across the
+        write and the filename is unique per cid, so the _flush re-entrancy
+        hazard does not apply. Never raises: a failed sidecar is recorded on
+        the entry (`stdout_sidecar_error`) and the entry is still written."""
+        final, partial, err = self._write_sidecar_text(f"{cid}.txt", text)
+        if final:
+            entry["stdout_path"] = final
+            if partial:
+                entry["stdout_partial"] = True
+        elif err:
+            _warn(f"stdout sidecar for call {cid} failed: {err}")
+            entry["stdout_sidecar_error"] = err
+```
+
+[`core/execution_log.py:1549-1562`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1549-L1562)
+
+[13] `exit` 파일이 없으면 실행 중으로 답한다.
+
+```python
+    if state.get("collected"):
+        return _finished_result(state, elapsed, cached=True)
+
+    if not os.path.exists(state["exit_file"]):
+        return {"success": True, "status": "running", "job_id": job_id,
+                "elapsed_seconds": elapsed,
+                "output_files_so_far": _count_outputs(state["output_dir"]),
+                "output_dir": state["output_dir"]}
+```
+
+[`core/jobs.py:117-124`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L117-L124)
+
+[14] 임시 파일에 쓴 뒤 이름을 바꾸고 상한을 넘으면 일부만 썼다고 돌려준다.
+
+```python
+    def _write_sidecar_text(self, name: str, text: str) -> tuple[str | None, bool, str]:
+        """Atomically write `text` to `.tool_output/<name>` (capped at
+        STDOUT_SIDECAR_CAP). Returns (path, partial, error); never raises."""
+        try:
+            from core.paths import STDOUT_SIDECAR_CAP
+            d = self.stdout_sidecar_dir()
+            if not d:
+                return None, False, ""
+            os.makedirs(d, exist_ok=True)
+            partial = len(text) > STDOUT_SIDECAR_CAP
+            body = text[:STDOUT_SIDECAR_CAP]
+            import tempfile
+            stem = os.path.splitext(name)[0]
+            fd, tmp = tempfile.mkstemp(prefix=f".{stem}-", suffix=".tmp", dir=d)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                    fh.write(body)
+                final = os.path.join(d, name)
+                os.replace(tmp, final)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return final, partial, ""
+        except Exception as e:
+            return None, False, str(e)[:200]
+```
+
+[`core/execution_log.py:1564-1591`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1564-L1591)
+
+[15] 저장 출력의 상한이다.
+
+```python
+# Full-stdout sidecar cap (bytes). The trace entry keeps a 600-char excerpt for
+# humans; the COMPLETE stdout is persisted to <analysis>/.tool_output/<cid>.txt
+# so the reviewer's EVIDENCE_REQUEST can fetch rows the excerpt cut off.
+STDOUT_SIDECAR_CAP = int(os.environ.get("TRUDI_STDOUT_SIDECAR_CAP") or str(8 * 1024 * 1024))
+```
+
+[`core/paths.py:25-28`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L25-L28)
+
+[16] 근거 묶음은 일부만 저장된 출력을 완전하지 않은 출처로 싣는다.
+
+```python
+            retained_complete = (bool(source.complete) and not bool(entry.get('stdout_partial'))
+                                 and not scan_truncated)
+            if source.kind != 'file':
+                retained_complete = retained_complete and not bool(entry.get('truncated'))
+                if not raw and entry.get('stdout_chars') is None:
+                    retained_complete = False
+```
+
+[`core/evidence_packets.py:302-307`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L302-L307)
+
+[17] 수집한 작업에 `collected`를 남긴다.
+
+```python
+    state["status"] = "finished"
+    state["collected"] = True
+    state["call_id"] = cid
+    state["stdout_excerpt"] = stdout[:2000]
+    state["stderr_final"] = stderr[:2000]
+    state["exit_code"] = rc
+    state["timed_out"] = timed_out
+    with open(path, "w") as f:
+        json.dump(state, f)
+    return _finished_result(state, elapsed, cached=False)
+```
+
+[`core/jobs.py:154-163`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L154-L163)
+
+[18] 호출 기록 내보내기는 쓰기 실패를 경고로만 남긴다.
+
+```python
+        entry_count = data.get("entry_count", 0)
+        json_ok = md_ok = False
+        try:
+            with open(path + ".json", "w") as f:
+                json.dump(data, f, indent=2)
+            json_ok = True
+        except OSError as e:
+            _warn(f"export JSON write failed ({path}.json): {e}")
+        try:
+            with open(path + ".md", "w") as f:
+                f.write(_render_entries(data.get("case_id"), data.get("entries", [])))
+            md_ok = True
+        except OSError as e:
+            _warn(f"export MD write failed ({path}.md): {e}")
+
+        return {
+            "entry_count": entry_count,
+            "json_wrote": json_ok,
+            "md_wrote": md_ok,
+        }
+```
+
+[`core/execution_log.py:2017-2036`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L2017-L2036)
+
+[19] `device_install_inventory`는 CSV 쓰기 실패를 알리지 않고 요청한 경로를 돌려준다.
+
+```python
+    if output_path and inv.get("success"):
+        try:
+            import csv
+            flag_ids = {d["identity"] for d in flagged}
+            with open(output_path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(["first_seen", "last_seen", "device_class", "vendor",
+                            "product", "vid", "pid", "interfaces", "actions", "flagged"])
+                for d in inv.get("devices", []):
+                    w.writerow([d.get("first_seen"), d.get("last_seen"), d.get("device_class"),
+                                d.get("vendor"), d.get("product"), d.get("vid"), d.get("pid"),
+                                "|".join(d.get("interfaces", [])), "|".join(d.get("actions", [])),
+                                "YES" if d.get("identity") in flag_ids else ""])
+        except OSError:
+            pass
+```
+
+[`tools/misc.py:703-717`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L703-L717)
+
+```python
+    return {
+        "success": inv.get("success", False),
+        "error": inv.get("error"),
+        "_trudi_call_id": cid,
+        "device_count": inv.get("device_count", 0),
+        "event_count": inv.get("event_count", 0),
+        "coverage_window": cov,
+        "flagged": flagged,
+        "devices": inv.get("devices", []),
+        "summary": summary,
+        "output_path": output_path,
+    }
+```
+
+[`tools/misc.py:741-752`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L741-L752)
+
+[20] `export_execution_log`는 내보내기 결과의 쓰기 여부를 보지 않는다.
+
+```python
+    result = log.export(output_path)
+    return {
+        "success": True,
+        "entry_count": result.get("entry_count", 0),
+        "json_path": output_path + ".json",
+        "md_path": output_path + ".md",
+    }
+```
+
+[`tools/misc.py:1995-2001`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1995-L2001)
+
+[21] 실행기는 기록한 호출 ID만 결과에 넣는다.
+
+```python
+    try:
+        from core.execution_log import log
+        parent = [log._last_dair_cid] if log._last_dair_cid else None
+        cid = log.record_tool_call(
+            cmd=result["cmd"],
+            success=result["success"],
+            truncated=result["truncated"],
+            retries=result["retries"],
+            exit_code=result["exit_code"],
+            stderr=result["stderr"],
+            elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+            input_call_ids=parent,
+            stdout_full=stdout_full,
+            output_path=result.get("output_path"),
+            exit_meaning=result.get("exit_meaning", ""),
+        )
+        result["_trudi_call_id"] = cid
+```
+
+[`core/executor.py:78-96`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L78-L96)

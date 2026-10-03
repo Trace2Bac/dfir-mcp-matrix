@@ -1,0 +1,836 @@
+---
+cell: E04
+details:
+- id: E04.01
+  exception: false
+- id: E04.02
+  exception: true
+- id: E04.03
+  exception: true
+- id: E04.05
+  exception: false
+- id: E04.07
+  exception: false
+- id: E04.08
+  exception: true
+---
+
+# E04 분석 입력 준비
+
+### E04.01 작업 사본 생성
+
+**구현.** 보관 파일이나 이미지의 내용 전체를 작업 위치에 푸는 도구는 `misc.pff_export`·`misc.readpst_extract`·`tsk.recover`다 [1][2][3].
+`misc.pff_export`는 PST·OST 메일 보관 파일을 `pffexport`로 풀어 메시지마다 폴더를 만든다 [1].
+코드 설명은 `pffexport`가 출력 폴더 이름 뒤에 `.export`를 붙인다고 적고 서버는 실제로 생긴 폴더를 `output_path`로 돌려주며 `read.mail`로 읽으라는 안내를 붙인다 [1].
+`misc.readpst_extract`는 PST를 `readpst`로 mbox 또는 메시지별 파일로 바꿔 출력 폴더에 쓴다 [2].
+`tsk.recover`는 `tsk_recover`로 파일시스템의 파일을 출력 폴더로 꺼내고 도구 설명은 `include_unallocated`가 참이면 삭제·비할당 파일까지 꺼낸다고 적는다 [3].
+`tsk.recover`는 늘 백그라운드 작업으로 돈다 [4].
+출력 위치는 모델이 정하고 서버는 그 위치가 증거 위치인지만 검사한다(E03.02) [5].
+파서와 외부 도구 대부분은 이런 사본 없이 증거 경로나 마운트 아래 경로를 그대로 받는다 [6].
+
+### E04.02 선택 추출
+
+**구현.** 모델이 고른 범위만 꺼내는 도구는 `tsk.icat`·`vol.dumpfiles`·`vol.memmap`이다 [7][8].
+`tsk.icat`은 모델이 준 inode 하나(ADS면 `번호-형식-ID`)의 내용을 모델이 정한 `output_path`에 쓴다 [7].
+`vol.dumpfiles`는 모델이 준 가상 주소나 PID로 메모리 안 파일 객체를 `output_dir`에 꺼내고 `vol.memmap`은 `dump`가 참이면 그 PID의 메모리를 꺼낸다 [8].
+조건을 대조하는 일은 Sleuth Kit과 Volatility가 한다 [7][8].
+
+서버 코드가 이름으로 파일을 골라 입력을 좁히는 도구는 `ez.recmd_batch`와 `misc.usbdeviceforensics`다 [9][10].
+`ez.recmd_batch`는 `per_hive`가 참이면 폴더 아래에서 이름이 `ntuser.dat`·`usrclass.dat`·`sam`·`system`·`software`·`security`·`amcache.hve`·`default`인 파일을 대소문자를 가리지 않고 찾고 트랜잭션 로그 확장자는 뺀다 [9].
+찾은 하이브는 폴더를 이름 차례로 돈 순서대로 `max_hives`(기본 64개)까지 하나씩 RECmd에 넘기고 파일을 옮기거나 복사하지 않는다 [9][11].
+`misc.usbdeviceforensics`는 받은 config 폴더에서 `SYSTEM`·`SOFTWARE`와 두 단계 위 `INF` 폴더의 `setupapi.dev.log`를 이름으로 골라 임시 폴더에 심볼릭 링크로 모은다 [10].
+그 임시 폴더를 `usbdeviceforensics`에 넘기고 도구가 끝나면 지운다 [12].
+`SYSTEM`을 찾지 못하면 받은 경로를 그대로 넘긴다 [10][12].
+
+**예외.** `ez.recmd_batch`에 `per_hive`를 거짓으로 주면 서버가 하이브를 고르지 않고 폴더 전체를 RECmd의 `-d`로 넘긴다 [11].
+
+### E04.03 전체·부분 마운트
+
+**구현.** 파일시스템으로 마운트하는 도구는 서버가 파티션을 고르는 `ewf.mount_full_image`와 모델이 시작 위치를 주는 `ewf.mount_ntfs`다 [13][14].
+이 도구는 `ewfmount`로 E01을 붙여 원시 디스크 `ewf1`을 만들고 `mmls`로 파티션 표를 읽는다 [13].
+파티션은 설명에 `ntfs`가 든 것을 앞에 두고 그다음 크기가 큰 차례로 늘어놓는다 [15].
+그 차례대로 `fsstat`을 돌려 파일시스템 종류가 NTFS인 첫 파티션을 고르고 시작 섹터에 `mmls`가 알린 섹터 크기를 곱해 오프셋을 정한다 [16].
+고른 파티션 하나만 읽기 전용으로 마운트하고 응답에 오프셋과 `ewf1` 경로를 적는다 [16].
+NTFS 파티션이 없으면 마운트하지 않고 살펴본 파티션과 파일시스템 종류를 실패 응답에 적는다 [16].
+파티션은 호출마다 새로 고르고 서버는 고른 값을 저장하지 않는다 [16].
+`ewf.mount_ntfs`는 모델이 정한 시작 위치 `offset_bytes`로 NTFS 파일시스템 하나를 마운트한다 [14].
+
+나머지 마운트 도구는 파일시스템을 마운트하지 않는다.
+`img.vshadow_mount`는 모델이 준 볼륨 오프셋으로 `vshadowinfo`를 먼저 돌려 섀도 복사본이 없으면 마운트하지 않고 있으면 그 수만큼 `vss1`부터의 경로를 돌려준다 [17].
+`img.losetup_create`도 모델이 준 오프셋으로 loop 장치를 만든다 [18].
+`ewf.mount`와 `img.xmount_image`는 이미지 전체를 원시 디스크 파일 하나로 보이게 하고 파티션을 고르지 않는다 [19][20].
+`img.bde_mount`는 BitLocker 볼륨을 붙이고 도구 설명은 그 뒤 `mount_ntfs`를 오프셋 0으로 부르라고 적는다 [21].
+마운트의 읽기 전용 여부는 E03.01에서 본다.
+
+**예외.** `ewf.mount_full_image`는 NTFS 파티션이 여럿이어도 첫 하나만 마운트하고 성공 응답에 나머지 파티션을 적지 않는다 [16].
+
+### E04.05 추출·생략 범위 기록
+
+**구현.** 준비한 입력의 범위를 남기는 도구는 `misc.usbdeviceforensics`와 `ez.recmd_batch`다 [12][22].
+`misc.usbdeviceforensics`는 임시 폴더에 모은 원래 파일 경로를 `Staged input:` 줄로 출력 앞에 붙이고 그 줄은 응답과 호출 기록의 전체 출력에 함께 남는다 [12].
+응답에는 같은 경로 목록이 `staged_inputs`로도 실린다 [12].
+`ez.recmd_batch`는 찾은 하이브 수 `hives_found`, 성공·실패 수, 하이브마다의 경로·성공 여부·오류와 상한에 닿았는지를 뜻하는 `capped`를 응답에 돌려준다 [22].
+하이브마다의 RECmd 실행은 따로 호출 기록에 남는다 [22].
+`capped`는 찾은 하이브 수가 상한과 같기만 해도 참이 되고 상한 밖에 하이브가 몇 개 남았는지는 적지 않는다 [22].
+
+`tsk.icat`·`tsk.recover`·`vol.dumpfiles`·`misc.pff_export`·`misc.readpst_extract`는 꺼낸 파일의 목록이나 개수를 서버가 따로 정리하지 않는다 [1][2][3][7][8].
+`ewf.mount_full_image`도 마운트하지 않은 파티션을 성공 응답에 적지 않는다(E04.03의 예외) [16].
+
+### E04.07 부속 자료 누락·로그 미반영 표시
+
+**구현.** 이 방식은 SQLite 채팅 DB를 읽는 `misc.chat_db_export`에 적용된다 [23].
+서버는 DB를 `mode=ro&immutable=1`로 열고 코드 설명은 이 모드가 체크포인트되지 않은 `-wal` 프레임을 읽지 못한다고 적는다 [24].
+DB와 같은 이름의 `-wal` 파일이 있으면 응답에 `wal_present`를 참으로 두고 최근 행이 빠졌을 수 있다는 경고를 싣는다 [25][23].
+성공한 호출이면 이 경고가 호출 기록에 남는 요약에도 들어간다 [23].
+서버는 `-wal`이 있는지만 보고 반영하거나 함께 옮기지 않는다 [25].
+SQLite 증거를 외부 도구에 넘기는 `ez.sqlecmd`·`ez.wxtcmd`·`misc.hindsight_chrome`은 `-wal` 파일을 따로 보지 않는다 [26].
+서버 코드가 입력 옆의 부속 파일을 찾아 입력과 함께 넘기는 곳은 없어 E04.06에는 연결하지 않았다.
+
+### E04.08 로그 재생·복원
+
+**구현.** 트랜잭션 로그를 적용하는 외부 도구에 로그를 넘기는 도구는 `ez.rla`다 [27].
+`ez.rla`는 하이브와 `.LOG1`·`.LOG2`가 든 폴더를 `rla`의 `-d`로 넘기고 도구 설명은 로그를 재생해 최신 상태의 하이브를 얻는다고 적는다 [27].
+적용은 `rla`가 하고 서버는 로그가 적용됐는지 확인하지 않는다 [27].
+
+RECmd를 쓰는 `ez.recmd_hive`·`ez.recmd_dir`·`ez.recmd_batch`는 하이브 경로나 폴더만 넘기고 로그 처리는 RECmd에 맡긴다 [28][9].
+RECmd 2026.5.0은 더티 하이브를 만나면 같은 폴더에서 `<하이브 이름>.LOG?` 파일을 찾아 메모리에서 적용한다 [29].
+로그가 없으면 `--nl`을 주지 않은 경우 경고를 출력하고 그 하이브를 건너뛴다 [29].
+서버는 `--nl`을 넘기지 않고 로그를 적용했는지나 하이브를 건너뛰었는지를 응답에 따로 적지 않는다 [28].
+
+**예외.** `rla` 2026.5.0의 인자는 `-f`·`-d`·`--out`·`--ca`·`--cn`·`--nop`·`--debug`·`--trace`이고 서버가 넘기는 `--csv`·`--csvf`는 없다 [30].
+`rla`는 로그를 적용한 하이브를 `--out` 폴더에 쓰고 `-f`나 `-d`를 받았는데 `--out`이 없으면 처리하지 않고 끝난다 [30][31].
+서버는 `--out`을 넘기지 않으므로 `ez.rla`는 로그를 적용한 하이브를 만들지 못한다 [27].
+이 호출의 실제 출력과 종료 코드는 실행해 확인하지 않았다.
+
+### 근거
+
+[1] `misc.pff_export`는 PST를 풀고 실제 출력 폴더를 돌려준다.
+
+```python
+    missing = tool_unavailable_result("misc.pff_export", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.pff_export", _bin_or_warn)
+    os.makedirs(output_dir, exist_ok=True)
+    # -q: quiet — suppress the progress banner from stdout. pffexport APPENDS
+    # ".export" to the -t target, so the real output tree is
+    # `<output_dir>.export/` (a call reporting output_dir left it empty and the
+    # agent read "no mail" — a false-absence episode). Surface the true path
+    # and a read hint so read.mail is pointed at the tree that exists.
+    r = run([binary, "-q", "-m", mode, "-t", output_dir, pst_path], timeout=1800)
+    if isinstance(r, dict) and r.get("success"):
+        actual = output_dir + ".export"
+        r["output_path"] = actual if os.path.isdir(actual) else output_dir
+        r["layout"] = "pffexport_items"
+        r["read_hint"] = (f"read.mail over {r['output_path']} — pffexport item tree "
+                          f"(MessageNNNNN/ dirs), consumed natively; or use "
+                          f"misc.readpst_extract for an mbox.")
+    return r
+```
+
+[`tools/misc.py:2447-2465`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2447-L2465)
+
+[2] `misc.readpst_extract`는 PST를 mbox나 메시지별 파일로 바꾼다.
+
+```python
+def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) -> dict:
+    """
+    Convert a PST file to mbox (default) or per-message MIME using readpst.
+
+    format_mbox: True → -o mbox; False → -e (per-message .eml files).
+    """
+    missing = tool_unavailable_result("misc.readpst_extract", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.readpst_extract", _bin_or_warn)
+    os.makedirs(output_dir, exist_ok=True)
+    # -q: quiet — only error messages on stdout (progress banner otherwise
+    # dominates the trace excerpt; converted mail is written under output_dir).
+    cmd = [binary, "-q", "-o", output_dir]
+    if not format_mbox:
+        cmd.append("-e")
+    cmd.append(pst_path)
+    return run(cmd, timeout=1800)
+```
+
+[`tools/misc.py:2470-2487`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2470-L2487)
+
+[3] `tsk.recover`는 파일시스템의 파일을 출력 폴더로 꺼낸다.
+
+```python
+@mcp.tool()
+@output_safe
+def tsk_recover(
+    image: str,
+    output_dir: str,
+    offset_sectors: Optional[int] = None,
+    include_unallocated: bool = False,
+) -> dict:
+    """
+    Bulk extract files from a disk image.
+    include_unallocated: also recover deleted/unallocated files.
+    """
+    cmd = ["tsk_recover"]
+    if include_unallocated:
+        cmd.append("-e")
+    else:
+        cmd.append("-a")
+    if offset_sectors:
+        cmd += ["-o", str(offset_sectors)]
+    cmd += [image, output_dir]
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*3, output_dir=output_dir)
+```
+
+[`tools/sleuthkit.py:175-195`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L175-L195)
+
+[4] 늘 백그라운드 작업으로 도는 도구 목록이다.
+
+```python
+BACKGROUND_ALWAYS = frozenset({
+    "ewf_verify", "misc_clamscan_directory", "ez_recmd_dir",
+    "plaso_create_timeline", "plaso_create_targeted", "plaso_export_csv",
+    "plaso_export_json", "plaso_filter_incident_window",
+    "carve_bulk_extractor_scan", "carve_bulk_extractor_unallocated",
+    "carve_foremost_carve", "carve_scalpel_carve", "img_photorec_carve", "tsk_recover",
+    "yara_scan_directory", "yara_scan_memory_image",
+})
+```
+
+[`core/jobs.py:209-216`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L209-L216)
+
+[5] 출력 인자 이름 목록이다.
+
+```python
+_OUTPUT_PARAM_NAMES = (
+    "output_path",
+    "output_dir",
+    "output_file",
+    "output_pcap",
+    "output_csv",
+    "output_json",
+    "output_manifest",
+    "storage_file",
+)
+```
+
+[`core/paths.py:109-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L109-L118)
+
+[6] 파서와 외부 도구는 받은 경로를 그대로 넘긴다: [`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22), [`tools/plaso.py:26-30`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/plaso.py#L26-L30), [`tools/eztools.py:139-153`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L139-L153).
+
+[7] `tsk.icat`은 inode 하나의 내용을 출력 파일에 쓴다.
+
+```python
+@mcp.tool()
+@output_safe
+def tsk_icat(
+    image: str,
+    inode: str,
+    output_path: str,
+    offset_sectors: Optional[int] = None,
+    recover_deleted: bool = False,
+    slack_space: bool = False,
+) -> dict:
+    """
+    Extract file content by inode number to output_path.
+    inode: can be a number or 'number-stream-id' for ADS (e.g. '11-128-4').
+    recover_deleted: attempt recovery of deleted file data.
+    slack_space: extract file slack space.
+    """
+    cmd = ["icat"]
+    if recover_deleted:
+        cmd.append("-r")
+    if slack_space:
+        cmd.append("-s")
+    if offset_sectors:
+        cmd += ["-o", str(offset_sectors)]
+    cmd += [image, str(inode)]
+    return run_with_output_file(
+        cmd, output_path=output_path, mode="wb", timeout=120, needs_sudo=True,
+    )
+```
+
+[`tools/sleuthkit.py:83-109`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L83-L109)
+
+[8] `vol.dumpfiles`와 `vol.memmap`의 덤프 인자다.
+
+```python
+@mcp.tool()
+@output_safe
+def vol_dumpfiles(
+    image: str,
+    virt_addr: Optional[str] = None,
+    pid: Optional[int] = None,
+    output_dir: Optional[str] = None,
+) -> dict:
+    """
+    Dump files from memory by virtual address (from filescan output) or PID.
+    Requires output_dir.
+    """
+    if not output_dir:
+        return {"success": False, "stderr": "output_dir is required for dumpfiles"}
+    extra = []
+    if virt_addr:
+        extra += ["--virtaddr", virt_addr]
+    extra += _pid_extra(pid)
+    return _vol(image, "windows.dumpfiles", extra, output_dir=output_dir)
+```
+
+[`tools/volatility.py:444-462`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L444-L462)
+
+```python
+@mcp.tool()
+@output_safe
+def vol_memmap(image: str, pid: int, dump: bool = False, output_dir: Optional[str] = None) -> dict:
+    """
+    Show or dump memory map for a process.
+    Set dump=True with output_dir to write process memory to disk.
+    """
+    extra = _pid_extra(pid)
+    if dump and output_dir:
+        extra += ["--dump"]
+    return _vol(image, "windows.memmap", extra, output_dir=output_dir if dump else None)
+```
+
+[`tools/volatility.py:472-482`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L472-L482)
+
+[9] `ez.recmd_batch`가 하이브 파일을 고르는 함수다.
+
+```python
+_HIVE_NAMES = ("ntuser.dat", "usrclass.dat", "sam", "system", "software", "security",
+               "amcache.hve", "default")
+
+
+def _find_hives(hives_dir: str, names=_HIVE_NAMES, max_hives: int = 64) -> list[str]:
+    """Registry hive files under `hives_dir` (case-insensitive, transaction
+    logs excluded), sorted, capped."""
+    out: list[str] = []
+    want = {n.lower() for n in names}
+    for dirpath, dirnames, filenames in os.walk(hives_dir, followlinks=False):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            low = fn.lower()
+            if low in want and not low.endswith((".log", ".log1", ".log2", ".regtrans-ms", ".blf")):
+                out.append(os.path.join(dirpath, fn))
+                if len(out) >= max_hives:
+                    return out
+    return out
+```
+
+[`tools/eztools.py:226-243`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L226-L243)
+
+[10] `misc.usbdeviceforensics`가 입력 파일을 골라 임시 폴더에 링크로 모은다.
+
+```python
+    src = os.path.dirname(registry_path) if os.path.isfile(registry_path) else registry_path
+    if not os.path.isdir(src):
+        return None, []
+    by_lower = {n.lower(): n for n in os.listdir(src)}
+    picks = []
+    if os.path.isfile(registry_path):
+        picks.append(registry_path)
+    elif "system" in by_lower:
+        picks.append(os.path.join(src, by_lower["system"]))
+    else:
+        return None, []
+    if "software" in by_lower:
+        picks.append(os.path.join(src, by_lower["software"]))
+    inf = os.path.normpath(os.path.join(src, "..", "..", "INF"))
+    if os.path.isdir(inf):
+        for n in os.listdir(inf):
+            if n.lower() == "setupapi.dev.log":
+                picks.append(os.path.join(inf, n))
+    stage = tempfile.mkdtemp(prefix="trudi-usbdf-")
+    names, used = [], []
+    for p in picks:
+        name = os.path.basename(p)
+        if name in names:
+            continue
+        os.symlink(os.path.abspath(p), os.path.join(stage, name))
+        names.append(name)
+        used.append(os.path.abspath(p))
+    return stage, used
+```
+
+[`tools/misc.py:465-492`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L465-L492)
+
+[11] `ez.recmd_batch`의 `per_hive` 분기와 하이브별 실행이다.
+
+```python
+    if not per_hive:
+        args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir]
+        return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
+    assert_output_safe(output_dir)
+    hives = _find_hives(hives_dir, max_hives=max(1, int(max_hives)))
+    if not hives:
+        return {"success": False, "error": f"no registry hives found under {hives_dir}",
+                "looked_for": list(_HIVE_NAMES)}
+    runs: list[dict] = []
+    for hive in hives:
+        parent = os.path.basename(os.path.dirname(hive)) or "root"
+        sub = os.path.join(output_dir, f"{parent}_{os.path.basename(hive)}".replace(" ", "_"))
+        args = ["-f", hive, "--bn", batch_file, "--csv", sub]
+        r = _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=sub, timeout=DEFAULT_TIMEOUT)
+        runs.append({"hive": hive, "success": bool(r.get("success")), "output_dir": sub,
+                     "elapsed_seconds": r.get("elapsed_seconds"),
+                     "_trudi_call_id": r.get("_trudi_call_id"),
+                     "error": (r.get("error") or (r.get("stderr") or "")[:200]) if not r.get("success") else ""})
+```
+
+[`tools/eztools.py:265-282`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L265-L282)
+
+[12] 임시 폴더를 넘기고 고른 입력을 출력과 응답에 적은 뒤 지운다.
+
+```python
+    if output_path:
+        assert_output_safe(output_path)
+    stage, staged = _usbdf_stage(registry_path)
+    hives = stage or registry_path
+    cmd = ["/usr/local/bin/usbdeviceforensics", "-r", hives]
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        cmd += ["-o", output_path, "-f", "tsv"]
+    def _stamp_inputs(r: dict, _out: str, _err: str) -> None:
+        # The -r dir is a scratch stage: record which evidence files it held
+        # in the stored output so the trace names the hives actually read.
+        head = "".join(f"Staged input: {p}\n" for p in staged)
+        r["stdout"] = head + r.get("stdout", "")
+        r["_stdout_full"] = head + r.get("_stdout_full", "")
+
+    try:
+        result = run(cmd, timeout=_USBDF_TIMEOUT,
+                     classify=_stamp_inputs if staged else None)
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+    if staged:
+        result["staged_inputs"] = staged
+    if output_path:
+        result["output_path"] = output_path
+    return result
+```
+
+[`tools/misc.py:426-451`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L426-L451)
+
+[13] `ewf.mount_full_image`의 설명과 원시 디스크·파티션 표 읽기다.
+
+```python
+@mcp.tool()
+def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) -> dict:
+    """
+    Convenience: mount an E01 image end-to-end.
+    1. ewfmount the E01 to ewf_mount_point (exposes ewf1)
+    2. Read partition table via mmls
+    3. Probe candidate partitions with fsstat and mount the NTFS one
+
+    Returns the mount result and the detected NTFS offset in bytes.
+    """
+
+    os.makedirs(ewf_mount_point, exist_ok=True)
+    os.makedirs(fs_mount_point, exist_ok=True)
+
+    # Step 1: ewfmount
+    ewf_result = run(["ewfmount", image_e01, ewf_mount_point], needs_sudo=True)
+    if not ewf_result["success"]:
+        return ewf_result
+
+    ewf_device = os.path.join(ewf_mount_point, "ewf1")
+
+    # Step 2: mmls to find NTFS partition
+    mmls_result = run(["mmls", ewf_device], needs_sudo=True)
+    if not mmls_result["success"]:
+        return mmls_result
+```
+
+[`tools/ewf.py:209-233`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L209-L233)
+
+[14] `ewf.mount_ntfs`는 모델이 준 오프셋을 쓴다.
+
+```python
+@mcp.tool()
+def mount_ntfs(
+    ewf_device: str,
+    mount_point: str,
+    offset_bytes: int,
+    read_only: bool = True,
+) -> dict:
+    """
+    Mount an NTFS partition from a raw EWF device.
+    offset_bytes: byte offset = sector_start * sector_size (from mmls output).
+    Always mounts read-only, with norecover to prevent NTFS journal replay.
+    Falls back to an explicit ntfs-3g filesystem type when the kernel has no
+    in-built NTFS driver.
+    """
+    os.makedirs(mount_point, exist_ok=True)
+    if not read_only:
+        return {"success": False, "stderr": "Read-only mount is required for evidence integrity."}
+    return _mount_ntfs_ro(ewf_device, mount_point, offset_bytes)
+```
+
+[`tools/ewf.py:152-169`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L152-L169)
+
+[15] 파티션 후보를 늘어놓는 차례다.
+
+```python
+def _mmls_partitions(stdout: str) -> list[dict]:
+    """Real partitions from an mmls table, largest first.
+
+    Skips the Meta and Unallocated rows and keeps every data partition whatever
+    its description: a GPT table calls them "Basic data partition", so matching
+    the word NTFS in the description finds nothing at all.
+    """
+    out = []
+    for line in (stdout or "").splitlines():
+        m = _MMLS_ROW_RE.match(line.strip())
+        if not m:
+            continue
+        slot, start, end, length, desc = m.groups()
+        if not slot[0].isdigit():      # Meta / ------- rows carry no partition
+            continue
+        out.append({"slot": slot, "start": int(start), "end": int(end),
+                    "length": int(length), "description": desc.strip()})
+    # A description that names the filesystem is the strongest hint; size breaks ties.
+    return sorted(out, key=lambda p: ("ntfs" in p["description"].lower(), p["length"]),
+                  reverse=True)
+```
+
+[`tools/ewf.py:187-206`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L187-L206)
+
+[16] `fsstat`으로 NTFS를 찾고 하나만 마운트한다.
+
+```python
+    offset_sectors = None
+    checked = []
+    for part in candidates:
+        probe = run(["fsstat", "-o", str(part["start"]), ewf_device], needs_sudo=True)
+        fs_type = ""
+        for line in (probe.get("stdout") or "").splitlines():
+            if line.lower().startswith("file system type:"):
+                fs_type = line.split(":", 1)[1].strip()
+                break
+        checked.append({**part, "fs_type": fs_type})
+        if "ntfs" in fs_type.lower():
+            offset_sectors = part["start"]
+            break
+
+    if offset_sectors is None:
+        return {"success": False,
+                "stderr": ("No NTFS filesystem found in any partition (fsstat probed "
+                           + ", ".join(f"sector {c['start']}: {c['fs_type'] or 'unreadable'}"
+                                       for c in checked) + ")."),
+                "partitions": checked, "mmls": mmls_result["stdout"]}
+
+    offset_bytes = offset_sectors * sector_size
+
+    # Step 3: mount NTFS (read-only, explicit ntfs-3g fallback)
+    mount_result = _mount_ntfs_ro(ewf_device, fs_mount_point, offset_bytes)
+    mount_result["ntfs_offset_bytes"] = offset_bytes
+    mount_result["ntfs_offset_sectors"] = offset_sectors
+    mount_result["ewf_device"] = ewf_device
+    return mount_result
+```
+
+[`tools/ewf.py:246-274`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L246-L274)
+
+[17] `img.vshadow_mount`는 모델이 준 오프셋으로 섀도 복사본을 확인하고 붙인다: [`tools/imaging.py:16-75`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/imaging.py#L16-L75).
+
+[18] `img.losetup_create`는 모델이 준 오프셋으로 loop 장치를 만든다.
+
+```python
+@mcp.tool()
+@output_safe
+def losetup_create(image_path: str, offset_bytes: Optional[int] = None) -> dict:
+    """
+    Create a loop device from a disk image (alternative to mount -o loop).
+    Returns the loop device path (e.g. /dev/loop0).
+    """
+    cmd = ["losetup", "-f", "--show"]
+    if offset_bytes:
+        cmd += ["-o", str(offset_bytes)]
+    cmd.append(image_path)
+    return run(cmd, needs_sudo=True)
+```
+
+[`tools/imaging.py:206-217`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/imaging.py#L206-L217)
+
+[19] `ewf.mount`는 이미지를 원시 디스크로 붙인다.
+
+```python
+@mcp.tool()
+def ewf_mount(image: str, mount_point: str) -> dict:
+    """
+    Mount an E01/EWF image as a raw device at mount_point.
+    For multi-segment images (E01/E02/...) specify the first segment only.
+    After mounting, run tsk_mmls against mount_point/ewf1 to get partition offsets.
+    """
+    os.makedirs(mount_point, exist_ok=True)
+    return run(["ewfmount", image, mount_point], needs_sudo=True)
+```
+
+[`tools/ewf.py:79-87`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/ewf.py#L79-L87)
+
+[20] `img.xmount_image`는 이미지를 원시 디스크 파일로 붙인다.
+
+```python
+@mcp.tool()
+@output_safe
+def xmount_image(
+    input_image: str,
+    mount_point: str,
+    input_format: str = "ewf",
+    output_format: str = "raw",
+) -> dict:
+    """
+    Mount a disk image in any format as a raw device using xmount.
+    input_format: 'ewf' (E01), 'aff', 'vmdk', 'vhd', 'vdi', 'raw', 'dmg'.
+    output_format: 'raw' (default) — exposes as /mount_point/<image>.dd.
+    Useful when a tool doesn't support E01 natively (pass the raw file instead).
+    """
+    os.makedirs(mount_point, exist_ok=True)
+    cmd = [
+        "xmount",
+        "--in", input_format, input_image,
+        "--out", output_format,
+        mount_point,
+    ]
+    return run(cmd, needs_sudo=True)
+```
+
+[`tools/imaging.py:129-150`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/imaging.py#L129-L150)
+
+[21] `img.bde_mount`의 설명과 실행이다.
+
+```python
+@mcp.tool()
+@output_safe
+def bde_mount(
+    image_path: str,
+    mount_point: str,
+    recovery_password: Optional[str] = None,
+    recovery_key_file: Optional[str] = None,
+) -> dict:
+    """
+    Mount a BitLocker-encrypted image or partition using bdemount.
+    Provide either recovery_password (48-digit key) or recovery_key_file path.
+    After mounting, run mount_ntfs() on mount_point/bde1 with offset=0.
+    """
+    os.makedirs(mount_point, exist_ok=True)
+    cmd = ["bdemount"]
+    if recovery_password:
+        cmd += ["-r", recovery_password]
+    elif recovery_key_file:
+        cmd += ["-k", recovery_key_file]
+    cmd += [image_path, mount_point]
+    return run(cmd, needs_sudo=True)
+```
+
+[`tools/imaging.py:97-117`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/imaging.py#L97-L117)
+
+[22] `ez.recmd_batch`가 하이브별 결과와 수를 돌려준다.
+
+```python
+    for hive in hives:
+        parent = os.path.basename(os.path.dirname(hive)) or "root"
+        sub = os.path.join(output_dir, f"{parent}_{os.path.basename(hive)}".replace(" ", "_"))
+        args = ["-f", hive, "--bn", batch_file, "--csv", sub]
+        r = _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=sub, timeout=DEFAULT_TIMEOUT)
+        runs.append({"hive": hive, "success": bool(r.get("success")), "output_dir": sub,
+                     "elapsed_seconds": r.get("elapsed_seconds"),
+                     "_trudi_call_id": r.get("_trudi_call_id"),
+                     "error": (r.get("error") or (r.get("stderr") or "")[:200]) if not r.get("success") else ""})
+        if r.get("tool_unavailable"):
+            return {"success": False, "tool_unavailable": True, "error": r.get("error"),
+                    "fallback": r.get("fallback"), "hives": runs}
+    ok = [x for x in runs if x["success"]]
+    return {
+        "success": bool(ok),
+        "hives_found": len(hives),
+        "hives_ok": len(ok),
+        "hives_failed": len(runs) - len(ok),
+        "capped": len(hives) >= max(1, int(max_hives)),
+        "hives": runs,
+        "output_dir": output_dir,
+    }
+```
+
+[`tools/eztools.py:274-295`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L274-L295)
+
+[23] `misc.chat_db_export`는 경고와 `wal_present`를 응답과 요약에 싣는다: [`tools/misc.py:596-617`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L596-L617), [`tools/misc.py:642-657`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L642-L657).
+
+```python
+    cov = parsed.get("coverage_window")
+    parts = parsed.get("participants", [])
+    if parsed.get("success"):
+        summary = (f"{parsed.get('app')}: {parsed.get('message_count', 0)} messages, "
+                   f"{parsed.get('transfer_count', 0)} file transfers, "
+                   f"{len(parts)} participants, coverage "
+                   f"{(cov or {}).get('start', '?')} -> {(cov or {}).get('end', '?')}")
+        if parsed.get("warning"):
+            summary += f"\n⚠ {parsed['warning']}"
+    else:
+        summary = parsed.get("error", "chat db export failed")
+
+    # Self-log with the SOURCE DB PATH in cmd — the comms-coverage and
+    # chat_messenger manifest regexes match on it (main.db/msgstore/skype/...),
+    # so this call satisfies them with no gate edits. Failed attempts are
+    # logged too: the attempt is part of the audit trail.
+    result = {"success": parsed.get("success", False), "stdout": summary,
+              "stderr": "" if parsed.get("success") else parsed.get("error", ""),
+              "exit_code": 0 if parsed.get("success") else 1, "truncated": False,
+              "retries": 0, "elapsed_seconds": 0.0,
+              "cmd": f"misc.chat_db_export {db_path}"}
+    _log_tool(result)
+```
+
+[`tools/misc.py:596-617`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L596-L617)
+
+```python
+    return {
+        "success": parsed.get("success", False),
+        "error": parsed.get("error"),
+        "warning": parsed.get("warning"),
+        "_trudi_call_id": cid,
+        "app": parsed.get("app"),
+        "partial": parsed.get("partial", False),
+        "wal_present": parsed.get("wal_present", False),
+        "message_count": parsed.get("message_count", 0),
+        "transfer_count": parsed.get("transfer_count", 0),
+        "participant_count": len(parts),
+        "participants_preview": parts[:40],
+        "coverage_window": cov,
+        "output_paths": output_paths,
+        "summary": summary,
+    }
+```
+
+[`tools/misc.py:642-657`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L642-L657)
+
+[24] 읽기 방식과 `-wal`에 대한 코드 설명이다.
+
+```python
+"""Read-only chat/messenger sqlite parsers (Skype main.db, WhatsApp msgstore.db).
+
+First direct-sqlite code in the repo — the access contract matters because the
+source db usually lives on a read-only evidence mount:
+
+* Open with ``file:<path>?mode=ro&immutable=1`` (uri=True). Plain ``mode=ro``
+  still attempts ``-wal``/``-shm`` sidecar access, which fails (or worse, tries
+  to create files) on a read-only mount; ``immutable=1`` promises sqlite the
+  file cannot change, so no sidecars are touched and no locks are taken.
+* Immutable mode will NOT see frames in an uncheckpointed ``-wal`` sibling. A
+  frozen forensic image is normally checkpointed; when a ``-wal`` file exists
+  next to the db we surface ``wal_present: True`` + a warning, never a silent
+  partial read.
+```
+
+[`core/chat_db.py:1-13`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L1-L13)
+
+```python
+def open_ro(db_path: str) -> sqlite3.Connection:
+    """Open a sqlite db strictly read-only: no -wal/-shm sidecars, no locks."""
+    uri = f"file:{pathname2url(os.path.abspath(db_path))}?mode=ro&immutable=1"
+    return sqlite3.connect(uri, uri=True)
+```
+
+[`core/chat_db.py:34-37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L34-L37)
+
+[25] `-wal` 파일이 있는지 보고 경고를 붙인다.
+
+```python
+    wal = os.path.exists(db_path + "-wal")
+    try:
+        conn = open_ro(db_path)
+    except sqlite3.Error as e:
+        return {"success": False, "wal_present": wal,
+                "error": f"cannot open db read-only: {e}"}
+    try:
+        app = chat_app if chat_app in ("skype", "whatsapp") else detect_schema(conn)
+        if app == "skype":
+            out = parse_skype(conn)
+        elif app == "whatsapp":
+            out = parse_whatsapp(conn)
+        else:
+            return {"success": False, "wal_present": wal,
+                    "error": ("unsupported chat schema — tables found: "
+                              + (", ".join(sorted(_tables(conn))) or "none"))}
+    except sqlite3.DatabaseError as e:
+        return {"success": False, "wal_present": wal,
+                "error": f"db parse failed: {e}"}
+    finally:
+        conn.close()
+    out["wal_present"] = wal
+    if wal:
+        out["warning"] = ("-wal sibling present: immutable read-only mode cannot "
+                          "see uncheckpointed WAL frames; the most recent rows "
+                          "may be absent from this export")
+    return out
+```
+
+[`core/chat_db.py:219-245`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L219-L245)
+
+[26] SQLite 증거를 외부 도구에 넘기는 도구다: [`tools/eztools.py:568-578`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L568-L578), [`tools/eztools.py:585-599`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L585-L599), [`tools/misc.py:331-343`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L331-L343).
+
+[27] `ez.rla`가 `rla`에 넘기는 인자다.
+
+```python
+# ── RLA (Registry Log Analysis) ──────────────────────────────────────────────
+
+@mcp.tool()
+@output_safe
+def ez_rla(
+    hive_dir: str,
+    output_dir: str,
+    output_file: str = "rla.csv",
+) -> dict:
+    """
+    Replay registry transaction logs against hives for complete, up-to-date data.
+    hive_dir: directory containing hive files and their .LOG1/.LOG2 files.
+    """
+    args = ["-d", hive_dir, "--csv", output_dir, "--csvf", output_file]
+    return _ez(f"{EZ}/rla.dll", args, output_dir=output_dir)
+```
+
+[`tools/eztools.py:626-640`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L626-L640)
+
+[28] `ez.recmd_hive`는 하이브 경로와 배치 파일만 넘긴다: [`tools/eztools.py:196-210`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L196-L210), [`tools/eztools.py:213-223`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L213-L223).
+
+```python
+@mcp.tool()
+@output_safe
+def ez_recmd_hive(
+    hive_path: str,
+    output_dir: str,
+    output_file: str = "registry.csv",
+    batch_file: str = f"{EZ}/RECmd/BatchExamples/DFIRBatch.reb",
+) -> dict:
+    """
+    Parse a single registry hive using a RECmd batch file.
+    hive_path: path to SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, etc.
+    batch_file: path to .reb batch file (defaults to DFIRBatch.reb)
+    """
+    args = ["-f", hive_path, "--bn", batch_file, "--csv", output_dir, "--csvf", output_file]
+    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
+```
+
+[`tools/eztools.py:196-210`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L196-L210)
+
+```python
+@mcp.tool()
+@output_safe
+def ez_recmd_dir(
+    hives_dir: str,
+    output_dir: str,
+    output_file: str = "registry_all.csv",
+    batch_file: str = f"{EZ}/RECmd/BatchExamples/DFIRBatch.reb",
+) -> dict:
+    """Parse all registry hives in a directory recursively using a RECmd batch file."""
+    args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir, "--csvf", output_file]
+    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
+```
+
+[`tools/eztools.py:213-223`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L213-L223)
+
+[29] RECmd 2026.5.0의 `--nl` 인자([`RECmd/Program.cs:201-205`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L201-L205)), 더티 하이브의 로그 적용([`RECmd/Program.cs:951-994`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L951-L994)), 그 하이브의 예외 처리([`RECmd/Program.cs:1680-1700`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L1680-L1700))와 버전([`RECmd/RECmd.csproj:11`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/RECmd.csproj#L11))이다.
+
+[30] rla 2026.5.0의 인자 정의([`rla/Program.cs:55-103`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/rla/Program.cs#L55-L103))와 버전([`rla/rla.csproj:11`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/rla/rla.csproj#L11))이다.
+
+[31] rla 2026.5.0은 `--out`이 없으면 처리하지 않는다: [`rla/Program.cs:164-175`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/rla/Program.cs#L164-L175).

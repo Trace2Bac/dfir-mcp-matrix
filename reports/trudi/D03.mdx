@@ -1,0 +1,392 @@
+---
+cell: D03
+details:
+- id: D03.01
+  exception: false
+- id: D03.09
+  exception: true
+- id: D03.10
+  exception: false
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 발견사항 검토에 인용된 출력과 보고 직전 호출 기록 항목이 가리키는 출력 파일에 적용된다.
+파생물을 만들거나 보관할 때는 해시를 계산하지 않고 호출 기록 항목에는 출력의 글자 수와 줄 수만 들어간다 [1].
+기준값은 모델이 발견사항 검토를 부를 때 서버가 스스로 계산한다.
+`reason.evaluate_finding`과 `misc.submit_finding`은 인용한 호출의 출력 바이트를 읽어 SHA-256 `output_sha256`을 evidence packet에 담는다 [2].
+같은 packet에 읽은 파일과 출력 폴더의 버전(장치·inode·크기·수정 시각·변경 시각)과 인용 항목의 내용 digest를 담는다 [3][4].
+출력은 하나마다 앞 64 MiB, packet 전체로 256 MiB까지만 해시하고 넘으면 앞부분만 해시한 뒤 `scan_truncated`를 적는다 [5].
+키를 쓰지 않는 해시이고 packet은 검토 항목의 `evidence_packet`으로 호출 기록 파일에 남는다 [6].
+
+`reason.pre_report_check`는 보고 전 상태를 묶은 해시 `readiness_fingerprint`를 계산해 자기 호출 기록 항목에 남긴다 [7].
+`readiness_fingerprint`는 현재 항목들과 각 항목의 `stdout_path`·`output_path`가 가리키는 파일의 크기·수정 시각·변경 시각·inode를 묶은 SHA-256이다 [8].
+이 값은 파일 내용을 해시하지 않는다 [8].
+보고서와 호출 기록 내보내기를 쓴 호출의 항목은 이 값에서 뺀다 [8].
+
+해시를 계산하는 때가 파생물을 만들 때가 아니라 검토와 보고 직전이다.
+모델이 해시 도구를 부르는 방식이 아니어서 이 상세에 연결했다.
+검토에 인용되지 않은 출력과 보고서 파일에는 기준값이 없다.
+`hash.file`은 증거와 파생물을 가리지 않는 해시 도구라 D03.02에는 연결하지 않았다 [9].
+
+### D03.09 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 검토를 거친 CONFIRMED·LIKELY 발견사항 기록, `misc.submit_finding`, `reason.evaluate_finding`, 최종 보고서와 호출 기록 내보내기에 적용된다 [10][11][12][13].
+`packet_current`는 지금 파일 버전, 인용 항목의 digest, 사건 식별값, 검토 정책 digest를 packet의 값과 대조한다 [10].
+내용을 다시 해시하지 않으며 `output_sha256`은 다시 대조하지 않는다 [10].
+`misc.record_finding`은 CONFIRMED·LIKELY 발견사항에 쓰려는 검토 통과 기록 `review_receipt`가 지금 상태와 맞는지 이 함수로 본다 [11].
+`misc.submit_finding`은 packet을 만든 직후와 발견사항을 기록하기 직전에 대조하고 `reason.evaluate_finding`은 검토가 끝난 뒤 대조한다 [12][6].
+`misc.write_final_report`와 `misc.export_execution_log`는 지금 `readiness_fingerprint`를 다시 계산해 마지막 `reason.pre_report_check`의 값과 대조한다 [13].
+
+기준값은 검토 항목과 보고 직전 점검 항목에 들어가므로 인용된 출력 파일과 다른 파일에 남는다.
+인용 항목의 digest는 그 항목과 같은 호출 기록 파일에 들어가므로 호출 기록 파일을 고치면 둘이 함께 바뀔 수 있다 [4][6].
+파일 버전 대조는 파일 메타데이터 비교라서 내용이 바뀌어도 장치·inode·크기·수정 시각·변경 시각이 그대로면 알아채지 못한다 [3].
+
+**예외.** `receipt_required`와 `review_receipt`가 둘 다 없는 검토 항목으로 CONFIRMED·LIKELY 발견사항을 기록하면 packet 대조를 거치지 않는다 [14].
+이 서버의 `reason.evaluate_finding`은 모든 검토 항목에 `receipt_required`를 붙이므로 이런 항목은 다른 코드가 쓴 호출 기록 파일을 이어 쓸 때 생긴다 [6].
+
+### D03.10 불일치 시 중단·경고
+
+**구현.** 대조가 어긋나면 그 출력을 근거로 삼는 기록과 보고를 멈춘다.
+`misc.record_finding`은 `review_receipt` 게이트로 발견사항을 거부하고 인용 출력이 검토 뒤에 바뀌었다고 응답에 적는다 [15].
+`misc.submit_finding`은 발견사항을 기록하지 않고 `retryable-review-failure`를 돌려준다 [12].
+`reason.evaluate_finding`은 검토 결과를 실패로 바꾸고 `review_receipt`를 붙이지 않는다 [6].
+`misc.write_final_report`와 `misc.export_execution_log`는 파일을 쓰지 않고 `pre_report_check_required` 게이트로 거부한다 [13].
+
+### 근거
+
+[1] 호출 기록 항목에는 출력의 글자 수와 줄 수만 들어간다.
+
+```python
+            if stdout_full is not None:
+                # Stamped even when EMPTY (0) so "ran and produced nothing"
+                # is distinguishable from "output never persisted".
+                entry["stdout_chars"] = len(stdout_full)
+                entry["stdout_lines"] = (stdout_full.count("\n") + (
+                    0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
+```
+
+[`core/execution_log.py:1511-1516`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1511-L1516)
+
+[2] 인용 출력의 바이트로 SHA-256을 계산해 packet에 담는다.
+
+```python
+            retained_complete = (bool(source.complete) and not bool(entry.get('stdout_partial'))
+                                 and not scan_truncated)
+            if source.kind != 'file':
+                retained_complete = retained_complete and not bool(entry.get('truncated'))
+                if not raw and entry.get('stdout_chars') is None:
+                    retained_complete = False
+            kind = ('read_result' if is_read and source.kind == 'stdout_sidecar'
+                    else 'artifact_output' if has_artifact else 'tool_stdout')
+            evidence.append({'call_id': cid, 'kind': kind,
+                             'path': path or None, 'output_sha256': hashlib.sha256(raw).hexdigest(),
+                             'output_bytes': len(raw), 'retained_output_complete': retained_complete,
+                             'scan_truncated': scan_truncated,
+                             'search_scope': 'only this retained output, not the entire original evidence',
+                             'extractor_scope_complete': entry.get('scope_complete'),
+                             'provenance': provenance, 'selections': selections})
+```
+
+[`core/evidence_packets.py:302-316`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L302-L316)
+
+[3] 파일 버전은 `os.stat` 값 다섯 개이고 항목 digest는 시각·토큰 같은 값을 뺀 항목의 digest다.
+
+```python
+_VOLATILE = {'ts', 'elapsed_seconds', 'input_tokens', 'output_tokens', 'dair_phase', 'dair_depth'}
+
+
+class PacketError(ValueError):
+    def __init__(self, message, status='invalid'):
+        super().__init__(message)
+        self.status = status
+
+
+def file_version(path):
+    try:
+        st = os.stat(path)
+        return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+    except OSError:
+        return None
+
+
+def entry_identity(entry):
+    return digest({k: v for k, v in entry.items() if k not in _VOLATILE})
+```
+
+[`core/evidence_packets.py:19-37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L19-L37)
+
+[4] packet에 인용 항목 digest와 감시할 파일 버전을 담는다.
+인용 항목마다 digest를 넣는 곳은 [`core/evidence_packets.py:207-212`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L207-L212)이다.
+
+```python
+    packet = {'schema_version': VERSION, 'case': case_identity(log), 'request': request,
+              'evidence': evidence, 'context_only': contexts, 'entry_identities': identities,
+              'file_versions': watches, 'policy': review_policy(), 'selectors': selectors}
+    packet['packet_id'] = 'EP-' + digest(packet)
+    return packet
+```
+
+[`core/evidence_packets.py:325-329`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L325-L329)
+
+[5] 해시할 바이트의 상한과 그 상한에서 자르는 곳이다.
+상한 값은 [`core/evidence_packets.py:15-18`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L15-L18)이다.
+
+```python
+            before = file_version(path) if path else None
+            scan_truncated = False
+            if path:
+                if before is None:
+                    raise PacketError(f'Output unavailable for call {cid}: {path}', 'needs-evidence')
+                try:
+                    with open(path, 'rb') as stream:
+                        raw = stream.read(MAX_SOURCE_BYTES + 1)
+                    if len(raw) > MAX_SOURCE_BYTES:
+                        # Search the leading MAX_SOURCE_BYTES (whole lines) and
+                        # mark the source partial, rather than refusing review of
+                        # a large extractor output (MFT/EVTX CSVs). A miss over a
+                        # partial scan is never read as absence.
+                        cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                        raw, scan_truncated = raw[:cut], True
+                except OSError as exc:
+                    raise PacketError(f'Cannot read output for call {cid}: {exc}', 'needs-evidence') from exc
+                if before != file_version(path):
+                    raise PacketError('Evidence changed while constructing packet', 'retryable-review-failure')
+                watches[path] = before
+            else:
+                raw = source.text.encode('utf-8')
+            if len(raw) > MAX_SOURCE_BYTES:
+                cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                raw, scan_truncated = raw[:cut], True
+            if scanned_bytes + len(raw) > MAX_SCAN_BYTES:
+                cut = raw.rfind(b'\n', 0, max(0, MAX_SCAN_BYTES - scanned_bytes)) + 1
+                raw, scan_truncated = raw[:cut], True
+            scanned_bytes += len(raw)
+```
+
+[`core/evidence_packets.py:258-286`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L258-L286)
+
+[6] 검토가 끝나면 packet이 지금 상태와 맞는지 보고 맞을 때만 `review_receipt`와 packet을 검토 항목에 넣는다.
+모든 검토 항목에 `receipt_required`를 붙인다.
+
+```python
+    if packet is not None and result.get("success"):
+        if not packet_current(log, packet):
+            result.update(success=False, error="Evidence changed during review; retry with current evidence",
+                          retryable=True)
+        else:
+            receipt = {'schema_version': 1, 'packet_id': packet['packet_id'],
+                       'binding': packet_binding(packet), 'policy': packet['policy']}
+            result['review_receipt'] = receipt
+            log.update_reason_call(result.get('_trudi_call_id', 0),
+                                   review_receipt=receipt, evidence_packet=packet)
+    log.update_reason_call(result.get('_trudi_call_id', 0), receipt_required=True,
+                           success=result.get('success', False))
+```
+
+[`tools/reasoning.py:2764-2775`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L2764-L2775)
+
+[7] 보고 직전 점검은 `readiness_fingerprint`를 계산해 결과와 함께 기록한다.
+
+```python
+    with log.transaction():
+        result = assess_readiness(log)
+        fingerprint = state_fingerprint(log._entries, log._case_id)
+        result["readiness_fingerprint"] = fingerprint
+        ready = result["ready_to_report"]
+        if not log._path:
+            result["ready_to_report"] = False
+            return result
+        conclusion = (f"READY_TO_REPORT: {str(ready).lower()}\n"
+                      f"BLOCKING_ISSUES: {'; '.join(result['blocking_issues']) or 'none'}")
+        if not ready and log._current_phase == "Report":
+            result["phase_returned_to"] = "Collect"
+        log.record_reason_call(
+            tool="reason_pre_report_check", success=True, conclusion=conclusion,
+            directives={}, blockers=result["blocking_issues"],
+            input_call_ids=[e['call_id'] for e in active_findings(log._entries)],
+            extra=result)
+```
+
+[`tools/reasoning.py:3425-3441`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L3425-L3441)
+
+[8] `readiness_fingerprint`는 항목과 출력 파일의 `stat` 값과 정책 파일 해시를 묶는다.
+
+```python
+def state_fingerprint(entries, case_id='', include_synthesis=True, scope='full') -> str:
+    """scope='full' binds the pre-report approval to the whole semantic state;
+    scope='claims' is the synthesis staleness key (claims + dispositions)."""
+    records, files = [], {}
+    for e in current_entries(entries):
+        typ, tool = e.get('type'), e.get('tool')
+        if typ in _IGNORED_TYPES or tool in _IGNORED_TOOLS:
+            continue
+        if scope == 'claims' and typ not in _CLAIM_TYPES and not (
+                include_synthesis and tool == 'reason_synthesize'):
+            continue
+        if tool == 'reason_synthesize' and not include_synthesis:
+            continue
+        if typ == 'tool_call' and any(t in e.get('cmd', '') for t in (
+                'misc_write_final_report', 'misc_export_execution_log', 'misc_serve_dashboard')):
+            continue
+        # Timestamps and accounting are not changes to the evidence or claim.
+        records.append({k: v for k, v in e.items() if k not in {
+            'ts', 'input_tokens', 'output_tokens', 'elapsed_seconds', 'backend_meta',
+            'inputs', 'dair_phase', 'dair_depth', 'readiness_fingerprint'}})
+        for k in ('stdout_path', 'output_file', 'output_path'):
+            path = e.get(k)
+            if isinstance(path, str):
+                try:
+                    st = Path(path).stat()
+                    files[path] = [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino]
+                except OSError:
+                    files[path] = 'unavailable'
+```
+
+[`core/readiness.py:24-51`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/readiness.py#L24-L51)
+
+[9] `hash.file`은 받은 경로의 해시를 기록한다.
+
+```python
+def _record_hash_result(result: dict, source_version: str) -> dict:
+    """Retain the typed hash result as evidence, rather than an invocation log."""
+    from core.execution_log import log
+    try:
+        path = os.path.abspath(result['file'])
+        stat = os.stat(path)
+    except OSError as exc:
+        return {'success': False, 'error': str(exc), 'file': result['file']}
+    if _cache_key(stat, path) != source_version:
+        return {'success': False, 'error': 'File changed while hashing; retry', 'file': result['file']}
+    version = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    payload = {k: result[k] for k in ('file', 'size_bytes', 'md5', 'sha1', 'sha256')}
+    cid = log.record_tool_call(cmd=f"hash.file {result['file']}", success=True,
+                               truncated=False, retries=0, exit_code=0,
+                               stdout_full=json.dumps(payload), stdout_excerpt=json.dumps(payload))
+    log.annotate_tool_call(cid, hash_result=payload, source_version=source_version,
+                           hashed_file_version=version,
+                           source_hashes={result['file']: result['sha256']})
+    return {**result, '_trudi_call_id': cid}
+```
+
+[`tools/hashing.py:56-74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/hashing.py#L56-L74)
+
+[10] 지금 상태와 packet을 대조하는 함수다.
+
+```python
+def packet_current(log, packet):
+    by_id = {e.get('call_id'): e for e in log._entries}
+    return (case_identity(log) == packet['case'] and review_policy() == packet['policy']
+            and all(entry_identity(by_id.get(int(cid), {})) == sig
+                    for cid, sig in packet['entry_identities'].items())
+            and all(file_version(path) == version for path, version in packet['file_versions'].items()))
+```
+
+[`core/evidence_packets.py:332-337`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L332-L337)
+
+[11] `review_receipt`의 `binding`과 packet을 지금 기록하려는 발견사항에 대조한다.
+
+```python
+def receipt_matches(ctx, review):
+    if review.get('success') is not True or review.get('review_pending'):
+        return False
+    packet, receipt = review.get('evidence_packet'), review.get('review_receipt')
+    if not packet or not receipt or review.get('verdict') != 'SUPPORTED':
+        return False
+    ids = cited_ids({'input_call_ids': ctx.input_call_ids, 'linked_call_id': ctx.linked_call_id,
+                     'claim': ctx.claim})
+    # Context/review call IDs may appear in legacy lineage, but cannot stand in
+    # for evidence IDs in the exact binding.
+    ids = [cid for cid in ids if (ctx.idx.by_call_id.get(cid) or {}).get('type') == 'tool_call']
+    binding = material_binding(ctx.description, ctx.claim, ids, getattr(ctx, 'supersedes', 0))
+    return binding == receipt.get('binding') and packet_current(ctx.log, packet)
+```
+
+[`core/finding_submission.py:29-41`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L29-L41)
+
+[12] 제출 경로는 packet을 만든 뒤([`core/finding_submission.py:217-219`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L217-L219))와 기록 직전에 대조한다.
+
+```python
+            if not packet_current(log, packet):
+                outcome = _failure('retryable-review-failure', 'Reviewed evidence changed; retry with current evidence')
+```
+
+[`core/finding_submission.py:267-268`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L267-L268)
+
+[13] 보고서와 호출 기록 내보내기는 지금 `readiness_fingerprint`가 마지막 점검의 값과 같아야 쓴다.
+
+```python
+    recorded = pre_report_entry.get("readiness_fingerprint")
+    current = state_fingerprint(log._entries, log._case_id)
+    if not recorded or recorded != current:
+        return {"success": False, "gate": "pre_report_check_required",
+                "error": "Report snapshot is missing or stale; run reason.pre_report_check again.",
+                "missing_check": "reason_pre_report_check"}
+    return None
+```
+
+[`tools/misc.py:1037-1043`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1037-L1043)
+
+[14] `receipt_required` 표시가 없는 검토 항목은 판정만 보고 통과시킨다.
+
+```python
+    _verdict = (eval_entry.get("result_block") or {}).get("verdict") or eval_entry.get("verdict")
+    if (eval_entry.get("review_receipt") or eval_entry.get("receipt_required")) and _verdict \
+            and _verdict != "SUPPORTED":
+        return _receipt_refusal(ctx, eval_entry, match)
+    if eval_entry.get("success") is False or eval_entry.get("review_pending"):
+        return {"success": False, "gate": "confirmed_requires_supported_evaluate",
+                "error": "Matched evaluation failed" +
+                         (f" ({eval_entry.get('error')})" if eval_entry.get("error") else "") +
+                         "; complete a successful evidence review first",
+                "evaluate_call_id": eval_entry.get("call_id"), "evaluate_match": match}
+    if eval_entry.get('receipt_required') or eval_entry.get('review_receipt'):
+        return _receipt_refusal(ctx, eval_entry, match)
+```
+
+[`tools/_gates/confirmed_requires_supported_evaluate.py:215-226`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/confirmed_requires_supported_evaluate.py#L215-L226)
+
+```python
+    conclusion = eval_entry.get("conclusion", "") or ""
+    verdict = str(eval_entry.get("verdict") or "").upper() or parse_verdict(conclusion)
+
+    if verdict == "SUPPORTED":
+        # The reviewer is a fact-checker: SUPPORTED means the
+        # cited rows hold the stated facts. The TIER is not its call — the
+        # tier_contract gate computed it from the cited artifact classes.
+        ctx.gated_by_evaluate_call_id = int(eval_entry.get("call_id") or 0)
+        return None
+```
+
+[`tools/_gates/confirmed_requires_supported_evaluate.py:248-256`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/confirmed_requires_supported_evaluate.py#L248-L256)
+
+[15] `review_receipt`가 있는 검토가 지금 상태와 맞지 않으면 바뀐 점을 적어 거부한다.
+
+```python
+    from core.evidence_packets import cited_ids, packet_current
+    packet = review.get("evidence_packet") or {}
+    req = packet.get("request") or {}
+    diffs = []
+    if (req.get("description") or "").strip() != (ctx.description or "").strip():
+        diffs.append("description")
+    rc, cc = req.get("claim") or {}, getattr(ctx, "claim", None) or {}
+    diffs += [f"claim.{k}" for k in sorted(set(rc) | set(cc)) if rc.get(k) != cc.get(k)]
+    reviewed_ids = sorted({e.get("call_id") for e in packet.get("evidence") or []})
+    ids = [c for c in cited_ids({"input_call_ids": ctx.input_call_ids,
+                                 "linked_call_id": ctx.linked_call_id, "claim": cc})
+           if (ctx.idx.by_call_id.get(c) or {}).get("type") == "tool_call"]
+    if sorted(set(ids)) != reviewed_ids:
+        diffs.append(f"evidence call ids (reviewed {reviewed_ids}, recording {sorted(set(ids))})")
+    if int(req.get("supersedes") or 0) != int(getattr(ctx, "supersedes", 0) or 0):
+        diffs.append("supersedes")
+    if not diffs and packet and not packet_current(ctx.log, packet):
+        diffs.append("the cited evidence changed after the review")
+    return {**base, "gate": "review_receipt", "differs": diffs,
+            "error": ("The review (call " + str(review.get("call_id")) + ") covered a different "
+                      "claim/evidence than this record: " + (", ".join(diffs) or "unknown difference") +
+                      ". Record exactly what was reviewed, or evaluate this revision.")}
+```
+
+[`tools/_gates/confirmed_requires_supported_evaluate.py:140-161`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/confirmed_requires_supported_evaluate.py#L140-L161)

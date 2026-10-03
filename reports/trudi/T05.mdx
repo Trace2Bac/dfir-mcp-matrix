@@ -1,0 +1,684 @@
+---
+cell: T05
+details:
+- id: T05.01
+  exception: true
+- id: T05.02
+  exception: true
+- id: T05.04
+  exception: false
+---
+
+# T05 분석 도구 검증
+
+### T05.01 선언: 저장소·의존성 고정
+
+**구현.** 이 방식은 설치 스크립트가 받는 Chainsaw와, 저장소에 든 Velociraptor 탐지 아티팩트와 YARA 룰에 적용된다.
+`install.sh`는 `/usr/local/bin/chainsaw`가 없을 때 Chainsaw v2.10.2 x86_64 릴리스 묶음을 내려받아 실행 파일과 `mappings` 폴더를 설치한다 [1].
+받은 묶음의 해시를 대조하는 코드는 없다 [1].
+설치 스크립트 주석은 묶음에 Sigma 룰이 함께 든다고 적는다 [1].
+v2.10.2 x86_64 묶음에는 실행 파일, `mappings` 폴더의 매핑 파일 두 개, README, LICENCE만 있어 설치 스크립트는 Sigma 룰을 설치하지 않는다 [2].
+`monitor.start_watcher`는 저장소의 `monitoring/artifacts/*.yaml.tmpl` 틀에 기준선 값을 채워 탐지 아티팩트를 만들고 Velociraptor 서버에 올린다 [3].
+기준선 수집 도우미 `Custom.TRUDI.PersistenceSnapshot`도 저장소의 YAML 파일을 그대로 올린다 [4].
+탐지 아티팩트가 단말에서 읽는 YARA 룰 파일은 기준선에 `yara_rules_path`가 없으면 `/rules/trudi-demo.yar`이고 서버는 그 파일의 내용을 정하지 않는다 [5].
+저장소의 `rules/` 폴더에 든 YARA 룰은 모델이 그 경로를 `rules_path`로 넘길 때만 쓰인다 [6].
+
+그 밖의 도구는 저장소가 버전을 고정하지 않는다.
+`requirements.txt`는 서버가 불러오거나 실행하는 `yara-python`, `flare-capa`, `flare-floss`, `oletools`를 `>=` 하한으로만 적는다 [7].
+`install.sh`는 Sleuth Kit, ewf-tools, pff-tools, pst-utils 같은 apt 패키지를 버전 없이 설치하고 이미 있으면 건너뛴다 [8].
+Volatility 3, EZ Tools, Plaso 같은 SIFT 도구는 저장소가 설치하지 않고 `install.sh`는 `python3`와 `dotnet`이 있는지만 본다 [9].
+서버는 Volatility를 `/usr/local/bin/vol`로, EZ Tools를 `/opt/zimmermantools` 아래 DLL로 부른다 [10].
+Prefetch 대체 파서가 쓰는 `pyscca`는 `requirements.txt`에 없고 서버는 가상 환경에서 불러오지 못하면 시스템 패키지 폴더에서 불러온다 [7][11].
+`requirements.txt`의 `fastmcp`, `httpx`, `anthropic`, `python-dotenv`는 증거를 해석하지 않는 서버 실행용 라이브러리라 이 방식으로 세지 않는다 [7].
+도구나 참조 자료를 쓰기 직전에 실제 파일의 해시, 서명, 컨테이너 digest를 기대값과 대조하는 코드는 없다.
+
+서버 코드가 판단에 쓰는 지식 데이터도 저장소에 들어 있다.
+`data/fk`의 YAML 시트는 서버가 저장소 안 경로로 읽으므로 기준 커밋이 그 내용을 정한다 [12][13].
+이 시트는 응답에 붙는 해석 주의(R04)와 발견사항 등급 상한(D07.03)을 정한다 [12][13].
+MITRE ATT&CK 기법 표는 `install.sh`가 저장소의 `cases/.common/mitre_techniques.json`을 `~/cases/.common/`으로 복사하고 서버는 그 복사본을 읽는다 [14][15].
+
+**예외.** `install.sh`는 `/usr/local/bin/chainsaw`가 이미 있으면 그 버전을 보지 않고 설치를 건너뛴다 [1].
+내려받는 주소가 x86_64용 묶음 하나로 정해져 있어 아키텍처를 가리지 않고 그 묶음을 설치한다 [1].
+`misc.chainsaw_hunt`는 `chainsaw`를 PATH에서 찾으므로 PATH에서 `/usr/local/bin`보다 앞선 폴더에 다른 `chainsaw`가 있으면 그것을 실행한다 [16].
+`install.sh`는 `~/cases/.common/mitre_techniques.json`이 이미 있으면 내용을 보지 않고 복사를 건너뛰므로 서버는 저장소와 다른 MITRE 표를 쓸 수 있다 [14].
+`velo.upload_artifact_yaml`은 이름이 `Custom.TRUDI.`로 시작하는 아티팩트를 모델이 준 YAML로 Velociraptor 서버에 등록하거나 바꾼다 [17].
+그래서 감시 중에 같은 이름의 탐지 아티팩트를 저장소의 틀과 다른 내용으로 바꿀 수 있다 [17].
+
+### T05.02 선언: 설정·호출 인자 지정
+
+**구현.** 이 방식은 YARA 룰, Chainsaw Sigma 룰, EZ Tools의 맵과 배치 파일, Volatility 심볼 폴더, Velociraptor 실행 파일에 적용된다.
+`yara.*` 도구는 필수 인자 `rules_path`로 룰 파일이나 룰 폴더를 받는다 [18].
+`vol.vadyarascan`과 `vol.yarascan`은 `yara_rules`로 룰 파일 경로나 룰 본문을 받는다 [19].
+`live.yara_scan`은 단말에 미리 둔 룰의 경로를 `rules_path`로 받는다 [20].
+`misc.chainsaw_hunt`는 `sigma_dir`로 Sigma 룰 폴더를 받고 주지 않으면 `/opt/chainsaw/sigma`, `/usr/local/share/chainsaw/sigma`, `/usr/share/chainsaw/sigma` 가운데 처음 있는 폴더를 쓴다 [21].
+매핑 파일은 그 폴더 옆의 `mappings/sigma-event-logs-all.yml`로 정한다 [21].
+세 폴더가 모두 없으면 `-s`와 `--mapping` 없이 `chainsaw hunt`를 실행한다 [21].
+`ez.evtxecmd`와 `ez.sqlecmd`는 `maps_dir`로, `ez.recmd_hive`와 `ez.recmd_dir`는 `batch_file`로 위치를 받고 기본값은 `/opt/zimmermantools` 아래 SIFT 설치 경로다 [22].
+Volatility 심볼 폴더는 환경변수 `VOLATILITY_SYMBOLS`로 정하고 값이 없으면 `~/.cache/volatility3/symbols`를 쓴다 [10].
+Velociraptor 실행 파일은 환경변수 `TRUDI_VELO_BIN`으로 정하고 값이 없으면 PATH의 `velociraptor`를 쓴다 [23].
+MITRE 기법·탐지·그룹 표는 환경변수 `TRUDI_MITRE_TABLE`·`TRUDI_MITRE_DETECTION`·`TRUDI_MITRE_GROUPS`로 위치를 정하고 값이 없으면 `~/cases/.common/` 아래 파일을 쓴다 [15].
+서버는 받은 위치에 있는 룰, 맵, 심볼의 버전이나 내용을 읽지 않는다.
+
+**예외.** `vol.vadyarascan` 설명은 `yara_rules`가 룰 파일 경로나 룰 본문이라고 적는다 [24].
+서버는 값이 있는 파일이 아니고 `rule `과 `{`를 담지 않으면 그 값을 `--yara-string` 검색 문자열로 넘긴다 [19].
+그래서 없는 룰 파일 경로를 넘기면 오류 없이 그 경로 글자를 찾는 검사가 실행된다 [19].
+`yara.*` 도구는 폴더를 받으면 하위 폴더까지 룰 파일을 모으면서 파일 이름을 키로 삼는다 [18].
+이름이 같은 룰 파일이 여러 하위 폴더에 있으면 그 가운데 하나만 컴파일되고 응답은 빠진 파일을 알리지 않는다 [18].
+
+### T05.04 확인: 참조 자료 버전·식별값 조회
+
+**구현.** 이 방식은 `vol.symbol_check`와 검토·보고 전 점검이 만드는 정책 값에 있다 [25][26][27].
+`vol.symbol_check`는 심볼 폴더의 `windows/ntkrnlmp.pdb`와 `windows/ntoskrnl.pdb` 아래 `*.json.xz` 파일 이름을 읽어 `cached_guids`로 돌려준다 [25].
+읽는 대상은 캐시에 있는 Windows 커널 심볼 전부이고 메모리 이미지가 요구하는 심볼과 대조하지 않는다 [25].
+`symbols_ready`는 그런 파일이 하나라도 있으면 참이다 [25].
+도구 설명은 심볼이 없으면 `vol.info`를 한 번 불러 내려받으라고 안내한다 [28].
+메모리 플러그인을 실행하는 `vol.*` 도구는 이 확인을 거치지 않고 심볼 폴더 경로만 Volatility에 넘긴다 [29].
+Linux 커널 심볼과 그 밖의 심볼 폴더는 보지 않는다 [25].
+
+`reason.evaluate_finding`과 `misc.submit_finding`이 evidence packet을 만들 때 서버는 `data/fk` 아래 YAML 시트와 게이트 코드 파일의 SHA-256을 계산해 packet의 정책 값 `policy`에 넣는다 [26].
+발견사항을 기록하기 전에 이 값을 다시 계산해 packet의 값과 견주고 다르면 그 packet을 지금 상태가 아닌 것으로 본다 [30].
+보고서 전 점검도 `data/fk/tiering.yaml`과 게이트 코드 파일의 SHA-256을 `readiness_fingerprint`에 넣는다 [27].
+MITRE 표의 버전이나 식별값은 읽지 않는다.
+
+외부 도구 실행 파일의 버전을 실행 중에 묻는 코드는 없어 T05.03에는 연결하지 않는다.
+`strings.exiftool_metadata`는 오히려 `--ExifToolVersion`으로 출력의 버전 줄을 뺀다 [31].
+
+### 근거
+
+[1] Chainsaw 설치 단계다.
+
+```bash
+CHAINSAW_BIN="/usr/local/bin/chainsaw"
+CHAINSAW_VERSION="2.10.2"
+
+if [ -x "$CHAINSAW_BIN" ]; then
+    ok "chainsaw already installed at $CHAINSAW_BIN"
+else
+    CHAINSAW_URL="https://github.com/WithSecureLabs/chainsaw/releases/download/v${CHAINSAW_VERSION}/chainsaw_x86_64-unknown-linux-gnu.tar.gz"
+    TMPDIR=$(mktemp -d)
+    if curl -fsSL "$CHAINSAW_URL" -o "$TMPDIR/chainsaw.tgz" 2>/dev/null; then
+        # Guard extraction: a corrupt download must degrade to the optional-skip
+        # path, not abort the whole install under `set -e`.
+        # Release ships as chainsaw/chainsaw + sigma rules
+        if ! tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR" 2>/dev/null; then
+            warn "chainsaw archive corrupt — skipping (TRUDI works without it)"
+        elif [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
+            sudo install -m 0755 "$TMPDIR/chainsaw/chainsaw" "$CHAINSAW_BIN"
+            # Create the share dir once, before either optional copy — so a
+            # release that ships mappings/ but no sigma/ (or vice versa) can't
+            # leave the parent missing and fail a copy under `set -e`.
+            sudo mkdir -p /usr/local/share/chainsaw
+            if [ -d "$TMPDIR/chainsaw/sigma" ]; then
+                sudo cp -r "$TMPDIR/chainsaw/sigma" /usr/local/share/chainsaw/sigma
+            fi
+            if [ -d "$TMPDIR/chainsaw/mappings" ]; then
+                sudo cp -r "$TMPDIR/chainsaw/mappings" /usr/local/share/chainsaw/mappings
+            fi
+            ok "Installed chainsaw v${CHAINSAW_VERSION} → $CHAINSAW_BIN"
+```
+
+[`install.sh:96-122`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L96-L122)
+
+[2] Chainsaw v2.10.2 릴리스의 `chainsaw_x86_64-unknown-linux-gnu.tar.gz`를 내려받아 파일 목록을 확인했다: [Chainsaw v2.10.2 릴리스](https://github.com/WithSecureLabs/chainsaw/releases/tag/v2.10.2).
+목록은 `chainsaw/LICENCE`, `chainsaw/README.md`, `chainsaw/chainsaw`, `chainsaw/mappings/sigma-event-logs-legacy.yml`, `chainsaw/mappings/sigma-event-logs-all.yml`이다.
+설치 스크립트는 `sigma` 폴더가 있을 때만 복사한다([`install.sh:116-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L116-L118)).
+
+[3] 저장소의 틀을 읽어 채우고 Velociraptor 서버에 올린다.
+
+```python
+    src = ARTIFACTS_DIR / f"{name}.yaml.tmpl"
+    if not src.exists():
+        raise FileNotFoundError(f"artifact template not found: {src}")
+
+    mapping = {
+        "artifact_name": name,
+        "baseline_proc_names": _vql_array(baseline.get("process_names") or []),
+        "baseline_image_paths": _vql_array(baseline.get("image_paths") or []),
+        "baseline_persistence_paths": _vql_array(
+            baseline.get("persistence_paths") or []
+        ),
+        # Watch dirs come from the canonical constant, not the baseline, so the
+        # detector and the PersistenceSnapshot helper always glob the same set.
+        "watch_dirs": _vql_array(PERSISTENCE_WATCH_GLOBS),
+        "baseline_endpoints_ips": _vql_array(
+            (ep["remote_ip"] for ep in (baseline.get("endpoints") or []))
+        ),
+        "baseline_endpoints_dst_pairs": _vql_array(
+            (f"{ep['remote_ip']}:{ep['remote_port']}"
+             for ep in (baseline.get("endpoints") or []))
+        ),
+        "yara_rules_path": baseline.get("yara_rules_path") or "/rules/trudi-demo.yar",
+    }
+
+    template = Template(src.read_text())
+    return template.safe_substitute(mapping)
+```
+
+[`monitoring/render.py:53-78`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/monitoring/render.py#L53-L78)
+
+```python
+    baseline = json.loads(baseline_path.read_text())
+
+    pushed: list[dict] = []
+    for name in detectors:
+        rendered = render.render_template(name, baseline)
+        # Persist the rendered YAML in the case dir for audit.
+        out = _monitoring_dir(case_id) / "artifacts" / f"{name}.yaml"
+        out.write_text(rendered)
+        upload = upload_artifact_yaml(rendered)
+```
+
+[`tools/monitor.py:490-498`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L490-L498)
+
+[4] 기준선 수집 도우미를 저장소 파일에서 읽어 올린다.
+
+```python
+    # Persistence allowlist: collect the PersistenceSnapshot helper, which globs
+    # the SAME surface the NewPersistence detector watches (so the allowlist
+    # matches exactly). Upload it first (idempotent), then collect with the
+    # canonical WatchDirs.
+    snap_yaml = (render.ARTIFACTS_DIR / f"{PERSISTENCE_SNAPSHOT_ARTIFACT}.yaml").read_text()
+    snap_upload = upload_artifact_yaml(snap_yaml)
+```
+
+[`tools/monitor.py:351-356`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L351-L356)
+
+[5] 단말의 YARA 룰 경로 기본값이다: [`monitoring/render.py:74`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/monitoring/render.py#L74).
+
+[6] YARA 도구 설명이 저장소의 룰 폴더를 안내한다.
+
+```python
+@mcp.tool()
+@output_safe
+def yara_scan_memory_image(
+    image_path: str,
+    rules_path: str,
+    timeout: int = 300,
+) -> dict:
+    """
+    Scan a full memory image (e.g. base-wkstn-01-memory.img) with YARA rules.
+    Suitable for raw memory captures — not just per-process dumps.
+    rules_path: path to a .yar file or directory of .yar/.yara files.
+    Use ~/trudi/rules/ for the built-in TTP rule library.
+    timeout: per-scan timeout in seconds (default 300 — full images are large).
+```
+
+[`tools/yara_tools.py:141-153`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L141-L153)
+
+[7] pip 의존성이다.
+
+```text
+fastmcp>=3.2.0
+httpx>=0.28.0
+python-dotenv>=1.0.0
+yara-python>=4.3.0
+anthropic>=0.40.0
+
+# Malware analysis (FLARE)
+flare-capa>=7.0.0      # capability analysis → MITRE ATT&CK mapping
+flare-floss>=3.0.0     # obfuscated/stacked string extraction
+
+# Office document forensics (phishing initial access)
+oletools>=0.60         # olevba, mraptor — Office macro detection
+```
+
+[`requirements.txt:1-12`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/requirements.txt#L1-L12)
+
+[8] apt 패키지 설치다.
+
+```bash
+APT_PACKAGES=(
+    python3-venv       # ensurepip — required by `python3 -m venv` (NOT preinstalled on the SIFT base)
+    python3-pip        # pip bootstrap for the venv
+    pff-tools          # pffexport — PST/OST email extraction
+    pst-utils          # readpst — PST→mbox conversion
+    binwalk            # firmware / embedded carving
+    tcpxtract          # network stream carving (already covered)
+    sleuthkit          # TSK tools
+    ewf-tools          # ewfmount, ewfinfo, ewfverify
+)
+
+MISSING_PKGS=()
+for pkg in "${APT_PACKAGES[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+        MISSING_PKGS+=("$pkg")
+    fi
+done
+```
+
+[`install.sh:49-65`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L49-L65)
+
+[9] 설치 스크립트의 사전 조건 확인이다.
+
+```bash
+python3 --version &>/dev/null || fail "python3 not found. SIFT Workstation required."
+PYTHON_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
+[ "$PYTHON_MINOR" -ge 10 ] || fail "Python 3.10+ required (found 3.$PYTHON_MINOR)."
+ok "Python 3.$PYTHON_MINOR"
+
+dotnet --version &>/dev/null || fail "dotnet not found — EZ Tools require the .NET runtime. Install SIFT Workstation first."
+ok "dotnet $(dotnet --version)"
+```
+
+[`install.sh:31-37`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L31-L37)
+
+[10] Volatility 실행 파일, 심볼 폴더, EZ Tools 위치다.
+
+```python
+def vol3_bin() -> str:
+    return "/usr/local/bin/vol"
+
+
+def vol3_symbols() -> str:
+    """Return writable Volatility 3 symbol cache directory, creating it if needed."""
+    # Use `or` so an empty VOLATILITY_SYMBOLS env var falls back to the default
+    path = os.environ.get("VOLATILITY_SYMBOLS") or os.path.expanduser("~/.cache/volatility3/symbols")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def ez_tool(name: str, subdir: str | None = None) -> str:
+    base = "/opt/zimmermantools"
+    if subdir:
+        return f"dotnet {base}/{subdir}/{name}.dll"
+    return f"dotnet {base}/{name}.dll"
+```
+
+[`core/paths.py:182-198`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/paths.py#L182-L198)
+
+[11] `pyscca`를 시스템 패키지 폴더에서 불러온다.
+
+```python
+def _import_system_pyscca():
+    """pyscca ships as a Debian package (python3-libscca) in the system
+    dist-packages, which a venv does not see. Borrow it from there when the
+    interpreter matches; None when libscca is genuinely absent."""
+    import sys
+    sysdir = "/usr/lib/python3/dist-packages"
+    if not os.path.isdir(sysdir):
+        return None
+    added = sysdir not in sys.path
+    if added:
+        sys.path.append(sysdir)
+    try:
+        import pyscca
+        return pyscca
+    except ImportError:
+        return None
+    finally:
+        if added:
+            sys.path.remove(sysdir)
+```
+
+[`tools/eztools.py:342-360`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L342-L360)
+
+[12] FK 지식 시트는 저장소 안 `data/fk` 폴더에서 읽는다.
+
+```python
+FK_DIR = Path(__file__).resolve().parent.parent / "data" / "fk"
+```
+
+[`tools/_fk.py:18-18`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_fk.py#L18-L18)
+
+[13] 등급 상한 계약은 저장소 안 `data/fk/tiering.yaml`이다.
+
+```python
+TIERING_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "fk" / "tiering.yaml"
+```
+
+[`tools/_gates/_tiering.py:39-39`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/_tiering.py#L39-L39)
+
+[14] `install.sh`는 MITRE 표가 이미 있으면 복사하지 않는다.
+
+```bash
+MITRE_DEST="$HOME/cases/.common/mitre_techniques.json"
+MITRE_SRC="$TRUDI_DIR/cases/.common/mitre_techniques.json"
+mkdir -p "$HOME/cases/.common"
+# Prefer in-repo copy; fall back to the one bundled with TRUDI if cases/ is missing.
+if [ -f "$MITRE_DEST" ]; then
+    ok "MITRE reference table already at $MITRE_DEST"
+elif [ -f "$MITRE_SRC" ]; then
+    cp "$MITRE_SRC" "$MITRE_DEST"
+    ok "Installed MITRE reference table → $MITRE_DEST"
+else
+    warn "MITRE reference table not found in repo; mitre_map will be a no-op"
+fi
+```
+
+[`install.sh:188-199`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/install.sh#L188-L199)
+
+[15] MITRE 표의 위치는 환경변수로 정하고 기본값은 `~/cases/.common/` 아래다.
+
+```python
+DEFAULT_TECHNIQUES_PATH = os.environ.get(
+    "TRUDI_MITRE_TABLE",
+    os.path.expanduser("~/cases/.common/mitre_techniques.json"),
+)
+DEFAULT_DETECTION_PATH = os.environ.get(
+    "TRUDI_MITRE_DETECTION",
+    os.path.expanduser("~/cases/.common/mitre_detection.json"),
+)
+DEFAULT_GROUPS_PATH = os.environ.get(
+    "TRUDI_MITRE_GROUPS",
+    os.path.expanduser("~/cases/.common/mitre_groups.json"),
+)
+```
+
+[`tools/mitre/__init__.py:14-25`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/mitre/__init__.py#L14-L25)
+
+[16] 선택 실행 파일을 PATH에서 찾고 Chainsaw 도구가 그 결과를 실행한다.
+
+```python
+def optional_binary(tool_id: str, which=None) -> str | None:
+    """Resolved binary for an optional-binary tool; None when none is installed.
+    Tools outside the table are always considered available ("")."""
+    spec = _OPTIONAL_BINARIES.get(tool_id)
+    if not spec:
+        return ""
+    which = which or shutil.which
+    return next((b for b in (which(n) for n in spec[0]) if b), None)
+```
+
+[`tools/tool_capabilities.py:377-384`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/tool_capabilities.py#L377-L384)
+
+```python
+    missing = tool_unavailable_result("misc.chainsaw_hunt", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.chainsaw_hunt", _bin_or_warn)
+```
+
+[`tools/misc.py:2530-2533`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2530-L2533)
+
+[17] 모델이 준 YAML로 아티팩트를 등록한다.
+
+```python
+@mcp.tool()
+@output_safe
+def upload_artifact_yaml(yaml_text: str) -> dict:
+    """Register (or update) a custom artifact on the Velociraptor server.
+
+    yaml_text: the complete artifact YAML document. Must start with `name:`
+               and the name MUST begin with `Custom.TRUDI.` — enforced here
+               to keep TRUDI-managed artifacts namespaced and easy to audit.
+    """
+    head = yaml_text.lstrip().splitlines()[0] if yaml_text.strip() else ""
+    if not head.startswith("name:"):
+        return {"success": False, "error": "artifact YAML must start with `name:`"}
+    # Crude but effective namespace gate.
+    if "Custom.TRUDI." not in yaml_text.splitlines()[0]:
+        return {
+            "success": False,
+            "error": "artifact name must begin with 'Custom.TRUDI.' — TRUDI manages "
+                     "its own artifacts in that namespace to avoid clobbering "
+                     "operator-authored content.",
+        }
+    vql = f"SELECT artifact_set(definition={json.dumps(yaml_text)}) FROM scope()"
+    return _velo_query(vql)
+```
+
+[`tools/velo.py:463-484`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L463-L484)
+
+[18] 룰 경로 인자와 룰 컴파일이다.
+
+```python
+def _compile_rules(rules_path: str):
+    import yara
+    if os.path.isdir(rules_path):
+        rule_files = {
+            os.path.basename(f): f
+            for f in glob.glob(os.path.join(rules_path, "**/*.yar"), recursive=True)
+            + glob.glob(os.path.join(rules_path, "**/*.yara"), recursive=True)
+        }
+        if not rule_files:
+            raise ValueError(f"No .yar/.yara files found in {rules_path}")
+        return yara.compile(filepaths=rule_files)
+    else:
+        return yara.compile(filepath=rules_path)
+```
+
+[`tools/yara_tools.py:12-24`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L12-L24)
+
+```python
+@mcp.tool()
+@output_safe
+def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
+    """
+    Scan a single file with YARA rules.
+    rules_path: path to a .yar file or a directory of .yar/.yara files.
+    Returns all matching rules with offsets and string identifiers.
+```
+
+[`tools/yara_tools.py:40-46`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L40-L46)
+
+[19] Volatility에 넘기는 YARA 인자를 만든다.
+
+```python
+def _yara_args(yara_rules: str) -> list[str]:
+    """Volatility 2.27 takes --yara-file (a rules file) or --yara-string (a
+    pattern); there is no --yara-rules. Inline rule text goes to a temp file."""
+    if os.path.isfile(yara_rules):
+        return ["--yara-file", yara_rules]
+    if "rule " in yara_rules and "{" in yara_rules:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="trudi-yara-", suffix=".yar")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(yara_rules)
+        return ["--yara-file", path]
+    return ["--yara-string", yara_rules]
+```
+
+[`tools/volatility.py:25-36`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L25-L36)
+
+[20] 단말의 룰 경로를 받는다.
+
+```python
+
+@mcp.tool()
+@output_safe
+def live_yara_scan(host: str, rules_path: str, target_dir: str) -> dict:
+    """Run a YARA scan on a directory of the live endpoint.
+
+    rules_path: path TO THE RULES ON THE ENDPOINT — they must already be
+                present there (push via scp or initial deployment). Keeps
+                this tool stateless and read-only on TRUDI side.
+    target_dir: directory on the endpoint to scan.
+
+    For one-off rules push, scp the rules during endpoint setup (see
+    docs/live-endpoint-testing.md).
+    """
+    return ssh_run(
+        host,
+        ["yara", "-r", "-s", rules_path, target_dir],
+        timeout=300,
+    )
+```
+
+[`tools/live.py:217-235`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/live.py#L217-L235)
+
+[21] Sigma 룰 폴더와 매핑 파일을 정한다.
+
+```python
+    if sigma_dir is None:
+        for candidate in ("/opt/chainsaw/sigma", "/usr/local/share/chainsaw/sigma",
+                          "/usr/share/chainsaw/sigma"):
+            if os.path.isdir(candidate):
+                sigma_dir = candidate
+                break
+    cmd = [binary, "hunt", evtx_dir]
+    if sigma_dir:
+        cmd += ["-s", sigma_dir, "--mapping", sigma_dir + "/../mappings/sigma-event-logs-all.yml"]
+    if output_path:
+        cmd += ["--csv", "--output", output_path]
+    return run(cmd, timeout=3600)
+```
+
+[`tools/misc.py:2534-2545`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L2534-L2545)
+
+[22] EZ Tools의 맵 폴더와 배치 파일 기본값이다: [`tools/eztools.py:176`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L176), [`tools/eztools.py:202`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L202), [`tools/eztools.py:219`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L219), [`tools/eztools.py:589`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L589).
+
+[23] Velociraptor 실행 파일 위치다.
+
+```python
+DEFAULT_VELO_BIN = "velociraptor"
+DEFAULT_API_CONFIG = os.path.expanduser(
+    "~/.config/trudi/velociraptor/api.config.yaml"
+)
+
+
+def _resolve_bin() -> str:
+    return os.environ.get("TRUDI_VELO_BIN") or DEFAULT_VELO_BIN
+```
+
+[`tools/velo.py:41-48`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L41-L48)
+
+[24] `vol.vadyarascan`의 인자 설명이다.
+
+```python
+@mcp.tool()
+@output_safe
+def vol_vadyarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> dict:
+    """
+    YARA scan of process VAD regions directly from memory.
+    yara_rules: path to a .yar file or inline rule string.
+    """
+    extra = _yara_args(yara_rules) + _pid_extra(pid)
+    return _vol(image, "windows.vadyarascan", extra, timeout=VOL_TIMEOUT)
+```
+
+[`tools/volatility.py:353-361`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L353-L361)
+
+[25] 캐시된 Windows 커널 심볼의 파일 이름을 돌려준다.
+
+```python
+    expanded = os.path.expanduser(memory_image)
+    if not os.path.exists(expanded):
+        return {
+            "success": False,
+            "image": memory_image,
+            "symbols_ready": False,
+            "cached_symbol_count": 0,
+            "cached_guids": [],
+            "note": f"Image not found: {expanded} — check the path and try again.",
+        }
+
+    symbols_dir = vol3_symbols()
+    cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
+    cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
+
+    return {
+        "success": True,
+        "image": expanded,
+        "symbols_ready": len(cached) > 0,
+        "cached_symbol_count": len(cached),
+        "cached_guids": [os.path.basename(p) for p in cached],
+        "note": (
+            "Symbol cache is populated — proceed with memory plugins."
+            if cached else
+            "Symbol cache is empty — call vol_info once to download symbols (requires internet)."
+        ),
+    }
+```
+
+[`tools/volatility.py:79-105`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L79-L105)
+
+[26] 정책 값은 지식 시트와 게이트 코드의 SHA-256을 담는다.
+
+```python
+def review_policy():
+    # No secrets/endpoints in the receipt. The model and deliberate review
+    # settings participate in identity; source hashes cover prompt/gate changes.
+    from tools import reasoning as R
+    root = Path(__file__).resolve().parents[1]
+    policy = {}
+    for pattern in ('core/evidence_packets.py', 'core/finding_submission.py',
+                    'tools/reasoning.py', 'tools/_llm_parse.py', 'tools/_output_reader.py',
+                    'tools/_gates/*.py', 'data/fk/**/*.yaml'):
+        for path in root.glob(pattern):
+            policy[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digest([VERSION, policy, R._active_backend(), R.REASON_MODEL,
+                   R.MAX_TOKENS_EVALUATE, R.COMPAT_EVIDENCE_ROUNDS, R.COMPAT_EVIDENCE_MODE,
+                   digest(R.REASON_URL), R.COMPAT_EXTRA_BODY_RAW, R.REASON_FK,
+                   R.COMPAT_THINKING_BUDGET, R.COMPAT_NO_THINK_MODE,
+                   sorted(R.COMPAT_NO_THINK_TOOLS), R.COMPAT_EVIDENCE_ROUND_CHARS])
+```
+
+[`core/evidence_packets.py:58-73`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L58-L73)
+
+[27] 보고서 전 점검의 `readiness_fingerprint`에도 등급 계약과 게이트 코드의 SHA-256이 들어간다.
+
+```python
+    root = Path(__file__).resolve().parents[1]
+    policy = {}
+    for pattern in ('core/findings.py', 'core/readiness.py', 'core/review_issues.py',
+                    'core/evidence_packets.py', 'core/finding_submission.py',
+                    'tools/_readiness.py', 'tools/reasoning.py', 'tools/_llm_parse.py',
+                    'tools/dair.py', 'tools/_gates/*.py', 'data/fk/tiering.yaml'):
+        for p in root.glob(pattern):
+            policy[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return digest([POLICY_VERSION, case_id, records, files, policy])
+```
+
+[`core/readiness.py:54-62`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/readiness.py#L54-L62)
+
+[28] `vol.symbol_check`의 설명이다.
+
+```python
+@mcp.tool()
+@output_safe
+def vol_symbol_check(memory_image: str) -> dict:
+    """
+    Pre-flight check: verify the memory image exists and Volatility 3 symbol
+    files are cached. Returns the resolved absolute path in the 'image' field
+    so downstream plugins can use it directly without re-expanding ~.
+
+    If symbols_ready is False, call vol_info once (requires internet) to
+    trigger the download for this kernel build, then retry memory plugins.
+    """
+```
+
+[`tools/volatility.py:68-78`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L68-L78)
+
+[29] 메모리 플러그인 실행은 심볼 폴더 경로만 넘긴다.
+
+```python
+def _vol(image: str, plugin: str, extra: list[str] | None = None,
+         output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
+    # -o OUTPUT_DIR is a global Volatility flag — must come before the plugin name.
+    # Plugin-specific args (--pid, --dump, etc.) go in extra, after the plugin.
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)   # Volatility refuses a missing -o dir
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin] + (extra or [])
+    return run(cmd, timeout=timeout)
+```
+
+[`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22)
+
+[30] 기록 전에 정책 값을 다시 계산해 packet의 값과 견준다.
+
+```python
+def packet_current(log, packet):
+    by_id = {e.get('call_id'): e for e in log._entries}
+    return (case_identity(log) == packet['case'] and review_policy() == packet['policy']
+            and all(entry_identity(by_id.get(int(cid), {})) == sig
+                    for cid, sig in packet['entry_identities'].items())
+```
+
+[`core/evidence_packets.py:332-336`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L332-L336)
+
+[31] `exiftool` 호출이 버전 줄을 뺀다.
+
+```python
+@mcp.tool()
+@output_safe
+def exiftool_metadata(file_path: str) -> dict:
+    """Extract EXIF and metadata from files (images, Office docs, PDFs, executables)."""
+    # -q: suppress status ("N image files read"). --ExifToolVersion: drop the
+    # leading "ExifTool Version Number" pseudo-tag so the real metadata (Creator,
+    # Last Modified By, …) leads the output instead of a tool banner — the
+    # stdout excerpt stored in the trace then carries evidence, not preamble.
+    return run(["exiftool", "-q", "--ExifToolVersion", file_path])
+```
+
+[`tools/strings_tools.py:293-301`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/strings_tools.py#L293-L301)
