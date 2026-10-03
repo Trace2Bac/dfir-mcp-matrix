@@ -7,11 +7,12 @@ DFIR MCP 서버가 증거 무결성·실행 통제·결과 전달·기록 같은
 
 ```
 pip install -r requirements.txt
-python tools/pilot.py serve        # http://localhost:8000
+cd web && npm ci && npm start      # http://localhost:3000/dfir-mcp-architecture-matrix-v2/
 ```
 
-위에 전체 셀 구조가 있고 셀을 누르면 상세 항목과 서버, 서버를 누르면 구현·예외·근거가 열린다.
-CI가 PR·`main` 푸시마다 화면을 빌드해 Actions 아티팩트(`matrix-site`)로 올린다. 저장소가 비공개라 GitHub Pages 배포는 꺼 두었다(`.github/workflows/matrix.yml` 머리 참고).
+화면은 Docusaurus 사이트(`web/`)다. 첫 화면에 전체 셀 구조가 있고 셀을 누르면 상세 항목과 그 상세에 드는 서버, 서버를 누르면 그 서버 원고(구현·예외·근거)가 열린다.
+`npm start`·`npm run build`는 먼저 `python tools/pilot.py build`로 화면 데이터를 만든다. 그래서 Python과 Node.js 20 이상이 둘 다 있어야 한다.
+CI가 PR·`main` 푸시마다 사이트를 빌드해 Actions 아티팩트(`matrix-site`)로 올린다. 저장소가 비공개라 GitHub Pages 배포는 꺼 두었다(`.github/workflows/matrix.yml` 머리 참고).
 
 ## 축
 
@@ -28,14 +29,14 @@ CI가 PR·`main` 푸시마다 화면을 빌드해 Actions 아티팩트(`matrix-s
 ## 구조
 
 ```
-matrix/          셀 구조와 정의의 원본. 셀 하나 = cells/<ID>.yaml 하나        → matrix/README.md
-reports/         서버별 원고. reports/<서버>/<셀ID>.md                       → reports/README.md
+matrix/          셀 구조와 정의의 원본. 셀 하나 = cells/<ID>.mdx 하나         → matrix/README.md
+reports/         서버별 원고. reports/<서버>/<셀ID>.mdx                      → reports/README.mdx
 docs/
-  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.md
-  redesign-plan-2026-09-30.md   개편 배경·원칙·셀 경계·옛 셀 대응
-  cell-review-2026-09-30.md     셀 공동 검토 자료(옛 번호)
-site/index.html  화면. 빌드한 data/matrix.json을 읽어 그리기만 한다
-tools/pilot.py   validate·check·build·serve·fill·renumber
+  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
+  redesign-plan-2026-09-30.mdx  개편 배경·원칙·셀 경계·옛 셀 대응
+  cell-review-2026-09-30.mdx    셀 공동 검토 자료(옛 번호)
+web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
+tools/pilot.py   validate·check·build·fill·renumber
 .github/workflows/matrix.yml   PR·main 푸시마다 validate·build, 화면을 아티팩트로 올림(Pages는 켜면 배포)
 ```
 
@@ -47,16 +48,15 @@ LLM에게 고치게 할 때는 [AGENTS.md](AGENTS.md)를 읽힌다(Claude Code�
 ```
 python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(CI가 돌린다)
 python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(옛 저장소와 서버 클론 필요)
-python tools/pilot.py build             # _site/에 화면과 데이터를 만든다
-python tools/pilot.py serve [포트]       # build 뒤 로컬에서 띄운다
+python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
 python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
-python tools/coverage.py <서버>          # reports/<서버>/tools.yaml로 기능→셀 대응표(coverage.md)를 만든다
+python tools/coverage.py <서버>          # reports/<서버>/tools.yaml로 기능→셀 대응표(coverage.mdx)를 만든다
 ```
 
 필요한 것: Python 3.10 이상과 `requirements.txt`. `check`·`fill`은 옛 매트릭스 저장소(`Claude outputs`)와 분석 대상 서버의 클론도 있어야 한다(CONTRIBUTING.md).
 
 ## 라이선스
 
-코드(`tools/`·`site/`·`matrix/schema/`·`.github/`)는 MIT([LICENSE](LICENSE)), 매트릭스 정의·원고·문서는 CC BY 4.0([LICENSE-CONTENT](LICENSE-CONTENT))이다.
+코드(`tools/`·`web/`·`matrix/schema/`·`.github/`)는 MIT([LICENSE](LICENSE)), 매트릭스 정의·원고·문서는 CC BY 4.0([LICENSE-CONTENT](LICENSE-CONTENT))이다.
 원고에 인용한 분석 대상 서버의 코드 발췌는 각 프로젝트의 라이선스를 따른다. 자세한 범위는 [NOTICE.md](NOTICE.md)에 있다.

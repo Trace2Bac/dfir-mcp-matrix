@@ -3,28 +3,23 @@
 
   python tools/pilot.py validate          셀·축·설정·원고 머리말을 스키마와 서로 대조한다(외부 저장소 없이 돈다. CI가 돌린다)
   python tools/pilot.py check [서버[:셀,셀] ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(옛 저장소와 서버 클론이 있어야 한다)
-  python tools/pilot.py build             _site/에 화면(index.html)과 데이터(data/matrix.json)를 만든다
-  python tools/pilot.py serve [포트]       build 뒤 _site/를 http://localhost:포트 로 띄운다(기본 8000)
+  python tools/pilot.py build             사이트(web/)가 읽는 화면 데이터 web/static/data/matrix.json을 만든다
   python tools/pilot.py fill <서버>        원고의 `@발췌 경로:시작-끝` 줄을 기준 커밋 코드 블록과 링크로 바꾸고 백틱 `경로:줄`을 링크로 바꾼다
   python tools/pilot.py renumber <서버>    셀 파일마다 표지 번호를 본문에 처음 나온 차례로 다시 매기고 근거 항목을 그 차례로 옮긴다
 
 원본:
   matrix/axes.yaml           축 차례·이름
-  matrix/cells/<ID>.yaml     셀 하나의 질문·상세 정의
+  matrix/cells/<ID>.mdx      셀 하나의 질문·상세 정의
   matrix/config.yaml         화면에 보일 서버, 시범 셀
-  reports/<서버>/index.md    서버 원고의 머리(저장소·기준 커밋)
-  reports/<서버>/<셀>.md     서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·예외·근거
-형식은 matrix/README.md와 reports/README.md에 있다.
+  reports/<서버>/index.mdx   서버 원고의 머리(저장소·기준 커밋)
+  reports/<서버>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·예외·근거
+형식은 matrix/README.md와 reports/README.mdx에 있다.
 """
 import functools
 import glob
-import html
-import http.server
 import json
 import os
 import re
-import shutil
-import socketserver
 import subprocess
 import sys
 
@@ -34,10 +29,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MATRIX = os.path.join(ROOT, "matrix")
 REPORTS = os.path.join(ROOT, "reports")
-SITE_SRC = os.path.join(ROOT, "site")
-OUT = os.path.join(ROOT, "_site")
+OUT = os.path.join(ROOT, "web", "static", "data", "matrix.json")   # 생성물(.gitignore)
 
-# ── 원고 표시어 ── 원고(reports/)·화면 데이터에 쓰는 낱말. 다국어로 나눌 때 여기와 site/index.html의 STRINGS만 언어별로 늘린다.
+# ── 원고 표시어 ── 원고(reports/)·화면 데이터에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
 TERMS = {
     "not_implemented": "미구현",   # 머리말 details의 id 값
     "not_applicable": "비적용",
@@ -60,14 +54,29 @@ def load_yaml(path):
         return yaml.safe_load(f)
 
 
+FRONT = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+
+
+def read_front(path):
+    """마크다운 파일의 머리말(YAML)과 본문을 나눈다. 본문 줄 번호를 맞추려고 머리말 줄 수도 돌려준다."""
+    text = open(path, encoding="utf-8").read().replace("\r\n", "\n")
+    m = FRONT.match(text)
+    if not m:
+        return {}, text, 0
+    return (yaml.safe_load(m.group(1)) or {}), text[m.end():], m.group(0).count("\n")
+
+
 def load_matrix():
     """축·셀·설정을 읽는다. 셀은 축 차례, 같은 축 안에서는 ID 차례다."""
     axes = load_yaml(os.path.join(MATRIX, "axes.yaml"))["axes"]
     order = {a["id"]: i for i, a in enumerate(axes)}
     cells = []
-    for p in glob.glob(os.path.join(MATRIX, "cells", "*.yaml")):
-        c = load_yaml(p) or {}
+    for p in glob.glob(os.path.join(MATRIX, "cells", "*.mdx")):
+        if os.path.basename(p) == "index.mdx":   # Docusaurus의 셀 목록 화면
+            continue
+        c, body, _ = read_front(p)
         c["_file"] = os.path.relpath(p, ROOT)
+        c["_title"] = body.strip()
         cells.append(c)
     cells.sort(key=lambda c: (order.get(str(c.get("id", "?"))[0], 99), str(c.get("id"))))
     config = load_yaml(os.path.join(MATRIX, "config.yaml"))
@@ -95,18 +104,6 @@ def retired_detail(iid):
     return None
 
 
-FRONT = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-
-
-def read_front(path):
-    """마크다운 파일의 머리말(YAML)과 본문을 나눈다. 본문 줄 번호를 맞추려고 머리말 줄 수도 돌려준다."""
-    text = open(path, encoding="utf-8").read().replace("\r\n", "\n")
-    m = FRONT.match(text)
-    if not m:
-        return {}, text, 0
-    return (yaml.safe_load(m.group(1)) or {}), text[m.end():], m.group(0).count("\n")
-
-
 def report_dir(name):
     return os.path.join(REPORTS, name)
 
@@ -114,7 +111,7 @@ def report_dir(name):
 def cell_files(name):
     """서버 폴더의 셀 파일. {셀ID: 경로}"""
     out = {}
-    for p in sorted(glob.glob(os.path.join(report_dir(name), "*.md"))):
+    for p in sorted(glob.glob(os.path.join(report_dir(name), "*.mdx"))):
         stem = os.path.splitext(os.path.basename(p))[0]
         if stem != "index" and CELL_ID.match(stem):
             out[stem] = p
@@ -184,28 +181,14 @@ def parse_cell(path):
 
 
 def parse(name):
-    """서버 원고 전체. (index.md 머리말과 본문, {셀ID: 셀 파일 내용})"""
-    idx = os.path.join(report_dir(name), "index.md")
+    """서버 원고 전체. (index.mdx 머리말과 본문, {셀ID: 셀 파일 내용})"""
+    idx = os.path.join(report_dir(name), "index.mdx")
     head_fm, head, _ = read_front(idx) if os.path.exists(idx) else ({}, "", 0)
     return head_fm, head, {cid: parse_cell(p) for cid, p in cell_files(name).items()}
 
 
 def block_text(b):
     return " ".join(l for l in b["lines"] if l.strip())
-
-
-def paragraphs(lines):
-    """빈 줄로 나뉜 단락마다 줄 목록을 돌려준다. 원고는 문장 하나를 한 줄에 쓰므로 줄이 곧 문장이다."""
-    out, cur = [], []
-    for l in lines:
-        if l.strip():
-            cur.append(l.strip())
-        elif cur:
-            out.append(cur)
-            cur = []
-    if cur:
-        out.append(cur)
-    return out
 
 
 SENT_END = re.compile(r"(?<=[다음됨함]\.)\s+(?=\S)|(?<=\]\.)\s+(?=\S)|(?<=\)\.)\s+(?=\S)")
@@ -257,9 +240,11 @@ def validate():
     seen = set()
     for c in CELL_LIST:
         f = c["_file"]
-        body = {k: v for k, v in c.items() if k != "_file"}
+        body = {k: v for k, v in c.items() if not k.startswith("_")}
         errs += _schema_errors(body, cell_schema, f)
         cid = str(c.get("id"))
+        if c["_title"] != "# %s %s" % (cid, c.get("name")):
+            errs.append("%s: 본문은 제목 '# %s %s' 한 줄이어야 한다(셀 이름을 고치면 같이 고친다)" % (f, cid, c.get("name")))
         if os.path.splitext(os.path.basename(f))[0] != cid:
             errs.append("%s: 파일 이름과 id(%s)가 다르다" % (f, cid))
         if cid in seen:
@@ -298,17 +283,17 @@ def validate():
             errs.append("matrix/config.yaml: 시범 셀 %s에 정의(scope·not_implemented·not_applicable·include·exclude)가 없다" % cid)
     rep_schema = _schema("report.schema.json")
     for n in reported_servers():
-        idx = os.path.join(report_dir(n), "index.md")
+        idx = os.path.join(report_dir(n), "index.mdx")
         if not os.path.exists(idx):
-            errs.append("reports/%s/index.md가 없다" % n)
+            errs.append("reports/%s/index.mdx가 없다" % n)
         else:
             fm, _, _ = read_front(idx)
             if fm.get("server") != n:
-                errs.append("reports/%s/index.md: 머리말 server가 %s가 아니다" % (n, n))
+                errs.append("reports/%s/index.mdx: 머리말 server가 %s가 아니다" % (n, n))
         files = cell_files(n)
         for cid in ORDER:
             if cid not in files:
-                errs.append("reports/%s/%s.md가 없다(시범 셀)" % (n, cid))
+                errs.append("reports/%s/%s.mdx가 없다(시범 셀)" % (n, cid))
         for cid, p in files.items():
             where = os.path.relpath(p, ROOT)
             fm, _, _ = read_front(p)
@@ -316,7 +301,7 @@ def validate():
             if fm.get("cell") != cid:
                 errs.append("%s: 머리말 cell이 파일 이름(%s)과 다르다" % (where, cid))
             if cid not in CELLS:
-                errs.append("%s: matrix/cells/%s.yaml이 없다" % (where, cid))
+                errs.append("%s: matrix/cells/%s.mdx이 없다" % (where, cid))
                 continue
             det = fm.get("details") or []
             ids = [str(d.get("id")) for d in det]
@@ -361,11 +346,11 @@ def v1():
 
 
 def _use_report_commits(linkify):
-    """서버의 저장소·기준 커밋은 이 저장소의 reports/<서버>/index.md 머리말을 원본으로 쓴다.
+    """서버의 저장소·기준 커밋은 이 저장소의 reports/<서버>/index.mdx 머리말을 원본으로 쓴다.
     옛 저장소 판정 YAML의 값은 클론 위치를 찾을 때만 쓴다."""
     clones = os.environ.get("DFIR_CLONES") or os.path.dirname(ROOT)
     for n in reported_servers():
-        fm = read_front(os.path.join(report_dir(n), "index.md"))[0]
+        fm = read_front(os.path.join(report_dir(n), "index.mdx"))[0]
         if not fm.get("repo") or not fm.get("commit"):
             continue
         old = linkify.REPOS.get(n)
@@ -395,7 +380,7 @@ def repo_by_slug():
 # ───────────────────────── fill ─────────────────────────
 LANG = {".py": "python", ".ts": "typescript", ".tsx": "typescript", ".js": "javascript", ".mjs": "javascript",
         ".go": "go", ".cs": "csharp", ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
-        ".md": "markdown", ".sh": "bash", ".ps1": "powershell", ".rs": "rust", ".sql": "sql"}
+        ".md": "markdown", ".mdx": "markdown", ".sh": "bash", ".ps1": "powershell", ".rs": "rust", ".sql": "sql"}
 PH = re.compile(r"^" + re.escape(TERMS["excerpt"]) + r" (\S+):(\d+)-(\d+)\s*$")
 
 
@@ -488,16 +473,16 @@ def check(name, slugs, only=None):
     head_fm, head, secs = parse(name)
     sha0 = str(head_fm.get("commit", ""))
     if not sha0:
-        errs.append("index.md 머리말에 commit이 없다")
+        errs.append("index.mdx 머리말에 commit이 없다")
     elif sha0[:7] not in head:
-        errs.append("index.md 본문의 기준 커밋 링크가 머리말 commit(%s)과 다르다" % sha0[:7])
+        errs.append("index.mdx 본문의 기준 커밋 링크가 머리말 commit(%s)과 다르다" % sha0[:7])
     root = linkify.REPOS.get(name, ("", "", ""))[2]
     if sha0 and subprocess.run(["git", "-C", root, "cat-file", "-e", sha0 + "^{commit}"], capture_output=True).returncode:
         errs.append("클론 %s에 기준 커밋 %s가 없다(git fetch를 한 번 한다)" % (linkify.REPOS[name][2], sha0[:7]))
     for cid, p in cell_files(name).items():
         if only and cid not in only:
             continue
-        where = "%s.md" % cid
+        where = "%s.mdx" % cid
         hit, missing, _ = linkify.run(name, p, write=False)
         if hit:
             errs.append("%s 링크로 바꾸지 않은 `경로:줄`이 %d개 있다(fill을 돌린다)" % (where, hit))
@@ -597,7 +582,7 @@ def check_cell(cid, s, slugs):
     return errs, warns
 
 
-EXCERPT_MAX = 30          # 이 줄 수 이하의 한 범위는 발췌를 붙인다(reports/README.md 근거 규칙)
+EXCERPT_MAX = 30          # 이 줄 수 이하의 한 범위는 발췌를 붙인다(reports/README.mdx 근거 규칙)
 EXCERPT_LINK_ONLY = 3     # 코드 위치가 이만큼 이상이면 링크만 두어도 된다
 NON_CODE = (".md", ".txt", ".rst")
 
@@ -675,67 +660,11 @@ def check_blocks(lines, slugs):
 
 
 # ───────────────────────── build ─────────────────────────
-def md_inline(s):
-    """원고 한 단락을 HTML로. 링크·굵게·코드 백틱·표지만 다룬다.
-    상대 링크는 화면에서 열리지 않으므로 이름만 글자로 보인다."""
-    out, i = [], 0
-    pat = re.compile(r"\[`(?P<cl>[^`]+)`\]\((?P<cu>[^)]+)\)"
-                     r"|\[(?P<rl>[^\]]+)\]\((?P<ru>\.\.?/[^)]+)\)"
-                     r"|\[(?P<ll>[^\]]+)\]\((?P<lu>https?://[^)]+)\)"
-                     r"|`(?P<code>[^`]+)`|\*\*(?P<b>[^*]+)\*\*|\[(?P<mk>\d+)\](?!\()")
-    for m in pat.finditer(s):
-        out.append(html.escape(s[i:m.start()]))
-        g = m.groupdict()
-        if g["cl"]:
-            out.append('<a href="%s" target="_blank" rel="noopener"><code>%s</code></a>' % (html.escape(g["cu"]), html.escape(g["cl"])))
-        elif g["rl"]:
-            out.append(html.escape(g["rl"]))
-        elif g["ll"]:
-            out.append('<a href="%s" target="_blank" rel="noopener">%s</a>' % (html.escape(g["lu"]), md_inline(g["ll"])))
-        elif g["code"]:
-            out.append("<code>%s</code>" % html.escape(g["code"]))
-        elif g["b"]:
-            out.append("<b>%s</b>" % md_inline(g["b"]))
-        else:
-            out.append('<a class="mk" href="#" data-ev="%s">[%s]</a>' % (g["mk"], g["mk"]))
-        i = m.end()
-    out.append(html.escape(s[i:]))
-    return "".join(out)
-
-
-def md_evidence(lines):
-    """근거 항목 하나를 HTML로. 단락과 코드 블록만 다룬다."""
-    out, para, code, lang = [], [], None, ""
-
-    def flush():
-        if para:
-            out.append("<p>%s</p>" % "<br>".join(md_inline(x) for x in para))
-            para.clear()
-    for ln in lines:
-        if code is not None:
-            if ln.startswith("```"):
-                out.append('<pre class="code"><code data-lang="%s">%s</code></pre>' % (lang, html.escape("\n".join(code))))
-                code = None
-            else:
-                code.append(ln)
-            continue
-        if ln.startswith("```"):
-            flush()
-            code, lang = [], ln[3:].strip()
-            continue
-        if not ln.strip():
-            flush()
-            continue
-        para.append(ln)
-    flush()
-    return "\n".join(out)
-
-
 def build_data():
     """화면 데이터(dict)를 만든다."""
     names = list(CONFIG["servers"])
     reports = {n: parse(n)[2] for n in reported_servers()}
-    link, impl = {}, {}
+    link = {}
     for n in names:
         link[n] = {}
         for c in CELL_LIST:
@@ -743,22 +672,7 @@ def build_data():
             if not s or not s["items"]:
                 link[n][c["id"]] = [{"상세": UNKNOWN, "예외": False}]
                 continue
-            rows = []
-            for it, u in zip(s["items"], s["units"]):
-                marks = []
-                for b in u["blocks"]:
-                    for x in MARK.findall(block_text(b)):
-                        if int(x) not in marks:
-                            marks.append(int(x))
-                rows.append({"상세": it["id"], "예외": it["dagger"]})
-                blocks = {b["label"]: "".join("<p>%s</p>" % "<br>".join(md_inline(x) for x in p) for p in paragraphs(b["lines"]))
-                          for b in u["blocks"]}
-                ev = "".join('<div class="ev" id="EV-%d"><span class="evn">[%d]</span>%s</div>'
-                             % (k, k, md_evidence([re.sub(r"^\[\d+\] ", "", s["evid"][k][0])] + s["evid"][k][1:]))
-                             for k in sorted(marks) if k in s["evid"])
-                impl["%s|%s|%s" % (c["id"], n, it["id"])] = {"impl": blocks.get(TERMS["impl"]) or blocks.get(TERMS["judge"], ""),
-                                                            "exc": blocks.get(TERMS["exc"], ""), "evid": ev}
-            link[n][c["id"]] = rows
+            link[n][c["id"]] = [{"상세": it["id"], "예외": it["dagger"]} for it in s["items"]]
     cells_out = []
     for c in CELL_LIST:
         defined = bool(c.get("scope"))
@@ -779,7 +693,7 @@ def build_data():
                           "cond": bool(c.get("conditional")), "scope": c.get("applies_to", ""),
                           "note": c.get("boundary", ""), "defined": defined, "dscope": c.get("scope", ""),
                           "studied": studied, "rows": rows})
-    return {"axes": {a["id"]: a["name"] for a in AXES}, "cells": cells_out, "impl": impl, "samples": names,
+    return {"axes": {a["id"]: a["name"] for a in AXES}, "cells": cells_out, "samples": names,
             "pilot": {"cells": ORDER, "servers": list(reports)}}
 
 
@@ -787,34 +701,12 @@ def build():
     import datetime
     data = build_data()
     data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
-    if os.path.isdir(OUT):
-        shutil.rmtree(OUT)
-    os.makedirs(OUT, exist_ok=True)
-    os.makedirs(os.path.join(OUT, "data"), exist_ok=True)
-    with open(os.path.join(OUT, "data", "matrix.json"), "w", encoding="utf-8", newline="\n") as f:
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
-    print("_site/ 만듦 (셀 %d, 조건부 %d, 서버 %d, 구현 설명 %d)"
-          % (len(data["cells"]), sum(1 for c in data["cells"] if c["cond"]), len(data["samples"]), len(data["impl"])))
+    print("%s 만듦 (셀 %d, 조건부 %d, 서버 %d)"
+          % (os.path.relpath(OUT, ROOT), len(data["cells"]), sum(1 for c in data["cells"] if c["cond"]), len(data["samples"])))
     return data
-
-
-class _Utf8Handler(http.server.SimpleHTTPRequestHandler):
-    """글 파일에 charset=utf-8을 붙여 보낸다. 없으면 브라우저가 지역 인코딩(EUC-KR 등)으로 추측해 한글이 깨진다."""
-    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
-                      ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8",
-                      ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
-
-
-def serve(port=8000):
-    build()
-    handler = functools.partial(_Utf8Handler, directory=OUT)
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
-        print("http://localhost:%d 에서 본다. 끝내려면 Ctrl+C" % port)
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
 
 
 def _print(title, errs, warns=()):
@@ -854,8 +746,6 @@ def main():
         sys.exit(1 if total else 0)
     elif cmd == "build":
         build()
-    elif cmd == "serve":
-        serve(int(args[0]) if args else 8000)
     elif cmd == "fill":
         for a in args:
             fill(*target(a))

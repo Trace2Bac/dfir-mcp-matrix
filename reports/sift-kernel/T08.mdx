@@ -1,0 +1,611 @@
+---
+cell: T08
+details:
+- id: T08.01
+  exception: true
+- id: T08.02
+  exception: true
+- id: T08.03
+  exception: true
+- id: T08.05
+  exception: true
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 서버가 실행하는 외부 도구는 모두 공통 실행기의 `execute`나 `extractToFile`을 거치고 두 함수가 종료 코드를 본다 [1][2].
+`execute`는 프로세스가 0이 아닌 코드로 끝나면 실패를 돌려주고 0이면 성공을 돌려준다 [1].
+서버는 실행기가 실패를 돌려주면 연산을 `success: false`로 정하고 실행 오류의 `message`를 응답과 호출 기록의 오류로 싣는다 [3].
+이 `message`에는 종료 코드만 들어가고 표준 오류는 들어가지 않는다 [4].
+`mount_evidence`는 마운트 명령의 종료 코드가 0일 때만 마운트 성공으로 본다 [5].
+이미지에서 파일을 꺼내는 `extractToFile`은 종료 코드가 0이 아니고 받은 바이트도 없을 때만 실패로 본다 [2].
+
+**예외.** `execute`는 `close` 이벤트의 종료 코드가 `null`이면 0으로 바꿔 성공을 돌려준다 [1].
+Node.js는 자식 프로세스가 신호로 끝났을 때 이 값을 `null`로 준다 [6].
+실행기가 시간 제한·출력 상한으로 끊은 경우는 따로 다루지만 그 밖의 신호로 끝난 도구는 그때까지의 출력과 함께 성공으로 처리된다 [1][3].
+`extractToFile`은 종료 코드가 0이 아니어도 받은 바이트가 있으면 성공을 돌려준다 [2].
+서버는 그 파일로 `path`를 바꿔 레지스트리·이벤트 로그 도구를 실행하고 꺼내기가 실패 코드로 끝났다는 표시를 남기지 않는다 [7].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 실행기는 실행마다 시간 제한을 걸고 시간이 지나면 `SIGTERM`을 보낸 뒤 5초 뒤에 `SIGKILL`을 보낸다 [8].
+기본 시간 제한은 45초다 [9].
+서버는 `search_filename`과 재귀 `list_directory`에 30초, 이벤트 로그 연산에 35초를 주고 비동기 연산에는 300초를 준다 [10][11].
+실행기는 표준 출력이 줄 수 상한이나 바이트 상한을 넘을 때도 같은 `killed` 표시를 세우고 프로세스를 끊는다 [12].
+끊긴 실행에 표준 출력이 없으면 시간 초과 오류를 돌려주고 출력이 있으면 종료 코드 -1과 그 출력을 돌려준다 [13].
+시간 초과 오류는 다시 시도할 오류로 표시되고 실행기는 같은 명령을 처음 실행까지 합쳐 3번까지 실행한다 [4][14].
+표준 오류에 `EAGAIN`·`EBUSY` 같은 문구가 있는 실패도 다시 시도한다 [4][14].
+다시 시도하는 횟수는 exponential-backoff 3.1.3의 `numOfAttempts` 동작을 따른다 [15].
+
+실행기는 외부 도구를 한 번에 하나만 실행하고 시간 제한은 차례가 와서 프로세스를 띄울 때부터 잰다 [16].
+호출 처리기는 요청 객체만 받고 클라이언트의 호출 취소를 실행기에 전하는 코드가 없다 [17].
+그래서 클라이언트가 기다림을 멈춰도 실행과 다시 시도는 이어진다.
+
+**예외.** 시간 제한이나 출력 상한으로 끊긴 실행에 출력이 있으면 서버는 종료 코드 -1을 성공으로 처리한다 [13][18].
+응답과 호출 기록에는 끊겼다는 표시가 없고 시간 초과와 출력 상한도 구별되지 않는다 [18].
+비동기 연산도 같은 결과를 `completed`로 둔다 [19].
+이 상태는 T08.05에서 본다.
+
+실행기의 실행 파일 대체 목록은 짝끼리 서로를 가리킨다 [20].
+두 이름이 모두 없는 도구는 `ENOENT`가 날 때마다 시간 제한 타이머를 지우고 다른 이름으로 다시 띄우므로 시간 제한이 걸리지 않고 실행이 끝나지 않는다 [21].
+실행기는 한 번에 하나만 실행하므로 이 실행이 끝나지 않으면 뒤의 외부 도구 실행도 차례를 받지 못한다 [16].
+`--sudo`로 서버를 띄우면 신호를 받는 프로세스는 `sudo`이고 그 아래 도구 프로세스까지 끝나는지는 확인하지 못했다 [22].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 출력 내용으로 성공을 가르는 곳은 `mount_evidence`, 파일 꺼내기, regipy 연산이다 [23][2][24].
+`mount_evidence`는 메모리 덤프 확장자면 `vol`로 `windows.info.Info`를 실행하고 종료 코드가 0이거나 출력에 `Kernel`이 있으면 메모리 덤프로 받는다 [23].
+마운트가 실패하면 `fls` 출력이 비지 않았을 때만 직접 읽기로 성공을 정하고 `mmls` 출력도 비지 않았을 때만 분할 정보를 읽는다 [25].
+`extractToFile`은 받은 바이트가 0이면 `No data extracted`로 실패를 돌려준다 [2].
+regipy 연산은 표준 출력 대신 결과 JSON 파일을 읽고 그 파일이 비지 않았을 때만 내용을 결과로 쓴다 [24].
+
+공통 실행 경로는 도구 출력의 오류 문구를 읽지 않는다.
+종료 코드 0으로 끝나고 출력이 빈 실행은 `status`가 `completed`인 결과로 성공 처리한다 [26].
+파서는 실패를 돌려주지 않고 전용 파서가 없는 연산은 원래 출력을 그대로 결과에 넣는다 [27].
+여러 플러그인을 한 번에 실행하는 레지스트리 연산도 실행 하나의 성공·실패만 정하므로 T08.04에는 연결하지 않는다 [28].
+서버 안 처리기는 분석 라이브러리를 부르지 않고 앞선 원래 출력을 읽는 서버 코드라서 T08.08에는 연결하지 않는다 [29].
+
+**예외.** regipy 결과 파일이 없거나 비면 서버는 표준 출력을 결과로 두고 성공으로 처리한다 [24].
+코드 주석은 이 표준 출력이 플러그인 진행 문구뿐이라고 적는다 [24].
+
+### T08.05 비동기 최종 상태 조회
+
+**구현.** `generate_timeline`·`carve_files`·`analyze_unallocated`·`recover_deleted`는 배경 작업으로 실행한다 [30].
+서버는 작업 ID를 만들어 `running` 상태로 작업 목록에 넣고 작업 ID와 `get_job_status` 안내를 바로 돌려준다 [19][31].
+실행이 끝나면 실행기 결과가 성공일 때 `completed`와 출력 앞 2000자·출력 파일 경로를, 실패일 때 `failed`와 오류 문구를 작업에 적는다 [19].
+`get_job_status`는 작업 ID를 받으면 그 작업을, 받지 않으면 모든 작업을 돌려준다 [32].
+호출 기록 항목은 작업을 시작할 때 성공으로 남고 작업이 끝난 뒤 고치지 않는다 [33].
+이 기록은 L02에서 본다.
+
+**예외.** 작업 상태는 실행기 결과가 성공인지만 보고 정하므로 300초 시간 제한으로 끊겨 출력 일부만 남은 실행도 `completed`가 된다 [13][19].
+작업 목록은 서버 객체의 메모리에만 있어 서버를 다시 띄우면 앞선 작업은 `Job not found`가 된다 [30][32].
+HTTP 전송은 요청마다 서버 객체를 새로 만들므로 다른 요청에서 시작한 작업은 `get_job_status`가 찾지 못한다 [34].
+
+### 근거
+
+[1] 실행기는 종료 코드가 0도 `null`도 아니면 실패를 돌려주고 `null`은 0으로 바꾼다.
+
+```typescript
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        const durationMs = Date.now() - startTime;
+        const stdout = Buffer.concat(chunks).toString("utf-8");
+        const stderr = Buffer.concat(errChunks).toString("utf-8");
+
+        if (killed) {
+          // If killed due to output limits but we have data, return partial output with non-zero exit code
+          if (stdout.length > 0) {
+            resolve(ok({ stdout, stderr, exitCode: -1, durationMs }));
+          } else {
+            resolve(err(executionError(binary, code, stderr || "Process killed (timeout or output limit)", true)));
+          }
+          return;
+        }
+
+        if (code !== 0 && code !== null) {
+          resolve(err(executionError(binary, code, stderr, false)));
+          return;
+        }
+
+        resolve(ok({ stdout, stderr, exitCode: code ?? 0, durationMs }));
+      });
+```
+
+[`src/adapters/process-executor.ts:230-252`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L230-L252)
+
+[2] 파일 꺼내기의 종료 판정이다.
+
+```typescript
+      proc.on("close", (code) => {
+        clearTimeout(timer);
+        out.end(() => {
+          if (settled) return;
+          settled = true;
+          const durationMs = Date.now() - startTime;
+          if (killed) { resolve(err(executionError(binary, code, "Process killed (timeout)", true))); return; }
+          if (code !== 0 && code !== null && bytes === 0) { resolve(err(executionError(binary, code, Buffer.concat(errChunks).toString("utf-8"), false))); return; }
+          if (bytes === 0) { resolve(err(executionError(binary, code, "No data extracted", false))); return; }
+          resolve(ok({ path: outPath, bytes, durationMs }));
+        });
+      });
+```
+
+[`src/adapters/process-executor.ts:308-319`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L308-L319)
+
+[3] 연산 실행의 성공 여부와 오류 문구를 정한다.
+
+```typescript
+      const execResult = await executor.execute(mapping.binary, args, execOpts);
+      if (execResult.isErr()) {
+        rawOutput = "";
+        success = false;
+        errorMsg = execResult.error.message;
+      } else {
+        rawOutput = execResult.value.stdout;
+        // exitCode -1 = killed due to line limit (partial output is valid for searches)
+        success = execResult.value.exitCode === 0 || (execResult.value.exitCode === -1 && rawOutput.length > 0);
+        errorMsg = success ? undefined : execResult.value.stderr;
+```
+
+[`src/server.ts:1955-1964`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1955-L1964)
+
+[4] 실행 오류의 `message`는 종료 코드만 담고 시간 초과이거나 표준 오류에 자원 오류 문구가 있으면 다시 시도할 오류로 표시한다.
+
+```typescript
+export function executionError(
+  tool: string,
+  exitCode: number | null,
+  stderr: string,
+  timedOut: boolean,
+): ExecutionError {
+  const message = timedOut
+    ? `Tool "${tool}" timed out`
+    : `Tool "${tool}" exited with code ${exitCode}`;
+  const guidance = timedOut
+    ? `The tool took too long. Try with a smaller scope or increase timeout.`
+    : `Check stderr for details: ${stderr.slice(0, 200)}`;
+  // Mark as retriable if timedOut or if stderr hints at transient resource issues
+  const retriable = timedOut || /EAGAIN|EBUSY|EIO|EMFILE|resource temporarily/i.test(stderr);
+  return { kind: "EXECUTION_ERROR", tool, exitCode, stderr, timedOut, retriable, message, guidance };
+}
+```
+
+[`src/domain/errors.ts:100-115`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/errors.ts#L100-L115)
+
+[5] 마운트 명령의 종료 코드를 본다.
+
+```typescript
+      // Execute first step of mount
+      const execResult = await executor.execute(mountCommand.binary, mountCommand.args);
+      let success = execResult.isOk() && execResult.value.exitCode === 0;
+```
+
+[`src/server.ts:1669-1671`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1669-L1671)
+
+[6] [Node.js 18 문서의 `close` 이벤트](https://nodejs.org/docs/latest-v18.x/api/child_process.html#event-close)는 자식 프로세스가 신호로 끝나면 `code`가 `null`이라고 적는다.
+서버가 요구하는 Node.js 버전이다.
+
+```json
+  "engines": {
+    "node": ">=18.0.0"
+  },
+```
+
+[`package.json:29-31`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/package.json#L29-L31)
+
+[7] 꺼내기가 성공하면 `path`를 꺼낸 파일로 바꾼다.
+
+```typescript
+            const exResult = await executor.extractToFile(
+              "icat",
+              ["-o", String(investigationState.partitionOffset), evidencePath, currentInode],
+              extractedPath,
+            );
+            if (exResult.isOk()) {
+              toolParams["path"] = extractedPath;
+            }
+```
+
+[`src/server.ts:1900-1907`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1900-L1907)
+
+[8] 실행마다 거는 시간 제한 타이머다.
+
+```typescript
+      const timer = setTimeout(() => {
+        killed = true;
+        proc.kill("SIGTERM");
+        setTimeout(() => proc.kill("SIGKILL"), 5000);
+      }, timeoutMs);
+```
+
+[`src/adapters/process-executor.ts:189-193`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L189-L193)
+
+[9] 기본 시간 제한이다.
+
+```typescript
+const DEFAULT_TIMEOUT_MS = 45_000;
+```
+
+[`src/adapters/process-executor.ts:65-65`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L65-L65)
+
+[10] 연산별 시간 제한과 줄 수 상한이다.
+
+```typescript
+      // Per-tool executor options: searches and recursive ops get shorter timeout + line limit
+      const execOpts: import("./ports/tool-executor.port.js").ExecutorOptions = {};
+      if (name === "search_filename") {
+        Object.assign(execOpts, { timeoutMs: 30_000, maxLines: 50_000 });
+      } else if (name === "list_directory" && toolParams["recursive"]) {
+        Object.assign(execOpts, { timeoutMs: 30_000, maxLines: 20_000 });
+      } else if (name === "parse_event_log" || name === "search_events" || name === "parse_powershell_logs") {
+        // evtx_dump on a 262MB log emits millions of JSONL events; bound output to a
+        // representative sample (≈3000 events) — enough to detect clearing (EID 1102),
+        // logons (4624/4625), process creation (4688) — without flooding LLM context.
+        Object.assign(execOpts, { timeoutMs: 35_000, maxLines: 3_000 });
+      }
+```
+
+[`src/server.ts:1943-1954`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1943-L1954)
+
+[11] 비동기 연산의 시간 제한이다.
+
+```typescript
+      executor.execute(mapping.binary, args, { timeoutMs: 300_000 }).then((result) => {
+```
+
+[`src/server.ts:1812-1812`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1812-L1812)
+
+[12] 줄 수와 바이트 상한에 걸리면 같은 `killed` 표시를 세우고 끊는다.
+
+```typescript
+      proc.stdout.on("data", (chunk: Buffer) => {
+        totalBytes += chunk.length;
+        if (totalBytes <= MAX_OUTPUT_BYTES && lineCount < maxLines) {
+          chunks.push(chunk);
+          // Count newlines in this chunk
+          for (let i = 0; i < chunk.length; i++) {
+            if (chunk[i] === 10) lineCount++;
+          }
+          if (lineCount >= maxLines && !killed) {
+            killed = true;
+            proc.kill("SIGTERM");
+            setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already dead */ } }, 3000);
+          }
+        } else if (!killed) {
+          killed = true;
+          proc.kill("SIGTERM");
+          setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already dead */ } }, 3000);
+        }
+```
+
+[`src/adapters/process-executor.ts:195-212`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L195-L212)
+
+[13] 끊긴 실행은 출력이 있으면 종료 코드 -1로, 없으면 시간 초과 오류로 돌려준다.
+
+```typescript
+        if (killed) {
+          // If killed due to output limits but we have data, return partial output with non-zero exit code
+          if (stdout.length > 0) {
+            resolve(ok({ stdout, stderr, exitCode: -1, durationMs }));
+          } else {
+            resolve(err(executionError(binary, code, stderr || "Process killed (timeout or output limit)", true)));
+          }
+          return;
+```
+
+[`src/adapters/process-executor.ts:236-243`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L236-L243)
+
+[14] 다시 시도할 오류면 최대 3번까지 실행한다.
+
+```typescript
+    return this.serialize(() => backOff(
+      () => this._executeInner(binary, args, options).then(r => {
+        if (r.isErr() && r.error.retriable) throw r.error; // trigger retry
+        return r;
+      }),
+      {
+        numOfAttempts: 3,
+        startingDelay: 500,
+        timeMultiple: 2,
+        jitter: "full",
+        retry: (e) => {
+          // Only retry truly transient errors
+          const code = (e as { code?: string }).code;
+          return RETRIABLE_ERRORS.has(code ?? "") || (e as { retriable?: boolean }).retriable === true;
+        },
+      },
+    ).catch((lastErr) => {
+      // All retries exhausted — return the last error
+      if (lastErr && typeof lastErr === "object" && "kind" in lastErr) {
+        return err(lastErr as ExecutionError);
+      }
+      const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      return err(executionError(binary, null, msg, false));
+    }));
+```
+
+[`src/adapters/process-executor.ts:121-144`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L121-L144)
+
+[15] [exponential-backoff v3.1.3 `src/backoff.ts:34-54`](https://github.com/coveooss/exponential-backoff/blob/v3.1.3/src/backoff.ts#L34-L54)는 실패할 때마다 시도 횟수를 늘리고 `numOfAttempts`에 이르면 마지막 오류를 던진다.
+라이브러리 버전은 잠금 파일에서 확인했다.
+
+```json
+    "node_modules/exponential-backoff": {
+      "version": "3.1.3",
+      "resolved": "https://registry.npmjs.org/exponential-backoff/-/exponential-backoff-3.1.3.tgz",
+```
+
+[`package-lock.json:1612-1614`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/package-lock.json#L1612-L1614)
+
+[16] 실행을 하나씩 차례로 돌리고 시간 제한은 프로세스를 띄우는 함수 안에서 건다: [`src/adapters/process-executor.ts:152-157`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L152-L157).
+
+```typescript
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const task = this.queue.then(fn, fn);
+    this.queue = task.then(() => {}, () => {});
+    return task;
+  }
+```
+
+[`src/adapters/process-executor.ts:99-103`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L99-L103)
+
+[17] 호출 처리기는 요청 객체만 받는다.
+
+```typescript
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    let { name, arguments: params } = request.params;
+    let toolParams = (params ?? {}) as Record<string, unknown>;
+```
+
+[`src/server.ts:382-384`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L382-L384)
+
+[18] 서버는 종료 코드 -1이어도 출력이 있으면 성공으로 정한다.
+
+```typescript
+        // exitCode -1 = killed due to line limit (partial output is valid for searches)
+        success = execResult.value.exitCode === 0 || (execResult.value.exitCode === -1 && rawOutput.length > 0);
+        errorMsg = success ? undefined : execResult.value.stderr;
+```
+
+[`src/server.ts:1962-1964`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1962-L1964)
+
+[19] 배경 작업을 시작하고 끝나면 상태를 적는다.
+
+```typescript
+    if (ASYNC_TOOLS.has(name) && mapping) {
+      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const evidencePath = investigationState.imagePath || config.evidencePath;
+      const args = mapping.buildArgs(toolParams, evidencePath, investigationState.partitionOffset, config.outputPath);
+      asyncJobs.set(jobId, { status: "running", tool: name, startedAt: new Date().toISOString() });
+      // Fire and forget — runs in background
+      executor.execute(mapping.binary, args, { timeoutMs: 300_000 }).then((result) => {
+        if (result.isOk()) {
+          const output = result.value.stdout;
+          // Write async output to a file in the output directory
+          const outputPath = `${config.outputPath}/async-${jobId}.txt`;
+          try { writeFileSync(outputPath, output); } catch { /* best-effort */ }
+          asyncJobs.set(jobId, { status: "completed", tool: name, startedAt: asyncJobs.get(jobId)!.startedAt, result: output.slice(0, 2000), outputPath });
+        } else {
+          asyncJobs.set(jobId, { status: "failed", tool: name, startedAt: asyncJobs.get(jobId)!.startedAt, error: result.error.message });
+        }
+      });
+```
+
+[`src/server.ts:1806-1822`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1806-L1822)
+
+[20] 실행 파일 대체 목록이다.
+
+```typescript
+// Fallback binary names: SIFT uses .py suffixes, non-SIFT doesn't
+const BINARY_FALLBACKS = new Map<string, string>([
+  ["log2timeline", "log2timeline.py"],
+  ["log2timeline.py", "log2timeline"],
+  ["psort", "psort.py"],
+  ["psort.py", "psort"],
+  ["pinfo", "pinfo.py"],
+  ["pinfo.py", "pinfo"],
+  ["vol", "vol.py"],
+  ["vol.py", "vol"],
+  ["evtx_dump", "evtxexport"],
+  ["evtxexport", "evtx_dump"],
+  ["regipy-plugins-run", "rip.pl"],
+  ["rip.pl", "regipy-plugins-run"],
+  ["ewfverify", "img_stat"],
+  ["img_stat", "ewfverify"],
+]); // 45s — MUST be under MCP client's 60s timeout
+```
+
+[`src/adapters/process-executor.ts:67-83`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L67-L83)
+
+[21] `ENOENT`면 타이머를 지우고 대체 이름으로 다시 실행한다.
+
+```typescript
+      proc.on("error", (e) => {
+        clearTimeout(timer);
+        // Binary not found — try fallback name (log2timeline vs log2timeline.py)
+        if ((e as NodeJS.ErrnoException).code === "ENOENT" && BINARY_FALLBACKS.has(binary)) {
+          const fallback = BINARY_FALLBACKS.get(binary)!;
+          resolve(this._executeInner(fallback, args, options));
+          return;
+        }
+        resolve(err(executionError(binary, null, e.message, false)));
+      });
+```
+
+[`src/adapters/process-executor.ts:219-228`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L219-L228)
+
+[22] `--sudo`이면 `sudo`를 띄우고 신호도 그 프로세스에 보낸다: [`src/adapters/process-executor.ts:189-193`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L189-L193).
+
+```typescript
+      // If sudo mode is enabled, prepend sudo to execute forensic tools on FUSE-mounted evidence
+      const actualBinary = this.useSudo ? "sudo" : binary;
+      const actualArgs = this.useSudo ? [binary, ...args] : [...args];
+
+      const proc = spawn(actualBinary, actualArgs, {
+        shell: false,
+        cwd,
+        env: { ...process.env, PATH: envPath, ...options?.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+```
+
+[`src/adapters/process-executor.ts:175-184`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L175-L184)
+
+[23] 메모리 덤프 판정이다.
+
+```typescript
+      if (MEMORY_EXTENSIONS.has(ext) && !imagePath.includes("drive") && !imagePath.includes("disk")) {
+        // Check if this is actually a memory dump (vol can identify it)
+        const volCheck = await executor.execute("vol", ["-f", imagePath, "windows.info.Info"]);
+        if (volCheck.isOk() && (volCheck.value.exitCode === 0 || volCheck.value.stdout.includes("Kernel"))) {
+```
+
+[`src/server.ts:1602-1605`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1602-L1605)
+
+[24] regipy 결과 파일이 비지 않았을 때만 그 내용을 쓴다.
+
+```typescript
+        // regipy-plugins-run writes JSON to its -o file; stdout is only progress noise
+        // ("Loaded N plugins / Finished X/N"). Always read the JSON file, not stdout.
+        if (success && mapping.binary === "regipy-plugins-run") {
+          try {
+            const { readFileSync, unlinkSync } = await import("node:fs");
+            try {
+              const json = readFileSync(`${config.outputPath}/regipy_out.json`, "utf8");
+              if (json.trim().length > 0) rawOutput = json;
+              try { unlinkSync(`${config.outputPath}/regipy_out.json`); } catch { /* ignore */ }
+            } catch { /* file missing — tool produced no output */ }
+          } catch { /* import failure — leave stdout */ }
+        }
+```
+
+[`src/server.ts:1965-1976`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1965-L1976)
+
+[25] 마운트가 실패하면 `fls`와 `mmls` 출력이 비었는지 본다.
+
+```typescript
+      if (!success) {
+        const flsCheck = await executor.execute("fls", ["-o", "0", imagePath]);
+        if (flsCheck.isOk() && flsCheck.value.exitCode === 0 && flsCheck.value.stdout.length > 0) {
+          success = true;
+          rawOutput = `Image accessible directly via Sleuth Kit (no filesystem mount needed).\nRoot entries:\n${flsCheck.value.stdout.slice(0, 2000)}`;
+          // Try to detect partition offset via mmls
+          const mmlsResult = await executor.execute("mmls", [imagePath]);
+          if (mmlsResult.isOk() && mmlsResult.value.exitCode === 0 && mmlsResult.value.stdout.length > 0) {
+```
+
+[`src/server.ts:1676-1683`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1676-L1683)
+
+[26] 출력이 비면 `completed` 결과를 만든다.
+
+```typescript
+    const { parsed, anomalies } = rawOutput ? parseToolOutput(name, rawOutput) : { parsed: success ? { status: "completed", tool: name } : { error: errorMsg ?? "Tool execution failed" }, anomalies: [] as AnomalyFlag[] };
+```
+
+[`src/server.ts:2029-2029`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2029-L2029)
+
+[27] 파서 결과가 없으면 원래 출력을 넣고 전용 파서가 없는 연산은 출력을 감싸 성공으로 돌려준다: [`src/parsers/index.ts:106-114`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/index.ts#L106-L114).
+기준 커밋의 `src/parsers`에서 `err(`나 `parseError(`를 부르는 곳은 없다.
+
+```typescript
+function parseToolOutput(tool: string, raw: string): { parsed: unknown; anomalies: AnomalyFlag[] } {
+  const result = parseToolRaw(tool, raw);
+  if (result.isOk()) {
+    return { parsed: result.value.data, anomalies: [...result.value.anomalies] };
+  }
+  // Parser failed or no parser exists — return raw
+  return { parsed: { raw_output: raw }, anomalies: [] };
+}
+```
+
+[`src/server.ts:139-146`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L139-L146)
+
+[28] 레지스트리 연산은 여러 regipy 플러그인을 한 번의 실행으로 부른다.
+
+```typescript
+    get_user_activity: { binary: "regipy-plugins-run", buildArgs: (p, _, _o, out) => ["-o", `${out}/regipy_out.json`, "-p", "user_assist,recentdocs,typed_paths,typed_urls,runmru,word_wheel_query", String(p["path"] ?? "")] },
+    get_system_config: { binary: "regipy-plugins-run", buildArgs: (p, _, _o, out) => ["-o", `${out}/regipy_out.json`, "-p", "computer_name,timezone_data,host_domain_name,shutdown,active_control_set", String(p["path"] ?? "")] },
+    get_persistence_keys: { binary: "regipy-plugins-run", buildArgs: (p, _, _o, out) => ["-o", `${out}/regipy_out.json`, "-p", "ntuser_persistence,image_file_execution_options,appinit_dlls,appcert_dlls,services", String(p["path"] ?? "")] },
+```
+
+[`src/server.ts:222-224`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L222-L224)
+
+[29] 서버 안 처리기 모듈이 불러오는 것은 서버 자신의 탐지 모듈과 형식 정의뿐이다.
+
+```typescript
+import { detectTimestomping, type TimestampPair } from "../intelligence/timestomping.js";
+import { detectBeaconing, type NetworkCallback } from "../intelligence/beaconing.js";
+import { detectKnownBadPaths, type FileEntry } from "../intelligence/known-bad-paths.js";
+import { detectWipingTools } from "../intelligence/wiping-tools.js";
+import { detectLogGaps, type EventRecord } from "../intelligence/log-gap.js";
+import type { Finding, Hypothesis, LedgerEntry } from "../domain/types.js";
+```
+
+[`src/handlers/in-process.ts:14-19`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L14-L19)
+
+[30] 작업 목록과 비동기 연산 목록이다.
+
+```typescript
+  // Async job store for long-running tools (timeline, carving, bulk analysis)
+  const asyncJobs = new Map<string, { status: "running" | "completed" | "failed"; tool: string; startedAt: string; result?: string; error?: string; outputPath?: string }>();
+
+  // Tools that genuinely take minutes — run async, return job_id for polling
+  const ASYNC_TOOLS = new Set(["generate_timeline", "carve_files", "analyze_unallocated", "recover_deleted"]);
+```
+
+[`src/server.ts:335-339`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L335-L339)
+
+[31] 시작 응답이다.
+
+```typescript
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        status: "ASYNC_JOB_STARTED",
+        job_id: jobId,
+        tool: name,
+        message: `${name} is a long-running operation. It has been started in the background. Call get_job_status with job_id="${jobId}" to check progress.`,
+        suggested_next_actions: [{ tool: "get_job_status", params: { job_id: jobId }, reason: "Check if the background job has completed" }],
+      }) }] };
+```
+
+[`src/server.ts:1831-1837`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1831-L1837)
+
+[32] 작업 상태를 돌려준다.
+
+```typescript
+    if (name === "get_job_status") {
+      const jobId = toolParams["job_id"] as string | undefined;
+      if (jobId) {
+        const job = asyncJobs.get(jobId);
+        if (!job) return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Job not found", job_id: jobId }) }], isError: true };
+        return { content: [{ type: "text" as const, text: JSON.stringify(job) }] };
+      }
+      // List all jobs
+      const jobs = Array.from(asyncJobs.entries()).map(([id, j]) => ({ job_id: id, ...j }));
+      return { content: [{ type: "text" as const, text: JSON.stringify({ jobs }) }] };
+    }
+```
+
+[`src/server.ts:496-506`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L496-L506)
+
+[33] 시작할 때 성공 항목을 남긴다.
+
+```typescript
+      const lastEntry = ledgerStore.getLastEntry();
+      const prevHash = lastEntry ? hashEntry(lastEntry) : getGenesisHash();
+      const entry = createLedgerEntry({ tool: name, toolParams, outputHash: "", rawOutputPath: "", prevHash, capabilitiesHeld: capabilityGraph.getHeld(), findingsProduced: [], anomaliesFlagged: [], durationMs: 0, success: true });
+      ledgerStore.append(entry);
+```
+
+[`src/server.ts:1824-1827`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1824-L1827)
+
+[34] HTTP 요청마다 전송과 서버 객체를 만든다.
+
+```typescript
+    // Create transport and server for each session
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID() });
+    const server = createSiftKernelServer(config);
+```
+
+[`src/http-transport.ts:48-50`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/http-transport.ts#L48-L50)

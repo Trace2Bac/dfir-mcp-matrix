@@ -1,0 +1,279 @@
+---
+cell: P03
+details:
+- id: P03.04
+  exception: true
+- id: P03.05
+  exception: false
+---
+
+# P03 조사 진척 판단
+
+### P03.04 미조사 범위·생략 사유 보고
+
+**구현.** 여러 단계를 묶은 workflow 두 개가 건너뛴 단계를 응답에 싣는다 [1][2].
+`MemoryAnalysisWorkflow.FindMalwareAsync`는 원격 연결 조회나 커널 루트킷 검사가 실패해도 분석을 멈추지 않고 응답 문구에 그 단계를 건너뛰었다는 말과 사유를 붙인다 [1].
+프로세스를 찾는 세 검사 가운데 하나라도 실패하면 전체를 실패로 돌려준다 [3].
+`LinuxAnalysisWorkflow.TriageHostAsync`는 돌지 못한 하위 검사의 영역을 보고서에서 `null`로 둔다 [2][4].
+이 메서드의 docstring은 저널 분석과 악성코드 검사를 묶음에서 뺐다고 적지만 응답에는 그 사실이 없다 [4].
+
+서버가 대상마다 해야 할 작업 목록을 두거나 수행한 작업을 대상별로 세는 곳은 없다.
+그래서 P03.01~P03.03에는 연결하지 않는다.
+사건 `CLAUDE.md` 견본은 보고서에 다루지 못한 범위를 적는 절을 두라고 모델에게 적는다 [5].
+
+**예외.** `FindMalwareAsync`의 생략 사유는 실제 실패 원인과 관계없이 고정 문구다 [1].
+툴킷의 공통 실행 함수는 명령이 완료 상태가 아니면 이유와 관계없이 `null`을 돌려주므로 `windows.netscan`이 다른 이유로 실패해도 응답은 그 이미지·OS에서 netscan을 쓸 수 없다고 적는다 [1][6].
+명령줄·SID 조회가 실패하면 빈 목록으로 바꿔 용의자의 명령줄과 SID가 비어 있을 뿐 실패를 알리지 않는다 [7].
+덤프나 YARA 검사가 실패해도 빈 목록으로 바꿔 응답은 덤프 0개, YARA 일치 0건으로 적는다 [8].
+VAD 영역 YARA 검사가 실패하면 결과를 `null`로 두고 응답 문구에는 아무것도 붙이지 않는다 [9].
+`TriageHostAsync`의 응답 문구는 `null`인 영역이 있어도 계정·로그인·지속성·셸 기록·파일을 모두 훑었다고 적고 찾은 항목이 없으면 침해 흔적이 드러나지 않았다고 적는다 [10].
+
+### P03.05 모델이 적은 진행 기록 보관
+
+**구현.** `Execute` 스크립트의 전역 함수 `auditMissingEvidence`가 이 방식을 쓴다 [11].
+모델은 이 함수로 확인하지 못한 범위(증거 공백)를 적고 서버는 그 문장을 사건 호출 기록에 `missing-evidence` 유형으로 남기며 같은 줄을 응답에도 붙인다 [11].
+기록은 사건 ID로 이름을 지은 `audit-<CaseId>.clef` 파일에 쌓여 서버를 다시 띄워도 남는다 [12].
+서버는 저장한 기록을 다시 읽거나 요약해 돌려주는 도구를 두지 않고 응답에는 방금 적은 줄만 돌아온다 [11].
+적힌 공백이 실제 호출과 맞는지 서버는 대조하지 않는다 [11].
+마친 작업이나 다룬 질문을 적는 전용 함수는 없다.
+`auditFalsePositive`·`auditInfo`는 버린 단서와 일반 메모를 적는 함수라 D05.01에서 보고 `auditFinding`은 D05에서 본다 [11][13].
+CLI의 `bake-report`가 호출 기록 전체를 보고서 화면 파일에 넣어 사람이 이 기록을 읽는다 [14].
+
+### 근거
+
+[1] 원격 연결과 루트킷 검사의 실패를 생략 문구로 바꾼다.
+
+```csharp
+        // Network and rootkit are non-nominating secondary signals (they never nominate a per-process suspect),
+        // so a failure in either must NOT abort the whole analysis — we degrade to an empty report and note it.
+        // The nominating scans above (rogue/triage/injection) stay fail-fast: if a process-enumeration plugin
+        // fails the image itself is unreadable and there is nothing to analyse.
+        //  - netscan is unimplemented for Windows XP/2003 (5.x) in vol3.
+        //  - the kernel plugins (ssdt/callbacks/driverirp) commonly fail on live-acquired busy servers from page
+        //    smear (unreadable kernel pages), as seen on the SHIELDBASE DC capture.
+        var network = networkTask.Result;
+        var networkResult = network.IsSuccess ? network.Result! : new RemoteIpReport([], []);
+        var networkNote = network.IsSuccess ? "" : " (network corroboration skipped: netscan unavailable on this image/OS)";
+        var rootkit = rootkitTask.Result;
+        var rootkitResult = rootkit.IsSuccess ? rootkit.Result! : new KernelRootkitReport();
+        var rootkitNote = rootkit.IsSuccess ? "" : " (rootkit scan skipped: kernel plugins unavailable — e.g. memory smear)";
+```
+
+[`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:683-695`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L683-L695)
+
+[2] 하위 검사의 결과 값을 그대로 꺼내 실패한 영역은 `null`이 된다.
+
+```csharp
+        await Task.WhenAll(accountsT, loginsT, authT, persistenceT, historyT, filesT);
+
+        var accounts = accountsT.Result.Result;
+        var logins = loginsT.Result.Result;
+        var auth = authT.Result.Result;
+        var persistence = persistenceT.Result.Result;
+        var history = historyT.Result.Result;
+        var files = filesT.Result.Result;
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs:54-61`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs#L54-L61)
+
+[3] 프로세스를 찾는 세 검사는 하나라도 실패하면 전체가 실패한다.
+
+```csharp
+        var rogue = rogueTask.Result;
+        if (!rogue.IsSuccess) return WorkflowResult<FindMalwareReport>.Failure(rogue.Message ?? "rogue-process scan failed.");
+        var triage = triageTask.Result;
+        if (!triage.IsSuccess) return WorkflowResult<FindMalwareReport>.Failure(triage.Message ?? "process-triage scan failed.");
+        var injection = injectionTask.Result;
+        if (!injection.IsSuccess) return WorkflowResult<FindMalwareReport>.Failure(injection.Message ?? "code-injection scan failed.");
+```
+
+[`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:676-681`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L676-L681)
+
+[4] `TriageHostAsync`의 docstring이다.
+
+```csharp
+    /// <summary>
+    /// Triages a whole mounted Linux host in one call: runs the account, login, auth-log, persistence,
+    /// shell-history and file-anomaly hunts in parallel over <paramref name="rootDir"/> and rolls up the
+    /// highest-signal observations into <see cref="LinuxHostTriageReport.TopFindings"/>. Each sub-report is
+    /// included (null when that step could not run), so the agent can drill into any area. The journal and
+    /// malware scans are <em>not</em> included here (they are heavier / situational) — call
+    /// <see cref="AnalyzeJournalAsync"/> and <see cref="ScanForMalwareAsync"/> directly when wanted.
+    /// </summary>
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs:32-39`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs#L32-L39)
+
+[5] 사건 `CLAUDE.md` 견본의 보고서 절 안내다: [`src/Camel.CLI/CaseTemplate/CLAUDE.md:277-289`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.CLI/CaseTemplate/CLAUDE.md#L277-L289).
+
+[6] 툴킷 공통 실행 함수는 명령이 완료 상태가 아니면 `null`을 돌려준다.
+
+```csharp
+    public async Task<T?> ExecuteToolAsync<T>(string name, string args) where T : class
+    {
+        var r = await auditEnvironment.ExecuteCommandAsync(Tools[name].Command, args, Tools[name].Sudo);
+        if (r.IsCompleted)
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<T>(r.Output);
+        }
+        else
+        {
+            Error($"Failed to execute tool command ${Tools[name].Command} {args}: {r.Output}.");
+            return null;
+        }
+    }
+```
+
+[`src/Camel.Toolkits/Toolkit.cs:314-326`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Toolkit.cs#L314-L326)
+
+[7] 명령줄·SID 조회 실패를 빈 목록으로 바꾼다.
+
+```csharp
+        // Step 2 enrichment data — pulled image-wide (cheaper than per-PID), indexed by PID below.
+        var cmdlines = cmdlinesTask.Result ?? [];
+        var sids = sidsTask.Result ?? [];
+```
+
+[`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:697-699`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L697-L699)
+
+[8] 덤프·YARA 실패를 빈 목록으로 바꾸고 개수를 응답에 적는다: [`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:792`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L792), [`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:806`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L806), [`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:850-851`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L850-L851).
+
+[9] VAD 영역 YARA 실패는 `null`이고 문구는 결과가 있을 때만 붙는다.
+
+```csharp
+        // Step 6 (optional): YARA-X scan of the live image's VAD regions. Non-fatal — a failure leaves YaraScan null.
+        MemoryYaraReport? yara = null;
+        if (yaraRulesFile is not null)
+        {
+            var y = await ScanMemoryWithYaraAsync(imageFile, yaraRulesFile);
+            yara = y.IsSuccess ? y.Result : null;
+        }
+```
+
+[`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:828-834`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L828-L834)
+
+```csharp
+        var yaraNote = yara is null ? "" : $" VAD-YARA: {yara.Matches.Length} match(es).";
+```
+
+[`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:852-852`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L852-L852)
+
+[10] `TriageHostAsync`의 응답 문구다.
+
+```csharp
+        var host = system?.Hostname ?? rootDir;
+        return WorkflowResult<LinuxHostTriageReport>.Success(report,
+            $"Triaged Linux host '{host}'" + (system?.PrettyName is { } p ? $" ({p})" : "") +
+            $": {top.Count} notable finding(s) across accounts, logins, persistence, history and files. " +
+            (top.Count == 0 ? "No obvious compromise indicators surfaced." : "Review TopFindings and the per-area reports."));
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs:93-97`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs#L93-L97)
+
+[11] 모델이 부르는 기록 함수와 그 처리다.
+
+```csharp
+          // auditInfo/auditError additionally record the line in the per-case audit log (CLEF) as an
+          // information/error event, so agent-surfaced output survives in the trail, not just the response.
+          .SetValue("auditInfo", new Action<string>((s) => AuditInfo(s, output)))
+          .SetValue("auditError", new Action<string>((s) => AuditError(s, output)))
+          // auditFinding stages a structured forensic finding (observation/interpretation/confidence + the
+          // execution ids that prove it) as a `finding` event; auditReviewRec marks a high-consequence decision
+          // a human should review as a `human-judgement-recommended` event. Both also echo to the response.
+          .SetValue("auditFinding", new Action<string, string, string, string>(
+              (observation, interpretation, confidence, evidenceExecutionIds) =>
+                  AuditFinding(observation, interpretation, confidence, evidenceExecutionIds, output)))
+          .SetValue("auditReviewRec", new Action<string>((s) => AuditReviewRec(s, output)))
+          // IR-accuracy events: auditFalsePositive (a lead checked and rejected as benign), auditMissingEvidence
+          // (a gap — absent/cleared/disabled logs), auditHallucination (the agent caught itself inventing an
+          // artifact/method/field). Surfacing these in the trail is positive evidence of investigative rigour.
+          .SetValue("auditFalsePositive", new Action<string>((s) => AuditFalsePositive(s, output)))
+          .SetValue("auditMissingEvidence", new Action<string>((s) => AuditMissingEvidence(s, output)))
+          .SetValue("auditHallucination", new Action<string>((s) => AuditHallucination(s, output)))
+```
+
+[`src/Camel.Server/MCPServer.cs:241-257`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L241-L257)
+
+```csharp
+    /// <summary>Records a lead that was checked and rejected as benign as a <c>false-positive</c> event.</summary>
+    protected void AuditFalsePositive(string text, StringBuilder output)
+    {
+        AuditEvent("false-positive", "{Message}", text);
+        output.AppendLine(text);
+    }
+
+    /// <summary>Records an evidentiary gap (absent/cleared/disabled logs, unavailable artifact) as a
+    /// <c>missing-evidence</c> event — "no evidence found", not "did not happen".</summary>
+    protected void AuditMissingEvidence(string text, StringBuilder output)
+    {
+        AuditEvent("missing-evidence", "{Message}", text);
+        output.AppendLine(text);
+    }
+
+    /// <summary>Records that the agent caught itself inventing an artifact, method, or field as a
+    /// <c>hallucination</c> event. The server also emits this automatically on a script error that names a
+    /// non-existent toolkit/workflow (see <see cref="ClassifyHallucination"/>).</summary>
+    protected void AuditHallucination(string text, StringBuilder output)
+    {
+        AuditEvent("hallucination", "{Message}", text);
+        output.AppendLine(text);
+    }
+```
+
+[`src/Camel.Server/MCPServer.cs:444-466`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L444-L466)
+
+[12] 호출 기록은 사건 ID별 파일에 쓰인다.
+
+```csharp
+    public static void WithAuditLog(string auditDir)
+    {
+        System.IO.Directory.CreateDirectory(auditDir);
+        _auditLogger = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .MinimumLevel.Information()
+            .WriteTo.Map(
+                keyPropertyName: "CaseId",
+                defaultKey: "unknown",
+                configure: (caseId, wt) => wt.File(
+                    new Serilog.Formatting.Compact.CompactJsonFormatter(),
+                    System.IO.Path.Combine(auditDir, $"audit-{SanitizeCaseId(caseId)}.clef")))
+            .CreateLogger();
+    }
+```
+
+[`src/Camel.Runtime/Runtime.cs:161-174`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L161-L174)
+
+[13] `auditFinding`은 받은 실행 ID를 문자열 그대로 기록한다.
+
+```csharp
+    protected void AuditFinding(string observation, string interpretation, string confidence, string evidenceExecutionIds, StringBuilder output)
+    {
+        AuditEvent("finding",
+            "FINDING [{Confidence}] {Observation} => {Interpretation} (evidence: {EvidenceExecutionIds})",
+            confidence, observation, interpretation, evidenceExecutionIds);
+        output.AppendLine($"[finding {confidence}] {observation} => {interpretation} (evidence: {evidenceExecutionIds})");
+    }
+```
+
+[`src/Camel.Server/MCPServer.cs:425-431`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L425-L431)
+
+[14] `bake-report`가 호출 기록을 보고서 화면용 파일에 넣는다.
+
+```csharp
+        var clef = Path.Combine(logsDir, $"audit-{caseId}.clef");
+        if (!File.Exists(clef) && Directory.Exists(logsDir))
+            clef = Directory.EnumerateFiles(logsDir, "audit-*.clef").FirstOrDefault() ?? clef;
+
+        // audit-data.js — embed the per-case CLEF (read with a shared lock since the live server still writes it).
+        if (File.Exists(clef))
+            dataFiles += TryWriteSidecar("audit-data.js", () =>
+            {
+                var name = Path.GetFileName(clef);
+                File.WriteAllText(Path.Combine(reportsDir, "audit-data.js"),
+                    $"/* Embedded copy of logs/{name} so report.html opens with data by double-click. */\n" +
+                    $"window.__AUDIT_CLEF__={JsonSerializer.Serialize(ReadAllTextShared(clef), JsDataOpts)};\n" +
+                    $"window.__AUDIT_SOURCE__={JsonSerializer.Serialize($"../logs/{name} (embedded)", JsDataOpts)};\n");
+            });
+```
+
+[`src/Camel.CLI/Program.cs:280-293`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.CLI/Program.cs#L280-L293)

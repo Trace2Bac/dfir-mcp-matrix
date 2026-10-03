@@ -11,7 +11,7 @@
 matrix/
 ├─ axes.yaml          축 차례·이름
 ├─ config.yaml        화면에 보일 서버, 시범 셀
-├─ cells/<ID>.yaml    셀 하나의 질문과 상세 항목
+├─ cells/<ID>.mdx     셀 하나의 질문과 상세 항목
 └─ schema/            위 파일들과 원고 머리말의 JSON Schema(validate가 쓴다)
 ```
 
@@ -35,7 +35,9 @@ axes:
 
 목록 차례가 화면의 축 차례다. 셀 파일 이름의 첫 글자가 그 셀의 축이다.
 
-## cells/<ID>.yaml
+## cells/<ID>.mdx
+
+머리말(`---` 사이)에 아래 YAML을 쓰고 본문에는 제목 `# <ID> <name>` 한 줄만 둔다(`validate`가 본다). 이 파일이 사이트의 셀 페이지가 된다.
 
 ```yaml
 id: E03                          # 파일 이름과 같아야 한다
@@ -96,10 +98,10 @@ labels:
 
 | 하려는 일 | 고칠 곳 |
 |---|---|
-| 셀 질문·이름 고치기 | `cells/<ID>.yaml`의 `question`·`name`. 원고 제목(`# ID 이름`)이 달라지면 `check`가 경고한다 |
-| 셀 새로 만들기 | 지금 셀로 분류할 수 없는 새 기능이 나왔을 때. `cells/`에 축 안 마지막 번호 다음으로 `<ID>.yaml`을 만든다 |
+| 셀 질문·이름 고치기 | `cells/<ID>.mdx`의 `question`·`name`. `name`을 고치면 본문 제목도 고친다. 원고 제목(`# ID 이름`)이 달라지면 `check`가 경고한다 |
+| 셀 새로 만들기 | 지금 셀로 분류할 수 없는 새 기능이 나왔을 때. `cells/`에 축 안 마지막 번호 다음으로 `<ID>.mdx`를 만든다 |
 | 셀 나누기·합치기·번호 바꾸기 | 파일을 만들고 지운 뒤 원고·문서의 옛 번호를 고친다. 절차는 [CONTRIBUTING.md](../CONTRIBUTING.md#셀을-나누거나-합치거나-번호를-바꾼다) |
-| 셀의 범위(`scope`·미구현·비적용) 바꾸기 | `cells/<ID>.yaml` |
+| 셀의 범위(`scope`·미구현·비적용) 바꾸기 | `cells/<ID>.mdx` |
 | 축 차례·이름 바꾸기 | `axes.yaml` |
 | 시범 셀 바꾸기 | `config.yaml`의 `pilot_cells`. 그 셀에 정의(`scope` 등)가 있어야 한다 |
 

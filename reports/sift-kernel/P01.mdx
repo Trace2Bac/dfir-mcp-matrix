@@ -1,0 +1,422 @@
+---
+cell: P01
+details:
+- id: P01.01
+  exception: true
+- id: P01.02
+  exception: true
+- id: P01.03
+  exception: true
+- id: P01.04
+  exception: true
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 증거 형식을 정하는 곳은 커널 도구 `mount_evidence` 하나다 [1].
+`mount_evidence`는 받은 `image_path`에서 마지막 `.` 뒤의 글자를 소문자로 바꿔 확장자로 쓴다 [1].
+확장자가 `raw`·`img`·`dmp`·`mem`·`vmem`·`lime`·`core`이고 경로에 `drive`·`disk`가 없으면 메모리 덤프 후보로 보고 P01.03의 내용 확인을 거친다 [1][2].
+확장자가 `pcap`·`pcapng`·`cap`이면 내용을 보지 않고 네트워크 캡처로 정한다 [3].
+그 밖의 확장자는 마운트 명령을 고르는 데 쓴다 [4].
+`e01`·`s01`·`ex01`은 `ewfmount`, `vmdk`는 `qemu-nbd`, `aff4`는 `affuse`, 나머지는 `mount -o ro,loop`로 마운트한다 [4].
+정한 종류는 조사 상태 `investigationState`의 `evidenceType`·`imageFormat`에 적고 응답의 `evidence_type`·`format`으로 돌려준다 [2][3][5].
+분류 도구의 연산은 형식을 다시 판별하지 않고 조사 상태의 이미지 경로를 쓴다 [6].
+
+**예외.** 서버를 시작 인자 `--evidence`로 띄우면 조사 상태의 이미지 경로가 처음부터 그 값이다 [6].
+그 뒤 `mount_evidence`가 다른 이미지를 마운트 명령으로 마운트하면 이미지 경로가 비어 있지 않아 바꾸지 않는다 [5].
+그때 분석 연산은 판별하고 마운트한 이미지가 아니라 `--evidence`로 준 이미지를 읽는다 [5][6].
+`reset_investigation`도 조사 상태를 비우지 않으므로 초기화한 뒤 새 이미지를 마운트 명령으로 마운트하면 앞 이미지 경로가 남는다 [7].
+마운트 명령이 실패해 `fls` 직접 접근으로 넘어가는 경로와 메모리·캡처 분기만 이미지 경로를 새 값으로 바꾼다 [2][3][8].
+
+### P01.02 메타데이터 조회
+
+**구현.** 디스크 이미지의 마운트 명령이 실패하면 `mount_evidence`는 `fls -o 0`으로 이미지를 직접 읽을 수 있는지 본다 [8].
+읽히면 `mmls`가 낸 파티션 표에서 `NTFS`·`Win95`·`FAT`가 든 줄을 찾아 그 시작 섹터를 분석 연산의 파티션 오프셋으로 쓴다 [8].
+맞는 줄이 없으면 오프셋은 0이다 [8].
+이어서 그 오프셋으로 `fsstat`을 돌린다 [9].
+출력에 `NTFS`·`FAT`가 있으면 `disk-windows`, `ext2`~`ext4`·`xfs`·`btrfs`가 있으면 `disk-linux`, `HFS`·`APFS`가 있으면 `disk-macos`로 정한다 [9].
+어느 것에도 맞지 않으면 `disk-windows`로 두고 `filesystemType`을 `unknown`으로 적는다 [9].
+정한 종류와 파일 시스템은 성공 응답의 `evidence_type`·`filesystem_type`에 싣고 방법론 상태 기계에 넘긴다 [5].
+분류 도구의 `list_partitions`·`get_filesystem_info` 연산도 `mmls`·`fsstat`을 돌리지만 그 결과로 조사 상태의 오프셋이나 종류를 바꾸지 않는다 [10].
+
+**예외.** 이 조회는 마운트 명령이 실패한 경로에만 있다 [8].
+마운트 명령이 성공하면 `mmls`·`fsstat`을 돌리지 않아 오프셋은 0이고 `evidenceType`은 앞의 값으로 남는다 [5][8].
+처음 마운트라면 그 값은 `unknown`이고 방법론 상태 기계는 Windows 기준 목록을 쓰며 Linux 연산이 요구하는 `linux_accessible` 능력도 생기지 않는다 [5][9][11].
+`fsstat`이 실패해도 성공 응답을 돌려주고 응답의 `evidence_type`이 앞의 값으로 남을 뿐 판별하지 못했다는 항목은 없다 [9][5].
+주석은 가장 큰 NTFS 파티션을 찾는다고 적지만 코드는 표에서 처음 맞는 줄을 쓰고 Linux 파티션은 찾지 않는다 [8].
+그래서 파티션이 여러 개인 Linux 이미지는 오프셋 0으로 `fsstat`을 돌리고 거기서 파일 시스템을 찾지 못하면 위와 같이 판별 없이 진행한다 [8][9].
+
+### P01.03 내용·헤더 검사
+
+**구현.** 메모리 덤프 후보는 Volatility 3의 `windows.info.Info` 플러그인으로 열어 본다 [2].
+종료 코드가 0이거나 표준 출력에 `Kernel`이 있으면 메모리 덤프로 정하고 `memory_profiled` 능력을 준다 [2].
+이 확인의 출력은 `mount_evidence` 호출 기록 항목과 원래 출력 파일로 남는다 [2].
+조건을 채우지 못하면 디스크 이미지로 보고 P01.01의 마운트 경로로 넘어간다 [2][4].
+확인에 `windows.info.Info`만 쓰므로 Windows 메모리 덤프만 메모리로 정한다 [2].
+
+**예외.** 경로 어딘가에 `drive`나 `disk`라는 글자가 있으면 이 확인을 건너뛰고 디스크 이미지로 다룬다 [1].
+이 비교는 대소문자를 구별해 `Disk`가 든 경로는 확인을 받는다 [1].
+`vol`이 없거나 실행이 실패해도 디스크 이미지 경로로 넘어가고 응답은 메모리 확인을 하지 못했다는 사실을 알리지 않는다 [2][4].
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** 판별 결과는 분류 연산의 실행 조건과 방법론 기준 목록에 쓰인다.
+`mount_evidence`는 메모리 덤프면 `memory_profiled`, 네트워크 캡처면 `network_capture_loaded`, `fsstat`이 Linux 파일 시스템을 보면 `linux_accessible`을 능력 집합에 더한다 [2][3][9].
+메모리 연산은 `memory_profiled`나 그것으로 생기는 `memory_accessible`을, 네트워크 연산은 `network_capture_loaded`를, Linux 연산은 `linux_accessible`을 요구한다 [12].
+서버는 분류 연산을 실행하기 전에 요구 능력을 가진 능력과 대조하고 모자라면 실행하지 않고 `CAPABILITY_BLOCKED`를 돌려준다 [13].
+그래서 Linux 연산은 `fsstat`이 Linux 파일 시스템으로 판별한 이미지에서만 돈다 [9][12][13].
+방법론 상태 기계는 넘겨받은 증거 종류로 기준 도구 목록을 고른다 [11].
+`disk-linux`면 Linux 목록, `memory`면 메모리 목록, `pcap`이면 네트워크 목록, 그 밖은 Windows 목록이다 [11].
+
+레지스트리·이벤트 로그·실행 흔적 연산은 OS를 요구하지 않고 파일 시스템이나 하이브 능력만 요구해 Linux·macOS 이미지에서도 대조를 지난다 [14].
+`list_registry_hives`는 하이브를 찾지 못해도 성공으로 끝나 `registry_accessible`을 만든다 [14].
+메모리 연산은 모두 Volatility 3의 `windows.` 플러그인을 고정해 부른다 [15].
+
+**예외.** `load_network_capture`는 앞선 파일 목록 출력에 캡처 파일 이름이 없어도 성공으로 끝나 `network_capture_loaded`를 만든다 [16].
+그 뒤에는 디스크 이미지로 판별한 증거에서도 네트워크 연산이 능력 대조를 지난다 [12][13][16].
+메모리 덤프와 네트워크 캡처 분기는 판별한 종류를 방법론 상태 기계에 넘기지 않고 돌아간다 [2][3][5].
+그래서 메모리 덤프와 네트워크 캡처에도 Windows 기준 목록을 쓰고 메모리·네트워크 기준 목록은 쓰이지 않는다 [11].
+이 목록이 권하는 작업은 P02에서 본다.
+
+### 근거
+
+[1] 확장자를 뽑고 메모리 후보를 고르는 조건이다.
+
+```typescript
+      // Detect format from extension (verified approach from SIFT docs)
+      const ext = imagePath.toLowerCase().split(".").pop() ?? "";
+      const mountSteps: string[] = [];
+      let mountCommand: { binary: string; args: string[] };
+
+      // ── MEMORY IMAGE DETECTION ──
+      const MEMORY_EXTENSIONS = new Set(["raw", "img", "dmp", "mem", "vmem", "lime", "core"]);
+      const PCAP_EXTENSIONS = new Set(["pcap", "pcapng", "cap"]);
+
+      if (MEMORY_EXTENSIONS.has(ext) && !imagePath.includes("drive") && !imagePath.includes("disk")) {
+```
+
+[`src/server.ts:1593-1602`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1593-L1602)
+
+[2] 메모리 후보를 `windows.info.Info`로 열어 보고 메모리로 정하면 `setEvidenceType` 없이 능력을 주고 돌아간다.
+
+```typescript
+      if (MEMORY_EXTENSIONS.has(ext) && !imagePath.includes("drive") && !imagePath.includes("disk")) {
+        // Check if this is actually a memory dump (vol can identify it)
+        const volCheck = await executor.execute("vol", ["-f", imagePath, "windows.info.Info"]);
+        if (volCheck.isOk() && (volCheck.value.exitCode === 0 || volCheck.value.stdout.includes("Kernel"))) {
+          investigationState.imagePath = imagePath;
+          investigationState.evidenceType = "memory";
+          investigationState.imageFormat = ext;
+          investigationState.accessMode = "raw";
+          capabilityGraph.produce("mount_evidence");
+          capabilityGraph.grant("memory_profiled" as Capability);
+          methodology.recordExecution("mount_evidence");
+          // Record in ledger
+          const outputHash = hashData(volCheck.value.stdout);
+          const lastEntry = ledgerStore.getLastEntry();
+          const prevHash = lastEntry ? hashEntry(lastEntry) : getGenesisHash();
+          const entry = createLedgerEntry({ tool: "mount_evidence", toolParams: { image_path: imagePath, format: "memory" }, outputHash, rawOutputPath: "", prevHash, capabilitiesHeld: capabilityGraph.getHeld(), findingsProduced: [], anomaliesFlagged: [], durationMs: 0, success: true });
+          const storeResult = rawStore.store(entry.id, volCheck.value.stdout);
+          ledgerStore.append({ ...entry, rawOutputPath: storeResult.isOk() ? storeResult.value : "" });
+          const autoActivated = disclosure.onCapabilityGained(["evidence_mounted", "memory_profiled"] as readonly Capability[]);
+          return { content: [{ type: "text" as const, text: JSON.stringify({ result: { status: "mounted", image_path: imagePath, format: "MEMORY", evidence_type: "memory", note: "Memory image detected. Volatility3 workflows unlocked." }, suggested_next_actions: [{ tool: "verify_integrity", reason: "Verify memory dump integrity", priority: "CRITICAL" }], progress: { phase: capabilityGraph.getPhase(), workflows_newly_activated: autoActivated }, ledger_entry_id: entry.id }) }] };
+        }
+```
+
+[`src/server.ts:1602-1622`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1602-L1622)
+
+[3] 캡처 확장자는 내용 확인 없이 네트워크 캡처로 정하고 돌아간다.
+
+```typescript
+      if (PCAP_EXTENSIONS.has(ext)) {
+        // Network capture — no disk mount needed
+        investigationState.imagePath = imagePath;
+        investigationState.evidenceType = "pcap";
+        investigationState.imageFormat = ext;
+        investigationState.accessMode = "raw";
+        capabilityGraph.produce("mount_evidence");
+        capabilityGraph.grant("network_capture_loaded" as Capability);
+        methodology.recordExecution("mount_evidence");
+        const pcapHash = hashData(`PCAP: ${imagePath}`);
+        const pcapLastEntry = ledgerStore.getLastEntry();
+        const pcapPrevHash = pcapLastEntry ? hashEntry(pcapLastEntry) : getGenesisHash();
+        const pcapEntry = createLedgerEntry({ tool: "mount_evidence", toolParams: { image_path: imagePath, format: "pcap" }, outputHash: pcapHash, rawOutputPath: "", prevHash: pcapPrevHash, capabilitiesHeld: capabilityGraph.getHeld(), findingsProduced: [], anomaliesFlagged: [], durationMs: 0, success: true });
+        rawStore.store(pcapEntry.id, `PCAP loaded: ${imagePath}`);
+        ledgerStore.append({ ...pcapEntry, rawOutputPath: "" });
+        const pcapAutoActivated = disclosure.onCapabilityGained(["evidence_mounted", "network_capture_loaded"] as readonly Capability[]);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ result: { status: "mounted", image_path: imagePath, format: "PCAP", evidence_type: "pcap", note: "Network capture detected. Network forensics workflow unlocked." }, suggested_next_actions: [{ tool: "verify_integrity", reason: "Verify capture integrity", priority: "CRITICAL" }], progress: { phase: capabilityGraph.getPhase(), workflows_newly_activated: pcapAutoActivated }, ledger_entry_id: pcapEntry.id }) }] };
+      }
+```
+
+[`src/server.ts:1625-1642`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1625-L1642)
+
+[4] 디스크 이미지는 확장자로 마운트 명령을 고른다.
+
+```typescript
+      if (ext === "e01" || ext === "s01" || ext === "ex01") {
+        // Expert Witness Format: requires ewfmount first (verified from Protocol SIFT + SIFT docs)
+        mountSteps.push(
+          `1. ewfmount "${imagePath}" /mnt/ewf/ → creates /mnt/ewf/ewf1`,
+          `2. mount -o ro,loop,noexec,noatime /mnt/ewf/ewf1 /mnt/evidence/`
+        );
+        mountCommand = { binary: "ewfmount", args: [imagePath, "/mnt/ewf/"] };
+      } else if (ext === "vmdk") {
+        mountSteps.push(
+          `1. qemu-nbd -r -c /dev/nbd0 "${imagePath}"`,
+          `2. mount -o ro,noexec,noatime /dev/nbd0p1 /mnt/evidence/`
+        );
+        mountCommand = { binary: "qemu-nbd", args: ["-r", "-c", "/dev/nbd0", imagePath] };
+      } else if (ext === "aff4") {
+        mountSteps.push(
+          `1. affuse "${imagePath}" /mnt/aff/ → creates raw image`,
+          `2. mount -o ro,loop,noexec,noatime /mnt/aff/*.raw /mnt/evidence/`
+        );
+        mountCommand = { binary: "affuse", args: [imagePath, "/mnt/aff/"] };
+      } else {
+        // Raw/dd — direct mount
+        mountSteps.push(`mount -o ro,loop,noexec,noatime "${imagePath}" /mnt/evidence/`);
+        mountCommand = { binary: "mount", args: ["-o", "ro,loop,noexec,noatime", imagePath, "/mnt/evidence/"] };
+      }
+```
+
+[`src/server.ts:1644-1667`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1644-L1667)
+
+[5] 성공 경로는 이미지 경로가 비었을 때만 바꾸고 증거 종류를 방법론 상태 기계에 넘긴다.
+
+```typescript
+      // Produce capabilities on success
+      if (success) {
+        // Update investigation state — tools will read from here
+        if (!investigationState.imagePath) {
+          investigationState.imagePath = imagePath;
+          investigationState.imageFormat = ext || "raw";
+        }
+        capabilityGraph.produce("mount_evidence");
+        methodology.recordExecution("mount_evidence");
+        methodology.setEvidenceType(investigationState.evidenceType);
+        const autoActivated = disclosure.onCapabilityGained(["evidence_mounted"]);
+
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          result: {
+            status: "mounted",
+            image_path: imagePath,
+            format: ext.toUpperCase(),
+            evidence_type: investigationState.evidenceType,
+            filesystem_type: investigationState.filesystemType,
+            mount_point: "/mnt/evidence/",
+            read_only: true,
+```
+
+[`src/server.ts:1743-1763`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1743-L1763)
+
+[6] 조사 상태의 이미지 경로는 시작 인자 `--evidence`로 시작하고 분석 연산은 그 경로를 쓴다.
+
+```typescript
+  const investigationState = {
+    imagePath: config.evidencePath || "",
+    partitionOffset: 0,               // From mmls; 0 for single-partition images
+```
+
+[`src/server.ts:310-312`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L310-L312)
+
+```typescript
+    if (mapping) {
+      const evidencePath = investigationState.imagePath || config.evidencePath;
+```
+
+[`src/server.ts:1848-1849`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1848-L1849)
+
+[7] `reset_investigation`이 비우는 대상에 조사 상태가 없다.
+
+```typescript
+    if (name === "reset_investigation") {
+      const prevFindings = findings.size;
+      const prevHypotheses = hypotheses.size;
+      const prevEntries = ledgerStore.getAllEntries().length;
+      capabilityGraph.reset();
+      methodology.reset();
+      disclosure.reset();
+      reasoningEngine.reset();
+      findings.clear();
+      hypotheses.clear();
+      ledgerStore.clear();
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        status: "RESET_COMPLETE",
+        cleared: { findings: prevFindings, hypotheses: prevHypotheses, ledger_entries: prevEntries },
+        message: "Investigation state reset. All findings, hypotheses, and ledger entries cleared. Ready for a new case.",
+      }) }] };
+    }
+```
+
+[`src/server.ts:477-493`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L477-L493)
+
+[8] 마운트 명령이 실패하면 `fls`로 직접 읽히는지 보고 `mmls` 출력에서 오프셋을 정한다.
+
+```typescript
+      // FALLBACK: If mount fails, check if the image is directly accessible by sleuthkit
+      // This handles ewfmounted images (/mnt/ewf/ewf1) and raw images that don't need mounting
+      if (!success) {
+        const flsCheck = await executor.execute("fls", ["-o", "0", imagePath]);
+        if (flsCheck.isOk() && flsCheck.value.exitCode === 0 && flsCheck.value.stdout.length > 0) {
+          success = true;
+          rawOutput = `Image accessible directly via Sleuth Kit (no filesystem mount needed).\nRoot entries:\n${flsCheck.value.stdout.slice(0, 2000)}`;
+          // Try to detect partition offset via mmls
+          const mmlsResult = await executor.execute("mmls", [imagePath]);
+          if (mmlsResult.isOk() && mmlsResult.value.exitCode === 0 && mmlsResult.value.stdout.length > 0) {
+            // Parse mmls output: find the largest NTFS partition
+            const lines = mmlsResult.value.stdout.split("\n");
+            for (const line of lines) {
+              if (/NTFS|Win95|FAT/i.test(line)) {
+                const match = line.match(/\d+:\s+\d+\s+(\d+)\s+\d+\s+(\d+)/);
+                if (match?.[1]) {
+                  investigationState.partitionOffset = parseInt(match[1], 10);
+                  break;
+                }
+              }
+            }
+          }
+          // If mmls found nothing (single partition), offset stays 0
+          investigationState.imagePath = imagePath;
+          investigationState.accessMode = "raw";
+          investigationState.imageFormat = ext || "raw";
+```
+
+[`src/server.ts:1674-1699`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1674-L1699)
+
+[9] `fsstat` 출력의 낱말로 증거 종류와 파일 시스템을 정한다.
+
+```typescript
+          // Detect filesystem type and evidence type via fsstat
+          const fsResult = await executor.execute("fsstat", ["-o", String(investigationState.partitionOffset), imagePath]);
+          if (fsResult.isOk() && fsResult.value.exitCode === 0) {
+            const fsOutput = fsResult.value.stdout;
+            if (/NTFS|FAT/i.test(fsOutput)) {
+              investigationState.evidenceType = "disk-windows";
+              investigationState.filesystemType = /NTFS/i.test(fsOutput) ? "NTFS" : "FAT";
+            } else if (/ext[234]|xfs|btrfs/i.test(fsOutput)) {
+              investigationState.evidenceType = "disk-linux";
+              investigationState.filesystemType = fsOutput.match(/ext[234]|xfs|btrfs/i)?.[0] ?? "ext4";
+              capabilityGraph.grant("linux_accessible" as Capability);
+            } else if (/HFS|APFS/i.test(fsOutput)) {
+              investigationState.evidenceType = "disk-macos";
+              investigationState.filesystemType = /APFS/i.test(fsOutput) ? "APFS" : "HFS+";
+            } else {
+              investigationState.evidenceType = "disk-windows"; // default assumption for unknown disk FS
+              investigationState.filesystemType = "unknown";
+            }
+          }
+        }
+```
+
+[`src/server.ts:1701-1720`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1701-L1720)
+
+[10] 두 연산의 인자 구성은 [`src/server.ts:162`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L162)와 [`src/server.ts:172`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L172)에 있고 초기값 0 밖에 조사 상태의 `partitionOffset`을 바꾸는 곳은 [`src/server.ts:1690`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1690) 하나다.
+
+[11] 방법론 상태 기계는 넘겨받은 증거 종류로 기준 목록을 고르고 그 밖은 Windows 목록이다.
+
+```typescript
+  /** Set evidence type — drives which baseline applies */
+  setEvidenceType(type: "disk-windows" | "disk-linux" | "disk-macos" | "memory" | "pcap" | "unknown"): void {
+    this.evidenceType = type;
+  }
+
+  /** Get the appropriate baseline for the current evidence type */
+  private getBaseline(): readonly BaselineItem[] {
+    switch (this.evidenceType) {
+      case "disk-linux": return BASELINE_LINUX;
+      case "memory": return BASELINE_MEMORY;
+      case "pcap": return BASELINE_NETWORK;
+      default: return BASELINE_INVESTIGATION; // Windows + macOS + unknown
+    }
+  }
+```
+
+[`src/domain/methodology.ts:437-450`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/methodology.ts#L437-L450)
+
+[12] 증거 종류에 묶인 능력을 요구하는 연산 명세: 메모리 [`src/domain/capability-graph.ts:81-82`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/capability-graph.ts#L81-L82), 네트워크 [`src/domain/capability-graph.ts:94-95`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/capability-graph.ts#L94-L95), Linux [`src/domain/capability-graph.ts:140-147`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/capability-graph.ts#L140-L147).
+
+[13] 분류 연산을 실행하기 전에 요구 능력을 대조한다.
+
+```typescript
+    const canExec = capabilityGraph.canExecute(name);
+    if (canExec.isErr()) {
+      const error = canExec.error;
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        error: "CAPABILITY_BLOCKED",
+        tool: name,
+        missing_capabilities: error.missing,
+        held_capabilities: error.held,
+        guidance: error.guidance,
+        suggestion: methodology.suggestNextAction(capabilityGraph.getHeld()),
+      }) }], isError: true };
+    }
+```
+
+[`src/server.ts:1784-1795`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1784-L1795)
+
+[14] 레지스트리 연산은 하이브 능력만 요구하고 하이브 목록 연산은 앞선 파일 목록이 없어도 성공으로 끝난다.
+
+```typescript
+  { tool: "list_registry_hives", requires: ["filesystem_accessible"], produces: ["registry_accessible"], category: "registry", description: "Locate all registry hive files in image" },
+  { tool: "parse_registry_key", requires: ["registry_accessible"], produces: [], category: "registry", description: "Parse specific registry key via regripper" },
+  { tool: "get_user_activity", requires: ["registry_accessible"], produces: [], category: "registry", description: "NTUSER.DAT: typed paths, recent docs, UserAssist" },
+  { tool: "get_system_config", requires: ["registry_accessible"], produces: [], category: "registry", description: "SYSTEM: hostname, timezone, network, shutdown time" },
+  { tool: "get_persistence_keys", requires: ["registry_accessible"], produces: [], category: "registry", description: "Check ALL known persistence registry locations (50+)" },
+  { tool: "get_installed_software", requires: ["registry_accessible"], produces: [], category: "registry", description: "SOFTWARE: uninstall entries, app paths, install dates" },
+  { tool: "get_usb_history", requires: ["registry_accessible"], produces: [], category: "registry", description: "USBSTOR + mountpoints + setupapi correlation" },
+  { tool: "get_network_config", requires: ["registry_accessible"], produces: [], category: "registry", description: "Network interfaces, DNS, firewall rules" },
+  { tool: "parse_sam", requires: ["registry_accessible"], produces: [], category: "registry", description: "SAM: user accounts, last login, password policy" },
+```
+
+[`src/domain/capability-graph.ts:40-48`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/capability-graph.ts#L40-L48)
+
+```typescript
+function handleListRegistryHives(_params: Record<string, unknown>, ctx: HandlerContext): HandlerResult {
+  const flsEntries = ctx.ledgerEntries.filter(e => e.tool === "list_directory");
+  if (flsEntries.length === 0) {
+    return { success: true, output: JSON.stringify({ result: "no_filesystem_data", message: "Run list_directory first to discover registry hive files.", suggestion: { tool: "list_directory", params: { path: "/Windows/System32/config/" } } }) };
+  }
+```
+
+[`src/handlers/in-process.ts:633-637`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L633-L637)
+
+[15] 메모리 연산의 Volatility 3 플러그인 이름이다.
+
+```typescript
+    identify_memory_profile: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.info.Info"] },
+    list_processes: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.pslist.PsList"] },
+    detect_process_injection: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.malfind.Malfind"] },
+    list_network_connections: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.netscan.NetScan"] },
+    detect_rootkit: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.ssdt.SSDT"] },
+    dump_process: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "windows.dumpfiles.DumpFiles", "--pid", String(p["pid"] ?? 0)] },
+    get_command_history: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.cmdline.CmdLine"] },
+    scan_memory_yara: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "yarascan.YaraScan", "--yara-file", String(p["rules"] ?? "")] },
+    list_handles: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.handles.Handles", ...(p["pid"] ? ["--pid", String(p["pid"])] : [])] },
+    analyze_privileges: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.privileges.Privs"] },
+    list_kernel_drivers: { binary: "vol", buildArgs: (p, ev) => ["-f", String(p["memory_path"] ?? ev), "--output", "json", "windows.driverscan.DriverScan"] },
+```
+
+[`src/server.ts:206-216`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L206-L216)
+
+[16] `load_network_capture`는 캡처 파일을 찾지 못해도 `success: true`를 돌려준다.
+
+```typescript
+function handleLoadNetworkCapture(_params: Record<string, unknown>, ctx: HandlerContext): HandlerResult {
+  // Verify pcap exists — just a gate for capability production
+  const fsEntries = ctx.ledgerEntries.filter(e => e.tool === "list_directory" || e.tool === "search_filename");
+  const hasPcap = fsEntries.some(e => {
+    const raw = ctx.rawOutputs.get(e.id as string) ?? "";
+    return raw.match(/\.(pcap|pcapng|cap)/i) !== null;
+  });
+
+  if (hasPcap) {
+    return { success: true, output: JSON.stringify({ result: "capture_located", message: "Network capture file found in evidence.", suggestion: { tool: "parse_pcap_summary", reason: "Get high-level network statistics" } }) };
+  }
+
+  return { success: true, output: JSON.stringify({ result: "no_capture", message: "No PCAP files found in evidence. Search for network captures.", suggestion: { tool: "search_filename", params: { pattern: "\\.(pcap|pcapng|cap)$" } } }) };
+}
+```
+
+[`src/handlers/in-process.ts:558-571`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L558-L571)

@@ -1,0 +1,282 @@
+---
+cell: E02
+details:
+- id: E02.01
+  exception: true
+- id: E02.02
+  exception: false
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 사건을 만드는 `scan_evidence`는 분류기가 증거로 알아본 파일마다 모델의 요청 없이 SHA-256을 계산한다 [1][2].
+파일을 64 KiB씩 끝까지 읽어 모든 바이트를 해시한다 [2].
+EWF 이미지는 `.E01` 파일 자체의 바이트를 해시하므로 이 값은 담긴 매체 데이터의 해시가 아니다 [2].
+값은 `evidence_registry`에 파일 경로·크기·등록 시각과 함께 들어간다 [2].
+응답은 해시를 마쳤다고 알리고 해시에 실패한 파일이 있으면 그 수를 경고로 붙인다 [1].
+등록한 값을 쓰는 곳은 `finalize_report`가 보고서에 싣는 것과 CLI `mulder report`뿐이다 [3].
+등록한 SHA-256을 다시 계산해 현재 증거와 대조하는 코드는 없어 E02.07·E02.09에는 들지 않는다 [3].
+
+`verify_evidence_integrity`는 이름과 달리 증거 파일을 읽지 않는다 [4].
+이 도구는 사건 DB에 적재한 도구 출력을 다시 해시해 적재 때의 값과 대조하므로 D03에서 본다 [4].
+
+**예외.** 응답은 등록한 파일 수와 관계없이 "Evidence hashing complete"라고 적는다 [1].
+분류기가 알아보지 못한 파일, 분할 이미지의 둘째 조각부터, 로그 폴더와 iOS 백업 안의 파일은 증거 폴더 안에 있어도 해시하지 않는다 [2][5].
+`extract_archive`가 푼 파일도 해시하지 않는다 [5].
+저장소 사본에서 `extract_archive`가 안내한 폴더로 사건을 만들자 해시한 파일이 0건인데도 응답은 해시를 마쳤다고 적었다 [6].
+같은 ID의 사건이 이미 있으면 `scan_evidence`는 해시 단계 전에 돌아간다 [1].
+분석 도구는 받은 경로가 등록·해시된 파일인지 보지 않으므로 해시하지 않은 파일도 분석 입력이 된다 [7].
+
+### E02.02 도구를 요청해 기준값 계산
+
+**구현.** 모델이 `run_hashdeep`을 부르면 받은 경로를 `hashdeep -r -l`로 해시하고 출력을 사건 DB에 `hashdeep.hashes`로 적재한다 [8].
+도구 설명은 경로 아래 모든 파일의 MD5·SHA-1·SHA-256을 계산한다고 적고 해시는 파일 단위다 [8].
+이 출력을 `evidence_registry`의 값과 대조하는 코드는 없다 [3].
+`run_hashdeep`은 받은 경로를 등록 목록에 넣지 않는다 [8].
+
+`extract_file_by_inode`는 이미지 안의 inode 하나를 `icat`으로 읽고 내용이 이진이면 그 바이트의 SHA-256과 크기를 응답에 싣는다 [9].
+같은 도구에서 내용이 텍스트이면 해시하지 않고 사건 DB에 적재한다 [9].
+이 값은 응답에만 들어가고 호출 기록에는 응답 전체의 해시만 남는다 [10].
+`extract_optical_file`도 SHA-256을 응답에 싣지만 사건 폴더에 저장한 사본을 다시 읽어 계산하므로 꺼낸 사본의 해시로 보고 D03에서 본다 [11].
+서버는 이 값들을 기준값으로 보관하지 않고 다시 대조하지도 않는다 [3].
+
+### 근거
+
+[1] 사건을 만든 뒤 해시 함수를 부르고 응답 문구를 만든다.
+사건이 이미 있으면 해시 함수를 부르기 전에 돌아간다.
+
+```python
+    result = create_case(case_id, str(ev_path), replace=replace)
+
+    if isinstance(result, dict) and result.get("status") == "case_exists":
+        result["evidence_tree"] = "\n".join(tree_lines)
+        result["type_summary"] = type_counts
+        result["total_items"] = len(manifest)
+        return result
+
+    if isinstance(result, dict) and result.get("status") == "error":
+        return result
+
+    failed_files = _hash_and_register_evidence(list(manifest))
+
+    archive_count = type_counts.get("compressed_archive", 0)
+    message = (
+        f"Case '{case_id}' created. Found {len(manifest)} evidence item(s). "
+        "Evidence hashing complete for chain of custody. "
+        "Use Tier 2 extraction tools to start analyzing immediately."
+    )
+    if failed_files:
+        message += f" WARNING: {len(failed_files)} file(s) failed to hash."
+```
+
+[`src/mulder/server/tools/case.py:239-259`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/case.py#L239-L259)
+
+[2] 분류 목록의 파일 항목만 64 KiB씩 읽어 SHA-256을 계산하고 등록한다.
+
+```python
+    for item in manifest:
+        fp = Path(str(item.get("path", "")))
+        if not fp.is_file():
+            continue
+        try:
+            h = _hashlib.sha256()
+            size = 0
+            with open(fp, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    size += len(chunk)
+            ctx.db.register_evidence_file(
+                file_path=str(fp),
+                sha256=h.hexdigest(),
+                size_bytes=size,
+            )
+        except Exception as exc:
+            logger.warning("Failed to hash evidence file %s: %s", fp, exc)
+            failed_files.append(str(fp))
+    return failed_files
+```
+
+[`src/mulder/server/tools/case.py:162-184`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/case.py#L162-L184)
+
+[3] 등록한 해시를 읽는 호출은 기준 커밋 전체에서 두 곳뿐이다.
+
+```python
+    evidence_integrity = ctx.db.get_evidence_registry()
+```
+
+[`src/mulder/server/tools/findings.py:678-678`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L678-L678)
+
+```python
+        evidence_integrity = case_db.get_evidence_registry()
+```
+
+[`src/mulder/cli.py:169-169`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/cli.py#L169-L169)
+
+[4] `verify_evidence_integrity`는 사건 DB의 `windows` 표를 다시 해시해 `windows_hash`와 비교한다.
+도구 함수는 [`src/mulder/server/tools/case.py:432-446`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/case.py#L432-L446), 대조 결과를 정하는 부분은 [`src/mulder/db.py:1281-1310`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1281-L1310)에 있다.
+
+```python
+    def verify_evidence_integrity(self) -> list[dict[str, object]]:
+        """Verify indexed source data against stored window hashes.
+
+        Recomputes BLAKE2b from stored windows in a single streaming query
+        ordered by source_id, comparing each hash to the windows_hash
+        recorded at ingestion. Sources without a stored hash are reported
+        as ``no_hash_recorded``.
+        """
+        sources = self.get_sources()
+        no_hash_ids = {s.source_id for s in sources if not s.windows_hash}
+
+        computed: dict[int, tuple[Any, int]] = {}
+
+        with self._engine.connect() as conn:
+            stream = conn.execute(
+                text("SELECT source_id, raw_text FROM windows ORDER BY source_id, window_id")
+            )
+            for row in stream:
+                sid: int = row[0]
+                if sid in no_hash_ids:
+                    continue
+                if sid not in computed:
+                    computed[sid] = (hashlib.blake2b(digest_size=32), 0)
+                h, count = computed[sid]
+                h.update(row[1].encode())
+                computed[sid] = (h, count + 1)
+```
+
+[`src/mulder/db.py:1254-1279`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1254-L1279)
+
+[5] 분류기가 건너뛰는 파일과 `extract_archive`의 처리는 E01 원고의 근거에 있다.
+분류기의 이미지 확장자 목록은 [`src/mulder/extractors/classifier.py:14-22`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/classifier.py#L14-L22)와 [`src/mulder/patterns.py:53-55`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/patterns.py#L53-L55), 폴더 항목 처리는 [`src/mulder/extractors/classifier.py:219-229`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/classifier.py#L219-L229), 푼 폴더를 분류만 하는 부분은 [`src/mulder/server/tools/case.py:743-772`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/case.py#L743-L772)에 있다.
+
+[6] (실행 확인) 압축 파일 하나를 `extract_archive`로 풀고 응답이 안내한 폴더로 `scan_evidence`를 부른 결과다.
+
+[7] 분석 도구는 받은 경로에 파일이 있는지만 본다(`run_volatility`의 예).
+
+```python
+    if not Path(memory_path).exists():
+        return error_response(
+            tc_id,
+            "run_volatility",
+            params,
+            f"File not found: {memory_path}",
+            error_type="file_not_found",
+        )
+```
+
+[`src/mulder/server/tools/extract/volatility.py:230-237`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/volatility.py#L230-L237)
+
+[8] `run_hashdeep`은 받은 경로를 그대로 `hashdeep`에 넘기고 출력을 적재한다.
+
+```python
+@mcp.tool()
+@tool_access(Role.EXTRACT_EXECUTOR)
+def run_hashdeep(target_path: str) -> dict[str, object]:
+    """Compute recursive cryptographic hashes using hashdeep.
+
+    Generates MD5, SHA1, and SHA256 hashes for all files under the
+    target path.  Useful for integrity verification and IOC matching.
+
+    Args:
+        target_path: Path to the file or directory to hash.
+    """
+    return run_cli_tool(
+        binary="hashdeep",
+        cmd=["hashdeep", "-r", "-l", target_path],
+        tool_name="run_hashdeep",
+        params={"target_path": target_path},
+        source_name="hashdeep.hashes",
+        source_path=target_path,
+        extractor_label="hashdeep",
+        timeout=adaptive_timeout(target_path),
+    )
+```
+
+[`src/mulder/server/tools/extract/misc.py:685-705`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/misc.py#L685-L705)
+
+[9] `extract_file_by_inode`는 이진 내용만 해시한다.
+
+```python
+    if b"\x00" in raw[:8192]:
+        file_hash = hashlib.sha256(raw).hexdigest()
+        results: dict[str, object] = {
+            "type": "binary",
+            "inode": inode,
+            "size_bytes": len(raw),
+            "sha256": file_hash,
+        }
+    else:
+        text = raw[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+        source_name = f"tsk.extracted.{inode}"
+        index_summary: dict[str, object] = {}
+        if text.strip():
+            index_summary = extract_and_index(text, source_name, image_path_resolved, "icat")
+        results = {
+            "type": "text",
+            "inode": inode,
+            "size_bytes": len(raw),
+            "source_name": source_name,
+            "windows_indexed": index_summary.get("windows_indexed", 0),
+            "hint": f"Use get_raw_output('{source_name}') to read the file content.",
+        }
+```
+
+[`src/mulder/server/tools/tsk.py:489-510`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L489-L510)
+
+[10] 두 도구는 호출 기록에 응답 결과의 해시(`output_hash`)만 넘긴다.
+`extract_file_by_inode`는 직접, `extract_optical_file`은 `tool_response`를 거쳐 기록한다.
+
+```python
+    elapsed = (time.monotonic() - t0) * 1000
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="extract_file_by_inode",
+        params={"inode": inode},
+        output_hash=hash_output(results),
+        duration_ms=elapsed,
+    )
+```
+
+[`src/mulder/server/tools/tsk.py:512-519`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L512-L519)
+
+```python
+    if has_ctx():
+        ctx = get_ctx()
+        ctx.audit.log_tool_call(
+            tool_call_id=tc_id,
+            tool_name=tool_name,
+            params=params,
+            output_hash=hash_output(results),
+            duration_ms=elapsed_ms,
+            batch_id=current_batch_id.get(),
+        )
+```
+
+[`src/mulder/server/helpers.py:347-356`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L347-L356)
+
+[11] `extract_optical_file`은 꺼낸 파일을 다시 읽어 해시한다.
+
+```python
+    digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+    elapsed = (time.monotonic() - t0) * 1000
+    results: dict[str, object] = {
+        "extracted_to": str(dest),
+        "disc_path": entry.path,
+        "size_bytes": written,
+        "sha256": digest,
+        "deleted_on_disc": entry.deleted,
+        "modified": entry.mtime,
+        "created": entry.ctime,
+        "hint": (
+            "Pass extracted_to to read_evidence_file, analyze_office_document, "
+            "run_hashdeep or run_exiftool."
+        ),
+    }
+```
+
+[`src/mulder/server/tools/extract/optical.py:158-172`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/optical.py#L158-L172)

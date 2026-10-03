@@ -1,6 +1,7 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import evidenceLinks from './src/remark/evidenceLinks';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
@@ -43,6 +44,8 @@ const config: Config = {
           path: '../reports',
           routeBasePath: 'reports',
           sidebarPath: './sidebars.ts',
+          // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾼다
+          remarkPlugins: [evidenceLinks],
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
           editUrl:
@@ -63,7 +66,7 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'Matrix Reports',
+      title: 'Matrix',
       logo: {
         alt: 'Matrix Logo',
         src: 'img/custom_logo.png',
@@ -80,6 +83,7 @@ const config: Config = {
           label: 'Docs',
           position: 'left',
         },
+
         {
           href: 'https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2',
           label: 'GitHub',
@@ -101,6 +105,7 @@ const config: Config = {
               label: 'Docs',
               to: '/docs/',
             },
+
           ],
         },
         {
@@ -130,6 +135,15 @@ const config: Config = {
         sidebarPath: './sidebars.ts',
       },
     ],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'matrix',
+        path: '../matrix/cells',
+        routeBasePath: '/',
+        sidebarPath: './sidebarsCells.ts',
+      },
+    ],
   ],
   themes: [
     [
@@ -137,7 +151,10 @@ const config: Config = {
       {
         hashed: true,
         language: ["en", "ko"],
-        docsRouteBasePath: ["/reports", "/docs"],
+        docsRouteBasePath: ["/reports", "/docs", "/"],
+        // hashed 색인 이름은 이 폴더들의 파일로 계산한다. 원본 폴더를 주어야 내용이 바뀔 때 새 색인을 받는다.
+        docsDir: ["../reports", "../docs", "../matrix/cells"],
+        indexBlog: false,
         highlightSearchTermsOnTargetPage: true,
       },
     ],

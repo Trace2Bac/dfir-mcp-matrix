@@ -4,7 +4,7 @@
   python tools/coverage.py <서버>
 
 입력:  reports/<서버>/tools.yaml   등록 도구 목록(name·path·line). 서버마다 기준 커밋 코드에서 뽑아 둔다.
-출력:  reports/<서버>/coverage.md  기능마다 원고 본문에 이름이 나오는 셀과 근거에만 나오는 셀
+출력:  reports/<서버>/coverage.mdx 기능마다 원고 본문에 이름이 나오는 셀과 근거에만 나오는 셀
        tools.yaml 항목: name·path·line, 선택 kind(종류)·owner(클래스)
 
 이름이 원고에 나오지 않는다고 그 기능을 조사하지 않았다는 뜻은 아니다(공통 처리기 설명으로 덮였을 수 있다).
@@ -31,10 +31,10 @@ def front(path):
 def main(server):
     d = os.path.join(ROOT, "reports", server)
     tools = yaml.safe_load(open(os.path.join(d, "tools.yaml"), encoding="utf-8"))["tools"]
-    fm, _ = front(os.path.join(d, "index.md"))
+    fm, _ = front(os.path.join(d, "index.mdx"))
     base = "https://github.com/%s/blob/%s/" % (fm["repo"], fm["commit"])
     cells = {}
-    for p in sorted(glob.glob(os.path.join(d, "*.md"))):
+    for p in sorted(glob.glob(os.path.join(d, "*.mdx"))):
         cid = os.path.splitext(os.path.basename(p))[0]
         if CELL.match(cid):
             _, body = front(p)
@@ -61,8 +61,8 @@ def main(server):
            "이름이 원고 본문에 나오는지만 찾으므로 이름이 나오지 않는다고 그 기능을 조사하지 않았다는 뜻은 아니다. 공통 처리기 설명으로 덮였을 수 있으므로 조사 범위를 다시 볼 때 출발점으로 쓴다.",
            "같은 이름이 여러 클래스에 있으면 어느 클래스의 것인지 가리지 못한다(마지막 열).", "",
            "| 기능 | 종류 | 정의 위치 | 본문에 나오는 셀 | 근거에만 나오는 셀 | 비고 |", "|---|---|---|---|---|---|"] + rows
-    open(os.path.join(d, "coverage.md"), "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
-    print("%s: %s → reports/%s/coverage.md" % (server, summary, server))
+    open(os.path.join(d, "coverage.mdx"), "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
+    print("%s: %s → reports/%s/coverage.mdx" % (server, summary, server))
 
 
 if __name__ == "__main__":

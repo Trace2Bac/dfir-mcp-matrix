@@ -4,7 +4,7 @@ This repository has two kinds of material under two licenses.
 
 | Material | Paths | License |
 |---|---|---|
-| Code: tools, screen, schemas, CI | `tools/`, `site/`, `matrix/schema/`, `.github/` | MIT ([LICENSE](LICENSE)) |
+| Code: tools, site, schemas, CI | `tools/`, `web/`, `matrix/schema/`, `.github/` | MIT ([LICENSE](LICENSE)) |
 | Content: matrix definitions, reports, docs | `matrix/` (except `matrix/schema/`), `reports/`, `docs/`, `*.md` guides | CC BY 4.0 ([LICENSE-CONTENT](LICENSE-CONTENT)) |
 
 Attribution for content: "DFIR MCP Architecture Matrix, Trace2Bac contributors", with a link to this repository.

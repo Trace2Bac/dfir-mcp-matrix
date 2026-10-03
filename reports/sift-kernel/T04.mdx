@@ -1,0 +1,233 @@
+---
+cell: T04
+details:
+- id: T04.01
+  exception: false
+- id: T04.02
+  exception: false
+- id: T04.04
+  exception: false
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 라이브러리 호출
+
+**구현.** 외부 실행 파일 매핑이 없는 분류 연산은 서버 프로세스 안의 처리기 함수가 수행한다 [1].
+처리기는 이상 징후 탐지, 상관 분석, 지속성 점검 같은 연산을 서버의 TypeScript 코드로 계산한다 [2].
+처리기의 재료는 앞선 호출이 저장한 원래 출력과 호출 기록·발견사항·가설이고 증거 파일을 직접 열지 않는다 [1].
+외부 도구의 출력도 서버 프로세스 안에서 처리한다.
+`parseToolOutput`이 도구별 파서로 출력을 구조화한다 [3].
+`search_filename`의 결과는 서버가 정규식으로 거른다 [4].
+`regipy-plugins-run`이 파일로 쓴 JSON 결과는 서버가 읽어 원래 출력으로 쓴다 [5].
+추론 엔진 `ForensicReasoningEngine`도 서버 프로세스 안에서 도구 출력을 받아 가설 신념을 계산한다 [6].
+이 계산은 저장소 안의 코드이고 분석용 외부 라이브러리를 불러오지 않는다 [7].
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 외부 도구는 모두 `ProcessExecutor`가 `spawn`으로 실행한다 [8].
+`spawn`에 실행 파일 이름과 인자 배열을 따로 넘기고 `shell: false`를 준다 [8].
+자식 프로세스는 서버의 환경변수를 물려받고 작업 위치(`cwd`)는 조사 출력 폴더 하나다 [8][9].
+계정을 바꾸거나 권한을 낮추는 인자를 주는 곳은 없어 외부 도구는 서버와 같은 계정·파일·네트워크 권한으로 돈다 [8].
+이미지 안 파일을 출력 폴더로 꺼내는 `extractToFile`과 비동기 작업도 같은 실행기로 실행한다 [10][11].
+`mount_evidence`의 마운트 명령과 `fls`·`mmls`·`fsstat` 확인도 같은 실행기를 거친다 [12].
+
+시작 인자 `--sudo`로 외부 도구의 권한을 바꾸는 경우는 T04.04에서 본다 [8].
+서버 코드에 셸 명령 문자열로 실행하는 곳은 없어 T04.03에는 연결하지 않는다 [8][10].
+컨테이너·namespace 같은 분리 설정이나 호출마다 새 작업 폴더를 만드는 곳도 없다 [9].
+
+### T04.04 권한을 나눈 실행
+
+**구현.** 이 방식은 시작 인자 `--sudo`로 띄운 서버의 외부 도구 실행 전부에 걸린다 [8][10].
+`--sudo`를 주면 실행기의 두 실행 경로가 모두 외부 도구를 `sudo <실행 파일> <인자>` 형태로 실행한다 [8][10].
+그래서 외부 도구는 서버 계정과 달리 root 권한으로 돈다.
+권한을 높이는 방향이고 도구마다 고르지 않고 모두 바꾼다.
+`--sudo`를 주지 않으면 외부 도구는 서버와 같은 권한으로 돌고 T04.02에 든다 [8].
+
+### 근거
+
+[1] 매핑이 없으면 서버 안 처리기에 저장된 출력과 조사 상태를 넘겨 실행한다.
+
+```typescript
+    } else {
+      // Try in-process handler (intelligence detectors, correlation, text parsing)
+      const entries = ledgerStore.getAllEntries();
+      const rawOutputMap = new Map<string, string>();
+      for (const e of entries) {
+        const r = rawStore.retrieve(e.id);
+        if (r.isOk()) rawOutputMap.set(e.id as string, r.value);
+      }
+      const context: HandlerContext = {
+        findings,
+        hypotheses,
+        ledgerEntries: entries,
+        rawOutputs: rawOutputMap,
+        evidencePath: investigationState.imagePath || config.evidencePath,
+      };
+      const inProcessResult = executeInProcess(name, toolParams, context);
+      if (inProcessResult) {
+        rawOutput = inProcessResult.output;
+        success = inProcessResult.success;
+        errorMsg = inProcessResult.success ? undefined : inProcessResult.error;
+      } else {
+        // No binary mapping AND no in-process handler — HONEST failure
+        rawOutput = "";
+        success = false;
+        errorMsg = `Tool "${name}" requires SIFT Workstation forensic binary that is not available on this system. Install SIFT: sudo cast install teamdfir/sift`;
+      }
+    }
+```
+
+[`src/server.ts:1991-2017`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1991-L2017)
+
+[2] 서버 안 처리기 목록이다: [`src/handlers/in-process.ts:775-850`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L775-L850).
+
+[3] 파싱은 서버 프로세스에서 한다.
+도구별 파서 선택은 [`src/parsers/index.ts:65-116`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/index.ts#L65-L116)에 있다.
+
+```typescript
+    const { parsed, anomalies } = rawOutput ? parseToolOutput(name, rawOutput) : { parsed: success ? { status: "completed", tool: name } : { error: errorMsg ?? "Tool execution failed" }, anomalies: [] as AnomalyFlag[] };
+```
+
+[`src/server.ts:2029-2029`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2029-L2029)
+
+[4] `search_filename` 결과를 서버가 정규식으로 거른다.
+
+```typescript
+      if (name === "search_filename" && success && rawOutput) {
+        const pattern = toolParams["pattern"] as string | undefined;
+        if (pattern) {
+          try {
+            const re = new RegExp(pattern, toolParams["case_sensitive"] ? "" : "i");
+            rawOutput = rawOutput.split("\n").filter(line => re.test(line)).join("\n");
+          } catch { /* invalid regex — return unfiltered */ }
+        }
+      }
+```
+
+[`src/server.ts:1979-1987`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1979-L1987)
+
+[5] regipy 결과 파일을 서버가 읽고 지운다.
+
+```typescript
+        // regipy-plugins-run writes JSON to its -o file; stdout is only progress noise
+        // ("Loaded N plugins / Finished X/N"). Always read the JSON file, not stdout.
+        if (success && mapping.binary === "regipy-plugins-run") {
+          try {
+            const { readFileSync, unlinkSync } = await import("node:fs");
+            try {
+              const json = readFileSync(`${config.outputPath}/regipy_out.json`, "utf8");
+              if (json.trim().length > 0) rawOutput = json;
+              try { unlinkSync(`${config.outputPath}/regipy_out.json`); } catch { /* ignore */ }
+            } catch { /* file missing — tool produced no output */ }
+          } catch { /* import failure — leave stdout */ }
+        }
+```
+
+[`src/server.ts:1965-1976`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1965-L1976)
+
+[6] 도구 출력을 추론 엔진에 넘긴다.
+
+```typescript
+     // FARE: Process tool output through reasoning engine (DSmT/PCR5 + EFE + convergence)
+     const toolCategory = capabilityGraph.getSpec(name)?.category ?? "filesystem";
+     const reasoningUpdate = reasoningEngine.processToolOutput(name, rawOutput, success, toolCategory);
+```
+
+[`src/server.ts:2070-2072`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2070-L2072)
+
+[7] 서버의 실행 의존성은 MCP SDK, SQLite 바인딩, 재시도·ID·결과형·schema 라이브러리다.
+
+```json
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "better-sqlite3": "11.10.0",
+    "exponential-backoff": "3.1.3",
+    "nanoid": "5.1.0",
+    "neverthrow": "8.2.0",
+    "zod": "3.25.76"
+  },
+```
+
+[`package.json:32-39`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/package.json#L32-L39)
+
+[8] 실행기의 `spawn` 호출이다.
+
+```typescript
+      // CRITICAL: shell: false — no shell interpretation, no injection
+      // PATH: prepend standard forensic tool locations (SIFT, cargo, local bin)
+      // Ensures correct binary is found regardless of platform (SIFT Workstation, dev machine, Docker)
+      const home = process.env["HOME"] ?? "/root";
+      const envPath = [
+        "/usr/local/bin",                    // Zimmerman tools on SIFT, bulk_extractor
+        `${home}/.cargo/bin`,                // Rust evtx_dump
+        `${home}/.local/bin`,                // pip-installed tools (regipy, plaso)
+        "/opt/volatility3",                  // SIFT volatility location
+        "/opt/CyberChef",                    // SIFT CyberChef
+        process.env["PATH"] ?? "",
+      ].join(":");
+      // If sudo mode is enabled, prepend sudo to execute forensic tools on FUSE-mounted evidence
+      const actualBinary = this.useSudo ? "sudo" : binary;
+      const actualArgs = this.useSudo ? [binary, ...args] : [...args];
+
+      const proc = spawn(actualBinary, actualArgs, {
+        shell: false,
+        cwd,
+        env: { ...process.env, PATH: envPath, ...options?.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+```
+
+[`src/adapters/process-executor.ts:163-184`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L163-L184)
+
+[9] 작업 위치를 주지 않으면 조사 출력 폴더를 쓴다.
+실행기는 출력 폴더 하나로 만들어진다([`src/server.ts:295`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L295)).
+
+```typescript
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const cwd = options?.cwd ?? this.outputPath;
+```
+
+[`src/adapters/process-executor.ts:152-153`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L152-L153)
+
+[10] 파일로 꺼내는 실행도 `shell: false`로 `spawn`한다.
+
+```typescript
+      const actualBinary = this.useSudo ? "sudo" : binary;
+      const actualArgs = this.useSudo ? [binary, ...args] : [...args];
+      try { mkdirSync(dirname(outPath), { recursive: true }); } catch { /* exists */ }
+      const out = createWriteStream(outPath);
+      let settled = false;
+      const errChunks: Buffer[] = [];
+      let bytes = 0;
+      let killed = false;
+      out.on("error", (e) => {
+        if (settled) return;
+        settled = true;
+        resolve(err(executionError(binary, null, `write failed: ${e.message}`, false)));
+      });
+      const proc = spawn(actualBinary, actualArgs, {
+        shell: false,
+        cwd: options?.cwd ?? this.outputPath,
+        env: { ...process.env, PATH: envPath, ...options?.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+```
+
+[`src/adapters/process-executor.ts:274-292`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L274-L292)
+
+[11] 비동기 작업도 같은 실행기로 실행한다.
+
+```typescript
+    if (ASYNC_TOOLS.has(name) && mapping) {
+      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const evidencePath = investigationState.imagePath || config.evidencePath;
+      const args = mapping.buildArgs(toolParams, evidencePath, investigationState.partitionOffset, config.outputPath);
+      asyncJobs.set(jobId, { status: "running", tool: name, startedAt: new Date().toISOString() });
+      // Fire and forget — runs in background
+      executor.execute(mapping.binary, args, { timeoutMs: 300_000 }).then((result) => {
+```
+
+[`src/server.ts:1806-1812`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1806-L1812)
+
+[12] 마운트 명령과 대체 확인을 실행기로 실행한다: [`src/server.ts:1670`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1670), [`src/server.ts:1677`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1677), [`src/server.ts:1682`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1682), [`src/server.ts:1702`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1702).
