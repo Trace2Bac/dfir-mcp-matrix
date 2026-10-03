@@ -5,6 +5,8 @@ DFIR MCP 서버가 증거 무결성·실행 통제·결과 전달·기록 같은
 
 ## 보기
 
+**https://trace2bac.github.io/dfir-mcp-architecture-matrix-v2/** 에서 본다. 로컬에서 띄우려면:
+
 ```
 pip install -r requirements.txt
 cd web && npm ci && npm start      # http://localhost:3000/dfir-mcp-architecture-matrix-v2/
@@ -12,7 +14,7 @@ cd web && npm ci && npm start      # http://localhost:3000/dfir-mcp-architecture
 
 화면은 Docusaurus 사이트(`web/`)다. 첫 화면에 전체 셀 구조가 있고 셀을 누르면 상세 항목과 그 상세에 드는 서버, 서버를 누르면 그 서버 원고(구현·예외·근거)가 열린다.
 `npm start`·`npm run build`는 먼저 `python tools/pilot.py build`로 화면 데이터를 만든다. 그래서 Python과 Node.js 20 이상이 둘 다 있어야 한다.
-CI가 PR·`main` 푸시마다 사이트를 빌드해 Actions 아티팩트(`matrix-site`)로 올린다. 저장소가 비공개라 GitHub Pages 배포는 꺼 두었다(`.github/workflows/matrix.yml` 머리 참고).
+CI가 PR·`main` 푸시마다 사이트를 빌드하고 `main` 푸시이면 GitHub Pages에 배포한다(`.github/workflows/matrix.yml`).
 
 ## 축
 
@@ -37,7 +39,7 @@ docs/
   cell-review-2026-09-30.mdx    셀 공동 검토 자료(옛 번호)
 web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
 tools/pilot.py   validate·check·build·fill·renumber
-.github/workflows/matrix.yml   PR·main 푸시마다 validate·build, 화면을 아티팩트로 올림(Pages는 켜면 배포)
+.github/workflows/matrix.yml   PR·main 푸시마다 validate·build, main이면 GitHub Pages에 배포
 ```
 
 ## 고치기
