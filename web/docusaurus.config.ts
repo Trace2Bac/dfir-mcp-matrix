@@ -5,6 +5,12 @@ import evidenceLinks from './src/remark/evidenceLinks';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
+// 원본은 web/ 밖(../reports 등)에 있어 editUrl을 문자열로 주면 경로에 ../가 끼므로 저장소 기준 경로로 직접 만든다
+const editUrlIn =
+  (dir: string) =>
+  ({docPath}: {docPath: string}) =>
+    `https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2/edit/main/${dir}/${docPath}`;
+
 const config: Config = {
   title: 'DFIR MCP Matrix',
   tagline: 'DFIR MCP Architecture Matrix',
@@ -19,7 +25,8 @@ const config: Config = {
   url: 'https://trace2bac.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/dfir-mcp-architecture-matrix-v2/',
+  // 로컬 개발 서버(npm start)는 BASE_URL=/ 로 띄워 http://localhost:3000/ 에서 바로 연다
+  baseUrl: process.env.BASE_URL ?? '/dfir-mcp-architecture-matrix-v2/',
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
@@ -27,6 +34,15 @@ const config: Config = {
   projectName: 'dfir-mcp-architecture-matrix-v2', // Usually your repo name.
 
   onBrokenLinks: 'warn',
+
+  // 셀 페이지 패널이 원고를 ?embed=1로 열면, 그리기 전에 data-embed를 붙여 머리·사이드바를 숨긴다(custom.css)
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {},
+      innerHTML: "if(/[?&]embed=1(&|$)/.test(location.search))document.documentElement.setAttribute('data-embed','')",
+    },
+  ],
 
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang. For example, if your site is Chinese, you
@@ -46,10 +62,7 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾼다
           remarkPlugins: [evidenceLinks],
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            'https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2/tree/main/',
+          editUrl: editUrlIn('reports'),
         },
         blog: false,
         theme: {
@@ -133,6 +146,7 @@ const config: Config = {
         path: '../docs',
         routeBasePath: 'docs',
         sidebarPath: './sidebars.ts',
+        editUrl: editUrlIn('docs'),
       },
     ],
     [
@@ -142,6 +156,7 @@ const config: Config = {
         path: '../matrix/cells',
         routeBasePath: '/',
         sidebarPath: './sidebarsCells.ts',
+        editUrl: editUrlIn('matrix/cells'),
       },
     ],
   ],

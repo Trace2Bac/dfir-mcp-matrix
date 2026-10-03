@@ -19,7 +19,7 @@
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python tools/pilot.py validate
-cd web && npm ci && npm start                          # http://localhost:3000/dfir-mcp-architecture-matrix-v2/ 에서 매트릭스를 본다(Node.js 20 이상)
+cd web && npm ci && npm start                          # http://localhost:3000/ 에서 매트릭스를 본다(Node.js 20 이상)
 ```
 
 원고의 코드 발췌를 채우는 `fill`과 발췌를 대조하는 `check`를 쓰려면 다음 두 가지가 더 있어야 합니다.

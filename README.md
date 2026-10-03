@@ -29,7 +29,7 @@
 
 ```
 pip install -r requirements.txt
-cd web && npm ci && npm start      # http://localhost:3000/dfir-mcp-architecture-matrix-v2/
+cd web && npm ci && npm start      # http://localhost:3000/
 ```
 
 화면은 Docusaurus 사이트(`web/`)입니다.

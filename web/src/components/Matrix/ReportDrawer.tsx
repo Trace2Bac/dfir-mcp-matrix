@@ -1,0 +1,96 @@
+import React, { useEffect, useRef, useState } from 'react';
+import styles from './ReportDrawer.module.css';
+
+type Props = {
+  server: string;
+  cellId: string;
+  url: string; // baseUrl을 붙인 원고 주소
+  editUrl: string; // GitHub에서 원고 파일을 고치는 주소
+  onClose: () => void;
+};
+
+const WIDTH_KEY = 'report-drawer-width';
+const MIN_WIDTH = 360;
+
+const clampWidth = (w: number) => Math.max(MIN_WIDTH, Math.min(w, window.innerWidth - 80));
+
+// 셀 페이지 오른쪽에 원고를 띄우는 패널. 원고는 ?embed=1로 열어 머리·사이드바를 숨긴다.
+// 왼쪽 가장자리를 끌어 폭을 바꾸고, 바꾼 폭은 localStorage에 남긴다.
+export default function ReportDrawer({ server, cellId, url, editUrl, onClose }: Props) {
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(WIDTH_KEY));
+    return clampWidth(saved || Math.round(window.innerWidth * 0.55));
+  });
+  const [dragging, setDragging] = useState(false);
+  // 끌기를 패널 밖에서 놓으면 바깥 클릭으로 잡히므로, 그 클릭 한 번은 닫지 않는다
+  const resizedRef = useRef(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    // iframe 안에 초점이 있을 때는 iframe이 ESC를 메시지로 알린다(src/theme/Root.tsx)
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin === window.location.origin && e.data?.type === 'report-drawer:close') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('message', onMessage);
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('message', onMessage);
+      document.body.style.overflow = overflow;
+    };
+  }, [onClose]);
+
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    setDragging(true);
+    resizedRef.current = true;
+    let last = width;
+    const onMove = (ev: PointerEvent) => {
+      last = clampWidth(window.innerWidth - ev.clientX);
+      setWidth(last);
+    };
+    const onUp = () => {
+      setDragging(false);
+      localStorage.setItem(WIDTH_KEY, String(last));
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setTimeout(() => (resizedRef.current = false));
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  return (
+    <div className={`${styles.overlay} ${dragging ? styles.dragging : ''}`} onClick={() => !resizedRef.current && onClose()}>
+      <aside
+        className={styles.panel}
+        style={{ width }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${server} ${cellId} 원고`}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className={styles.resizer} onPointerDown={startResize} aria-hidden="true" />
+        <header className={styles.header}>
+          <span className={styles.title}>
+            {server} <span className={styles.cell}>· {cellId}</span>
+          </span>
+          <a className={styles.action} href={editUrl} target="_blank" rel="noopener noreferrer" title="GitHub에서 원고 편집">
+            편집 ✎
+          </a>
+          <a className={styles.action} href={url} target="_blank" rel="noopener noreferrer" title="새 탭에서 열기">
+            새 탭에서 열기 ↗
+          </a>
+          <button className={styles.action} onClick={onClose} title="닫기 (Esc)" aria-label="닫기">
+            ✕
+          </button>
+        </header>
+        <iframe key={url} className={styles.frame} src={`${url}?embed=1`} title={`${server} ${cellId} 원고`} />
+      </aside>
+    </div>
+  );
+}

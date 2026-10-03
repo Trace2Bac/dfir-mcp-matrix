@@ -1,11 +1,43 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useHistory, useLocation } from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Link from '@docusaurus/Link';
 import Admonition from '@theme/Admonition';
+import ReportDrawer from './ReportDrawer';
+
+// 이 셀의 원고가 없는 서버를 모은 행(tools/pilot.py의 TERMS["unknown"]). 열 원고가 없어 링크를 달지 않는다
+const UNKNOWN_ROW = '미확인';
 
 export default function CellToolList({ cellId }: { cellId: string }) {
   const [data, setData] = useState<any>(null);
   const dataUrl = useBaseUrl('/data/matrix.json');
+  const reportsUrl = useBaseUrl('/reports/');
+  const { organizationName, projectName } = useDocusaurusContext().siteConfig;
+  const history = useHistory();
+  const location = useLocation();
+  // 패널에 연 서버는 ?server=로 주소에 남긴다.
+  // push로 바꾸면 Docusaurus가 페이지 맨 위로 초점을 옮겨 스크롤이 올라가므로 replace만 쓴다
+  const openServer = new URLSearchParams(location.search).get('server');
+
+  const withServer = (server: string | null) => {
+    const params = new URLSearchParams(location.search);
+    if (server) params.set('server', server);
+    else params.delete('server');
+    const search = params.toString();
+    return { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash };
+  };
+
+  const openDrawer = (e: React.MouseEvent, server: string) => {
+    // 수정 키나 가운데 버튼으로 누르면 원래대로 원고 페이지를 연다
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    history.replace(withServer(server));
+  };
+
+  const closeDrawer = useCallback(() => {
+    history.replace(withServer(null));
+  }, [history, location]);
 
   useEffect(() => {
     fetch(dataUrl)
@@ -51,7 +83,7 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           const hasSeen = r.seen && r.seen.length > 0;
           return (
             <div key={r.id} style={{ marginBottom: '1.5rem' }}>
-              <h3 style={{ marginBottom: '0.5rem' }}>{r.id} {r.name}</h3>
+              <h3 style={{ marginBottom: '0.5rem' }}>{r.id === r.name ? r.name : `${r.id} ${r.name}`}</h3>
               {r.inc && <div style={{ fontSize: '0.9rem', marginBottom: '0.2rem' }}><strong>포함:</strong> {r.inc}</div>}
               {r.exc && <div style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}><strong>제외:</strong> {r.exc}</div>}
               
@@ -61,11 +93,21 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                 <div style={{ fontStyle: 'italic', color: 'var(--ifm-color-emphasis-600)' }}>해당 서버 없음</div>
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem' }}>
-                  {r.m?.map((m: any) => (
+                  {r.m?.map((m: any) => r.id === UNKNOWN_ROW ? (
+                    <span
+                      key={m.s}
+                      className="button button--sm button--outline button--secondary"
+                      style={{ fontWeight: 'normal', cursor: 'default', opacity: 0.6 }}
+                      title="이 셀의 원고가 아직 없습니다"
+                    >
+                      {m.s}
+                    </span>
+                  ) : (
                     <Link 
                       key={m.s} 
                       to={`/reports/${m.s}/${cellId}`}
-                      className="button button--secondary button--sm" 
+                      onClick={e => openDrawer(e, m.s)}
+                      className={`button button--sm ${m.s === openServer ? 'button--primary' : 'button--secondary'}`}
                       style={{ fontWeight: 'normal' }}
                     >
                       {m.s}
@@ -78,6 +120,16 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           );
         })}
       </div>
+
+      {openServer && (
+        <ReportDrawer
+          server={openServer}
+          cellId={cellId}
+          url={`${reportsUrl}${openServer}/${cellId}`}
+          editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cellId}.mdx`}
+          onClose={closeDrawer}
+        />
+      )}
     </div>
   );
 }
