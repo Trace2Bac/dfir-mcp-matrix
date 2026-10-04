@@ -72,10 +72,15 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
       localStorage.setItem(WIDTH_KEY, String(last));
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('blur', onUp);
       setTimeout(() => (resizedRef.current = false));
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    // 창 밖에서 놓거나 다른 창으로 옮겨 pointerup을 못 받아도 끄기를 끝낸다
+    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('blur', onUp);
   };
 
   return (
@@ -103,6 +108,9 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
             ✕
           </button>
         </header>
+        {/* 끄는 동안 iframe이 포인터를 가져가지 않게 화면 전체를 덮는다.
+            iframe에 pointer-events: none을 줬다 풀면, 폭이 더 바뀌지 않은 채 끝났을 때 Chrome이 휠 대상을 갱신하지 않아 원고가 스크롤되지 않았다 */}
+        {dragging && <div className={styles.shield} />}
         <iframe ref={frameRef} key={url} className={styles.frame} src={srcRef.current.src} title={`${server} ${cellId} 원고`} />
       </aside>
     </div>
