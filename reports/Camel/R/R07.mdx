@@ -8,19 +8,21 @@ details:
 
 ### 미구현
 
-**판단.** 모델이 받는 `Execute` 응답은 스크립트가 `log`·`error`·`table`로 쓴 줄을 이은 글 하나다 [1].
+**판단.** 모델이 받는 `Execute` 응답은 `CallToolResult`의 글 블록 두 개다 [1][2][3][4].
+첫 블록은 스크립트가 `log`·`error`·`table`로 쓴 줄을 이은 `output.ToString()` 한 덩어리이고 `exit`로 끝난 응답과 실패한 응답도 같은 모양이다 [1][2][3].
+응답에는 `StructuredContent`가 없고 증거에서 온 값을 서버 문구와 다른 필드에 담지 않으므로 R07.01에 해당하지 않는다 [1].
 증거에서 온 값은 스크립트가 고른 모양으로 이 글 안에 들어가고 서버는 그 값을 감싸거나 따로 표시하지 않는다 [1].
 서버가 쓰는 문구도 같은 글에 섞인다.
-`error`는 줄 앞에 `Error: `를 붙이고 `auditFinding`·`auditReviewRec`은 서버가 정한 형식의 줄을 같은 출력에 더한다 [1][2].
-스크립트가 실패하면 서버는 그때까지의 출력 뒤에 JavaScript 오류 문구와 API 착각 안내를 이어 붙인다 [3].
+`error`는 줄 앞에 `Error: `를 붙이고 `auditFinding`·`auditReviewRec`은 서버가 정한 형식의 줄을 같은 출력에 더한다 [1][5].
+스크립트가 실패하면 서버는 그때까지의 출력 뒤에 JavaScript 오류 문구와 API 착각 안내를 이어 붙인다 [2].
 서버 문구 가운데 따로 떨어진 것은 응답 끝의 `[audit]` 블록 하나이고 이 블록은 사건 ID와 실행 ID만 담는다 [4].
 
-SDK 객체는 결과 `Result`와 요약 `Message`를 다른 속성에 담는다 [5].
+SDK 객체는 결과 `Result`와 요약 `Message`를 다른 속성에 담는다 [6].
 이 구분은 스크립트 안에서만 있고 모델에게는 스크립트가 출력한 글로만 간다 [1].
-`Message`와 요약 목록 문자열에도 증거에서 온 값이 서버 문장 안에 들어간다 [5][6].
-`TriageHostAsync`의 `TopFindings`는 shell 기록의 명령과 지속성 항목의 내용을 서버가 붙인 머리표와 한 문자열로 잇는다 [6].
+`Message`와 요약 목록 문자열에도 증거에서 온 값이 서버 문장 안에 들어간다 [6][7].
+`TriageHostAsync`의 `TopFindings`는 shell 기록의 명령과 지속성 항목의 내용을 서버가 붙인 머리표와 한 문자열로 잇는다 [7].
 
-도구 설명과 MCP 리소스에는 증거 속 지시를 따르지 말라는 문구가 없다 [7].
+도구 설명과 MCP 리소스에는 증거 속 지시를 따르지 말라는 문구가 없다 [8].
 
 ### 근거
 
@@ -65,7 +67,60 @@ SDK 객체는 결과 `Result`와 요약 `Message`를 다른 속성에 담는다 
 
 [`src/Camel.Server/MCPServer.cs:399-403`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L399-L403)
 
-[2] 발견사항과 검토 권고를 서버 형식으로 출력에 더한다.
+[2] 실패하면 출력 뒤에 서버 문구를 잇는다.
+
+```csharp
+            // A script that names a non-existent toolkit/workflow object or method is evidence the model invented
+            // part of the Camel API — a hallucination, not a logic bug. Record it as a `hallucination` event and
+            // nudge the agent back to the documented SDK so the failure becomes self-correcting (criteria 1 & 2).
+            if (ClassifyHallucination(jsErrorText) is string halluReason)
+            {
+                AuditEvent("hallucination", "{Message}", halluReason);
+                message += $"{Environment.NewLine}[possible hallucination] {halluReason}. Only objects and methods " +
+                           "documented in the camel-sdk-core resource exist — re-read it and do not invent APIs.";
+            }
+
+            // Include anything written via log()/error() before the failure for context.
+            if (output.Length > 0)
+            {
+                message = output.ToString() + Environment.NewLine + message;
+            }
+```
+
+[`src/Camel.Server/MCPServer.cs:367-381`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L367-L381)
+
+[3] `exit`로 끝나면 같은 모양의 응답을 만든다.
+
+```csharp
+        CallToolResult BuildExitResult()
+        {
+            var exitText = exitMessage ?? "";
+            AuditEvent("execution", "{Message}", "exit: " + exitText);
+            AuditExecution("exited", success: true, durationMs: auditSw.ElapsedMilliseconds);
+            if (exitText.Length > 0) output.AppendLine(exitText);
+            return new CallToolResult
+            {
+                Content = [new TextContentBlock { Text = output.ToString() }, ExecutionBlock(executionId, session.CaseId)],
+            };
+```
+
+[`src/Camel.Server/MCPServer.cs:316-325`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L316-L325)
+
+[4] 응답 끝의 `[audit]` 블록이다.
+
+```csharp
+    /// <summary>
+    /// The audit-handle block appended to every <c>Execute</c> result: the case id and this call's
+    /// execution id. The agent cites these in its report so a judge can grep the per-case audit file
+    /// (<c>audit-&lt;CaseId&gt;.clef</c>) for the execution and see exactly which tool executions produced a finding.
+    /// </summary>
+    static TextContentBlock ExecutionBlock(string executionId, string caseId) =>
+        new() { Text = $"\n[audit] case={caseId} execution={executionId}" };
+```
+
+[`src/Camel.Server/MCPServer.cs:487-493`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L487-L493)
+
+[5] 발견사항과 검토 권고를 서버 형식으로 출력에 더한다.
 
 ```csharp
     protected void AuditFinding(string observation, string interpretation, string confidence, string evidenceExecutionIds, StringBuilder output)
@@ -89,43 +144,7 @@ SDK 객체는 결과 `Result`와 요약 `Message`를 다른 속성에 담는다 
 
 [`src/Camel.Server/MCPServer.cs:438-442`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L438-L442)
 
-[3] 실패하면 출력 뒤에 서버 문구를 잇는다.
-
-```csharp
-            // A script that names a non-existent toolkit/workflow object or method is evidence the model invented
-            // part of the Camel API — a hallucination, not a logic bug. Record it as a `hallucination` event and
-            // nudge the agent back to the documented SDK so the failure becomes self-correcting (criteria 1 & 2).
-            if (ClassifyHallucination(jsErrorText) is string halluReason)
-            {
-                AuditEvent("hallucination", "{Message}", halluReason);
-                message += $"{Environment.NewLine}[possible hallucination] {halluReason}. Only objects and methods " +
-                           "documented in the camel-sdk-core resource exist — re-read it and do not invent APIs.";
-            }
-
-            // Include anything written via log()/error() before the failure for context.
-            if (output.Length > 0)
-            {
-                message = output.ToString() + Environment.NewLine + message;
-            }
-```
-
-[`src/Camel.Server/MCPServer.cs:367-381`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L367-L381)
-
-[4] 응답 끝의 `[audit]` 블록이다.
-
-```csharp
-    /// <summary>
-    /// The audit-handle block appended to every <c>Execute</c> result: the case id and this call's
-    /// execution id. The agent cites these in its report so a judge can grep the per-case audit file
-    /// (<c>audit-&lt;CaseId&gt;.clef</c>) for the execution and see exactly which tool executions produced a finding.
-    /// </summary>
-    static TextContentBlock ExecutionBlock(string executionId, string caseId) =>
-        new() { Text = $"\n[audit] case={caseId} execution={executionId}" };
-```
-
-[`src/Camel.Server/MCPServer.cs:487-493`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L487-L493)
-
-[5] workflow 결과 형식이다.
+[6] workflow 결과 형식이다.
 
 ```csharp
 public class WorkflowResult<T>
@@ -151,7 +170,7 @@ public class WorkflowResult<T>
 
 [`src/Camel.Workflows/Workflow.cs:5-23`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/Workflow.cs#L5-L23)
 
-[6] 증거에서 온 값을 서버 머리표와 이은 문자열이다.
+[7] 증거에서 온 값을 서버 머리표와 이은 문자열이다.
 
 ```csharp
         // Roll up the top findings across every sub-report into a flat, citable list.
@@ -175,7 +194,7 @@ public class WorkflowResult<T>
 
 [`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs:63-79`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.cs#L63-L79)
 
-[7] `Execute` 도구 설명이다.
+[8] `Execute` 도구 설명이다.
 기준 커밋의 이 설명과 리소스로 내놓는 SDK 문서 `docs/Camel.core.md`·`docs/Camel.discipline.md`·`docs/Camel.schema.md`에서 instruction·prompt·untrusted·inject를 찾았고 증거 속 지시에 관한 문구는 없었다.
 
 ```csharp
