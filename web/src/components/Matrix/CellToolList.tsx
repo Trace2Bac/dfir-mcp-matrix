@@ -7,9 +7,6 @@ import Admonition from '@theme/Admonition';
 import ReportDrawer from './ReportDrawer';
 import styles from './Matrix.module.css';
 
-// 이 셀의 원고가 없는 서버를 모은 행(tools/pilot.py의 UNKNOWN). 열 원고가 없어 링크를 달지 않는다
-const UNKNOWN_ROW = 'unknown';
-
 export default function CellToolList({ cellId }: { cellId: string }) {
   const [data, setData] = useState<any>(null);
   const dataUrl = useBaseUrl('/data/matrix.json');
@@ -17,23 +14,28 @@ export default function CellToolList({ cellId }: { cellId: string }) {
   const { organizationName, projectName } = useDocusaurusContext().siteConfig;
   const history = useHistory();
   const location = useLocation();
-  // 패널에 연 서버는 ?server=로 주소에 남긴다.
+  // 패널에 연 서버와 원고에서 보일 소제목은 ?server=&detail=로 주소에 남긴다.
   // push로 바꾸면 Docusaurus가 페이지 맨 위로 초점을 옮겨 스크롤이 올라가므로 replace만 쓴다
-  const openServer = new URLSearchParams(location.search).get('server');
+  const query = new URLSearchParams(location.search);
+  const openServer = query.get('server');
+  const openDetail = query.get('detail');
 
-  const withServer = (server: string | null) => {
+  const withServer = (server: string | null, detail: string | null = null) => {
     const params = new URLSearchParams(location.search);
-    if (server) params.set('server', server);
-    else params.delete('server');
+    for (const [k, v] of [['server', server], ['detail', detail]] as const) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
     const search = params.toString();
     return { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash };
   };
 
-  const openDrawer = (e: React.MouseEvent, server: string) => {
+  // detail은 원고 소제목의 머리(상세 번호, 또는 미구현·비적용). 패널이 그 소제목으로 스크롤한다
+  const openDrawer = (e: React.MouseEvent, server: string, detail: string) => {
     // 수정 키나 가운데 버튼으로 누르면 원래대로 원고 페이지를 연다
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    history.replace(withServer(server));
+    history.replace(withServer(server, detail));
   };
 
   const closeDrawer = useCallback(() => {
@@ -79,13 +81,19 @@ export default function CellToolList({ cellId }: { cellId: string }) {
       )}
 
       <div style={{ marginTop: '3rem', borderTop: '1px solid var(--ifm-color-emphasis-200)', paddingTop: '2rem' }}>
-        {cell.rows?.some((r: any) => r.m?.some((m: any) => m.d)) && (
-          <div className={styles.legend}>
-            <span className={`button button--sm button--secondary ${styles.exception}`} aria-hidden="true">서버</span>
-            예외가 있는 서버(원고의 예외 단락 참고)
-          </div>
-        )}
+        {/* 원고가 없는 서버(미확인)는 행으로 늘어놓지 않고 수만 보인다 */}
+        <div className={styles.legend}>
+          <span title="이 셀의 원고가 있는 서버 수 / 매트릭스의 전체 서버 수">조사한 서버 {studied}/{cell.total}</span>
+          {cell.rows?.some((r: any) => r.m?.some((m: any) => m.d)) && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className={`button button--sm button--secondary ${styles.exception}`} aria-hidden="true">서버</span>
+              예외가 있는 서버(원고의 예외 단락 참고)
+            </>
+          )}
+        </div>
         {cell.rows?.map((r: any) => {
+          const detail = r.special ? r.name : r.id;
           const hasTools = r.m && r.m.length > 0;
           const hasSeen = r.seen && r.seen.length > 0;
           return (
@@ -100,21 +108,12 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                 <div style={{ fontStyle: 'italic', color: 'var(--ifm-color-emphasis-600)' }}>해당 서버 없음</div>
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem' }}>
-                  {r.m?.map((m: any) => r.id === UNKNOWN_ROW ? (
-                    <span
-                      key={m.s}
-                      className="button button--sm button--outline button--secondary"
-                      style={{ fontWeight: 'normal', cursor: 'default', opacity: 0.6 }}
-                      title="이 셀의 원고가 아직 없습니다"
-                    >
-                      {m.s}
-                    </span>
-                  ) : (
+                  {r.m?.map((m: any) => (
                     <Link 
                       key={m.s} 
                       to={`/reports/${m.s}/${cell.axis}/${cellId}`}
-                      onClick={e => openDrawer(e, m.s)}
-                      className={`button button--sm ${m.s === openServer ? 'button--primary' : 'button--secondary'} ${m.d ? styles.exception : ''}`}
+                      onClick={e => openDrawer(e, m.s, detail)}
+                      className={`button button--sm ${m.s === openServer && detail === openDetail ? 'button--primary' : 'button--secondary'} ${m.d ? styles.exception : ''}`}
                       style={{ fontWeight: 'normal' }}
                       title={m.d ? '예외 있음' : undefined}
                     >
@@ -133,6 +132,7 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           server={openServer}
           cellId={cellId}
           url={`${reportsUrl}${openServer}/${cell.axis}/${cellId}`}
+          detail={openDetail}
           editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cell.axis}/${cellId}.mdx`}
           onClose={closeDrawer}
         />

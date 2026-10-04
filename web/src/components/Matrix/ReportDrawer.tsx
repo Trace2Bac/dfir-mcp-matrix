@@ -5,6 +5,7 @@ type Props = {
   server: string;
   cellId: string;
   url: string; // baseUrl을 붙인 원고 주소
+  detail: string | null; // 원고에서 보일 소제목의 머리(T03.02, 미구현 등)
   editUrl: string; // GitHub에서 원고 파일을 고치는 주소
   onClose: () => void;
 };
@@ -16,7 +17,7 @@ const clampWidth = (w: number) => Math.max(MIN_WIDTH, Math.min(w, window.innerWi
 
 // 셀 페이지 오른쪽에 원고를 띄우는 패널. 원고는 ?embed=1로 열어 머리·사이드바를 숨긴다.
 // 왼쪽 가장자리를 끌어 폭을 바꾸고, 바꾼 폭은 localStorage에 남긴다.
-export default function ReportDrawer({ server, cellId, url, editUrl, onClose }: Props) {
+export default function ReportDrawer({ server, cellId, url, detail, editUrl, onClose }: Props) {
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem(WIDTH_KEY));
     return clampWidth(saved || Math.round(window.innerWidth * 0.55));
@@ -24,6 +25,19 @@ export default function ReportDrawer({ server, cellId, url, editUrl, onClose }: 
   const [dragging, setDragging] = useState(false);
   // 끌기를 패널 밖에서 놓으면 바깥 클릭으로 잡히므로, 그 클릭 한 번은 닫지 않는다
   const resizedRef = useRef(false);
+
+  // 처음 열 때는 주소의 detail로 스크롤하고, 같은 원고에서 다른 행을 누르면 다시 읽지 않고 메시지로 스크롤시킨다
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const srcRef = useRef<{ url: string; src: string } | null>(null);
+  if (srcRef.current?.url !== url) {
+    srcRef.current = { url, src: `${url}?embed=1${detail ? `&detail=${encodeURIComponent(detail)}` : ''}` };
+  }
+  const firstDetail = useRef(detail);
+  useEffect(() => {
+    if (detail === firstDetail.current) return;
+    firstDetail.current = detail;
+    frameRef.current?.contentWindow?.postMessage({ type: 'report-drawer:detail', detail }, window.location.origin);
+  }, [detail]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -89,7 +103,7 @@ export default function ReportDrawer({ server, cellId, url, editUrl, onClose }: 
             ✕
           </button>
         </header>
-        <iframe key={url} className={styles.frame} src={`${url}?embed=1`} title={`${server} ${cellId} 원고`} />
+        <iframe ref={frameRef} key={url} className={styles.frame} src={srcRef.current.src} title={`${server} ${cellId} 원고`} />
       </aside>
     </div>
   );

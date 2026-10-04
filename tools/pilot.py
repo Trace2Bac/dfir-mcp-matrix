@@ -36,7 +36,6 @@ NOT_IMPL, NOT_APPL, UNKNOWN = "not_implemented", "not_applicable", "unknown"   #
 SPECIAL = (NOT_IMPL, NOT_APPL, UNKNOWN)
 SPECIAL_NAME = {NOT_IMPL: "미구현", NOT_APPL: "비적용", UNKNOWN: "미확인"}       # 원고 소제목 ### 미구현 등
 SPECIAL_OF_NAME = {v: k for k, v in SPECIAL_NAME.items()}
-UNKNOWN_NOTE = "이 셀의 지금 정의로 아직 조사하지 않은 경우입니다."               # 화면의 미확인 행 설명
 
 # ── 원고 표시어 ── 원고(reports/)에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
 TERMS = {
@@ -748,9 +747,10 @@ def build_data():
         defined = bool(c.get("scope"))
         items = [{"id": d["id"], "name": d["name"], "inc": d.get("include", ""), "exc": d.get("exclude", ""),
                   "seen": list(d.get("seen_in") or [])} for d in c.get("details") or []]
-        meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", ""), UNKNOWN: UNKNOWN_NOTE}
+        meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", "")}
         rows = []
-        for it in items + [{"id": x, "name": SPECIAL_NAME[x], "inc": meaning[x], "exc": "", "special": True} for x in SPECIAL]:
+        # 미확인은 행으로 두지 않고 셀의 studied·total(조사한 서버 수·전체 서버 수)로 보인다
+        for it in items + [{"id": x, "name": SPECIAL_NAME[x], "inc": meaning[x], "exc": "", "special": True} for x in (NOT_IMPL, NOT_APPL)]:
             members = [{"s": n, "d": r["예외"]} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
             seen = [x for x in it.get("seen", []) if x not in [m["s"] for m in members]]
             row = {"id": it["id"], "name": it["name"], "inc": it["inc"], "exc": it["exc"], "m": members, "seen": seen}
@@ -763,7 +763,7 @@ def build_data():
         cells_out.append({"id": c["id"], "name": c["name"], "axis": c["id"][0], "q": c["question"],
                           "cond": bool(c.get("conditional")), "scope": c.get("applies_to", ""),
                           "note": c.get("boundary", ""), "defined": defined, "dscope": c.get("scope", ""),
-                          "studied": studied, "rows": rows})
+                          "studied": studied, "total": len(names), "rows": rows})
     return {"axes": {a["id"]: a["name"] for a in AXES}, "cells": cells_out, "samples": names,
             "pilot": {"cells": ORDER, "servers": list(reports)}}
 
