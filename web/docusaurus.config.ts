@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import evidenceLinks from './src/remark/evidenceLinks';
 import noSingleTilde from './src/remark/noSingleTilde';
+import sentenceLines from './src/remark/sentenceLines';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
@@ -90,7 +91,7 @@ const config: Config = {
           routeBasePath: 'reports',
           sidebarPath: './sidebars.ts',
           // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾼다
-          remarkPlugins: [noSingleTilde, evidenceLinks],
+          remarkPlugins: [noSingleTilde, evidenceLinks, sentenceLines],
           editUrl: editUrlIn('reports'),
           sidebarItemsGenerator: async ({defaultSidebarItemsGenerator, ...args}) =>
             relabelAxes(await defaultSidebarItemsGenerator(args)) as any,
