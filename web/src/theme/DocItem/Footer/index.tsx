@@ -5,6 +5,7 @@ import type {WrapperProps} from '@docusaurus/types';
 import {useDoc, useCurrentSidebarCategory} from '@docusaurus/plugin-content-docs/client';
 import DocCardList from '@theme/DocCardList';
 import CellToolList from '@site/src/components/Matrix/CellToolList';
+import EvidenceBack from '@site/src/components/Matrix/EvidenceBack';
 
 type Props = WrapperProps<typeof FooterType>;
 
@@ -23,11 +24,14 @@ export default function FooterWrapper(props: Props): ReactNode {
   const frontMatter = useDoc().frontMatter as Record<string, unknown>;
   const cellId = typeof frontMatter.question === 'string' ? (frontMatter.id as string) : null;
   const isAxis = typeof frontMatter.axis === 'string';
+  // 서버 원고는 머리말에 cell이 있다(reports/README.mdx)
+  const isReport = typeof frontMatter.cell === 'string';
 
   return (
     <>
       {cellId && <CellToolList cellId={cellId} />}
       {isAxis && <AxisCellList />}
+      {isReport && <EvidenceBack />}
       <Footer {...props} />
     </>
   );
