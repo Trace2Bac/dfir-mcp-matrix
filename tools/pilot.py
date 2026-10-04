@@ -109,13 +109,6 @@ def detail_name(iid):
     return None
 
 
-def retired_detail(iid):
-    """지운 상세면 그 항목(dict)을 돌려준다."""
-    for r in CELLS.get(iid.split(".")[0], {}).get("retired") or []:
-        if r["id"] == iid:
-            return r
-    return None
-
 
 def report_dir(name):
     return os.path.join(REPORTS, name)
@@ -318,16 +311,11 @@ def validate():
         if cid[:1] not in axis_ids:
             errs.append("%s: 첫 글자 %s가 축(matrix/cells/<축>/index.mdx)이 아니다" % (f, cid[:1]))
         ids = [str(d.get("id")) for d in c.get("details") or []]
-        gone = [str(r.get("id")) for r in c.get("retired") or []]
-        for iid in ids + gone:
+        for iid in ids:
             if not iid.startswith(cid + "."):
                 errs.append("%s: 상세 번호 %s가 셀 번호 %s로 시작하지 않는다" % (f, iid, cid))
-        for iid in set(x for x in ids + gone if (ids + gone).count(x) > 1):
-            errs.append("%s: 상세 번호 %s가 겹친다(지운 번호는 다시 쓰지 않는다)" % (f, iid))
-        live = {str(d.get("id")) for x in CELL_LIST for d in x.get("details") or []}   # 셀을 나누면 다른 셀의 상세로 옮긴다
-        for r in c.get("retired") or []:
-            if r.get("merged_into") and r["merged_into"] not in live:
-                errs.append("%s: retired %s의 merged_into %s가 지금 상세에 없다" % (f, r["id"], r["merged_into"]))
+        for iid in set(x for x in ids if ids.count(x) > 1):
+            errs.append("%s: 상세 번호 %s가 겹친다" % (f, iid))
         if c.get("conditional") and not c.get("applies_to"):
             errs.append("%s: 조건부 셀에 applies_to가 없다" % f)
         if c.get("scope"):
@@ -383,12 +371,8 @@ def validate():
                 if iid in SPECIAL:
                     if d.get("exception"):
                         errs.append("%s: %s에는 exception을 붙이지 않는다" % (where, iid))
-                elif retired_detail(iid):
-                    r = retired_detail(iid)
-                    errs.append("%s: %s(%s)는 지운 상세다%s" % (where, iid, r["name"],
-                                ". %s로 합쳤다" % r["merged_into"] if r.get("merged_into") else ""))
                 elif not detail_name(iid) or not iid.startswith(cid + "."):
-                    errs.append("%s: 정의에 없는 상세 %s" % (where, iid))
+                    errs.append("%s: 정의에 없는 상세 %s(지운 상세라면 결정 기록이나 git 이력에서 옮긴 곳을 찾는다)" % (where, iid))
     linked = {(cid, str(d.get("id"))) for n in reported_servers() for cid, p in cell_files(n).items()
               for d in (read_front(p)[0].get("details") or [])}
     cand = [d["id"] for c in CELL_LIST if c.get("scope") for d in c.get("details") or []

@@ -62,8 +62,6 @@ matrix/          셀 구조와 정의의 원본. 축 하나 = cells/<축>/ 폴�
 reports/         서버별 원고. reports/<서버>/<축>/<셀ID>.mdx                 → reports/README.mdx
 docs/
   decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
-  redesign-plan-2026-09-30.mdx  개편 배경·원칙·셀 경계·옛 셀 대응
-  cell-review-2026-09-30.mdx    셀 공동 검토 자료(옛 번호)
 web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
 tools/pilot.py   validate·check·build·fill·renumber
 .github/workflows/matrix.yml   PR(열기·갱신)과 main 푸시마다 validate·build, main이면 GitHub Pages에 배포
