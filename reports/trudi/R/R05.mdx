@@ -10,7 +10,7 @@ details:
 - id: R05.04
   exception: true
 - id: R05.10
-  exception: true
+  exception: false
 ---
 
 # R05 결과 출처 표시
@@ -84,15 +84,16 @@ yara-python 4.5.4는 한 문자열이 맞은 위치마다 항목을 하나씩 `i
 코드 주석은 이 해석 정보가 증거가 아닌 메타데이터라서 `_metadata`에 두고 인용되는 도구 결과에는 증거만 남긴다고 적는다 [23].
 반복 호출 판정은 `enrich`가 덧붙이기 전의 결과로 해시를 계산한다 [22].
 
-MITRE 표에서 참조 지식을 돌려주는 `correlate.mitre_validate`·`correlate.mitre_map`은 기법 이름, tactic, 설명을 결과 본문에 싣고 이 구분을 쓰지 않는다 [25].
-두 도구는 이름이 `correlate_`로 시작해 제어 도구로 분류되므로 `_metadata`에 아무 표시도 붙지 않는다 [26].
-`correlate.mitre_validate`의 결과에는 기법의 원문 위치가 없어 R05.09에는 연결하지 않는다 [25].
+지식 시트가 붙지 않는 응답도 있다.
+`vol.*`와 `ez.*` 일부 도구는 백그라운드 작업으로 실행될 수 있고 그때 미들웨어는 `enrich`를 부르기 전에 작업 핸들을 돌려준다 [25].
+그 결과는 `misc.job_status`로 받고 이때 `enrich`는 도구 이름 `misc_job_status`로 호출되어 연결된 지식 시트가 없으므로 원래 도구의 지식 시트가 붙지 않는다 [22][26].
+`enrich`가 처리 중 예외를 내면 결과를 바꾸지 않고 돌려주므로 그 응답에도 지식 시트가 붙지 않는다 [27].
 
-**예외.** `vol.*`와 `ez.*` 일부 도구는 백그라운드 작업으로 실행될 수 있고 그때 미들웨어는 `enrich`를 부르기 전에 작업 핸들을 돌려준다 [27].
-그 결과는 `misc.job_status`로 받고 이때 `enrich`는 도구 이름 `misc_job_status`로 호출되어 연결된 지식 시트가 없으므로 `_metadata`에 지식이 붙지 않는다 [22][28].
-`enrich`가 처리 중 예외를 내면 결과를 바꾸지 않고 돌려주므로 그 응답에도 `_metadata`가 없다 [29].
-외부 위협 정보를 조회하는 `enrich.vt_lookup_hash`·`enrich.vt_lookup_ip`·`enrich.vt_lookup_domain`·`enrich.abuseipdb_check`·`enrich.machinae_lookup`은 이름이 제어 도구 목록에 없다 [26][30].
-그래서 VirusTotal·AbuseIPDB·machinae에서 받은 참조 지식에도 증거 도구 출력과 같은 `data_provenance` 값 `tool_output_may_contain_untrusted_evidence`가 붙는다 [26].
+MITRE 표에서 참조 지식을 돌려주는 `correlate.mitre_validate`·`correlate.mitre_map`은 기법 이름, tactic, 설명을 결과 본문에 싣고 이 구분을 쓰지 않는다 [28].
+두 도구는 이름이 `correlate_`로 시작해 제어 도구로 분류되므로 `_metadata`에 아무 표시도 붙지 않는다 [29].
+`correlate.mitre_validate`의 결과에는 기법의 원문 위치가 없어 R05.09에는 연결하지 않는다 [28].
+외부 위협 정보를 조회하는 `enrich.vt_lookup_hash`·`enrich.vt_lookup_ip`·`enrich.vt_lookup_domain`·`enrich.abuseipdb_check`·`enrich.machinae_lookup`도 VirusTotal·AbuseIPDB·machinae에서 받은 참조 지식을 결과 본문에 싣고 이 구분을 쓰지 않는다 [30].
+이 도구들은 이름이 제어 도구 목록에 없어 증거 도구 출력과 같은 `data_provenance` 값 `tool_output_may_contain_untrusted_evidence`를 받는다 [29].
 
 ### 근거
 
@@ -560,7 +561,47 @@ def _match_to_dict(match) -> dict:
 
 [`tools/_enrich.py:138-149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L138-L149)
 
-[25] MITRE 조회 도구 두 개는 지식을 결과 본문 필드로 돌려준다.
+[25] 백그라운드 작업이 되면 `enrich`를 거치기 전에 작업 핸들을 돌려준다.
+
+```python
+        try:
+            if not mode:
+                result = await _invoke(False)
+            else:
+                handle = await _run_as_job(_jobs, mode, tool_name, args, _invoke)
+                if not (isinstance(handle, tuple) and handle[0] == "done"):
+                    return handle                      # still running: a job handle
+                result = handle[1]
+```
+
+[`core/middleware.py:771-778`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L771-L778)
+
+[26] 연결된 시트가 없는 도구는 지식을 붙이지 않고 결과를 돌려준다.
+
+```python
+        # --- Artifact-specific tier: only where a knowledge sheet exists -----
+        artifact = _load_artifact(_ARTIFACT_MAP[tool_name]) if tool_name in _ARTIFACT_MAP else {}
+        tool_stem = _fk_tool_stem(tool_name)
+        tool = _load_tool(tool_stem) if tool_stem else {}
+        if not artifact and not tool:
+            if meta:
+                result["_metadata"] = meta
+            return result
+```
+
+[`tools/_enrich.py:104-111`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L104-L111)
+
+[27] `enrich`는 예외가 나면 결과를 그대로 돌려준다.
+
+```python
+    except Exception:
+        return result
+    return result
+```
+
+[`tools/_enrich.py:150-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L150-L152)
+
+[28] MITRE 조회 도구 두 개는 지식을 결과 본문 필드로 돌려준다.
 
 ```python
         scored.append({
@@ -604,7 +645,7 @@ def _match_to_dict(match) -> dict:
 
 [`tools/correlate.py:296-313`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L296-L313)
 
-[26] 이름으로 제어 도구를 가르고 그 밖의 도구에 증거 표시를 붙인다.
+[29] 이름으로 제어 도구를 가르고 그 밖의 도구에 증거 표시를 붙인다.
 
 ```python
 _CONTROL_PREFIXES = (
@@ -637,46 +678,6 @@ def _is_evidence_tool(name: str) -> bool:
 ```
 
 [`tools/_enrich.py:98-102`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L98-L102)
-
-[27] 백그라운드 작업이 되면 `enrich`를 거치기 전에 작업 핸들을 돌려준다.
-
-```python
-        try:
-            if not mode:
-                result = await _invoke(False)
-            else:
-                handle = await _run_as_job(_jobs, mode, tool_name, args, _invoke)
-                if not (isinstance(handle, tuple) and handle[0] == "done"):
-                    return handle                      # still running: a job handle
-                result = handle[1]
-```
-
-[`core/middleware.py:771-778`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L771-L778)
-
-[28] 연결된 시트가 없는 도구는 지식을 붙이지 않고 결과를 돌려준다.
-
-```python
-        # --- Artifact-specific tier: only where a knowledge sheet exists -----
-        artifact = _load_artifact(_ARTIFACT_MAP[tool_name]) if tool_name in _ARTIFACT_MAP else {}
-        tool_stem = _fk_tool_stem(tool_name)
-        tool = _load_tool(tool_stem) if tool_stem else {}
-        if not artifact and not tool:
-            if meta:
-                result["_metadata"] = meta
-            return result
-```
-
-[`tools/_enrich.py:104-111`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L104-L111)
-
-[29] `enrich`는 예외가 나면 결과를 그대로 돌려준다.
-
-```python
-    except Exception:
-        return result
-    return result
-```
-
-[`tools/_enrich.py:150-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L150-L152)
 
 [30] 외부 위협 정보 도구는 namespace `enrich`로 붙는다.
 

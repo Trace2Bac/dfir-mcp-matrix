@@ -33,7 +33,16 @@ details:
 이 파일은 실시간 감시 탐지 규칙이 쓰는 기준선이고 다시 부르면 덮어쓰며 수집에 실패하면 쓰지 않는다 [13].
 그래서 이 파일도 증거 등록 목록으로 세지 않았다.
 
-같은 저장소의 `pilot/mirror.py`는 운영자가 실행하는 CLI로 trace를 .vera 사건으로 옮기면서 명령에 `verify_evidence_hash`가 든 `tool_call`마다 Evidence 행을 만든다 [14].
+단말에서 만든 프로세스 메모리 덤프도 서버 쪽 목록에 오르지 않는다.
+`respond.execute_action`은 `dump_process_memory` 조치를 실행하면 SSH로 단말에서 `/usr/bin/gcore -o /var/quarantine/trudi-dump-<pid> <pid>`를 실행한다 [14].
+이 명령 앞에는 같은 실행기의 격리 조치와 달리 `/var/quarantine`을 만드는 `mkdir -p`가 없다 [14][15].
+이 경로는 원격 명령의 표준 출력·표준 오류·종료 코드를 응답과 사건 폴더의 조치 기록 파일에 남긴다 [16].
+단말에 생긴 덤프를 분석 서버로 가져오거나 증거로 등록하는 단계는 없다 [16].
+탐지기 recipe는 이 조치의 설명을 "gcore the process and upload to Velociraptor"로 적고 `respond.suggest_containment`는 그 설명을 제안에 그대로 싣는다 [17].
+그러나 `respond.execute_action`은 recipe의 `artifact` 값 `Custom.TRUDI.Respond.DumpProcessMemory`를 쓰지 않고 `action_template`만 SSH 실행기에 넘긴다 [18].
+그래서 이 경로에서는 Velociraptor 아티팩트가 실행되지 않고 덤프도 Velociraptor에 올라가지 않는다.
+
+같은 저장소의 `pilot/mirror.py`는 운영자가 실행하는 CLI로 trace를 .vera 사건으로 옮기면서 명령에 `verify_evidence_hash`가 든 `tool_call`마다 Evidence 행을 만든다 [19].
 이 CLI는 서버 밖 구성이라 E01 구현으로 세지 않았다.
 
 ### 근거
@@ -299,7 +308,137 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
 
 [`tools/monitor.py:414-428`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L414-L428)
 
-[14] pilot 미러가 Evidence 행을 만드는 곳이다.
+[14] `respond.execute_action`이 SSH 쓰기 실행기를 부르고([`tools/respond.py:357-358`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L357-L358)) 실행기는 `dump_process_memory`를 단말의 `gcore` 명령으로 만든다.
+
+```python
+    "dump_process_memory": {"params": {"pid": _v_pid},
+                            "argv": lambda p: ["/usr/bin/gcore", "-o",
+                                               f"/var/quarantine/trudi-dump-{p['pid']}", p["pid"]]},
+```
+
+[`core/ssh_exec.py:182-184`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L182-L184)
+
+[15] 격리 조치는 `/var/quarantine`을 먼저 만든다.
+
+```python
+def _quarantine_argv(p: dict) -> list[str]:
+    path = p["image_path"]
+    base = os.path.basename(path)
+    cmd = (
+        f"mkdir -p /var/quarantine && chmod 000 {shlex.quote(path)} && "
+        f"mv {shlex.quote(path)} /var/quarantine/{shlex.quote(base)}"
+    )
+    return ["/bin/sh", "-c", cmd]
+```
+
+[`core/ssh_exec.py:129-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L129-L136)
+
+[16] 실행기는 원격 명령의 표준 출력·표준 오류·종료 코드를 결과에 담고 `respond.execute_action`은 그 값을 조치 기록 파일에 쓴다.
+
+```python
+    start = time.perf_counter()
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+        result["exit_code"] = proc.returncode
+        result["success"] = proc.returncode == 0
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        if len(stdout) > OUTPUT_CAP:
+            stdout = stdout[:OUTPUT_CAP]
+            result["truncated"] = True
+        if line_cap is not None:
+            lines = stdout.splitlines(keepends=True)
+            if len(lines) > line_cap:
+                omitted = len(lines) - line_cap
+                stdout = ("".join(lines[:line_cap])
+                          + f"\n[TRUNCATED — {omitted} lines omitted]\n")
+                result["truncated"] = True
+        result["stdout"] = stdout
+        result["stderr"] = stderr[:4096]
+```
+
+[`core/ssh_exec.py:312-330`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/ssh_exec.py#L312-L330)
+
+```python
+    execution = {
+        "action_id": action_id,
+        "case_id": case_id,
+        "detector": suggestion.get("detector"),
+        "action_template": action_template,
+        "classification": classification,
+        "mode": mode,
+        "host": host,
+        "command_argv": command_argv,
+        "command_str": _command_string(command_argv) if command_argv else result.get("cmd", ""),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+        "exit_code": result.get("exit_code"),
+        "success": bool(result.get("success")),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+        "rollback_template": revert_template,
+        "rollback_command": rollback_command,
+        "raw_evidence": raw_evidence,
+        "approval_token": (approval or {}).get("approval_token"),
+        "executed_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "reverted": False,
+    }
+    _ensure_layout(case_id)
+    (_executions_dir(case_id) / f"{action_id}.json").write_text(json.dumps(execution, indent=2))
+```
+
+[`tools/respond.py:369-392`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L369-L392)
+
+[17] recipe는 덤프 조치를 Velociraptor 업로드로 설명하고 제안은 그 설명을 옮긴다.
+
+```yaml
+actions:
+  - action_template: dump_process_memory
+    artifact: Custom.TRUDI.Respond.DumpProcessMemory
+    description: "gcore the process and upload to Velociraptor (forensic capture)"
+    manual_command: "gcore -o /var/quarantine/trudi-dump-<pid> <pid>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.UnblockEgress  # no-op; reversible=true semantics
+    parameters:
+      Pid: evidence.pid
+```
+
+[`response/recipes/Custom.TRUDI.YaraProcess.yaml:1-10`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/response/recipes/Custom.TRUDI.YaraProcess.yaml#L1-L10)
+
+```python
+    for action in recipe.get("actions", []):
+        action_id = _next_action_id(case_id)
+        description = _render(action.get("description", ""), evidence_lc)
+        manual_command = _render(action.get("manual_command", ""), evidence_lc)
+```
+
+[`tools/respond.py:167-170`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L167-L170)
+
+[18] `respond.execute_action`은 제안의 `action_template`만 실행기에 넘긴다.
+
+```python
+    action_template = suggestion.get("action_template")
+    if not action_template:
+        return {
+            "success": False,
+            "error": f"{action_id} has no action_template — re-run suggest_containment.",
+        }
+
+    host = _resolve_host_for_case(case_id)
+    if host is None:
+        return {
+            "success": False,
+            "error": "no live host configured — set 'host' in monitoring/config.json "
+                     "or register exactly one host in ~/cases/.common/live_hosts.json.",
+        }
+
+    raw_evidence = suggestion.get("raw_evidence") or {}
+    result = ssh_exec.ssh_run_write(case_id, host, action_template, raw_evidence)
+```
+
+[`tools/respond.py:342-358`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/respond.py#L342-L358)
+
+[19] pilot 미러가 Evidence 행을 만드는 곳이다.
 
 ```python
 def _mirror_evidence(case: Case, entry: dict, known_labels: set[str]) -> bool:
