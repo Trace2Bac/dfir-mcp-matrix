@@ -137,7 +137,7 @@ const config: Config = {
       ],
     },
     footer: {
-      style: 'dark',
+      style: 'light',
       links: [
         {
           title: 'Docs',
@@ -178,6 +178,8 @@ const config: Config = {
         path: '../docs',
         routeBasePath: 'docs',
         sidebarPath: './sidebars.ts',
+        // 결정 기록·작성 규칙의 template.mdx는 복사해 쓰는 틀이라 사이트 목록에 넣지 않는다(앞 넷은 Docusaurus 기본값)
+        exclude: ['**/_*.{js,jsx,ts,tsx,md,mdx}', '**/_*/**', '**/*.test.{js,jsx,ts,tsx}', '**/__tests__/**', '**/template.mdx'],
         editUrl: editUrlIn('docs'),
         remarkPlugins: [noSingleTilde],
       },

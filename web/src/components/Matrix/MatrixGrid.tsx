@@ -18,17 +18,11 @@ export default function MatrixGrid() {
   }
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto', paddingTop: '1rem' }}>
-      <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', flexWrap: 'wrap', margin: '0 0 0.5rem 0' }}>
-        DFIR MCP Architecture Matrix
-        {data.updated_at && (
-          <span style={{ fontSize: '0.65rem', color: 'var(--ifm-color-emphasis-500)', fontWeight: 'normal' }}>
-            (최종 업데이트: {data.updated_at})
-          </span>
-        )}
-      </h2>
-      <p style={{ color: 'var(--ifm-color-emphasis-600)', marginBottom: '2rem', fontSize: '0.85rem' }}>
-        셀을 누르면 개별 문서(Cell Page)로 이동하여 상세 정보를 확인할 수 있습니다.
+    <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+      <h1 style={{ marginBottom: '0.5rem' }}>DFIR MCP 아키텍처 매트릭스</h1>
+      <p style={{ color: 'var(--ifm-color-emphasis-700)', marginBottom: '2rem' }}>
+        셀을 누르면 그 셀의 정의와 서버별 구현을 봅니다.
+        {data.updated_at && <span style={{ color: 'var(--ifm-color-emphasis-600)', fontSize: '0.85rem' }}> · 최종 갱신 {data.updated_at}</span>}
       </p>
 
       <div style={{ overflowX: 'auto' }}>

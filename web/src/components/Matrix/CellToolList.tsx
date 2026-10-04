@@ -3,9 +3,15 @@ import { useHistory, useLocation } from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Link from '@docusaurus/Link';
-import Admonition from '@theme/Admonition';
 import ReportDrawer from './ReportDrawer';
 import styles from './Matrix.module.css';
+
+// 정의 글은 여러 문장이라 원고처럼 문장마다 줄을 나눠 보인다("~다." 뒤에서 나눈다)
+function Sentences({ text }: { text: string }) {
+  const parts = text.split(/(?<=[다요]\.)\s+/).filter(Boolean);
+  if (parts.length < 2) return <>{text}</>;
+  return <>{parts.map((t, i) => <span key={i} className={styles.sentence}>{t}</span>)}</>;
+}
 
 export default function CellToolList({ cellId }: { cellId: string }) {
   const [data, setData] = useState<any>(null);
@@ -58,37 +64,40 @@ export default function CellToolList({ cellId }: { cellId: string }) {
   const studied = cell.studied || 0;
   
   return (
-    <div style={{ marginTop: '2rem' }}>
-      {!defined && (
-        <Admonition type="danger" title="미조사">
-          상세 항목 이름만 정했고 조사는 아직 없습니다.
-        </Admonition>
-      )}
-      
-      {defined && studied === 0 && (
-        <Admonition type="warning" title="미조사">
-          상세 항목 정의는 있지만 조사한 서버가 없습니다.
-        </Admonition>
-      )}
-      
+    <div className={styles.cellPage}>
+      {/* 셀 질문: 이 셀이 서버에 묻는 것 */}
+      {cell.q && <p className={styles.question}>{cell.q}</p>}
+
+      {!defined && <p className={styles.notice}>상세 항목 이름만 정했고 조사는 아직 없습니다.</p>}
+      {defined && studied === 0 && <p className={styles.notice}>상세 항목 정의는 있지만 조사한 서버가 없습니다.</p>}
+
       {(cell.dscope || cell.note) && (
-        <Admonition type="info" title="상세 항목 정의">
-          <ul style={{ margin: 0, paddingLeft: '1.2rem' }}>
-            {cell.dscope && <li><strong>적용 범위:</strong> {cell.dscope}</li>}
-            {cell.note && <li><strong>다른 셀과의 경계:</strong> {cell.note}</li>}
-          </ul>
-        </Admonition>
+        <dl className={styles.defs}>
+          {cell.dscope && (
+            <div>
+              <dt>적용 범위</dt>
+              <dd><Sentences text={cell.dscope} /></dd>
+            </div>
+          )}
+          {cell.note && (
+            <div>
+              <dt>다른 셀과의 경계</dt>
+              <dd><Sentences text={cell.note} /></dd>
+            </div>
+          )}
+        </dl>
       )}
 
-      <div style={{ marginTop: '3rem', borderTop: '1px solid var(--ifm-color-emphasis-200)', paddingTop: '2rem' }}>
+      <div className={styles.details}>
+        <h2 className={styles.sectionTitle}>상세 항목</h2>
         {/* 원고가 없는 서버(미확인)는 행으로 늘어놓지 않고 수만 보인다 */}
         <div className={styles.legend}>
           <span title="이 셀의 원고가 있는 서버 수 / 매트릭스의 전체 서버 수">조사한 서버 {studied}/{cell.total}</span>
           {cell.rows?.some((r: any) => r.m?.some((m: any) => m.d)) && (
             <>
               <span aria-hidden="true">·</span>
-              <span className={`button button--sm button--secondary ${styles.exception}`} aria-hidden="true">서버</span>
-              예외가 있는 서버(원고의 예외 단락 참고)
+              <span className={styles.badge}>예외</span>
+              원고에 예외 단락이 있는 서버
             </>
           )}
         </div>
@@ -97,32 +106,46 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           const hasTools = r.m && r.m.length > 0;
           const hasSeen = r.seen && r.seen.length > 0;
           return (
-            <div key={r.id} style={{ marginBottom: '1.5rem' }}>
-              <h3 style={{ marginBottom: '0.5rem' }}>{r.special ? r.name : `${r.id} ${r.name}`}</h3>
-              {r.inc && <div style={{ fontSize: '0.9rem', marginBottom: '0.2rem' }}><strong>포함:</strong> {r.inc}</div>}
-              {r.exc && <div style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}><strong>제외:</strong> {r.exc}</div>}
-              
+            <section key={r.id} className={styles.row}>
+              <h3 className={styles.rowTitle}>{r.special ? r.name : `${r.id} ${r.name}`}</h3>
+              {(r.inc || r.exc) && (
+                <dl className={styles.criteria}>
+                  {r.inc && (
+                    <div>
+                      {/* 미구현·비적용 행의 글은 포함 기준이 아니라 그 판정의 뜻이다 */}
+                      <dt className={r.special ? styles.exc : styles.inc}>{r.special ? '뜻' : '포함'}</dt>
+                      <dd><Sentences text={r.inc} /></dd>
+                    </div>
+                  )}
+                  {r.exc && (
+                    <div>
+                      <dt className={styles.exc}>제외</dt>
+                      <dd><Sentences text={r.exc} /></dd>
+                    </div>
+                  )}
+                </dl>
+              )}
+
               {r.cand ? (
-                <div style={{ fontStyle: 'italic', color: 'var(--ifm-color-emphasis-600)' }}>구현 사례 없음 (후보)</div>
+                <div className={styles.empty}>구현 사례 없음 (후보)</div>
               ) : !hasTools && !hasSeen ? (
-                <div style={{ fontStyle: 'italic', color: 'var(--ifm-color-emphasis-600)' }}>해당 서버 없음</div>
+                <div className={styles.empty}>해당 서버 없음</div>
               ) : (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <div className={styles.servers}>
                   {r.m?.map((m: any) => (
-                    <Link 
-                      key={m.s} 
+                    <Link
+                      key={m.s}
                       to={`/reports/${m.s}/${cell.axis}/${cellId}`}
                       onClick={e => openDrawer(e, m.s, detail)}
-                      className={`button button--sm ${m.s === openServer && detail === openDetail ? 'button--primary' : 'button--secondary'} ${m.d ? styles.exception : ''}`}
-                      style={{ fontWeight: 'normal' }}
-                      title={m.d ? '예외 있음' : undefined}
+                      className={`${styles.chip} ${m.s === openServer && detail === openDetail ? styles.chipActive : ''}`}
                     >
                       {m.s}
+                      {m.d && <span className={styles.badge}>예외</span>}
                     </Link>
                   ))}
                 </div>
               )}
-            </div>
+            </section>
           );
         })}
       </div>

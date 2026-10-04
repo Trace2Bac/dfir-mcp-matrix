@@ -16,7 +16,7 @@ export default function GridBoard({ data }: any) {
               <Link
                 key={c.id}
                 to={`/${c.axis}/${c.id}`}
-                className={`${styles.tile} ${c.studied ? styles.studied : ''}`}
+                className={styles.tile}
                 style={{ textDecoration: 'none' }}
               >
                 <span style={{ display: 'block' }}>
