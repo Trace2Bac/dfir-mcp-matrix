@@ -7,7 +7,7 @@ details:
   exception: true
 - id: T03.09
   exception: false
-- id: T03.11
+- id: T03.12
   exception: true
 ---
 
@@ -69,16 +69,25 @@ HTTP 전송으로 띄울 때 `--token`이 없으면 서버가 오류를 적고 �
 헤더 비교는 `!==` 문자열 비교이고 응답에는 모든 출처를 허용하는 CORS 헤더가 붙는다 [19].
 stdio 전송에는 이 검사가 없다.
 
-### T03.11 실행 자원 상태 확인
+### T03.12 동시 실행 수 제한
 
 **구현.** 이 방식은 외부 도구를 실행하는 `ProcessExecutor`의 두 경로 `execute`·`extractToFile`에 적용된다 [21][22].
 두 경로는 모두 Promise 큐 하나에 이어 붙어 한 번에 외부 도구 하나만 실행한다 [21][22].
+한도 1은 서버 코드에 고정되어 있고 운영자나 모델이 바꾸지 못한다 [21].
 주석은 증거 이미지의 I/O 경합을 막으려는 제한이라고 적는다 [21].
 앞선 실행이 실패해도 큐는 다음 실행으로 넘어간다 [21].
-큐에서 기다리는 시간에는 상한이 없고 실행 시간 제한은 큐를 지나 외부 도구를 띄운 뒤부터 잰다 [23].
+큐는 서버 객체를 만들 때 생기는 실행기 하나에 딸리므로 이 제한은 서버 객체 하나 안의 실행에 적용된다 [23].
+큐에서 기다리는 시간에는 상한이 없고 실행 시간 제한은 큐를 지나 외부 도구를 띄운 뒤부터 잰다 [24].
 메모리·CPU 사용률은 보지 않는다.
 
-**예외.** 실행기는 `createSiftKernelServer`가 서버를 만들 때 하나 생긴다 [24].
+배경 작업으로 도는 `generate_timeline`·`carve_files`·`analyze_unallocated`·`recover_deleted`도 같은 실행기의 `execute`를 불러 같은 큐에 들어간다 [25][26].
+배경 작업의 시간 제한은 300초이고 작업 목록에는 큐에서 기다리는 동안에도 처음부터 `running`으로 적힌다 [26].
+그래서 배경 작업이 큐에서 기다리거나 도는 동안 뒤에 들어온 일반 호출은 그 작업이 끝날 때까지 큐에서 기다린다 [21][26].
+실행기 파일의 한 주석은 기본 시간 제한 45초가 MCP 클라이언트의 60초 시간 제한보다 짧아야 한다고 적는다 [27].
+큐 대기 시간은 이 시간 제한에 들지 않으므로 앞선 실행이 길면 일반 호출의 대기와 실행을 합친 시간이 60초를 넘을 수 있다 [24][27].
+이 내용은 코드로만 확인했고 실행하지 않았다.
+
+**예외.** 실행기는 `createSiftKernelServer`가 서버를 만들 때 하나 생긴다 [23].
 HTTP 전송은 요청마다 서버를 새로 만들어 요청마다 큐가 따로 생긴다 [7].
 그래서 동시에 들어온 HTTP 요청의 외부 도구는 서로 기다리지 않고 함께 실행된다.
 
@@ -460,7 +469,17 @@ export const BASELINE_INVESTIGATION: readonly BaselineItem[] = [
 
 [`src/adapters/process-executor.ts:269-270`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L269-L270)
 
-[23] 시간 제한 타이머는 외부 도구를 띄운 뒤에 건다.
+[23] 서버를 만들 때 실행기를 만든다.
+
+```typescript
+  mkdirSync(config.outputPath, { recursive: true });
+  const ledgerStore = new SqliteLedgerStore(config.dbPath);
+  const executor = new ProcessExecutor(config.outputPath, config.sudo ?? false);
+```
+
+[`src/server.ts:293-295`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L293-L295)
+
+[24] 시간 제한 타이머는 외부 도구를 띄운 뒤에 건다.
 
 ```typescript
       const proc = spawn(actualBinary, actualArgs, {
@@ -482,12 +501,40 @@ export const BASELINE_INVESTIGATION: readonly BaselineItem[] = [
 
 [`src/adapters/process-executor.ts:179-193`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L179-L193)
 
-[24] 서버를 만들 때 실행기를 만든다.
+[25] 배경 작업으로 돌릴 연산 4개를 고정한다.
 
 ```typescript
-  mkdirSync(config.outputPath, { recursive: true });
-  const ledgerStore = new SqliteLedgerStore(config.dbPath);
-  const executor = new ProcessExecutor(config.outputPath, config.sudo ?? false);
+  // Tools that genuinely take minutes — run async, return job_id for polling
+  const ASYNC_TOOLS = new Set(["generate_timeline", "carve_files", "analyze_unallocated", "recover_deleted"]);
 ```
 
-[`src/server.ts:293-295`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L293-L295)
+[`src/server.ts:338-339`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L338-L339)
+
+[26] 배경 작업은 `running`으로 적은 뒤 같은 실행기의 `execute`를 300초 시간 제한으로 부른다.
+
+```typescript
+    // Async tools (minutes-long) return job_id immediately and run in background
+    if (ASYNC_TOOLS.has(name) && mapping) {
+      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const evidencePath = investigationState.imagePath || config.evidencePath;
+      const args = mapping.buildArgs(toolParams, evidencePath, investigationState.partitionOffset, config.outputPath);
+      asyncJobs.set(jobId, { status: "running", tool: name, startedAt: new Date().toISOString() });
+      // Fire and forget — runs in background
+      executor.execute(mapping.binary, args, { timeoutMs: 300_000 }).then((result) => {
+```
+
+[`src/server.ts:1805-1812`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L1805-L1812)
+
+[27] 기본 시간 제한과 클라이언트 시간 제한에 대한 주석이다.
+
+```typescript
+const DEFAULT_TIMEOUT_MS = 45_000;
+```
+
+[`src/adapters/process-executor.ts:65-65`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L65-L65)
+
+```typescript
+]); // 45s — MUST be under MCP client's 60s timeout
+```
+
+[`src/adapters/process-executor.ts:83-83`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/process-executor.ts#L83-L83)

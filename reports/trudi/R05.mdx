@@ -9,6 +9,8 @@ details:
   exception: true
 - id: R05.04
   exception: true
+- id: R05.10
+  exception: true
 ---
 
 # R05 결과 출처 표시
@@ -74,6 +76,23 @@ Volatility 프로세스 객체의 `Offset(V)`는 가상 주소라 이미지 안 
 
 **예외.** YARA 결과의 `offset`은 문자열마다 `instances`의 첫 항목 하나에서만 가져온다 [18].
 yara-python 4.5.4는 한 문자열이 맞은 위치마다 항목을 하나씩 `instances`에 넣으므로 같은 문자열의 두 번째 이후 위치는 응답에 없다 [21].
+
+### R05.10 참조 지식과 증거 결과 구분
+
+**구현.** 이 방식은 미들웨어가 도구 응답에 덧붙이는 FK 지식 시트의 내용에 적용된다 [22].
+`enrich`는 지식 시트의 `caveats`·`field_meanings`·`advisories`·`corroboration`과 종료 코드의 뜻을 결과의 최상위 키가 아니라 하위 객체 `_metadata`에 넣는다 [23][24].
+코드 주석은 이 해석 정보가 증거가 아닌 메타데이터라서 `_metadata`에 두고 인용되는 도구 결과에는 증거만 남긴다고 적는다 [23].
+반복 호출 판정은 `enrich`가 덧붙이기 전의 결과로 해시를 계산한다 [22].
+
+MITRE 표에서 참조 지식을 돌려주는 `correlate.mitre_validate`·`correlate.mitre_map`은 기법 이름, tactic, 설명을 결과 본문에 싣고 이 구분을 쓰지 않는다 [25].
+두 도구는 이름이 `correlate_`로 시작해 제어 도구로 분류되므로 `_metadata`에 아무 표시도 붙지 않는다 [26].
+`correlate.mitre_validate`의 결과에는 기법의 원문 위치가 없어 R05.09에는 연결하지 않는다 [25].
+
+**예외.** `vol.*`와 `ez.*` 일부 도구는 백그라운드 작업으로 돌 수 있고 그때 미들웨어는 `enrich`를 부르기 전에 작업 핸들을 돌려준다 [27].
+그 결과는 `misc.job_status`로 받고 이때 `enrich`는 `misc_job_status`라는 이름으로 돌아 연결된 지식 시트가 없으므로 `_metadata`에 지식이 붙지 않는다 [22][28].
+`enrich`가 처리 중 예외를 내면 결과를 바꾸지 않고 돌려주므로 그 응답에도 `_metadata`가 없다 [29].
+외부 위협 정보를 조회하는 `enrich.vt_lookup_hash`·`enrich.vt_lookup_ip`·`enrich.vt_lookup_domain`·`enrich.abuseipdb_check`·`enrich.machinae_lookup`은 이름이 제어 도구 목록에 없다 [26][30].
+그래서 VirusTotal·AbuseIPDB·machinae에서 받은 참조 지식에도 증거 도구 출력과 같은 `data_provenance` 값 `tool_output_may_contain_untrusted_evidence`가 붙는다 [26].
 
 ### 근거
 
@@ -435,3 +454,246 @@ def _match_to_dict(match) -> dict:
 
 [21] yara-python 4.5.4는 문자열의 일치마다 `StringMatchInstance`를 만들어 목록에 넣는다: [`yara-python.c:1254-1275`](https://github.com/VirusTotal/yara-python/blob/74920b6da9a70a162b3bdc41b30e4af02e5c7dff/yara-python.c#L1254-L1275).
 저장소는 `yara-python>=4.3.0`만 적으므로 기준 커밋 날짜에 PyPI에 나와 있던 최신 릴리스 4.5.4를 기준으로 삼았다.
+
+[22] 미들웨어는 덧붙이기 전의 결과로 반복 해시를 계산하고 그 뒤에 `enrich`를 부른다.
+
+```python
+        # 4. Forensic-knowledge enrichment — adds interpretive context to the
+        #    result (caveats, does_not_prove, field/exit-code meanings, generic
+        #    provenance + discipline tier). Additive only; never touches
+        #    success/data/_trudi_call_id. Fails open.
+        #    FastMCP wraps dict-returning tools in a ToolResult (content +
+        #    structured_content); enrich the structured dict and keep the text
+        #    content block in sync so the client sees it either way.
+        try:
+            _is_poll = tool_name.endswith("job_status")
+            if not _is_poll and tool_name not in DAIR_GATE_ALLOWLIST:
+                _reset_poll_run()   # a real tool call breaks a poll run
+            from tools._enrich import enrich
+            if isinstance(result, dict):
+                # Repeat-hash the RAW tool output, BEFORE enrich() decorates it
+                # — enrich adds rotating interpretive fields (discipline_reminder)
+                # that would make every identical call look different.
+                if repeat_key:
+                    rn = _repeat_update(repeat_key, tool_name, result)
+                    if rn:
+                        notices.append(("repeat_notice", rn))
+                if _is_poll:
+                    pn = _note_poll_and_advise(result)
+                    if pn:
+                        notices.append(("poll_advisory", pn))
+                result = _apply_notices(enrich(tool_name, result), notices)
+```
+
+[`core/middleware.py:786-810`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L786-L810)
+
+[23] `enrich`는 해석 정보를 증거가 아닌 `_metadata`에 둔다고 적고 그 객체를 만든다.
+
+```python
+        # Interpretive context is METADATA, not evidence: it lands in a
+        # `_metadata` sub-object, never as top-level payload keys. Two reasons:
+        # (1) the `discipline_reminder` ROTATES per call, so mixing it into the
+        # payload made otherwise-identical tool results look different (it broke
+        # the repeat-gate's result-hash before it was taught to hash raw); (2) a
+        # cited tool result stays clean evidence, with the coaching separated.
+        # `_metadata` is `_`-prefixed, so the repeat-gate hash (which drops
+        # `_`-keys) excludes it structurally — no exclusion list needed. The
+        # model still sees it, exactly as it sees `_trudi_call_id`.
+        meta = result.get("_metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+
+        # --- Generic tier: rides on every evidence-returning tool -----------
+        #     (untrusted-evidence provenance tag + rotating discipline reminder)
+        if _is_evidence_tool(tool_name):
+            meta.setdefault("data_provenance", "tool_output_may_contain_untrusted_evidence")
+            meta["discipline_reminder"] = DISCIPLINE_REMINDERS[call_num % len(DISCIPLINE_REMINDERS)]
+```
+
+[`tools/_enrich.py:85-102`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L85-L102)
+
+[24] 지식 시트의 값을 `_metadata`의 키로 넣는다.
+
+```python
+        caveats = list(tool.get("caveats", []))
+        advisories = list(tool.get("advisories", []))
+        field_meanings = dict(tool.get("field_meanings", {}))
+        corroboration = {}
+
+        for item in artifact.get("does_not_prove", []):
+            advisories.append(f"Does NOT prove: {item}")
+        for m in artifact.get("common_misinterpretations", []):
+            advisories.append(f"{m['claim']} -> {m['correction']}")
+        corroboration.update(artifact.get("corroborate_with", {}))
+
+        # ALWAYS: accuracy guidance
+        if caveats:
+            meta["caveats"] = caveats
+        if field_meanings:
+            meta["field_meanings"] = field_meanings
+
+        # DECAY: discovery guidance — full first 3 calls per tool, then every 10th
+        _fk_counts[tool_name] += 1
+        if _fk_counts[tool_name] <= 3 or _fk_counts[tool_name] % 10 == 0:
+            if advisories:
+                meta["advisories"] = advisories
+            if corroboration:
+                meta["corroboration"] = corroboration
+```
+
+[`tools/_enrich.py:113-136`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L113-L136)
+
+```python
+        # exit-code meaning (e.g. vol 1 = ran-but-failed/no-results; -1 = symbols not cached)
+        ec = _exit_code_of(result)
+        hints = tool.get("exit_code_hints") or {}
+        if result.get("exit_meaning"):
+            # The wrapper declared an exit policy (tools/_exit_codes.py) —
+            # single source of truth for that binary.
+            meta["exit_code_meaning"] = result["exit_meaning"]
+        elif ec is not None and ec in hints:
+            meta["exit_code_meaning"] = hints[ec]
+
+        if meta:
+            result["_metadata"] = meta
+```
+
+[`tools/_enrich.py:138-149`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L138-L149)
+
+[25] MITRE 조회 도구 두 개는 지식을 결과 본문 필드로 돌려준다.
+
+```python
+        scored.append({
+            "technique_id": tid,
+            "name": info.get("name", ""),
+            "tactic": info.get("tactic", ""),
+            "score": round(len(matched) / max(len(keywords), 1), 3),
+            "matched_keywords": matched,
+        })
+
+    scored.sort(key=lambda x: (-x["score"], -len(x["matched_keywords"]), x["technique_id"]))
+    return {
+        "success": True,
+        "candidates": scored[:top_n],
+        "techniques_examined": len(techniques),
+    }
+```
+
+[`tools/correlate.py:272-285`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L272-L285)
+
+```python
+    table = _load_mitre(table_path or DEFAULT_MITRE_PATH)
+    techniques = table.get("techniques", {})
+    info = techniques.get(technique_id)
+    if info:
+        return {
+            "success": True,
+            "exists": True,
+            "technique_id": technique_id,
+            "name": info.get("name", ""),
+            "tactic": info.get("tactic", ""),
+            "description": info.get("description", ""),
+        }
+    return {
+        "success": True,
+        "exists": False,
+        "technique_id": technique_id,
+        "available_count": len(techniques),
+    }
+```
+
+[`tools/correlate.py:296-313`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/correlate.py#L296-L313)
+
+[26] 이름으로 제어 도구를 가르고 그 밖의 도구에 증거 표시를 붙인다.
+
+```python
+_CONTROL_PREFIXES = (
+    "reason_", "dair_", "correlate_", "coverage_", "accuracy_",
+    "attribution_", "monitor_", "respond_",
+)
+_CONTROL_TOOLS = frozenset({
+    "misc_record_finding", "misc_record_agent_message", "misc_record_self_correction",
+    "misc_record_curiosity_probe", "misc_start_execution_log", "misc_export_execution_log",
+    "misc_write_final_report", "misc_serve_dashboard", "misc_clear_case_run",
+    "misc_knowns_pattern_generate", "hash_verify_evidence_hash",
+})
+
+
+def _is_evidence_tool(name: str) -> bool:
+    """True for tools returning evidence-derived output (get the generic tier)."""
+    if name.startswith(_CONTROL_PREFIXES):
+        return False
+    return name not in _CONTROL_TOOLS
+```
+
+[`tools/_enrich.py:34-50`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L34-L50)
+
+```python
+        # --- Generic tier: rides on every evidence-returning tool -----------
+        #     (untrusted-evidence provenance tag + rotating discipline reminder)
+        if _is_evidence_tool(tool_name):
+            meta.setdefault("data_provenance", "tool_output_may_contain_untrusted_evidence")
+            meta["discipline_reminder"] = DISCIPLINE_REMINDERS[call_num % len(DISCIPLINE_REMINDERS)]
+```
+
+[`tools/_enrich.py:98-102`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L98-L102)
+
+[27] 백그라운드 작업이 되면 `enrich`를 거치기 전에 작업 핸들을 돌려준다.
+
+```python
+        try:
+            if not mode:
+                result = await _invoke(False)
+            else:
+                handle = await _run_as_job(_jobs, mode, tool_name, args, _invoke)
+                if not (isinstance(handle, tuple) and handle[0] == "done"):
+                    return handle                      # still running: a job handle
+                result = handle[1]
+```
+
+[`core/middleware.py:771-778`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L771-L778)
+
+[28] 연결된 시트가 없는 도구는 지식 없이 돌아간다.
+
+```python
+        # --- Artifact-specific tier: only where a knowledge sheet exists -----
+        artifact = _load_artifact(_ARTIFACT_MAP[tool_name]) if tool_name in _ARTIFACT_MAP else {}
+        tool_stem = _fk_tool_stem(tool_name)
+        tool = _load_tool(tool_stem) if tool_stem else {}
+        if not artifact and not tool:
+            if meta:
+                result["_metadata"] = meta
+            return result
+```
+
+[`tools/_enrich.py:104-111`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L104-L111)
+
+[29] `enrich`는 예외가 나면 결과를 그대로 돌려준다.
+
+```python
+    except Exception:
+        return result
+    return result
+```
+
+[`tools/_enrich.py:150-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L150-L152)
+
+[30] 외부 위협 정보 도구는 namespace `enrich`로 붙는다.
+
+```python
+NAMESPACES = [
+    ("img", imaging_mcp), ("vol", vol_mcp), ("tsk", tsk_mcp), ("ewf", ewf_mcp),
+    ("ez", ez_mcp), ("plaso", plaso_mcp), ("yara", yara_mcp), ("hash", hash_mcp),
+    ("strings", strings_mcp), ("carve", carving_mcp), ("net", network_mcp),
+    ("enrich", enrichment_mcp), ("misc", misc_mcp), ("read", read_mcp),
+    ("reason", reason_mcp), ("dair", dair_mcp), ("accuracy", accuracy_mcp),
+    ("correlate", correlate_mcp), ("coverage", coverage_mcp),
+    ("af", antiforensics_mcp), ("attribution", attribution_mcp),
+    ("live", live_mcp), ("velo", velo_mcp), ("monitor", monitor_mcp),
+    ("respond", respond_mcp),
+]
+for _ns, _child in NAMESPACES:
+    mcp.mount(_child, namespace=_ns)
+```
+
+[`server.py:52-64`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/server.py#L52-L64)

@@ -9,6 +9,8 @@ details:
   exception: true
 - id: R05.04
   exception: true
+- id: R05.09
+  exception: false
 ---
 
 # R05 결과 출처 표시
@@ -62,6 +64,18 @@ EZ Tools 보안 로그를 읽었거나 요청한 자료가 없어 모든 적재 
 다른 결과에는 서버가 증거 안 오프셋을 따로 붙이지 않는다.
 
 **예외.** `list_partitions`도 `windowed_response`로 응답해 `raw_text`를 300자에서 자르므로 `mmls` 출력이 그보다 길면 뒤 행의 시작 섹터가 응답에서 빠진다 [16][19].
+
+### R05.09 참조 지식 원문 출처
+
+**구현.** 이 방식은 ATT&CK 기법을 조회하는 `lookup_attack_technique`에 적용된다 [23].
+이 도구는 STIX 자료의 기법마다 `external_references`에서 `mitre-attack`이나 `mitre-ics-attack` 항목을 골라 기법 ID를 정하고 그 항목의 `url`을 결과 항목의 `url`에 싣는다 [23].
+그 항목에 주소가 없으면 기법 ID로 `https://attack.mitre.org/techniques/` 아래 주소를 만들어 싣는다 [23].
+응답은 증거 도구와 같은 `tool_response`로 만들고 `source`를 `None`으로 둔다 [24].
+`tool_response`의 설명은 `None`을 사건 DB에 적재하지 않는 읽기·참조 도구의 결과에 쓴다고 적고 응답에 참조 지식이라는 표시는 따로 없다 [24].
+그래서 R05.10에는 연결하지 않는다.
+
+외부 위협 정보를 조회하는 `enrich_iocs`는 서비스별 결과에 서비스 이름 `source`를 싣지만 조회한 원문 위치는 싣지 않는다 [25].
+이 도구는 조회 결과를 출처 이름 `enrichment.iocs`로 사건 색인에 적재해 증거에서 뽑은 출력과 같은 색인에 둔다 [26].
 
 ### 근거
 
@@ -499,3 +513,91 @@ def parse_mmls_rows(mmls_text: str) -> list[tuple[int, int, str]]:
 ```
 
 [`src/mulder/server/tools/extract/misc.py:634-640`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/misc.py#L634-L640)
+
+[23] 기법 항목의 `url`은 STIX의 원문 참조에서 가져오고 없으면 기법 ID로 만든다.
+
+```python
+    ext_refs: list[dict[str, str]] = obj.get("external_references", [])
+    attack_ref = next(
+        (r for r in ext_refs if r.get("source_name") in ("mitre-attack", "mitre-ics-attack")),
+        None,
+    )
+    if attack_ref is None:
+        return None
+
+    tid = attack_ref["external_id"]
+    url = attack_ref.get("url", f"https://attack.mitre.org/techniques/{tid.replace('.', '/')}/")
+```
+
+[`src/mulder/server/tools/attack.py:78-87`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/attack.py#L78-L87)
+
+```python
+    return tid, {
+        "id": tid,
+        "name": obj.get("name", ""),
+        "description": _truncate(obj.get("description", "")),
+        "tactics": tactics,
+        "detection": _truncate(detection),
+        "url": url,
+    }
+```
+
+[`src/mulder/server/tools/attack.py:97-104`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/attack.py#L97-L104)
+
+[24] `tool_response`는 `source`가 `None`이면 전체 결과를 그대로 돌려준다.
+
+```python
+    """Build an audited success response and log the tool call.
+
+    When *source* is provided (indicating data has been indexed into the
+    case DB), returns a compact response with only a preview of the output.
+    The agent should use ``search()`` or ``get_raw_output()`` to access
+    the full data.
+
+    When *source* is None, returns the full results (for read/reference
+    tools whose output is not indexed elsewhere).
+    """
+```
+
+[`src/mulder/server/helpers.py:337-346`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L337-L346)
+
+```python
+    if source is None:
+        return {
+            "tool_call_id": tc_id,
+            "status": "success",
+            "results": results,
+            "source": source,
+        }
+```
+
+[`src/mulder/server/helpers.py:358-364`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L358-L364)
+
+[25] 위협 정보 서비스별 결과의 필드다.
+
+```python
+    d: dict[str, Any] = {
+        "source": result.source,
+        "ioc": result.ioc,
+        "ioc_type": result.ioc_type,
+        "found": result.found,
+    }
+```
+
+[`src/mulder/server/tools/enrichment.py:419-424`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/enrichment.py#L419-L424)
+
+[26] 위협 정보 조회 결과를 사건 색인에 적재한다.
+
+```python
+    if enrichment_results:
+        try:
+            raw_output = json.dumps(enrichment_results, indent=2, default=str)
+            extract_and_index(
+                raw_output=raw_output,
+                source_name="enrichment.iocs",
+                source_path="enrichment_analysis",
+                extractor_name="enrichment",
+            )
+```
+
+[`src/mulder/server/tools/enrichment.py:598-606`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/enrichment.py#L598-L606)

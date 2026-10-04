@@ -5,6 +5,10 @@ details:
   exception: true
 - id: T03.11
   exception: true
+- id: T03.12
+  exception: true
+- id: T03.13
+  exception: true
 ---
 
 # T03 실행 조건 확인
@@ -32,21 +36,46 @@ details:
 인용 `source` 게이트는 발견사항의 `sources` 문자열과 증거 `source` 이름을 양방향 부분 문자열로 대조한다 [13].
 그래서 `sources`에 빈 문자열이 하나 있으면 모든 증거 `source`가 인용된 것으로 세어진다 [13].
 
-### T03.11 실행 자원 상태 확인
+### T03.11 실행 자원 사용률 확인
 
 **구현.** 동기 MCP 도구는 등록할 때 `_wrap_sync_tool`로 감싸지고 이 래퍼가 도구를 실행하기 전에 `async_wait_for_resources`를 부른다 [14].
 이 함수는 메모리와 CPU 사용률이 기준 이상이면 5초마다 다시 확인하며 기다리고 300초가 지나면 자원 부족이 이어져도 실행으로 넘어간다 [15].
 기준은 메모리·CPU 모두 기본 90%이고 `mulder serve`의 `--mem-limit`·`--cpu-limit`로 바꾼다 [16].
-기다린 뒤에는 공유 `CapacityLimiter`로 동시에 도는 도구 실행을 `--workers` 개수(기본 8개)로 제한한다 [14][17].
-`UNTHROTTLED`로 선언한 작업 조회·대기 도구는 자원 확인과 공유 제한을 건너뛰고 anyio의 기본 스레드 제한으로 돈다 [14].
-비동기 함수로 등록한 도구(`run_parallel`·`enrich_iocs`)는 래퍼로 감싸지지 않아 그 호출 자체는 이 확인을 거치지 않는다 [18].
-`run_parallel`은 하위 도구를 등록 표 `_tool_dispatch`에 든 래퍼로 부르므로 하위 작업은 각자 자원 확인과 공유 제한을 거친다 [18][19].
-`run_parallel`은 `_SEQUENTIAL_ONLY`에 든 `run_bulk_extractor`를 병렬 묶음이 모두 끝난 뒤 하나씩 실행한다 [20].
-이 직렬화는 한 `run_parallel` 호출 안에서만 적용되고 `start_extraction_batch`가 작업을 스레드 풀에 넘기는 경로에는 없다 [20][21].
+`UNTHROTTLED`로 선언한 작업 조회·대기 도구는 이 확인을 건너뛴다 [14].
+비동기 함수로 등록한 도구(`run_parallel`·`enrich_iocs`)는 래퍼로 감싸지지 않아 그 호출 자체는 이 확인을 거치지 않는다 [17].
+`run_parallel`은 하위 도구를 등록 표 `_tool_dispatch`에 든 래퍼로 부르므로 하위 작업은 각자 이 확인을 거친다 [17][18].
 배경 작업 스레드는 같은 기준의 동기 함수 `wait_for_resources`로 기다린다 [15].
 
 **예외.** 사용률을 읽지 못하면 값을 -1로 두고 그 값은 기준을 넘지 않은 것으로 보아 확인 없이 실행한다 [15].
 `--mem-limit`·`--cpu-limit`를 0으로 주면 확인이 꺼진다 [15][16].
+
+### T03.12 동시 실행 수 제한
+
+**구현.** 이 방식은 `_wrap_sync_tool`로 감싼 동기 MCP 도구에 적용된다 [14].
+래퍼는 자원 확인 뒤 공유 `CapacityLimiter`로 도구를 실행한다 [14].
+이 제한은 서버 프로세스 하나에 하나 만들어지고 동시에 도는 동기 도구 실행을 `--workers` 개수(기본 8개)로 제한한다 [19][16].
+한도는 운영자가 `mulder serve`의 `--workers`로 정하고 모델은 바꾸지 못한다 [16].
+`run_parallel`의 하위 작업도 등록 표의 래퍼를 거치므로 같은 제한을 나눠 쓴다 [18].
+`UNTHROTTLED`로 선언한 도구는 공유 제한을 건너뛰고 anyio의 기본 스레드 제한으로 돈다 [14][20].
+코드 주석은 이 선언을 외부 프로그램을 실행하지 않는 작업 조회·대기 도구에만 쓴다고 적는다 [20].
+
+**예외.** 배경 작업을 맡기는 `start_extraction_batch`는 `UNTHROTTLED`로 선언되어 공유 제한을 거치지 않는다 [21].
+이 도구가 넘긴 추출 작업은 `JobStore`의 별도 `ThreadPoolExecutor`에서 돈다 [22][23].
+이 풀의 크기도 `--workers` 값이고 공유 `CapacityLimiter`와 따로 센다 [19].
+작업 스레드는 감싸기 전의 동기 함수 표 `_tool_dispatch_sync`에서 도구를 꺼내 바로 부르므로 공유 제한을 거치지 않는다 [17][24].
+그래서 같은 추출 도구가 공유 제한 안에서 `--workers`개, 배경 작업 풀에서 `--workers`개까지 함께 돌 수 있다 [19].
+미룬 작업을 다시 실행하는 스레드는 배경 작업 풀 밖에서 따로 만들어진다 [25].
+이 동작은 코드로만 확인했고 실행하지 않았다.
+
+### T03.13 특정 도구 차례 실행
+
+**구현.** 이 방식은 `run_parallel` 호출 하나 안의 작업 묶음에 적용된다 [26].
+`run_parallel`은 `_SEQUENTIAL_ONLY`에 든 `run_bulk_extractor`를 병렬 묶음에서 빼 두고 병렬 묶음이 모두 끝난 뒤 하나씩 실행한다 [26].
+대상 도구 목록은 서버 코드에 고정되어 있고 모델이나 운영자가 바꾸지 못한다 [26].
+
+**예외.** `start_extraction_batch`로 넘긴 `run_bulk_extractor`는 다른 작업과 함께 배경 작업 풀에 들어가 이 순서 제약 없이 돈다 [22].
+모델이 `run_bulk_extractor`를 직접 부르거나 `run_parallel`을 여러 번 겹쳐 부르면 그 실행은 다른 호출의 작업과 차례를 맞추지 않는다 [26].
+이 동작은 코드로만 확인했고 실행하지 않았다.
 
 ### 근거
 
@@ -408,15 +437,7 @@ async def async_wait_for_resources(tool_name: str = "") -> None:
 
 [`src/mulder/cli.py:63-80`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/cli.py#L63-L80)
 
-[17] 서버 초기화가 공유 제한의 크기를 정한다.
-
-```python
-    _tool_limiter = anyio.CapacityLimiter(max_workers)
-```
-
-[`src/mulder/server/app.py:358-358`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L358-L358)
-
-[18] 비동기 함수는 래퍼로 감싸지 않고 등록한다.
+[17] 비동기 함수는 래퍼로 감싸지 않고 등록한다.
 
 ```python
     original_decorator = _original_mcp_tool(**kwargs)
@@ -433,7 +454,7 @@ async def async_wait_for_resources(tool_name: str = "") -> None:
 
 [`src/mulder/server/app.py:84-93`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L84-L93)
 
-[19] `run_parallel`은 하위 도구를 등록 표의 래퍼로 부른다.
+[18] `run_parallel`은 하위 도구를 등록 표의 래퍼로 부른다.
 
 ```python
     async def _run_one(idx: int, tool_name: str, arguments: dict[str, Any]) -> None:
@@ -458,32 +479,41 @@ async def async_wait_for_resources(tool_name: str = "") -> None:
 
 [`src/mulder/server/app.py:695-712`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L695-L712)
 
-[20] 직렬로만 돌릴 도구는 병렬 묶음 뒤에 하나씩 실행한다.
+[19] 서버 초기화가 공유 제한과 배경 작업 풀의 크기를 같은 `max_workers`로 정한다.
 
 ```python
-_SEQUENTIAL_ONLY: set[str] = {
-    "run_bulk_extractor",
-}
+    _tool_limiter = anyio.CapacityLimiter(max_workers)
+
+    _job_store = JobStore(
+        max_workers=max_workers,
+        tool_dispatch=_tool_dispatch_sync,  # Shared mutable ref; late registrations visible
 ```
 
-[`src/mulder/server/app.py:664-666`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L664-L666)
+[`src/mulder/server/app.py:358-362`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L358-L362)
+
+[20] `UNTHROTTLED` 선언은 자원 확인과 공유 제한을 건너뛰게 한다.
+
 ```python
-    parallel_tasks = [(i, t) for i, t in valid_tasks if t["tool"] not in _SEQUENTIAL_ONLY]
-    sequential_tasks = [(i, t) for i, t in valid_tasks if t["tool"] in _SEQUENTIAL_ONLY]
-
-    t0 = time.monotonic()
-
-    async with anyio.create_task_group() as tg:
-        for i, task in parallel_tasks:
-            tg.start_soon(_run_one, i, task["tool"], task.get("args", {}))
-
-    for i, task in sequential_tasks:
-        await _run_one(i, task["tool"], task.get("args", {}))
+# Tools that skip the memory/CPU resource gate and the worker CapacityLimiter
+# in ``app._wrap_sync_tool``. Only for cheap control/query tools (job polling,
+# small DB reads); never for anything that runs a binary or scans a source.
+UNTHROTTLED: set[str] = set()
 ```
 
-[`src/mulder/server/app.py:725-735`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L725-L735)
+[`src/mulder/server/tool_access.py:41-44`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tool_access.py#L41-L44)
 
-[21] 배치 작업은 스레드 풀에 그대로 넘긴다.
+[21] `start_extraction_batch`는 `UNTHROTTLED`로 선언된다.
+
+```python
+@mcp.tool()
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
+def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Submit long-running extraction tools for background execution and return immediately.
+```
+
+[`src/mulder/server/tools/jobs.py:39-42`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L39-L42)
+
+[22] 배치 작업은 스레드 풀에 그대로 넘긴다.
 
 ```python
         with self._lock:
@@ -508,3 +538,85 @@ _SEQUENTIAL_ONLY: set[str] = {
 ```
 
 [`src/mulder/server/jobs.py:157-175`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L157-L175)
+
+[23] `JobStore`는 `max_workers` 크기의 스레드 풀을 따로 만든다.
+
+```python
+    def __init__(
+        self,
+        max_workers: int,
+        tool_dispatch: dict[str, Callable[..., Any]],
+    ) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="mulder-job"
+        )
+        self._tool_dispatch = tool_dispatch
+```
+
+[`src/mulder/server/jobs.py:135-143`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L135-L143)
+
+[24] 작업 스레드는 감싸기 전의 동기 함수를 꺼내 자원 대기 뒤 바로 부른다.
+
+```python
+        tool_name = job.tool_name
+        fn = self._tool_dispatch.get(tool_name)
+
+        if fn is None:
+            with self._lock:
+                job.status = "failed"
+                job.error = f"Unknown tool: {tool_name}"
+                job.completed_at = time.monotonic()
+            logger.info("%s %s|%s|%s", _JOB_COMPLETE_MARKER, tool_name, "failed", job.error)
+            return
+
+        from mulder.server.app import wait_for_resources
+
+        current_batch_id.set(job.batch_id)
+        try:
+            wait_for_resources(tool_name)
+            result = fn(**job.args)
+```
+
+[`src/mulder/server/jobs.py:201-217`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L201-L217)
+
+[25] 미룬 작업이 남으면 풀 밖의 스레드를 새로 만들어 다시 실행한다.
+
+```python
+            if deferred:
+                if batch.retry_started:
+                    return
+                batch.retry_started = True
+                threading.Thread(
+                    target=self._retry_deferred,
+                    args=(batch_id, [j.job_id for j in deferred]),
+                    daemon=True,
+                ).start()
+                return
+```
+
+[`src/mulder/server/jobs.py:317-326`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L317-L326)
+
+[26] 직렬로만 돌릴 도구는 병렬 묶음 뒤에 하나씩 실행한다.
+
+```python
+_SEQUENTIAL_ONLY: set[str] = {
+    "run_bulk_extractor",
+}
+```
+
+[`src/mulder/server/app.py:664-666`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L664-L666)
+```python
+    parallel_tasks = [(i, t) for i, t in valid_tasks if t["tool"] not in _SEQUENTIAL_ONLY]
+    sequential_tasks = [(i, t) for i, t in valid_tasks if t["tool"] in _SEQUENTIAL_ONLY]
+
+    t0 = time.monotonic()
+
+    async with anyio.create_task_group() as tg:
+        for i, task in parallel_tasks:
+            tg.start_soon(_run_one, i, task["tool"], task.get("args", {}))
+
+    for i, task in sequential_tasks:
+        await _run_one(i, task["tool"], task.get("args", {}))
+```
+
+[`src/mulder/server/app.py:725-735`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L725-L735)

@@ -76,6 +76,11 @@ Volatility, Plaso, Sleuth Kit, 카빙 도구의 실행은 출력을 해석하지
 
 **구현.** 미들웨어는 오래 걸리는 도구를 서버 안 배경 작업으로 돌리고 정해 둔 시간 안에 끝나지 않으면 작업 ID와 `queued` 또는 `running` 상태를 돌려준다 [29].
 배경 작업으로 돌릴 도구는 `BACKGROUND_ALWAYS`·`BACKGROUND_IF_SLOW` 목록과 `vol_` 이름으로 정한다 [30].
+`BACKGROUND_ALWAYS` 도구는 기다리지 않고 바로 작업 핸들을 돌려준다 [29][30].
+`BACKGROUND_IF_SLOW` 도구와 `vol_` 도구는 `TRUDI_JOB_INLINE_WAIT`(기본 30초) 안에 끝나면 일반 응답을 돌려주고 넘으면 작업 핸들을 돌려준다 [29][30].
+이 기준은 서버 코드와 운영자 환경변수가 정하고 모델은 고르지 못한다 [30].
+배경 작업은 일반 실행과 실행 한도를 나눠 쓰지 않고 배경 작업끼리 `TRUDI_JOB_SLOTS` 개수의 자리를 나눠 쓴다 [29][30].
+이 한도는 T03.12에서 본다.
 `misc.job_status`는 서버 안 작업이면 진행 중, 취소, 예외, 완료 상태를 돌려주고 완료면 도구 결과의 `success`를 그대로 싣는다 [31].
 서버를 다시 띄우면 서버 안 작업은 사라지고 `misc.job_status`는 그 작업 ID를 `unknown`으로 답한다 [31][32].
 `net.tcpxtract_streams`는 tcpxtract를 셸로 분리 실행하고 `misc.job_status`는 종료 코드 파일이 생길 때까지 `running`과 지금까지 만든 파일 수를 돌려준다 [32][33].
@@ -104,13 +109,17 @@ FastMCP 3.4.7은 이 옛 모듈 이름을 남겨 두지만 4.0.0부터는 남겨
 
 ### T08.08 라이브러리 예외를 실패로 구별
 
-**구현.** 미들웨어는 도구가 잡지 못한 예외를 받아 호출 기록에 실패 항목과 예외 문구를 남기고 `ToolError`로 바꿔 돌려준다 [41][42].
-`yara.*` 도구는 yara-python이 낸 예외를 잡아 `success: false`와 예외 문구를 돌려준다 [43].
+**구현.** 이 방식은 `yara.*` 도구와 `yara.scan_directory`·`ez.pecmd`의 대체 파서에 적용된다 [41][25][26].
+`yara.*` 도구는 yara-python이 낸 예외를 잡아 `success: false`와 예외 문구를 돌려준다 [41].
 `yara.scan_directory`와 `ez.pecmd`의 대체 파서는 파일마다 예외를 잡아 그 파일을 실패 목록에 넣는다 [25][26].
+그 밖의 도구 함수가 잡지 않은 예외는 FastMCP 3.4.7이 `ToolError`로 바꿔 `isError` 결과로 돌려준다 [42].
+미들웨어는 `ToolError`를 호출 기록 없이 넘기고 인자 검사 오류처럼 `ToolError`가 아닌 예외만 실패 항목으로 남긴다 [43][44].
+이 경로는 서버 코드가 예외를 잡는 방식이 아니어서 위 도구들과 구별한다.
+이 예외가 호출 기록에 남지 않는 것은 L01에서 본다.
 
-**예외.** `read.mail`이 쓰는 메일 저장소 읽기는 `.eml` 파일이나 mbox 파일을 읽다가 예외가 나면 그 파일을 건너뛰고 건너뛴 수를 세지 않는다 [44].
-메일 저장소가 mbox 파일 하나이면 예외가 난 곳에서 읽기를 끝낸다 [44].
-pffexport 항목 폴더를 메시지로 바꾸지 못하면 그 항목도 표시 없이 빠진다 [45].
+**예외.** `read.mail`이 쓰는 메일 저장소 읽기는 `.eml` 파일이나 mbox 파일을 읽다가 예외가 나면 그 파일을 건너뛰고 건너뛴 수를 세지 않는다 [45].
+메일 저장소가 mbox 파일 하나이면 예외가 난 곳에서 읽기를 끝낸다 [45].
+pffexport 항목 폴더를 메시지로 바꾸지 못하면 그 항목도 표시 없이 빠진다 [46].
 
 ### 근거
 
@@ -1057,7 +1066,37 @@ def get_collection_results(
 
 [`tools/velo.py:318-341`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L318-L341)
 
-[41] 도구가 낸 예외를 호출 기록에 남기고 `ToolError`로 바꾼다.
+[41] yara-python 예외를 실패로 돌려준다.
+
+```python
+@mcp.tool()
+@output_safe
+def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
+    """
+    Scan a single file with YARA rules.
+    rules_path: path to a .yar file or a directory of .yar/.yara files.
+    Returns all matching rules with offsets and string identifiers.
+    """
+    try:
+        import yara
+        rules = _compile_rules(rules_path)
+        matches = rules.match(file_path, timeout=timeout)
+        return {
+            "success": True,
+            "file": file_path,
+            "match_count": len(matches),
+            "matches": [_match_to_dict(m) for m in matches],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "file": file_path, "matches": []}
+```
+
+[`tools/yara_tools.py:40-59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L40-L59)
+
+[42] FastMCP 3.4.7은 도구 함수가 낸 예외 가운데 FastMCP 예외가 아닌 것을 `ToolError`로 바꿔 올린다: [`fastmcp_slim/fastmcp/server/server.py:1311-1358`](https://github.com/PrefectHQ/fastmcp/blob/758397efa66e2cedac95ada540001bc44a95a646/fastmcp_slim/fastmcp/server/server.py#L1311-L1358).
+mcp 1.30.0의 처리기는 처리 중 난 예외를 `isError`가 참인 결과로 돌려준다: [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L473-L480).
+
+[43] 미들웨어는 `ToolError`를 그대로 넘기고 그 밖의 예외만 기록한 뒤 `ToolError`로 바꾼다.
 
 ```python
         async def _invoke(concurrent: bool):
@@ -1082,7 +1121,7 @@ def get_collection_results(
 
 [`core/middleware.py:733-750`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L733-L750)
 
-[42] 예외를 실패 항목으로 기록한다.
+[44] `ToolError`가 아닌 예외를 실패 항목으로 기록한다.
 
 ```python
 def _trace_exception(tool_name: str, exc: Exception, elapsed: float,
@@ -1112,34 +1151,7 @@ def _trace_exception(tool_name: str, exc: Exception, elapsed: float,
 
 [`core/middleware.py:461-483`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L461-L483)
 
-[43] yara-python 예외를 실패로 돌려준다.
-
-```python
-@mcp.tool()
-@output_safe
-def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
-    """
-    Scan a single file with YARA rules.
-    rules_path: path to a .yar file or a directory of .yar/.yara files.
-    Returns all matching rules with offsets and string identifiers.
-    """
-    try:
-        import yara
-        rules = _compile_rules(rules_path)
-        matches = rules.match(file_path, timeout=timeout)
-        return {
-            "success": True,
-            "file": file_path,
-            "match_count": len(matches),
-            "matches": [_match_to_dict(m) for m in matches],
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e), "file": file_path, "matches": []}
-```
-
-[`tools/yara_tools.py:40-59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/yara_tools.py#L40-L59)
-
-[44] 메일 저장소를 읽다가 난 예외를 건너뛴다.
+[45] 메일 저장소를 읽다가 난 예외를 건너뛴다.
 
 ```python
                 return
@@ -1174,7 +1186,7 @@ def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
 
 [`core/mail_roster.py:214-241`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/mail_roster.py#L214-L241)
 
-[45] pffexport 항목을 메시지로 바꾸지 못하면 `None`을 돌려주고 읽기는 그 항목을 건너뛴다.
+[46] pffexport 항목을 메시지로 바꾸지 못하면 `None`을 돌려주고 읽기는 그 항목을 건너뛴다.
 
 ```python
     try:
