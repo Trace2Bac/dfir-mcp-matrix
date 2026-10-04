@@ -8,14 +8,14 @@ export default function GridBoard({ data }: any) {
       <div className={styles.grid}>
         {Object.keys(data.axes).map(ax => (
           <div key={ax} className={styles.col}>
-            <Link to={`/${ax}`} className={styles.colhead} style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}>
+            <Link to={`/${ax}/`} className={styles.colhead} style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}>
               <span className={styles.ax}>{ax}</span>
               <span className={styles.nm}>{data.axes[ax]}</span>
             </Link>
             {data.cells.filter((c: any) => c.axis === ax).map((c: any) => (
               <Link
                 key={c.id}
-                to={`/${c.id}`}
+                to={`/${c.axis}/${c.id}`}
                 className={`${styles.tile} ${c.studied ? styles.studied : ''}`}
                 style={{ textDecoration: 'none' }}
               >

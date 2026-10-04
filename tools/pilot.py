@@ -8,11 +8,11 @@
   python tools/pilot.py renumber <서버>    셀 파일마다 표지 번호를 본문에 처음 나온 차례로 다시 매기고 근거 항목을 그 차례로 옮긴다
 
 원본:
-  matrix/axes.yaml           축 차례·이름
-  matrix/cells/<ID>.mdx      셀 하나의 질문·상세 정의
-  matrix/config.yaml         화면에 보일 서버, 시범 셀
-  reports/<서버>/index.mdx   서버 원고의 머리(저장소·기준 커밋)
-  reports/<서버>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·예외·근거
+  matrix/cells/<축>/index.mdx     축 하나의 차례·이름·설명
+  matrix/cells/<축>/<ID>.mdx      셀 하나의 질문·상세 정의
+  matrix/config.yaml              화면에 보일 서버, 시범 셀
+  reports/<서버>/index.mdx        서버 원고의 머리(저장소·기준 커밋)
+  reports/<서버>/<축>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·예외·근거
 형식은 matrix/README.md와 reports/README.mdx에 있다.
 """
 import functools
@@ -31,19 +31,21 @@ MATRIX = os.path.join(ROOT, "matrix")
 REPORTS = os.path.join(ROOT, "reports")
 OUT = os.path.join(ROOT, "web", "static", "data", "matrix.json")   # 생성물(.gitignore)
 
-# ── 원고 표시어 ── 원고(reports/)·화면 데이터에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
+# ── 상세가 아닌 판정 ── 머리말 details의 id와 화면 데이터에는 영어 코드를, 원고 소제목과 화면 글자에는 한글 이름을 쓴다.
+NOT_IMPL, NOT_APPL, UNKNOWN = "not_implemented", "not_applicable", "unknown"   # unknown은 화면에만 쓴다
+SPECIAL = (NOT_IMPL, NOT_APPL, UNKNOWN)
+SPECIAL_NAME = {NOT_IMPL: "미구현", NOT_APPL: "비적용", UNKNOWN: "미확인"}       # 원고 소제목 ### 미구현 등
+SPECIAL_OF_NAME = {v: k for k, v in SPECIAL_NAME.items()}
+UNKNOWN_NOTE = "이 셀의 지금 정의로 아직 조사하지 않은 경우입니다."               # 화면의 미확인 행 설명
+
+# ── 원고 표시어 ── 원고(reports/)에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
 TERMS = {
-    "not_implemented": "미구현",   # 머리말 details의 id 값
-    "not_applicable": "비적용",
-    "unknown": "미확인",            # 화면에만 쓴다
     "impl": "구현",                 # 단락 머리 **구현.**
     "exc": "예외",                  # 단락 머리 **예외.**
     "judge": "판단",                # 미구현·비적용의 단락 머리 **판단.**
     "evidence": "근거",             # 소제목 ### 근거
     "excerpt": "@발췌",             # 근거의 발췌 지시어
 }
-NOT_IMPL, NOT_APPL, UNKNOWN = TERMS["not_implemented"], TERMS["not_applicable"], TERMS["unknown"]
-SPECIAL = (NOT_IMPL, NOT_APPL, UNKNOWN)
 EVID_HEAD = "\n### %s\n" % TERMS["evidence"]
 CELL_ID = re.compile(r"^[A-Z]\d\d$")
 
@@ -67,15 +69,27 @@ def read_front(path):
 
 
 def load_matrix():
-    """축·셀·설정을 읽는다. 셀은 축 차례, 같은 축 안에서는 ID 차례다."""
-    axes = load_yaml(os.path.join(MATRIX, "axes.yaml"))["axes"]
+    """축·셀·설정을 읽는다. 축은 order 차례, 셀은 축 차례, 같은 축 안에서는 ID 차례다.
+    matrix/cells/index.mdx는 Docusaurus의 매트릭스 화면이라 읽지 않는다."""
+    axes, cells = [], []
+    for p in glob.glob(os.path.join(MATRIX, "cells", "*", "index.mdx")):
+        a, body, _ = read_front(p)
+        title, _, desc = body.strip().partition("\n")
+        a["_file"] = os.path.relpath(p, ROOT)
+        a["_dir"] = os.path.basename(os.path.dirname(p))
+        a["_title"] = title.strip()
+        a["description"] = desc.strip()
+        axes.append(a)
+    axes.sort(key=lambda a: (a.get("order") if isinstance(a.get("order"), int) else 99, str(a.get("axis"))))
+    for a in axes:
+        a["id"] = a.get("axis")
     order = {a["id"]: i for i, a in enumerate(axes)}
-    cells = []
-    for p in glob.glob(os.path.join(MATRIX, "cells", "*.mdx")):
-        if os.path.basename(p) == "index.mdx":   # Docusaurus의 셀 목록 화면
+    for p in glob.glob(os.path.join(MATRIX, "cells", "*", "*.mdx")):
+        if os.path.basename(p) == "index.mdx":
             continue
         c, body, _ = read_front(p)
         c["_file"] = os.path.relpath(p, ROOT)
+        c["_dir"] = os.path.basename(os.path.dirname(p))
         c["_title"] = body.strip()
         cells.append(c)
     cells.sort(key=lambda c: (order.get(str(c.get("id", "?"))[0], 99), str(c.get("id"))))
@@ -109,9 +123,9 @@ def report_dir(name):
 
 
 def cell_files(name):
-    """서버 폴더의 셀 파일. {셀ID: 경로}"""
+    """서버 폴더의 셀 파일(reports/<서버>/<축>/<셀>.mdx). {셀ID: 경로}"""
     out = {}
-    for p in sorted(glob.glob(os.path.join(report_dir(name), "*.mdx"))):
+    for p in sorted(glob.glob(os.path.join(report_dir(name), "*", "*.mdx"))):
         stem = os.path.splitext(os.path.basename(p))[0]
         if stem != "index" and CELL_ID.match(stem):
             out[stem] = p
@@ -151,7 +165,7 @@ def parse_cell(path):
     for d in fm.get("details") or []:
         iid = str(d.get("id", ""))
         sec["items"].append({"id": iid, "dagger": bool(d.get("exception")),
-                             "label": iid if iid in SPECIAL else "%s %s" % (iid, detail_name(iid) or "")})
+                             "label": SPECIAL_NAME[iid] if iid in SPECIAL else "%s %s" % (iid, detail_name(iid) or "")})
     pre, *subs = re.split(r"^### ", body, flags=re.M)
     for ln in pre.split("\n"):
         if ln.startswith("# ") and not sec["title"]:
@@ -164,7 +178,8 @@ def parse_cell(path):
         if h == TERMS["evidence"]:
             sec["evid_order"], sec["evid"] = split_evidence(rest.split("\n"))
             continue
-        unit, cur = {"label": h, "id": h.split(" ", 1)[0], "blocks": []}, None
+        head = h.split(" ", 1)[0]
+        unit, cur = {"label": h, "id": SPECIAL_OF_NAME.get(head, head), "blocks": []}, None
         for ln in rest.split("\n"):
             if ln.startswith("```"):
                 sec["errors"].append("본문에 코드 블록이 있다. 코드는 근거 소절에만 둔다")
@@ -213,6 +228,39 @@ def prose_lines(lines):
         yield ln
 
 
+# ───────────────────────── 작성 규칙 낱말 ─────────────────────────
+# docs/writing-rules/ 0001(구어 낱말)·0002(코드 개념 직역어)에서 기계로 잡을 수 있는 낱말. 맞는 쓰임도 있어 경고만 낸다.
+WORD_RULES = [
+    ("0001", re.compile(r"깔(?:아 ?주|아 ?두|린|고 )|(?<![가-힣])까는"), "깔다 → 설치하다"),
+    ("0001", re.compile(r"찍(?:는다|는 |은 |어 |힌다|힌 |고 )"), "찍다 → 출력하다·기록하다"),
+    ("0001", re.compile(r"뜬다|뜨지만|뜨면"), "뜨다 → 시작되다·실행되다"),
+    ("0001", re.compile(r"그냥"), "그냥 → 그대로·별도 처리 없이"),
+    ("0001", re.compile(r"깨지(?:거나|면|고|는)|깨진"), "깨지다 → 손상되다·형식이 잘못되다"),
+    ("0001", re.compile(r"(?<!오래 )걸리지 않|(?:검사|방식|장치|목록|규칙)[이가은는] 걸(?:리|린)"), "적용 범위의 걸리다 → 적용되다"),
+    ("0001", re.compile(r"근데|엄청|되게 |얘기|이런 거|그런 거"), "구어 → 글말"),
+    ("0002", re.compile(r"영수증|(?<!키 )지문"), "코드 개념 직역어 → 코드 이름을 백틱으로 쓰고 뜻을 풀어 쓰기"),
+]
+
+
+def word_warnings(path):
+    """파일에서 WORD_RULES 낱말을 찾는다. 코드 블록·인라인 코드·링크 주소는 보지 않는다."""
+    out, fence = [], False
+    where = os.path.relpath(path, ROOT)
+    for no, ln in enumerate(open(path, encoding="utf-8").read().split("\n"), 1):
+        if ln.startswith("```"):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        t = re.sub(r"`[^`]*`", "C", ln)
+        t = re.sub(r"\]\([^)]*\)", "]", t)
+        for rule, rx, hint in WORD_RULES:
+            m = rx.search(t)
+            if m:
+                out.append("%s:%d 작성 규칙 %s(%s): …%s…" % (where, no, rule, hint, t[max(0, m.start() - 15):m.end() + 10].strip()))
+    return out
+
+
 # ───────────────────────── validate ─────────────────────────
 def _schema(name):
     return json.load(open(os.path.join(MATRIX, "schema", name), encoding="utf-8"))
@@ -231,12 +279,28 @@ def _schema_errors(obj, schema, where):
 def validate():
     """원본 파일끼리의 일관성. (오류, 경고, 알림)을 돌려준다. 오류만 CI를 실패시킨다."""
     errs, warns = [], []
-    errs += _schema_errors({"axes": AXES}, _schema("axes.schema.json"), "matrix/axes.yaml")
+    axis_schema = _schema("axis.schema.json")
+    for a in AXES:
+        f = a["_file"]
+        errs += _schema_errors({k: v for k, v in a.items() if not k.startswith("_") and k not in ("id", "description")},
+                               axis_schema, f)
+        if a.get("axis") != a["_dir"]:
+            errs.append("%s: 머리말 axis(%s)가 폴더 이름(%s)과 다르다" % (f, a.get("axis"), a["_dir"]))
+        if a["_title"] != "# %s %s" % (a.get("axis"), a.get("name")):
+            errs.append("%s: 본문 첫 줄은 제목 '# %s %s'여야 한다(축 이름을 고치면 같이 고친다)" % (f, a.get("axis"), a.get("name")))
+        if not a["description"]:
+            errs.append("%s: 제목 아래에 축 설명이 없다" % f)
     errs += _schema_errors(CONFIG, _schema("config.schema.json"), "matrix/config.yaml")
     cell_schema = _schema("cell.schema.json")
     axis_ids = [a["id"] for a in AXES]
     if len(set(axis_ids)) != len(axis_ids):
-        errs.append("matrix/axes.yaml: 축 id가 겹친다")
+        errs.append("matrix/cells/*/index.mdx: 축 axis가 겹친다")
+    orders = [a.get("order") for a in AXES]
+    if len(set(orders)) != len(orders):
+        errs.append("matrix/cells/*/index.mdx: 축 order가 겹친다")
+    for d in sorted(glob.glob(os.path.join(MATRIX, "cells", "*", ""))):
+        if not os.path.exists(os.path.join(d, "index.mdx")):
+            errs.append("%s: 축 폴더에 index.mdx가 없다" % os.path.relpath(d, ROOT))
     seen = set()
     for c in CELL_LIST:
         f = c["_file"]
@@ -247,11 +311,13 @@ def validate():
             errs.append("%s: 본문은 제목 '# %s %s' 한 줄이어야 한다(셀 이름을 고치면 같이 고친다)" % (f, cid, c.get("name")))
         if os.path.splitext(os.path.basename(f))[0] != cid:
             errs.append("%s: 파일 이름과 id(%s)가 다르다" % (f, cid))
+        if c["_dir"] != cid[:1]:
+            errs.append("%s: 셀은 축 폴더 matrix/cells/%s/에 둔다" % (f, cid[:1]))
         if cid in seen:
             errs.append("%s: 셀 id가 겹친다" % f)
         seen.add(cid)
         if cid[:1] not in axis_ids:
-            errs.append("%s: 첫 글자 %s가 matrix/axes.yaml의 축이 아니다" % (f, cid[:1]))
+            errs.append("%s: 첫 글자 %s가 축(matrix/cells/<축>/index.mdx)이 아니다" % (f, cid[:1]))
         ids = [str(d.get("id")) for d in c.get("details") or []]
         gone = [str(r.get("id")) for r in c.get("retired") or []]
         for iid in ids + gone:
@@ -276,6 +342,8 @@ def validate():
             for sv in d.get("seen_in") or []:
                 if sv not in CONFIG["servers"]:
                     warns.append("%s: %s의 seen_in 서버 %s가 matrix/config.yaml servers에 없다" % (f, d.get("id"), sv))
+    for f in [a["_file"] for a in AXES] + [c["_file"] for c in CELL_LIST]:
+        warns += word_warnings(os.path.join(ROOT, f))
     for cid in ORDER:
         if cid not in CELLS:
             errs.append("matrix/config.yaml: 시범 셀 %s의 셀 파일이 없다" % cid)
@@ -293,22 +361,24 @@ def validate():
         files = cell_files(n)
         for cid in ORDER:
             if cid not in files:
-                errs.append("reports/%s/%s.mdx가 없다(시범 셀)" % (n, cid))
+                errs.append("reports/%s/%s/%s.mdx가 없다(시범 셀)" % (n, cid[:1], cid))
         for cid, p in files.items():
             where = os.path.relpath(p, ROOT)
             fm, _, _ = read_front(p)
             errs += _schema_errors(fm, rep_schema, where)
             if fm.get("cell") != cid:
                 errs.append("%s: 머리말 cell이 파일 이름(%s)과 다르다" % (where, cid))
+            if os.path.basename(os.path.dirname(p)) != cid[:1]:
+                errs.append("%s: 원고는 축 폴더 reports/%s/%s/에 둔다" % (where, n, cid[:1]))
             if cid not in CELLS:
-                errs.append("%s: matrix/cells/%s.mdx이 없다" % (where, cid))
+                errs.append("%s: matrix/cells/%s/%s.mdx이 없다" % (where, cid[:1], cid))
                 continue
             det = fm.get("details") or []
             ids = [str(d.get("id")) for d in det]
             if any(i in SPECIAL for i in ids) and len(ids) > 1:
-                errs.append("%s: 미구현·비적용은 다른 상세와 함께 쓰지 않는다" % where)
+                errs.append("%s: not_implemented(미구현)·not_applicable(비적용)은 다른 상세와 함께 쓰지 않는다" % where)
             if UNKNOWN in ids:
-                errs.append("%s: 원고에는 미확인을 쓰지 않는다. 조사하지 않은 셀은 파일을 두지 않는다" % where)
+                errs.append("%s: 원고에는 unknown(미확인)을 쓰지 않는다. 조사하지 않은 셀은 파일을 두지 않는다" % where)
             for d in det:
                 iid = str(d.get("id"))
                 if iid in SPECIAL:
@@ -508,7 +578,7 @@ def check(name, slugs, only=None):
                     errs.append("%s 줄 범위가 파일 밖이다: %s#L%s-L%s (파일 %d줄)" % (where, rel, a, b, n))
         e, w = check_cell(cid, secs[cid], slugs)
         errs += e
-        warns += w
+        warns += w + word_warnings(p)
         fm_lines = read_front(p)[2]
         clean, fence = [], False
         for k, ln in enumerate(text.split("\n")):
@@ -678,14 +748,15 @@ def build_data():
         defined = bool(c.get("scope"))
         items = [{"id": d["id"], "name": d["name"], "inc": d.get("include", ""), "exc": d.get("exclude", ""),
                   "seen": list(d.get("seen_in") or [])} for d in c.get("details") or []]
-        meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", ""),
-                   UNKNOWN: CONFIG["labels"][UNKNOWN]}
+        meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", ""), UNKNOWN: UNKNOWN_NOTE}
         rows = []
-        for it in items + [{"id": x, "name": x, "inc": meaning[x], "exc": ""} for x in SPECIAL]:
+        for it in items + [{"id": x, "name": SPECIAL_NAME[x], "inc": meaning[x], "exc": "", "special": True} for x in SPECIAL]:
             members = [{"s": n, "d": r["예외"]} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
             seen = [x for x in it.get("seen", []) if x not in [m["s"] for m in members]]
             row = {"id": it["id"], "name": it["name"], "inc": it["inc"], "exc": it["exc"], "m": members, "seen": seen}
-            if it["id"] not in SPECIAL:
+            if it["id"] in SPECIAL:
+                row["special"] = True
+            else:
                 row["cand"] = not members and not seen
             rows.append(row)
         studied = sum(1 for n in names if link[n][c["id"]][0]["상세"] != UNKNOWN)

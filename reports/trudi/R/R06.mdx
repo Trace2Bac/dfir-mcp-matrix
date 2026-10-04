@@ -1,0 +1,326 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 비밀 값을 응답·호출 기록·보고서에 싣고 그 값을 가리거나 빼는 처리를 두지 않는다.
+
+응답에서는 자격증명을 꺼내는 도구가 꺼낸 값을 그대로 돌려준다.
+`vol.hashdump`·`vol.cachedump`·`vol.lsadump`는 메모리 이미지에서 NTLM 해시, 캐시된 도메인 자격증명, LSA secret을 꺼내는 Volatility 플러그인을 돌린다 [1].
+세 도구는 실행기 결과를 그대로 돌려주고 실행기는 도구의 표준 출력을 `stdout`에 싣는다 [1][2].
+`net.http_session_inventory`는 패킷 캡처에서 찾은 `Authorization` 헤더 값과 쿠키 값을 세션마다 `auth_headers`·`cookies`에 싣는다 [3].
+`misc.cs_beacon_config`는 비컨 설정을 모두 풀어 `settings`에 담고 응답의 `matches`에 싣는다 [4][5].
+이 설정 이름에는 `SSH_Password_Plaintext`·`Proxy_User`·`Proxy_Password`가 있다 [4].
+
+증거에서 찾아 인자로 다시 넘긴 비밀번호도 가리지 않는다.
+`img.bde_mount`는 BitLocker 복구 비밀번호를 `bdemount`의 `-r` 인자로 넣는다 [6].
+실행기는 인자를 공백으로 이은 명령 줄을 결과의 `cmd`에 싣고 호출 기록 항목에도 그대로 적는다 [2][7].
+
+기록에서는 실행기가 표준 출력 앞 600자를 호출 기록의 `stdout_excerpt`에 남기고 전체를 호출마다 사이드카 파일로 남긴다 [7].
+그래서 위 도구가 꺼낸 해시와 비밀번호가 호출 기록과 사이드카에 그대로 남는다.
+사이드카는 `analysis/` 아래 파일을 읽는 `read.output`으로 다시 읽힌다(R02.08) [8].
+
+보고서에서는 `misc.export_execution_log`가 호출 기록 전체를 JSON으로, 항목마다 `cmd`와 출력 앞 300자를 Markdown으로 쓴다 [9].
+
+가림 코드는 두 곳에 있지만 이 셀에 해당하지 않는다.
+Velociraptor 실행기는 기록하는 명령 줄에서 `--api_config` 경로를 `<redacted>`로 바꾼다 [10].
+이 값은 서버가 외부에 접속할 때 쓰는 설정이라 I04에서 본다.
+미들웨어의 `_arg_shapes`는 인자 이름과 자료형만 적고 값은 적지 않는다 [11].
+이 함수는 도구 예외 기록과 입력 검사 실패 문구, 백그라운드 작업 등록에만 쓰이고 비밀 값을 골라 가리는 처리가 아니다 [11].
+실행기를 거치는 도구의 인자 값은 위처럼 `cmd`에 그대로 남는다 [2].
+
+### 근거
+
+[1] 자격증명 플러그인을 돌리는 도구 3개와 공통 함수 `_vol`이다.
+
+```python
+@mcp.tool()
+@output_safe
+def vol_hashdump(image: str) -> dict:
+    """Dump NTLM password hashes from SAM and SYSTEM hives in memory."""
+    return _vol(image, "windows.hashdump")
+
+
+@mcp.tool()
+@output_safe
+def vol_cachedump(image: str) -> dict:
+    """Extract cached domain credentials (DCC2 hashes) from memory."""
+    return _vol(image, "windows.cachedump")
+
+
+@mcp.tool()
+@output_safe
+def vol_lsadump(image: str) -> dict:
+    """Dump LSA secrets from memory (service account passwords, auto-logon creds)."""
+    return _vol(image, "windows.lsadump")
+```
+
+[`tools/volatility.py:503-521`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L503-L521)
+
+```python
+def _vol(image: str, plugin: str, extra: list[str] | None = None,
+         output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
+    # -o OUTPUT_DIR is a global Volatility flag — must come before the plugin name.
+    # Plugin-specific args (--pid, --dump, etc.) go in extra, after the plugin.
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)   # Volatility refuses a missing -o dir
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin] + (extra or [])
+    return run(cmd, timeout=timeout)
+```
+
+[`tools/volatility.py:14-22`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/volatility.py#L14-L22)
+
+[2] 실행기는 명령 줄을 `cmd`에, 표준 출력을 `stdout`에 싣는다.
+
+```python
+    result: dict[str, Any] = {
+        "success": False,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "elapsed_seconds": 0.0,
+        "truncated": False,
+        "cmd": " ".join(cmd),
+        "retries": 0,
+        "progress_lines": [],
+    }
+```
+
+[`core/executor.py:148-158`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L148-L158)
+
+```python
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        # Complete stdout goes to the trace sidecar (popped by _log_tool);
+        # the agent-facing copy below keeps the byte/line caps.
+        result["_stdout_full"] = stdout[:STDOUT_SIDECAR_CAP]
+        result["_stdout_chars"] = len(stdout)
+
+        if len(stdout) > OUTPUT_CAP:
+            stdout = stdout[:OUTPUT_CAP]
+            result["truncated"] = True
+
+        if line_cap is not None:
+            stdout, line_truncated = _apply_line_cap(stdout, line_cap)
+            if line_truncated:
+                result["truncated"] = True
+
+        result["stdout"] = stdout
+```
+
+[`core/executor.py:172-188`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L172-L188)
+
+[3] HTTP 세션마다 `Authorization` 헤더 값과 쿠키 값을 모아 싣는다.
+
+```python
+        for m in cookie_re.finditer(block):
+            for kv in m.group(1).split(";"):
+                kv = kv.strip()
+                if "=" in kv:
+                    name, value = kv.split("=", 1)
+                    sess["cookies"].setdefault(name.strip(), set()).add(value.strip())
+
+        for m in set_cookie_re.finditer(block):
+            cookie_str = m.group(1).split(";")[0].strip()
+            if "=" in cookie_str:
+                name, value = cookie_str.split("=", 1)
+                sess["set_cookies"].setdefault(name.strip(), set()).add(value.strip())
+
+        for m in auth_re.finditer(block):
+            val = m.group(1).strip()
+            if val not in sess["auth_headers"]:
+                sess["auth_headers"].append(val)
+```
+
+[`tools/network.py:273-289`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L273-L289)
+
+```python
+    out_sessions = []
+    for sess in sessions.values():
+        out_sessions.append({
+            "source_ip": sess["source_ip"],
+            "host": sess["host"],
+            "user_agent": sess["user_agent"],
+            "cookies": {k: sorted(v) for k, v in sess["cookies"].items()},
+            "set_cookies": {k: sorted(v) for k, v in sess["set_cookies"].items()},
+            "url_params": {k: sorted(v) for k, v in sess["url_params"].items()},
+            "auth_headers": sess["auth_headers"],
+            "request_paths": sess["request_paths"][:50],
+            "emails": sess["emails"],
+        })
+```
+
+[`tools/network.py:303-315`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L303-L315)
+
+[4] 비컨 설정 이름과 결과 항목의 `settings`다.
+
+```python
+SETTINGS = {
+    1: "BeaconType", 2: "Port", 3: "SleepTime", 4: "MaxGetSize", 5: "Jitter",
+    6: "MaxDNS", 7: "PublicKey", 8: "C2Server", 9: "UserAgent", 10: "HttpPostUri",
+    11: "Malleable_C2_Instructions", 12: "HttpGet_Metadata", 13: "HttpPost_Metadata",
+    14: "SpawnTo", 15: "PipeName", 19: "DNS_Idle", 20: "DNS_Sleep",
+    21: "SSH_Host", 22: "SSH_Port", 23: "SSH_Username", 24: "SSH_Password_Plaintext",
+    25: "SSH_Password_Pubkey", 26: "HttpGet_Verb", 27: "HttpPost_Verb",
+    28: "HttpPostChunk", 29: "Spawnto_x86", 30: "Spawnto_x64", 31: "CryptoScheme",
+    32: "Proxy_Config", 33: "Proxy_User", 34: "Proxy_Password", 35: "Proxy_Behavior",
+```
+
+[`core/cs_beacon.py:39-47`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/cs_beacon.py#L39-L47)
+
+```python
+        digest = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str)
+                                .encode()).hexdigest()[:16]
+        rec.update({"config_id": digest, "summary": summarize(settings), "settings": settings})
+        decoded.append(rec)
+        configs.setdefault(digest, []).append(f"{m['file']}@0x{m['offset']:x}")
+    return {
+        "success": True, "found": bool(decoded), "matches": decoded,
+```
+
+[`core/cs_beacon.py:598-604`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/cs_beacon.py#L598-L604)
+
+[5] `misc.cs_beacon_config` 응답은 결과 항목을 10개까지 싣는다.
+
+```python
+        "success": ok, "error": res.get("error"), "warning": res.get("warning"),
+        "_trudi_call_id": cid, "found": bool(res.get("found")),
+        "distinct_configs": res.get("distinct_configs", 0),
+        "matches": res.get("matches", [])[:10],
+        "match_count": len(res.get("matches", [])),
+        "files_scanned": res.get("files_scanned", 0), "bytes_scanned": res.get("bytes_scanned", 0),
+        "timed_out": bool(res.get("timed_out")), "searched_for": res.get("searched_for"),
+        "elapsed_seconds": res.get("elapsed_seconds"), "summary": summary[:4000],
+        "output_path": output_path if ok else None,
+    }
+```
+
+[`tools/misc.py:855-864`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L855-L864)
+
+[6] 복구 비밀번호를 명령 인자로 넣는다.
+
+```python
+    os.makedirs(mount_point, exist_ok=True)
+    cmd = ["bdemount"]
+    if recovery_password:
+        cmd += ["-r", recovery_password]
+    elif recovery_key_file:
+        cmd += ["-k", recovery_key_file]
+    cmd += [image_path, mount_point]
+    return run(cmd, needs_sudo=True)
+```
+
+[`tools/imaging.py:110-117`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/imaging.py#L110-L117)
+
+[7] 호출 기록 항목에 명령 줄과 출력 발췌를 적고 전체 출력을 사이드카로 남긴다.
+
+```python
+            entry: dict = {
+                "call_id": cid,
+                "type": "tool_call",
+                "ts": _utcnow(),
+                "cmd": cmd,
+                "success": success,
+                "truncated": truncated,
+                "retries": retries,
+```
+
+[`core/execution_log.py:1490-1497`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1490-L1497)
+
+```python
+            if stdout_excerpt:
+                entry["stdout_excerpt"] = stdout_excerpt[:600]
+            if stdout_full is None and stdout_excerpt:
+                stdout_full = stdout_excerpt
+            if stdout_full is not None:
+                # Stamped even when EMPTY (0) so "ran and produced nothing"
+                # is distinguishable from "output never persisted".
+                entry["stdout_chars"] = len(stdout_full)
+                entry["stdout_lines"] = (stdout_full.count("\n") + (
+                    0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
+                # Always kept: .tool_output/<cid>.txt is the one predictable place
+                # a call's output lives. Short outputs used to be excerpt-only and
+                # every read of them failed "file not found" (2026-09-23 runs).
+                if stdout_full:
+                    self._write_stdout_sidecar(cid, stdout_full, entry)
+```
+
+[`core/execution_log.py:1507-1521`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1507-L1521)
+
+[8] `read.output`은 `analysis/`·`exports/`·`reports/` 아래 파일을 읽는다.
+
+```python
+@mcp.tool()
+def read_output(path: str, query: str = "", columns: str = "", where: str = "",
+                max_rows: int = 200, max_chars: int = 20000) -> dict:
+    """Read a PRODUCED-OUTPUT file (CSV/TSV/JSON/JSONL/TXT) under analysis/,
+    exports/, or reports/ and return the rows/lines most relevant to `query`.
+    Traced and citable — use this instead of Bash (python csv / jq / grep) so the
+    read is recorded with a call_id and the reviewer can re-verify it.
+```
+
+[`tools/read_output.py:92-98`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/read_output.py#L92-L98)
+
+[9] 내보내기는 기록 전체를 JSON으로 쓰고 Markdown에는 명령 줄과 출력 앞부분을 쓴다.
+
+```python
+        try:
+            with open(path + ".json", "w") as f:
+                json.dump(data, f, indent=2)
+            json_ok = True
+        except OSError as e:
+            _warn(f"export JSON write failed ({path}.json): {e}")
+        try:
+            with open(path + ".md", "w") as f:
+                f.write(_render_entries(data.get("case_id"), data.get("entries", [])))
+```
+
+[`core/execution_log.py:2019-2027`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L2019-L2027)
+
+```python
+            violation = f" ⚠ PROTOCOL_VIOLATION: {e['protocol_violation']}" if e.get("protocol_violation") else ""
+            lines.append(f"- `{ts}` {prefix}**TOOL** `{e.get('cmd', '')}`  → {status}{retries}{trunc}{elapsed}{violation}")
+            if not e.get("success") and e.get("stderr"):
+                lines.append(f"  - stderr: {e['stderr'][:200]}")
+            if e.get("stdout_excerpt"):
+                lines.append(f"  - output: {e['stdout_excerpt'][:300]}")
+```
+
+[`core/execution_log.py:225-230`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L225-L230)
+
+[10] Velociraptor 실행기의 기록용 명령 줄이다.
+
+```python
+    full_argv = [bin_path, "--api_config", api_config] + argv
+
+    # Redact api_config in the recorded cmd — its path is sensitive on a
+    # real deployment; the operator can recover it from env if needed.
+    safe_cmd = (
+        f"{bin_path} --api_config <redacted> " +
+        " ".join(shlex.quote(a) for a in argv)
+    )
+```
+
+[`tools/velo.py:96-103`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/velo.py#L96-L103)
+
+[11] `_arg_shapes`는 값을 적지 않는다.
+부르는 곳은 [`core/middleware.py:467`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L467), [`core/middleware.py:602`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L602), [`core/middleware.py:748`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L748)이다.
+
+```python
+def _arg_shapes(args: dict | None) -> str:
+    """Argument NAMES and python types — never values — so a validation
+    failure is diagnosable from the trace (which field, which type)."""
+    try:
+        return ", ".join(f"{k}:{type(v).__name__}" for k, v in (args or {}).items()
+                         if not str(k).startswith("_"))[:400]
+    except Exception:
+        return ""
+```
+
+[`core/middleware.py:446-453`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/middleware.py#L446-L453)

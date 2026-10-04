@@ -1,7 +1,10 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import fs from 'fs';
+import path from 'path';
 import evidenceLinks from './src/remark/evidenceLinks';
+import noSingleTilde from './src/remark/noSingleTilde';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
@@ -10,6 +13,32 @@ const editUrlIn =
   (dir: string) =>
   ({docPath}: {docPath: string}) =>
     `https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2/edit/main/${dir}/${docPath}`;
+
+// 축 이름과 차례. 원본은 matrix/cells/<축>/index.mdx 머리말이다
+const axes: Record<string, {name: string; order: number}> = {};
+const cellsDir = path.resolve(__dirname, '../matrix/cells');
+for (const ax of fs.readdirSync(cellsDir)) {
+  const index = path.join(cellsDir, ax, 'index.mdx');
+  if (!fs.existsSync(index)) continue;
+  const text = fs.readFileSync(index, 'utf8');
+  axes[ax] = {
+    name: text.match(/^name: (.*)$/m)?.[1].trim() ?? '',
+    order: Number(text.match(/^order: (\d+)$/m)?.[1] ?? 99),
+  };
+}
+
+// 원고 사이드바: 서버 폴더 아래 축 폴더(E 등)를 "E 원본 증거 관리"로 보이고 축 차례로 늘어놓는다
+type SidebarItem = {type: string; label?: string; items?: SidebarItem[]};
+const relabelAxes = (items: SidebarItem[]): SidebarItem[] => {
+  const out = items.map(it =>
+    it.type === 'category'
+      ? {...it, items: relabelAxes(it.items ?? []), label: axes[it.label!] ? `${it.label} ${axes[it.label!].name}` : it.label}
+      : it,
+  );
+  const isAxis = (it: SidebarItem) => it.type === 'category' && axes[it.label!.split(' ')[0]] !== undefined;
+  const sorted = out.filter(isAxis).sort((a, b) => axes[a.label!.split(' ')[0]].order - axes[b.label!.split(' ')[0]].order);
+  return out.map(it => (isAxis(it) ? sorted.shift()! : it));
+};
 
 const config: Config = {
   title: 'DFIR MCP Matrix',
@@ -61,8 +90,10 @@ const config: Config = {
           routeBasePath: 'reports',
           sidebarPath: './sidebars.ts',
           // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾼다
-          remarkPlugins: [evidenceLinks],
+          remarkPlugins: [noSingleTilde, evidenceLinks],
           editUrl: editUrlIn('reports'),
+          sidebarItemsGenerator: async ({defaultSidebarItemsGenerator, ...args}) =>
+            relabelAxes(await defaultSidebarItemsGenerator(args)) as any,
         },
         blog: false,
         theme: {
@@ -147,6 +178,7 @@ const config: Config = {
         routeBasePath: 'docs',
         sidebarPath: './sidebars.ts',
         editUrl: editUrlIn('docs'),
+        remarkPlugins: [noSingleTilde],
       },
     ],
     [
@@ -157,6 +189,7 @@ const config: Config = {
         routeBasePath: '/',
         sidebarPath: './sidebarsCells.ts',
         editUrl: editUrlIn('matrix/cells'),
+        remarkPlugins: [noSingleTilde],
       },
     ],
   ],

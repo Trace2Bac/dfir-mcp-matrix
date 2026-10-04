@@ -5,9 +5,10 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Link from '@docusaurus/Link';
 import Admonition from '@theme/Admonition';
 import ReportDrawer from './ReportDrawer';
+import styles from './Matrix.module.css';
 
-// 이 셀의 원고가 없는 서버를 모은 행(tools/pilot.py의 TERMS["unknown"]). 열 원고가 없어 링크를 달지 않는다
-const UNKNOWN_ROW = '미확인';
+// 이 셀의 원고가 없는 서버를 모은 행(tools/pilot.py의 UNKNOWN). 열 원고가 없어 링크를 달지 않는다
+const UNKNOWN_ROW = 'unknown';
 
 export default function CellToolList({ cellId }: { cellId: string }) {
   const [data, setData] = useState<any>(null);
@@ -78,12 +79,18 @@ export default function CellToolList({ cellId }: { cellId: string }) {
       )}
 
       <div style={{ marginTop: '3rem', borderTop: '1px solid var(--ifm-color-emphasis-200)', paddingTop: '2rem' }}>
+        {cell.rows?.some((r: any) => r.m?.some((m: any) => m.d)) && (
+          <div className={styles.legend}>
+            <span className={`button button--sm button--secondary ${styles.exception}`} aria-hidden="true">서버</span>
+            예외가 있는 서버(원고의 예외 단락 참고)
+          </div>
+        )}
         {cell.rows?.map((r: any) => {
           const hasTools = r.m && r.m.length > 0;
           const hasSeen = r.seen && r.seen.length > 0;
           return (
             <div key={r.id} style={{ marginBottom: '1.5rem' }}>
-              <h3 style={{ marginBottom: '0.5rem' }}>{r.id === r.name ? r.name : `${r.id} ${r.name}`}</h3>
+              <h3 style={{ marginBottom: '0.5rem' }}>{r.special ? r.name : `${r.id} ${r.name}`}</h3>
               {r.inc && <div style={{ fontSize: '0.9rem', marginBottom: '0.2rem' }}><strong>포함:</strong> {r.inc}</div>}
               {r.exc && <div style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}><strong>제외:</strong> {r.exc}</div>}
               
@@ -105,13 +112,13 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                   ) : (
                     <Link 
                       key={m.s} 
-                      to={`/reports/${m.s}/${cellId}`}
+                      to={`/reports/${m.s}/${cell.axis}/${cellId}`}
                       onClick={e => openDrawer(e, m.s)}
-                      className={`button button--sm ${m.s === openServer ? 'button--primary' : 'button--secondary'}`}
+                      className={`button button--sm ${m.s === openServer ? 'button--primary' : 'button--secondary'} ${m.d ? styles.exception : ''}`}
                       style={{ fontWeight: 'normal' }}
+                      title={m.d ? '예외 있음' : undefined}
                     >
                       {m.s}
-                      {m.d && <span style={{ color: 'var(--ifm-color-danger)', marginLeft: '4px' }}>†</span>}
                     </Link>
                   ))}
                 </div>
@@ -125,8 +132,8 @@ export default function CellToolList({ cellId }: { cellId: string }) {
         <ReportDrawer
           server={openServer}
           cellId={cellId}
-          url={`${reportsUrl}${openServer}/${cellId}`}
-          editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cellId}.mdx`}
+          url={`${reportsUrl}${openServer}/${cell.axis}/${cellId}`}
+          editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cell.axis}/${cellId}.mdx`}
           onClose={closeDrawer}
         />
       )}

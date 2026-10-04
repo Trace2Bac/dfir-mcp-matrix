@@ -12,14 +12,14 @@
 - **상세 항목**(줄여서 **상세**): 그 질문에 답하는 구현 방식 하나입니다. 예를 들어 `E03.01`은 "실행 환경의 읽기 전용 강제"입니다.
 
 원고 작성자는 MCP 서버마다 각 셀의 어느 상세에 해당하는지 판단하고, 그 결과를 **원고**에 씁니다.
-원고는 서버 하나가 셀 하나에 어떻게 답하는지 적은 문서입니다(`reports/<서버>/<셀ID>.mdx`).
+원고는 서버 하나가 셀 하나에 어떻게 답하는지 적은 문서입니다(`reports/<서버>/<축>/<셀ID>.mdx`).
 원고에는 다음 내용이 들어갑니다.
 
 - **구현**: 그 방식이 서버의 어느 도구나 경로에 있고 어떻게 동작하는지
 - **예외**: 구현에 적은 적용 범위 안에서 그 방식이 적용되지 않는 경우
 - **근거**: 위 설명을 뒷받침하는 자료(주로 기준 커밋의 코드 위치와 발췌)
 
-서버가 해당하는 상세에 예외가 있으면, 화면에서 그 상세 아래 서버 이름 옆에 **예외 표시(†)** 가 붙습니다.
+서버가 해당하는 상세에 예외가 있으면, 화면에서 그 상세 아래 서버 버튼에 **예외 표시**(주황 테두리)가 붙습니다.
 용어의 자세한 정의는 [matrix/README.md의 용어](matrix/README.md#용어)에 있습니다.
 
 ## 매트릭스 보기
@@ -58,8 +58,8 @@ CI는 PR이 열리거나 갱신될 때, 그리고 `main`에 푸시될 때마다 
 ## 저장소 구조
 
 ```
-matrix/          셀 구조와 정의의 원본. 셀 하나 = cells/<ID>.mdx 하나         → matrix/README.md
-reports/         서버별 원고. reports/<서버>/<셀ID>.mdx                      → reports/README.mdx
+matrix/          셀 구조와 정의의 원본. 축 하나 = cells/<축>/ 폴더 하나, 셀 하나 = cells/<축>/<ID>.mdx 하나  → matrix/README.md
+reports/         서버별 원고. reports/<서버>/<축>/<셀ID>.mdx                 → reports/README.mdx
 docs/
   decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
   redesign-plan-2026-09-30.mdx  개편 배경·원칙·셀 경계·옛 셀 대응
@@ -82,7 +82,7 @@ python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·�
 python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
 python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
-python tools/coverage.py <서버>          # reports/<서버>/tools.yaml로 기능→셀 대응표(coverage.mdx)를 만든다
+python tools/coverage.py <서버>          # reports/<서버>/coverage.mdx 머리말의 기능 목록으로 기능→셀 대응표(같은 파일 본문)를 만든다
 ```
 
 명령을 실행하려면 Python 3.10 이상과 `requirements.txt`의 패키지가 필요합니다.

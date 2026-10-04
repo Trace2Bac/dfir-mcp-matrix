@@ -1,0 +1,130 @@
+---
+cell: T06
+details:
+- id: not_implemented
+---
+
+# T06 실행 환경정보 표시
+
+### 미구현
+
+**판단.** Camel은 분석 도구의 버전을 응답·호출 기록·파생물 어디에도 싣지 않는다.
+호출 기록의 명령 항목은 호스트, 실행 파일 경로, 인자, `sudo` 여부, 종료 코드, 완료 여부, 걸린 시간을 남긴다 [1].
+명령 항목에 붙는 맥락 값은 사건 ID, 실행 ID, 작업 흐름·툴킷·도구 이름이고 버전은 없다 [2].
+저장소에 있는 실행 기록에서도 Volatility 3 명령 항목은 실행 파일 경로와 인자만 담는다 [3].
+`Execute` 응답은 스크립트가 출력한 글과 사건 ID·실행 ID 줄로 이루어진다 [4].
+서버가 도구에 버전을 묻거나 도구 출력에서 버전을 읽는 코드는 없어 T05.03·T05.04에 연결할 버전도 없다.
+hayabusa 버전은 설치 주소와 설치 폴더 이름에만 들어간다 [5].
+
+서버 자신의 버전은 `Runtime.AssemblyVersion`으로 읽을 수 있게 두었지만 그 값을 응답·호출 기록에 쓰는 곳이 없다 [6].
+서버는 모델을 부르지 않아 T06.06을 보지 않는다.
+사건 폴더의 Claude Code hook이 클라이언트 대화 기록에서 모델 이름별 토큰 수를 모아 `token-usage.json`에 쓰는 것은 클라이언트 쪽 기록이다 [7].
+
+### 근거
+
+[1] 명령 항목의 필드다.
+
+```csharp
+    /// <summary>
+    /// Records one command execution in the audit trail: the host it ran on, the command and arguments, whether
+    /// it ran under sudo, its exit code, duration, and whether it completed. <c>CaseId</c>/<c>ExecutionId</c>/
+    /// <c>Workflow</c>/<c>Toolkit</c>/<c>Operation</c> are supplied ambiently from the log context. This is the
+    /// row a judge lands on when tracing a finding back to "the specific tool execution that produced it".
+    /// </summary>
+    [DebuggerStepThrough]
+    public static void AuditCommand(string host, string command, string arguments, bool sudo, int? exitCode, long durationMs, bool completed) =>
+        _auditLogger?.ForContext("EventType", "command")
+            .Information("CMD {Host} {Command} {Arguments} (sudo={Sudo} exit={ExitCode} completed={Completed} {DurationMs}ms)",
+                host, command, arguments, sudo, exitCode, completed, durationMs);
+```
+
+[`src/Camel.Runtime/Runtime.cs:185-195`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L185-L195)
+
+[2] 명령 항목의 맥락 값을 쌓는 곳이다.
+
+```csharp
+    public async Task<string?> ExecuteToolTextAsync(string name, string args)
+    {
+        // Attribute the command(s) this runs to this toolkit and tool in the audit trail. The scopes bracket the
+        // awaited execution so the properties flow onto the command-execution event emitted in the environment.
+        using var _tk = PushAuditProperty("Toolkit", this.name);
+        using var _op = PushAuditProperty("Operation", name);
+        var r = await auditEnvironment.ExecuteCommandAsync(Tools[name].Command, args, Tools[name].Sudo);
+```
+
+[`src/Camel.Toolkits/Toolkit.cs:333-339`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Toolkit.cs#L333-L339)
+
+```csharp
+    protected IDisposable AuditScope([System.Runtime.CompilerServices.CallerMemberName] string operation = "") =>
+        new AuditScopeHandle(
+            PushAuditProperty("Workflow", GetType().Name),
+            PushAuditProperty("WorkflowOperation", operation));
+```
+
+[`src/Camel.Workflows/Workflow.cs:53-56`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/Workflow.cs#L53-L56)
+
+[3] 저장소 실행 기록의 명령 항목 예다.
+
+```text
+{"@t":"2026-06-15T14:44:45.5542192Z","@mt":"CMD {Host} {Command} {Arguments} (sudo={Sudo} exit={ExitCode} completed={Completed} {DurationMs}ms)","Host":"192.168.8.117","Command":" /opt/volatility3/bin/vol","Arguments":"-f /home/sansforensics/artifacts/srl2018/base-wkstn-01-mem.img -r json windows.cmdline","Sudo":true,"ExitCode":1,"Completed":false,"DurationMs":2070,"EventType":"command","ExecutionId":"62bcc75f","CaseId":"SRL-2018"}
+```
+
+[`cases/SRL-2018/logs/audit-SRL-2018.clef:6-6`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/cases/SRL-2018/logs/audit-SRL-2018.clef#L6-L6)
+
+[4] `Execute` 응답을 만든다.
+
+```csharp
+        AuditExecution("completed", success: true, durationMs: auditSw.ElapsedMilliseconds);
+        return new CallToolResult
+        {
+            Content = [new TextContentBlock { Text = output.ToString() }, ExecutionBlock(executionId, session.CaseId)],
+        };
+```
+
+[`src/Camel.Server/MCPServer.cs:399-403`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L399-L403)
+
+```csharp
+    static TextContentBlock ExecutionBlock(string executionId, string caseId) =>
+        new() { Text = $"\n[audit] case={caseId} execution={executionId}" };
+```
+
+[`src/Camel.Server/MCPServer.cs:492-493`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L492-L493)
+
+[5] hayabusa 설치 주소다.
+
+```csharp
+    protected override void InstallMissingTools() =>
+        InstallZipRelease("hayabusa",
+            "https://github.com/Yamato-Security/hayabusa/releases/download/v3.9.0/hayabusa-3.9.0-lin-x64-gnu.zip",
+            "/opt/hayabusa", "hayabusa-3.9.0-lin-x64-gnu", "/usr/local/bin/hayabusa");
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineToolkit.cs:22-25`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineToolkit.cs#L22-L25)
+
+[6] 서버 버전을 읽는 속성이다.
+기준 커밋에서 `AssemblyVersion`이 나오는 곳은 이 정의와 [`src/Camel.CLI/Camel.CLI.csproj:10`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.CLI/Camel.CLI.csproj#L10)뿐이다.
+
+```csharp
+    public static Version AssemblyVersion { get; } = Assembly.GetAssembly(typeof(Runtime))!.GetName().Version!;
+```
+
+[`src/Camel.Runtime/Runtime.cs:69-69`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L69-L69)
+
+[7] hook이 모델 이름별 토큰 수를 모은다.
+
+```csharp
+                var msg = n["message"];
+                var usage = msg?["usage"];
+                if (usage is null) continue;
+
+                long Get(string k) => usage[k]?.GetValue<long>() ?? 0;
+                long i = Get("input_tokens"), o = Get("output_tokens"),
+                     cc = Get("cache_creation_input_tokens"), cr = Get("cache_read_input_tokens");
+                var model = msg?["model"]?.GetValue<string>() ?? "unknown";
+
+                a.Input += i; a.Output += o; a.CacheCreate += cc; a.CacheRead += cr; a.Turns++;
+                if (!a.ByModel.TryGetValue(model, out var m)) { m = new long[5]; a.ByModel[model] = m; }
+                m[0]++; m[1] += i; m[2] += o; m[3] += cc; m[4] += cr;
+```
+
+[`src/Camel.CLI/Program.cs:572-583`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.CLI/Program.cs#L572-L583)
