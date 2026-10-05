@@ -108,12 +108,15 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           return (
             <section key={r.id} className={styles.row}>
               <h3 className={styles.rowTitle}>{r.special ? r.name : `${r.id} ${r.name}`}</h3>
-              {(r.inc || r.exc) && (
+              {/* 미구현·비적용 행의 글은 포함 기준이 아니라 그 판정의 뜻이라 이름표 없이 설명으로만 보인다 */}
+              {r.special && r.inc && (
+                <p className={styles.specialDesc}><Sentences text={r.inc} /></p>
+              )}
+              {!r.special && (r.inc || r.exc) && (
                 <dl className={styles.criteria}>
                   {r.inc && (
                     <div>
-                      {/* 미구현·비적용 행의 글은 포함 기준이 아니라 그 판정의 뜻이다 */}
-                      <dt className={r.special ? styles.exc : styles.inc}>{r.special ? '뜻' : '포함'}</dt>
+                      <dt className={styles.inc}>포함</dt>
                       <dd><Sentences text={r.inc} /></dd>
                     </div>
                   )}
