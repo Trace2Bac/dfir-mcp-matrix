@@ -3,11 +3,15 @@ cell: L02
 details:
 - id: L02.03
   exception: true
+- id: L02.06
+  exception: true
+- id: L02.10
+  exception: false
 ---
 
 # L02 기록 구성
 
-### L02.03 실제 실행 명령 기록
+### L02.03 외부 실행 명령 기록
 
 **구현.** 컨테이너 명령 도구는 서버가 붙인 실행 파일 이름·고정 인자와 모델이 준 인자를 합친 인자 배열을 `exec_stream`에 넘긴다 [1].
 `exec_stream`은 명령을 실행한 뒤 이 배열을 공백으로 이어 `command` 문자열을 만들고 출력·종료 코드와 함께 기록 관리기에 넘긴다 [2].
@@ -16,8 +20,31 @@ details:
 어떤 호출이 기록에 남는지는 L01에서 본다.
 
 **예외.** 인자를 공백으로 이으므로 공백이 든 인자 하나와 인자 여러 개를 기록에서 가를 수 없다 [2].
-네트워크에서 심볼을 받는 도구 3개는 실행한 명령 대신 함수 호출 모양의 문자열을 `command`에 쓴다 [4].
-`download_windows_symbol`은 이 문자열에 `overwrite`를 넣지 않아 심볼 파일을 덮어쓴 호출과 새로 받은 호출이 같게 보인다 [4].
+
+서버 안 함수로 심볼을 받는 도구의 함수 호출 모양 문자열은 실제 외부 실행 명령으로 인정하지 않는다 [4].
+그 문자열의 `overwrite` 생략은 요청 내용의 불완전함이며 외부 명령 기록의 예외 사유와 구별한다 [4].
+
+### L02.06 결과 상태·실행 시점 기록
+
+**구현.** 기록 관리기에 넘긴 `CommandRecord`의 시각 `date_run`과 종료 코드 `exit_code`가 요약 목록에 남는다 [5].
+컨테이너 명령은 실행 스트림이 끝난 뒤 객체를 만들어 그 시점을 기록한다 [6].
+서버는 스트림을 정상적으로 읽으면 종료 코드 0을, `DockerException`을 받으면 예외의 반환 코드나 기본값 1을 남긴다 [6].
+심볼을 받는 서버 함수도 성공 때 시각과 종료 코드 0을 기록하며 함수 호출 모양 문자열을 같이 남긴다 [4].
+항목이 남기 전에 예외로 끝나는 경로는 기록 장치의 적용 범위인 L01에서 본다.
+
+**예외.** 기록한 종료 코드가 컨테이너 안 프로세스의 최종 종료 코드와 항상 같은지는 확인하지 못했다 [6][7].
+서버는 스트림에서 종료 코드를 직접 읽지 않고 외부 라이브러리가 던지는 예외에 의존한다 [6].
+저장소가 `python_on_whales`의 버전을 정하지 않아 해당 버전의 스트림·예외 동작을 대조하지 못했다 [7].
+실제 비정상 종료도 시험하지 않았다.
+이는 잘못된 성공 기록이 재현되었다는 뜻이 아니라 외부 동작을 확인하지 못했다는 예외 표시다.
+
+### L02.10 결과 참조·요약값 기록
+
+**구현.** 기록 요약의 `number`는 보관한 출력 파일을 가리키는 번호다 [8].
+기록 관리기는 같은 번호를 파일 이름으로 쓰며 전체 출력을 `<number>.txt`에 저장한다 [8].
+후속 조회는 이 번호로 목록을 찾고 같은 파일을 읽는다 [9].
+심볼 도구의 결과 파일에는 내려받기 안내나 조회 결과가 남으며 심볼 파일 자체와는 구별한다 [4].
+보관 방식은 D01에서, 쓰기 실패는 D09에서 본다.
 
 ### 근거
 
@@ -79,3 +106,134 @@ def run_volatility_command(ctx: Context, arguments: list[str]) -> CommandRecordS
 ```
 
 [`mcp_dfir/tools/volatility.py:57-63`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L57-L63)
+
+[5] 결과 상태와 시각을 가진 객체를 요약한다.
+
+```python
+def date_as_str() -> str:
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+class CommandRecordSummary(BaseModel):
+    number: int = Field(examples=[1])
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    exit_code: int = Field(examples=[0])
+
+
+class CommandRecord(BaseModel):
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    result: str = Field(
+        default="",
+        examples=[
+            "Volatility 3 Framework 2.27.0\n\nPID\tPPID\tImageFileName\tOffset(V)\tThreads\tHandles\tSessionId\tWow64\tCreateTime\tExitTime\tFile output\n\n4\t0\tSystem\t"
+        ],
+    )
+    exit_code: int = Field(examples=[0])
+
+    def summary(self, number: int) -> CommandRecordSummary:
+        return CommandRecordSummary(
+            number=number,
+            command=self.command,
+            date_run=self.date_run,
+            exit_code=self.exit_code,
+        )
+```
+
+[`mcp_dfir/tools/models.py:17-45`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L17-L45)
+
+[6] 컨테이너 실행 종료 뒤 상태와 출력을 기록한다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[7] 외부 실행 라이브러리에 버전 조건이 없다.
+
+```toml
+dependencies = [
+    "attrs",
+    "loguru",
+    "mcp",
+    "python_on_whales",
+    "requests",
+]
+```
+
+[`pyproject.toml:10-16`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/pyproject.toml#L10-L16)
+
+[8] 번호를 부여하고 같은 번호의 출력 파일을 쓴다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:23-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L49)
+
+[9] 출력 번호로 보관 파일을 찾는다.
+
+```python
+    def get_command(self, command_number: int) -> CommandRecord:
+        for command in self.command_summary_list:
+            if command.number == command_number:
+                with open(file=config.command_record_directory / f"{command_number}.txt", encoding="utf-8") as file:
+                    return CommandRecord(
+                        command=command.command,
+                        date_run=command.date_run,
+                        result=file.read(),
+                        exit_code=command.exit_code,
+                    )
+        raise KeyError(f"Could not find command with number {command_number}")
+```
+
+[`mcp_dfir/data_manager.py:51-61`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L51-L61)

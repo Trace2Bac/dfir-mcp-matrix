@@ -33,24 +33,21 @@ details:
 실행 뒤의 비교에서 증거 변경이 드러나면 Volatility는 이미 실행되었지만 항목이 남지 않는다 [4].
 등록하지 않은 도구 이름은 FastMCP가 처리기를 부르기 전에 거부하므로 기록되지 않는다 [7].
 
-### L01.10 클라이언트의 보조 기록
+### L01.10 클라이언트의 MCP 호출 기록
 
-**구현.** 이 방식은 저장소의 클라이언트 `siftpp-investigate`로 서버를 쓸 때만 적용된다 [8].
-클라이언트는 출력 폴더에 자기 호출 기록 `audit.jsonl`을 두고 서버 기록 `mcp-server.jsonl`을 같은 폴더에 쓰게 한다 [8].
-클라이언트 기록은 서버 기록과 같은 `AuditLogger`로 쓰고 서버를 거치지 않는 사건을 남긴다 [8][9].
-그런 사건은 모델 호출마다의 `model_call`, 클라이언트 도구 `submit_finding`·`submit_review`의 결과인 `finding_submitted`·`review_submitted`, 역할 사이의 `agent_message`, 재조사 차례 `iteration`, 조사 시작·끝 `run_start`·`run_end`다 [9][10].
-클라이언트를 거친 서버 도구 호출도 `tool_call`로 한 번 더 남기고 호출한 역할을 `agent`에 적는다 [11].
-서버 기록 `mcp-server.jsonl`과 클라이언트 기록 `audit.jsonl`은 해시 체인을 따로 잇고 서로의 `seq`나 해시를 가리키지 않는다 [8][5].
-서버가 거부해 서버 기록에 남지 않은 호출(범위 밖 `pid` 등)도 클라이언트 기록에는 `exit_code` 1의 `tool_call`로 남는다 [12][11].
+**구현.** 이 방식은 저장소의 클라이언트 `siftpp-investigate`가 `_exec_mcp`를 통해 서버 도구를 부를 때 적용된다 [8].
+클라이언트는 출력 폴더의 `audit.jsonl`에 MCP 도구 이름을 담은 `tool_call` 항목을 서버 기록 `mcp-server.jsonl`과 별도로 남긴다 [9][8].
+호출한 역할은 `agent`에 적는다 [8].
+서버가 거부하여 서버 기록에 남지 않은 호출도 오류 응답이 값으로 돌아오면 클라이언트 기록에 남는다 [10][8].
+서버 기록과 클라이언트 기록은 서로의 항목 ID나 해시를 참조하지 않는다 [9][5].
+이것은 MCP 호출을 별도로 기록하는 방식이며 기록의 내용·위변조 방지는 L02~L04에서 평가하지 않는다.
 다른 MCP 클라이언트로 붙으면 이 기록은 생기지 않는다.
 
-**예외.** 클라이언트가 조사 시작에 부르는 `evidence_metadata`와 조사 끝에 부르는 `verify_evidence_integrity`는 `tool_call`로 남기지 않는다 [10].
-두 결과는 `run_start`의 증거 경로·해시와 `run_end`의 `evidence_unchanged`로만 남는다 [10].
-`submit_review`의 `status`가 허용 값이 아니어서 거부한 호출은 기록되지 않는다 [13].
-Skeptic이 한 차례 안에서 `submit_review`를 여러 번 부르면 마지막 판정만 `review_submitted`로 남는다 [13].
-`submit_finding`에 `claim`이 없으면 `KeyError`가 나서 조사가 중단되고 그 호출은 기록되지 않는다 [14].
-`submit_finding`이나 `submit_review`의 `confidence`가 0~1 밖이면 `Finding`·`SkepticReview`의 값 검사에서 예외가 나서 조사가 중단되고 그 호출은 기록되지 않는다 [15][14][13].
-클라이언트를 거친 서버 도구 호출에서 `mcp.call`이 예외를 내면 `tool_call` 없이 오류 문구만 모델에게 돌려준다 [11].
+모델 호출, 클라이언트 자체 발견사항·검토 제출, 역할 사이 메시지와 조사 시작·끝도 같은 파일에 남지만 L01.10의 연결 근거는 아니다 [11][12].
+
+**예외.** 같은 클라이언트가 조사 시작에 직접 부르는 `evidence_metadata`와 끝에 부르는 `verify_evidence_integrity`는 도구 이름을 가진 호출 항목으로 기록하지 않는다 [12].
+그 결과 일부는 `run_start`·`run_end`에 남지만 어느 MCP 도구를 호출했는지는 기록하지 않는다 [12].
+`_exec_mcp`에서 `mcp.call`이 예외를 내면 도구 호출 항목 없이 오류 문구만 모델에게 돌려준다 [8].
 
 ### 근거
 
@@ -161,39 +158,7 @@ def evidence_metadata() -> str:
 [7] (실행 확인) `pid` -1 호출, 등록하지 않은 이름 `windows.dumpfiles` 호출, 수정 시각이 바뀐 증거로 부른 `vol_info`는 서버 기록에 항목을 남기지 않았다.
 `evidence_metadata` 호출도 항목을 남기지 않았다.
 
-[8] 클라이언트의 기록 경로다.
-
-```python
-    case_id = args.case_id or datetime.now(timezone.utc).strftime("case-%Y%m%d-%H%M%S")
-    out = Path(args.out) if args.out else Path("analysis") / case_id
-    out.mkdir(parents=True, exist_ok=True)
-
-    audit = AuditLogger(out / "audit.jsonl", echo=True if args.echo else None)
-    params = _server_params(evidence, out / "mcp-server.jsonl", args.offline)
-```
-
-[`src/protocol_siftpp/cli.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L110-L115)
-
-[9] 모델 호출 기록이다.
-
-```python
-        u = resp.usage
-        audit.log(
-            "model_call",
-            agent=agent,
-            stop_reason=resp.stop_reason,
-            input_tokens=getattr(u, "input_tokens", None),
-            output_tokens=getattr(u, "output_tokens", None),
-            cache_read_input_tokens=getattr(u, "cache_read_input_tokens", None),
-            cache_creation_input_tokens=getattr(u, "cache_creation_input_tokens", None),
-        )
-```
-
-[`src/protocol_siftpp/orchestrator.py:68-77`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L68-L77)
-
-[10] 조사 시작·끝과 재조사 기록이다: [`src/protocol_siftpp/orchestrator.py:271-309`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L271-L309).
-
-[11] 클라이언트를 거친 서버 도구 호출의 기록이다.
+[8] 클라이언트를 거친 서버 도구 호출의 기록이다.
 
 ```python
     async def _exec_mcp(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
@@ -216,7 +181,20 @@ def evidence_metadata() -> str:
 
 [`src/protocol_siftpp/orchestrator.py:124-139`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L124-L139)
 
-[12] MCP 클라이언트 다리는 JSON으로 읽히지 않는 오류 응답을 `exit_code` 1의 값으로 돌려준다.
+[9] 클라이언트의 기록 경로다.
+
+```python
+    case_id = args.case_id or datetime.now(timezone.utc).strftime("case-%Y%m%d-%H%M%S")
+    out = Path(args.out) if args.out else Path("analysis") / case_id
+    out.mkdir(parents=True, exist_ok=True)
+
+    audit = AuditLogger(out / "audit.jsonl", echo=True if args.echo else None)
+    params = _server_params(evidence, out / "mcp-server.jsonl", args.offline)
+```
+
+[`src/protocol_siftpp/cli.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L110-L115)
+
+[10] MCP 클라이언트 다리는 JSON으로 읽히지 않는 오류 응답을 `exit_code` 1의 값으로 돌려준다.
 
 ```python
     async def call(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -231,98 +209,21 @@ def evidence_metadata() -> str:
 
 [`src/protocol_siftpp/mcp_client.py:56-63`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_client.py#L56-L63)
 
-[13] `submit_review` 처리와 `review_submitted` 기록이다.
+[11] 모델 호출 기록이다.
 
 ```python
-        holder: dict[str, SkepticReview] = {}
-
-        async def execute(name: str, args: dict[str, Any]) -> tuple[str, bool]:
-            if name == "submit_review":
-                try:
-                    status = FindingStatus(args["status"])
-                except (KeyError, ValueError):
-                    return "status must be confirmed | inferred | refuted", True
-                holder["review"] = SkepticReview(
-                    status=status,
-                    confidence=float(args.get("confidence", 0.5)),
-                    refutation_attempt=args.get("refutation_attempt", ""),
-                    rationale=args.get("rationale", ""),
-                )
-                return "Recorded review.", False
-            return await self._exec_mcp(name, args)
-```
-
-[`src/protocol_siftpp/orchestrator.py:217-232`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L217-L232)
-
-```python
-        review = holder.get("review")
-        if review is None:  # skeptic never submitted -> treat as unverified inference
-            review = SkepticReview(
-                status=FindingStatus.inferred,
-                confidence=min(finding.confidence, 0.4),
-                refutation_attempt="no verdict returned",
-                rationale="Skeptic did not submit a review; downgraded to inferred.",
-            )
-        finding.review = review
-        finding.status = review.status
-        finding.confidence = review.confidence
-        finding.updated_at = datetime.now(timezone.utc)
-        self.audit.log(
-            "review_submitted",
-            agent="skeptic",
-            finding_id=finding.id,
-            status=review.status.value,
-            confidence=review.confidence,
+        u = resp.usage
+        audit.log(
+            "model_call",
+            agent=agent,
+            stop_reason=resp.stop_reason,
+            input_tokens=getattr(u, "input_tokens", None),
+            output_tokens=getattr(u, "output_tokens", None),
+            cache_read_input_tokens=getattr(u, "cache_read_input_tokens", None),
+            cache_creation_input_tokens=getattr(u, "cache_creation_input_tokens", None),
         )
 ```
 
-[`src/protocol_siftpp/orchestrator.py:246-264`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L246-L264)
+[`src/protocol_siftpp/orchestrator.py:68-77`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L68-L77)
 
-[14] `submit_finding` 처리다.
-
-```python
-    def _record_finding(self, args: dict[str, Any], iteration: int) -> Finding:
-        evidence: list[Evidence] = []
-        for tool in args.get("cited_tools", []):
-            evs = self.evidence_by_tool.get(tool)
-            if evs:
-                evidence.append(evs[-1])
-        try:
-            severity = Severity(args.get("severity", "medium"))
-        except ValueError:
-            severity = Severity.medium
-        finding = Finding(
-            claim=args["claim"],
-            severity=severity,
-            confidence=float(args.get("confidence", 0.5)),
-            mitre_attack=args.get("mitre_attack", []),
-            evidence=evidence,
-            iteration=iteration,
-            status=FindingStatus.draft,
-        )
-        self.findings.append(finding)
-```
-
-[`src/protocol_siftpp/orchestrator.py:153-172`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L153-L172)
-
-[15] 두 모델의 `confidence`는 0 이상 1 이하로 검사한다.
-
-```python
-class SkepticReview(BaseModel):
-    """The Skeptic's adversarial review of one finding."""
-
-    status: FindingStatus
-    confidence: float = Field(..., ge=0.0, le=1.0)
-```
-
-[`src/protocol_siftpp/schema.py:59-63`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/schema.py#L59-L63)
-
-```python
-class Finding(BaseModel):
-    id: str = Field(default_factory=lambda: uuid4().hex[:12])
-    claim: str
-    severity: Severity = Severity.medium
-    confidence: float = Field(0.5, ge=0.0, le=1.0)
-```
-
-[`src/protocol_siftpp/schema.py:71-75`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/schema.py#L71-L75)
+[12] 조사 시작·끝과 재조사 기록이다: [`src/protocol_siftpp/orchestrator.py:271-309`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L271-L309).

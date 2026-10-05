@@ -5,11 +5,17 @@ details:
   exception: true
 - id: L02.05
   exception: true
+- id: L02.06
+  exception: false
+- id: L02.10
+  exception: false
+- id: L02.08
+  exception: true
 ---
 
 # L02 기록 구성
 
-### L02.03 실제 실행 명령 기록
+### L02.03 외부 실행 명령 기록
 
 **구현.** 외부 도구 실행기는 실제로 실행한 argv를 공백으로 이어 결과의 `cmd`에 둔다 [1].
 `sudo`가 붙은 명령이면 `sudo`까지 들어간다 [1].
@@ -33,6 +39,34 @@ Velociraptor는 API 설정 파일 경로를 `<redacted>`로 바꾼다 [4].
 **예외.** 모델 호출 기록에는 시스템 프롬프트 본문이 없고 종류 이름만 있다 [6].
 모델 답 원문은 형식 오류가 났을 때만 남긴다 [11].
 정책 식별값은 `reason.evaluate_finding`의 성공한 검토에만 붙는다 [9].
+
+### L02.06 결과 상태·실행 시점 기록
+
+**구현.** 외부 도구 실행의 `tool_call` 항목은 끝난 시각 `ts`, 성공 여부 `success`, 종료 코드 `exit_code`, 소요 시간 `elapsed_seconds`를 담는다 [3].
+시간 초과이면 `timed_out`도 남긴다 [12].
+서버 모델 호출도 완료 항목의 `success`·`ts`와 실패 때의 오류 문구를 남긴다 [8].
+이는 실행이 끝난 뒤 상태와 시점을 남기는 방식이며 시작·끝 항목 둘이 있어야 하는 것은 아니다.
+별도 프로세스로 시작한 작업의 최종 실행 항목은 완료 작업을 처음 조회할 때 남으므로 조회하지 않은 작업에는 그 항목이 없다(L01.09) [13].
+
+### L02.10 결과 참조·요약값 기록
+
+**구현.** 외부 실행의 `tool_call` 항목은 캡처한 표준 출력의 문자 수 `stdout_chars`와 줄 수 `stdout_lines`를 남긴다 [12].
+출력을 별도 파일에 쓰면 `stdout_path`를, 도구가 만든 출력 파일을 받으면 `output_path`를 남긴다 [12][14].
+문자 수·줄 수는 캡처한 문자열의 값이며 바이트 수나 출력 파일 전체의 크기는 아니다 [12].
+파일 쓰기 실패 때 경로 대신 남는 오류와 파일 용량 상한은 D09·D01에서 본다 [14].
+검토 중 추가 조회한 결과도 요청별 행 수·문자 수와 별도 파일 경로를 남긴다 [15].
+검토 성공 항목에 덧붙이는 evidence packet에는 검토 때 읽은 보관 출력 바이트의 `output_sha256`이 담긴다 [9][16].
+읽기 용량 상한으로 앞부분만 읽을 수 있으므로 이 값이 실행 출력 전체의 해시인지는 읽은 범위와 함께 확인해야 한다 [16].
+
+### L02.08 호출 ID로 항목 연결
+
+**구현.** 이 방식은 서버 모델 검토 중 추가 근거를 조회하는 경로의 기록에 적용된다 [15][17].
+추가 조회 항목 `reason_evidence_fetch`는 그 조회를 요청한 검토 항목의 호출 ID를 `reason_call_id`에 남긴다 [15].
+그래서 같은 검토 중 남긴 조회 항목을 원래 검토 항목과 연결할 수 있다 [17].
+다른 분석 호출을 근거로 가리키는 `input_call_ids`는 별도 호출 사이의 계보이므로 D02에서 본다 [15].
+
+**예외.** 모델 호출의 시작 항목 `call_initiated`와 끝 항목 `reason_call`은 각각 새 `call_id`를 받고 같은 요청을 묶는 ID를 공유하지 않는다 [18][8].
+시작 기록을 부르는 곳도 반환된 ID를 끝 기록에 넘기지 않으므로 도구 이름과 시각만으로 짝을 짐작한다 [19].
 
 ### 근거
 
@@ -215,3 +249,260 @@ def review_policy():
 ```
 
 [`tools/reasoning.py:1846-1850`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1846-L1850)
+
+[12] 표준 출력의 요약값과 시간 초과를 기록한다.
+
+```python
+                "stderr": stderr[:512] if stderr else "",
+            }
+            _mcp_tool = current_mcp_tool.get()
+            if _mcp_tool:
+                entry["mcp_tool"] = _mcp_tool
+            if timed_out:
+                entry["timed_out"] = True
+            if stdout_excerpt:
+                entry["stdout_excerpt"] = stdout_excerpt[:600]
+            if stdout_full is None and stdout_excerpt:
+                stdout_full = stdout_excerpt
+            if stdout_full is not None:
+                # Stamped even when EMPTY (0) so "ran and produced nothing"
+                # is distinguishable from "output never persisted".
+                entry["stdout_chars"] = len(stdout_full)
+                entry["stdout_lines"] = (stdout_full.count("\n") + (
+                    0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
+                # Always kept: .tool_output/<cid>.txt is the one predictable place
+                # a call's output lives. Short outputs used to be excerpt-only and
+                # every read of them failed "file not found" (2026-09-23 runs).
+                if stdout_full:
+                    self._write_stdout_sidecar(cid, stdout_full, entry)
+            if output_path:
+                entry["output_path"] = str(output_path)
+            if exit_meaning:
+                entry["exit_meaning"] = str(exit_meaning)[:200]
+            if gate:
+                entry["gate"] = str(gate)[:80]
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+```
+
+[`core/execution_log.py:1500-1529`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1500-L1529)
+
+[13] 별도 프로세스의 완료를 조회할 때 최종 실행 항목을 쓴다.
+
+```python
+    # Log the underlying command as a normal, citable tool_call (once).
+    res = {
+        "success": rc == 0, "stdout": stdout[:2000], "stderr": stderr[:2000],
+        "exit_code": rc, "truncated": len(stdout) > 2000, "retries": 0,
+        "elapsed_seconds": elapsed, "timed_out": timed_out,
+        "cmd": state["cmd"], "output_path": state["output_dir"],
+        "_stdout_full": stdout, "_stdout_chars": len(stdout),
+    }
+    try:
+        from core.executor import _log_tool
+        _log_tool(res)
+        cid = res.get("_trudi_call_id")
+    except Exception:
+        cid = None
+```
+
+[`core/jobs.py:139-152`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/jobs.py#L139-L152)
+
+[14] 출력 파일 경로나 쓰기 오류를 항목에 붙인다.
+
+```python
+    def _write_stdout_sidecar(self, cid: int, text: str, entry: dict) -> None:
+        """Persist the complete stdout for `cid`. Called from record_tool_call
+        between _next_id() and _append_entry() — no lock is held across the
+        write and the filename is unique per cid, so the _flush re-entrancy
+        hazard does not apply. Never raises: a failed sidecar is recorded on
+        the entry (`stdout_sidecar_error`) and the entry is still written."""
+        final, partial, err = self._write_sidecar_text(f"{cid}.txt", text)
+        if final:
+            entry["stdout_path"] = final
+            if partial:
+                entry["stdout_partial"] = True
+        elif err:
+            _warn(f"stdout sidecar for call {cid} failed: {err}")
+            entry["stdout_sidecar_error"] = err
+```
+
+[`core/execution_log.py:1549-1562`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1549-L1562)
+
+[15] 추가 조회의 검토 호출 ID·요약값·파일 경로를 기록한다.
+
+```python
+    def record_reason_evidence_fetch(
+        self,
+        reason_call_id: int,
+        requests: list[dict],
+        input_call_ids: list[int] | None = None,
+        results: list[str] | None = None,
+    ) -> int:
+        """One entry per EVIDENCE_REQUEST round: what the reviewer asked for and
+        what came back (call_id, query, columns, file, rows_returned,
+        total_rows, status). This is the grounding record behind a verdict —
+        "CHALLENGED after inspecting the 4720 rows" vs "on a 600-char excerpt".
+
+        `results[i]` is the text returned to the reviewer for `requests[i]`.
+        It is persisted as a sidecar (`.tool_output/fetch-<cid>-<n>.txt`,
+        `result_path` on the request) with a short inline `result_excerpt`,
+        so the entry stays small and the dashboard can show the exact rows.
+        Fail-open: never breaks a reviewer call."""
+        try:
+            with self._lock:
+                if self._path is None:
+                    return 0
+                cid = self._next_id()
+                entry: dict = {
+                    "call_id": cid,
+                    "type": "reason_evidence_fetch",
+                    "ts": _utcnow(),
+                    "reason_call_id": int(reason_call_id or 0),
+                    "requests": [
+                        {k: r.get(k) for k in ("call_id", "query", "columns", "file",
+                                               "rows_returned", "total_rows", "bytes",
+                                               "status", "source_kind", "source_complete",
+                                               "clipped_rows", "truncation_reason",
+                                               "missing_columns", "columns_ignored",
+                                               "scan_incomplete") if k in r}
+                        for r in (requests or []) if isinstance(r, dict)
+                    ],
+                }
+                texts = list(results or [])
+                for i, req in enumerate(entry["requests"]):
+                    text = texts[i] if i < len(texts) else ""
+                    if not isinstance(text, str) or not text:
+                        continue
+                    req["result_excerpt"] = text[:FETCH_RESULT_EXCERPT_CHARS]
+                    req["result_chars"] = len(text)
+                    path, partial, err = self._write_sidecar_text(
+                        f"fetch-{cid}-{i + 1}.txt", text)
+                    if path:
+                        req["result_path"] = path
+                        if partial:
+                            req["result_partial"] = True
+                    elif err:
+                        req["result_sidecar_error"] = err
+                if input_call_ids:
+                    entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+                elif self._last_dair_cid:
+```
+
+[`core/execution_log.py:1271-1325`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1271-L1325)
+
+[16] 검토에 읽은 출력의 용량을 제한하고 그 바이트를 해시한다.
+
+```python
+                    with open(path, 'rb') as stream:
+                        raw = stream.read(MAX_SOURCE_BYTES + 1)
+                    if len(raw) > MAX_SOURCE_BYTES:
+                        # Search the leading MAX_SOURCE_BYTES (whole lines) and
+                        # mark the source partial, rather than refusing review of
+                        # a large extractor output (MFT/EVTX CSVs). A miss over a
+                        # partial scan is never read as absence.
+                        cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                        raw, scan_truncated = raw[:cut], True
+                except OSError as exc:
+                    raise PacketError(f'Cannot read output for call {cid}: {exc}', 'needs-evidence') from exc
+                if before != file_version(path):
+                    raise PacketError('Evidence changed while constructing packet', 'retryable-review-failure')
+                watches[path] = before
+            else:
+                raw = source.text.encode('utf-8')
+            if len(raw) > MAX_SOURCE_BYTES:
+                cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                raw, scan_truncated = raw[:cut], True
+            if scanned_bytes + len(raw) > MAX_SCAN_BYTES:
+                cut = raw.rfind(b'\n', 0, max(0, MAX_SCAN_BYTES - scanned_bytes)) + 1
+                raw, scan_truncated = raw[:cut], True
+```
+
+[`core/evidence_packets.py:264-285`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L264-L285)
+
+```python
+            evidence.append({'call_id': cid, 'kind': kind,
+                             'path': path or None, 'output_sha256': hashlib.sha256(raw).hexdigest(),
+                             'output_bytes': len(raw), 'retained_output_complete': retained_complete,
+                             'scan_truncated': scan_truncated,
+                             'search_scope': 'only this retained output, not the entire original evidence',
+                             'extractor_scope_complete': entry.get('scope_complete'),
+                             'provenance': provenance, 'selections': selections})
+```
+
+[`core/evidence_packets.py:310-316`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L310-L316)
+
+[17] 한 검토 안의 추가 조회를 원래 검토 호출 ID로 기록한다.
+
+```python
+    reqs = result.get("evidence_requests") or []
+    if not reqs:
+        return result
+    cid = result.get("_trudi_call_id") or 0
+    from core.execution_log import log
+    rounds, fetches = 0, []
+    tok_in = int(result.get("input_tokens") or 0)
+    tok_out = int(result.get("output_tokens") or 0)
+    user_r = user
+    while reqs and rounds < COMPAT_EVIDENCE_ROUNDS:
+        texts: list[str] = []
+        block, recs = _resolve_evidence_requests(reqs, input_call_ids, COMPAT_EVIDENCE_ROUND_CHARS,
+                                                evidence_packet=evidence_packet, texts_out=texts)
+        rounds += 1
+        fetches.extend(recs)
+        try:
+            log.record_reason_evidence_fetch(
+                cid, recs,
+                input_call_ids=[r["call_id"] for r in recs if r.get("status") == "ok"] or None,
+                results=texts)
+```
+
+[`tools/reasoning.py:1690-1709`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L1690-L1709)
+
+[18] 시작 항목은 새 ID로 쓰고 반환한다.
+
+```python
+    def record_call_initiated(
+        self,
+        tool: str,
+        backend: str,
+        inputs: dict,
+        input_call_ids: list[int] | None = None,
+    ) -> int:
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"call_initiated: {tool}")
+            entry: dict = {
+                "call_id": self._next_id(),
+                "type": "call_initiated",
+                "ts": _utcnow(),
+                "tool": tool,
+                "backend": backend,
+                "inputs": inputs,
+            }
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            self._append_entry(entry)
+            return entry["call_id"]
+```
+
+[`core/execution_log.py:1728-1749`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/execution_log.py#L1728-L1749)
+
+[19] 시작 항목의 ID를 보관하지 않고 모델을 호출한다.
+
+```python
+        if _log:   # evidence-request rounds ≥ 2 stay off the trace window
+            try:
+                from core.execution_log import log as _elog
+                _elog.record_call_initiated(tool_name, "openai-compat", initiated,
+                                            input_call_ids=input_call_ids)
+            except Exception as _e:
+                import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
+
+        try:
+            resp = httpx.post(
+                f"{url.rstrip('/')}/v1/chat/completions",
+                json={
+```
+
+[`tools/reasoning.py:708-719`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/reasoning.py#L708-L719)
