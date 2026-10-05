@@ -1,0 +1,89 @@
+---
+cell: R01
+details:
+- id: R01.01
+  exception: false
+- id: R01.06
+  exception: false
+- id: R01.08
+  exception: false
+---
+
+# R01 도구 출력 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 Volatility 도구 9개의 응답에 있다 [1].
+서버는 Volatility를 JSON 렌더러(`-r json`)로 실행하고 표준 출력 전체를 JSON으로 읽는다 [1][2].
+읽히면 그 값을 `result`에, 읽히지 않으면 출력 글을 `result_text`에 넣는다 [2].
+서버는 행의 필드를 고르거나 이름을 바꾸거나 값을 바꾸지 않는다 [2].
+응답 전체는 `json.dumps`로 다시 글로 바꾸므로 Volatility가 쓴 들여쓰기는 남지 않고 키 차례와 값, 구조는 그대로 남는다 [2][3].
+`pstree`처럼 하위 행을 `__children`에 넣은 중첩 구조도 그대로 전달한다 [2][4].
+
+서버가 더하는 것은 실행 정보 필드(`tool`·`plugin`·`command`·`exit_code`·`timed_out`·`evidence_sha256`·`integrity_ok`·`output_sha256`·`output_bytes`·`duration_ms`·`row_count`·`truncated`·`stderr`)다 [2].
+`output_sha256`은 잘리기 전 표준 출력 전체의 해시다 [2].
+서버는 출력 전체를 보관하지 않으므로 이 해시는 같은 명령을 다시 실행한 출력과 대조할 때만 쓸 수 있다(D01).
+잘림은 R02에서 본다.
+
+### R01.06 시간 변환 전 값 유지
+
+**구현.** 서버는 시각 값을 바꾸지 않고 Volatility JSON 렌더러가 낸 문자열을 그대로 전달한다 [2].
+Volatility 3 2.28.0의 JSON 렌더러는 `datetime` 값을 `isoformat()` 문자열로 출력한다 [5].
+`pslist`·`psscan`의 생성·종료 시각, `netscan`의 연결 생성 시각, `dlllist`의 적재 시각 같은 값이 이 문자열로 `result`에 실린다 [5].
+
+### R01.08 시간대·단위·정밀도 표시
+
+**구현.** Volatility 3 2.28.0은 Windows FILETIME을 UTC 시간대가 붙은 `datetime`으로 바꾼다 [6].
+JSON 렌더러의 `isoformat()`은 이 값에 `+00:00` 오프셋을 붙여 출력하고 서버는 그 문자열을 바꾸지 않는다 [5][2].
+그래서 응답의 시각 문자열에는 시간대가 값으로 실린다.
+FILETIME이 0이면 Volatility는 값 대신 해당 없음 표시를 내고 JSON 렌더러는 이를 `null`로 출력한다 [5][6].
+범위를 벗어나 변환할 수 없는 FILETIME도 Volatility가 변환 불가 표시를 내므로 `null`로 출력된다 [5][6].
+서버 문구나 도구 설명은 시간대를 따로 말하지 않는다 [7].
+
+### 근거
+
+[1] 인자 배열에 JSON 렌더러를 정한다.
+
+```python
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:158-163`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L158-L163)
+
+[2] 출력을 읽고 응답을 만드는 부분이다: [`src/protocol_siftpp/mcp_server/volatility.py:124-131`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L124-L131), [`src/protocol_siftpp/mcp_server/volatility.py:186-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L186-L225).
+
+```python
+def _maybe_json(text: str) -> tuple[Any, bool]:
+    text = text.strip()
+    if not text:
+        return None, False
+    try:
+        return json.loads(text), True
+    except json.JSONDecodeError:
+        return None, False
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:124-131`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L124-L131)
+
+[3] 응답을 글로 바꾸는 함수다.
+
+```python
+def _dump(result: dict) -> str:
+    return json.dumps(result, ensure_ascii=False, default=str)
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:53-54`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L53-L54)
+
+[4] Volatility 3 2.28.0의 JSON 렌더러는 하위 행을 부모 행의 `__children`에 넣는다: [`volatility3/cli/text_renderer.py:578-608`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L578-L608).
+`windows.pstree`는 프로세스 깊이를 행의 깊이로 준다: [`volatility3/framework/plugins/windows/pstree.py:153`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pstree.py#L153).
+
+[5] Volatility 3 2.28.0 JSON 렌더러의 값 변환이다: [`volatility3/cli/text_renderer.py:534-555`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L534-L555), [`volatility3/cli/text_renderer.py:592-594`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L592-L594).
+
+[6] Volatility 3 2.28.0이 FILETIME을 바꾸는 함수다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28).
+
+[7] 도구 설명이다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).

@@ -1,0 +1,206 @@
+---
+cell: L02
+details:
+- id: L02.03
+  exception: false
+- id: L02.06
+  exception: true
+---
+
+# L02 기록 구성
+
+### L02.03 실제 실행 명령 기록
+
+**구현.** Volatility 도구의 `tool_call` 항목은 실제로 실행한 인자 배열을 `command`에 목록으로 남긴다 [1].
+목록에는 `vol` 실행 파일 경로, 증거 경로, `--offline` 여부, 플러그인 이름, `--pid`와 그 값이 들어 있다 [1][2].
+인자를 목록으로 남기므로 인자 사이의 경계가 그대로 남는다 [1].
+모델이 보낸 인자는 따로 남지 않고 `pid`는 `command` 안의 `--pid` 값으로만 남는다 [1][2].
+항목에는 MCP 도구 이름 `tool`, 표준 출력의 SHA-256 `output_sha256`과 바이트 수 `output_bytes`, 증거 기준 해시 `evidence_sha256`도 남는다 [1].
+Volatility 출력 자체와 표준 오류는 기록에 남지 않는다 [1].
+
+`agent`에는 환경변수 `SIFTPP_AGENT` 값이 서버 프로세스마다 하나로 정해져 남는다 [3].
+클라이언트 `siftpp-investigate`는 자기 환경변수를 그대로 서버에 넘기고 이 값을 역할마다 바꾸지 않는다 [3].
+그래서 Investigator와 Skeptic의 호출이 서버 기록에는 같은 `agent` 값으로 남고 사용자 환경에 이 값이 없으면 `investigator`다 [3][4].
+호출한 역할은 클라이언트 기록의 `tool_call`에 따로 남는다(L01.10) [5].
+
+### L02.06 실행 시작·종료·결과 상태 기록
+
+**구현.** `tool_call` 항목은 실행이 끝난 뒤 한 번 쓰이고 기록 시각 `ts`, 걸린 시간 `duration_ms`, 종료 코드 `exit_code`를 담는다 [1][6].
+시작 시각은 따로 남지 않고 `ts`에서 `duration_ms`를 빼서 얻는다 [6].
+`verify_evidence_integrity`의 `evidence_integrity` 항목은 기준 해시, 다시 계산한 해시, 같은지 여부 `unchanged`를 담는다 [7].
+
+**예외.** 시간 제한에 걸려 끊긴 실행은 `exit_code` -1로만 남고 응답에 있는 `timed_out` 필드는 기록에 없다 [1][8].
+표준 오류 끝에 붙이는 `[timed out]`도 기록에는 남지 않는다 [1][8].
+POSIX에서는 신호 1로 끝난 프로세스의 종료 코드도 -1이라 기록만으로는 시간 초과와 구별되지 않는다 [9].
+
+### 근거
+
+[1] `tool_call` 항목에 넘기는 값이다.
+
+```python
+        self.audit.tool_call(agent=self.agent, tool=tool, command=argv,
+                             output_sha256=out_sha, output_bytes=len(stdout),
+                             duration_ms=duration_ms, exit_code=returncode,
+                             evidence_sha256=self.guard.sha256)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:189-192`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L189-L192)
+
+`AuditLogger.tool_call`이 남기는 필드다.
+
+```python
+    def tool_call(self, *, agent: str, tool: str, command: list[str],
+                  output_sha256: str, output_bytes: int, duration_ms: int,
+                  exit_code: int = 0, tokens: int | None = None,
+                  evidence_sha256: str | None = None) -> dict[str, Any]:
+        return self.log("tool_call", agent=agent, tool=tool, command=command,
+                        output_sha256=output_sha256, output_bytes=output_bytes,
+                        duration_ms=duration_ms, exit_code=exit_code, tokens=tokens,
+                        evidence_sha256=evidence_sha256)
+```
+
+[`src/protocol_siftpp/audit.py:97-104`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L97-L104)
+
+[2] 인자 배열이다.
+
+```python
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:158-163`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L158-L163)
+
+[3] `agent` 값은 서버를 만들 때 환경변수에서 한 번 읽는다.
+클라이언트는 자기 환경변수 전체에 증거·기록 경로만 더해 서버에 넘기고 `SIFTPP_AGENT`를 따로 정하지 않는다.
+
+```python
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:36-41`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L36-L41)
+
+```python
+def _server_params(evidence: Path, server_audit: Path, offline: bool) -> StdioServerParameters:
+    env = {
+        **os.environ,
+        "SIFTPP_EVIDENCE": str(evidence),
+        "SIFTPP_AUDIT_LOG": str(server_audit),
+    }
+    if offline:
+        env["SIFTPP_VOL_OFFLINE"] = "1"
+    return StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "protocol_siftpp.mcp_server.server"],
+        env=env,
+    )
+```
+
+[`src/protocol_siftpp/cli.py:48-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L48-L60)
+
+[4] (실행 확인) 서버를 `SIFTPP_AGENT` 없이 실행하면 모든 `tool_call` 항목의 `agent`가 `investigator`다.
+
+[5] 클라이언트 기록의 `tool_call`은 호출한 역할을 `agent`에 적는다.
+
+```python
+        self.audit.tool_call(
+            agent=self._agent,
+            tool=name,
+            command=result.get("command", [name]),
+            output_sha256=sha or "",
+            output_bytes=result.get("output_bytes", 0),
+            duration_ms=result.get("duration_ms", 0),
+            exit_code=result.get("exit_code", 0),
+            evidence_sha256=result.get("evidence_sha256"),
+        )
+```
+
+[`src/protocol_siftpp/orchestrator.py:130-139`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L130-L139)
+
+[6] 항목을 쓰는 시각과 걸린 시간이다.
+
+```python
+    def log(self, event: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **fields,
+                "prev_hash": self._prev_hash,
+            }
+            record["hash"] = sha256_hex(self._prev_hash + _canonical(record))
+            self._prev_hash = record["hash"]
+```
+
+[`src/protocol_siftpp/audit.py:73-84`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L73-L84)
+
+```python
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout_s,
+            )
+            timed_out = False
+            stdout = proc.stdout or b""
+            stderr = proc.stderr or b""
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\n[timed out]"
+            returncode = -1
+        duration_ms = int((time.monotonic() - started) * 1000)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:166-183`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L166-L183)
+
+[7] 대조 결과 항목이다.
+
+```python
+    def evidence_integrity(self, *, path: str | Path, sha256_before: str,
+                           sha256_after: str) -> dict[str, Any]:
+        return self.log("evidence_integrity", path=str(path),
+                        sha256_before=sha256_before, sha256_after=sha256_after,
+                        unchanged=(sha256_before == sha256_after))
+```
+
+[`src/protocol_siftpp/audit.py:114-118`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L114-L118)
+
+[8] 시간 초과 처리와 응답의 `timed_out`이다.
+
+```python
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\n[timed out]"
+            returncode = -1
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:178-182`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L178-L182)
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-213`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L213)
+
+[9] Python 3.12 문서는 `Popen.returncode`가 음수 -N이면 자식이 신호 N으로 끝났다는 뜻이라고 적는다(POSIX만 해당): [`subprocess.Popen.returncode`](https://docs.python.org/3.12/library/subprocess.html#subprocess.Popen.returncode).
+CPython 3.12.13은 이 값을 `os.waitstatus_to_exitcode`로 정한다: [`Lib/subprocess.py:1961-1971`](https://github.com/python/cpython/blob/3bb231a6a5dc02b95658877318bf61501a7209e9/Lib/subprocess.py#L1961-L1971).

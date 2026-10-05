@@ -1,0 +1,140 @@
+---
+cell: P01
+details:
+- id: not_implemented
+---
+
+# P01 분석 방법 적합성 확인
+
+### 미구현
+
+**판단.** 서버는 증거 형식이나 OS를 판별하지 않고 고른 플러그인이 증거에 맞는지 대조하지 않는다.
+증거 파일을 열 때 서버가 확인하는 것은 파일이 있는지, 크기, 수정 시각, SHA-256뿐이다 [1].
+실행할 수 있는 플러그인은 모두 Windows 메모리용 `windows.*` 플러그인 9개이고 증거가 Windows 메모리 이미지인지 보지 않고 실행한다 [2][3].
+도구 설명과 `evidence_metadata`의 도구 요약은 각 플러그인이 무엇을 보여 주는지 안내할 뿐이다 [2][4].
+
+메모리 이미지의 계층 구성과 심볼은 Volatility 3이 스스로 찾는다.
+맞지 않는 입력이면 Volatility가 요구 조건을 채우지 못했다는 글과 함께 종료 코드 1로 끝나고 서버는 그 출력과 종료 코드를 그대로 돌려준다 [3][5].
+메모리 이미지가 아닌 합성 파일로 `vol_pslist`를 부르면 `exit_code` 1과 `Unsatisfied requirement` 글이 담긴 정상 응답이 돌아온다 [5].
+
+증거 후보를 확장자로 고르는 코드는 사용자 CLI `siftpp-download-case`에만 있다 [6].
+이 CLI는 내려받은 압축을 푼 뒤 메모리 이미지 확장자를 가진 파일을 크기순으로 후보로 출력하고 서버는 이 결과를 읽지 않는다 [6].
+
+### 근거
+
+[1] 증거를 열 때 확인하는 값이다.
+
+```python
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+        g = cls(path=p)
+        st = p.stat()
+        g.size = st.st_size
+        g._mtime_ns = st.st_mtime_ns
+        g.sha256 = g.full_sha256()  # acquisition hash (chain of custody)
+        return g
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:98-108`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L98-L108)
+
+[2] 서버가 실행하는 플러그인 목록이다.
+
+```python
+# Curated, READ-ONLY allowlist. Each plugin only reads the image and prints a
+# table; none writes, dumps, or touches the network. Dumping plugins
+# (windows.dumpfiles, windows.memmap --dump, *.procdump, ...) are deliberately
+# absent, so they cannot be invoked through this server.
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:42-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L42-L67)
+
+[3] 실행 전 확인은 도구 이름과 `pid`뿐이고 증거 형식은 보지 않는다.
+
+```python
+    def run(self, tool: str, *, pid: int | None = None) -> dict[str, Any]:
+        spec = _BY_TOOL.get(tool)
+        if spec is None:
+            # Architectural guard: only curated read-only tools may run.
+            raise ValueError(f"Tool {tool!r} is not an allowed read-only tool")
+        if pid is not None:
+            if not spec.takes_pid:
+                raise ValueError(f"{tool} does not take a pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                raise ValueError("pid must be a non-negative integer")
+
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+
+        self.guard.assert_unchanged()  # before
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:147-165`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L147-L165)
+
+[4] `evidence_metadata`가 돌려주는 도구 요약이다.
+
+```python
+@mcp.tool()
+def evidence_metadata() -> str:
+    """Evidence path, size, acquisition sha256 (chain of custody), and the list
+    of available read-only tools. Call this first."""
+    r = get_runner()
+    return _dump({
+        "path": str(r.guard.path),
+        "sha256": r.guard.sha256,
+        "bytes": r.guard.size,
+        "read_only": True,
+        "tools": [{"name": p.tool, "summary": p.summary} for p in READ_ONLY_PLUGINS],
+    })
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:57-68`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L68)
+
+[5] (실행 확인) 1,216바이트 합성 파일로 `vol_pslist`를 부른 응답은 `isError`가 거짓이고 `exit_code`가 1이다.
+`result_text`는 `Unsatisfied requirement plugins.PsList.kernel.layer_name`으로 시작하고 `stderr`는 `Unable to validate the plugin requirements`를 담는다.
+
+[6] 사용자 CLI가 확장자로 증거 후보를 고른다.
+
+```python
+MEMORY_SUFFIXES = {".raw", ".mem", ".vmem", ".dmp", ".lime", ".bin", ".img"}
+```
+
+[`src/protocol_siftpp/sample_case.py:35-35`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/sample_case.py#L35-L35)
+
+```python
+def memory_candidates(paths: list[Path]) -> list[Path]:
+    candidates = [p for p in paths if p.suffix.lower() in MEMORY_SUFFIXES]
+    if candidates:
+        return sorted(candidates, key=lambda p: p.stat().st_size, reverse=True)
+    return sorted(paths, key=lambda p: p.stat().st_size, reverse=True)
+```
+
+[`src/protocol_siftpp/sample_case.py:98-102`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/sample_case.py#L98-L102)

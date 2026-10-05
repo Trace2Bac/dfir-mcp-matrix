@@ -1,0 +1,130 @@
+---
+cell: R04
+details:
+- id: not_implemented
+---
+
+# R04 해석 한계 안내
+
+### 미구현
+
+**판단.** 서버의 도구 설명, 응답 어디에도 결과의 해석 한계나 추가 확인이 필요하다는 점을 적지 않는다.
+도구 설명은 각 플러그인이 무엇을 보여 주는지만 적는다 [1].
+`evidence_metadata`가 돌려주는 도구 요약도 용도를 적을 뿐이다 [2].
+`vol_psscan` 요약의 "reveals hidden/terminated procs pslist misses"는 플러그인의 용도를 말할 뿐 결과가 무엇을 증명하지 못하는지 말하지 않는다 [2].
+서버에는 서버 지침, MCP 리소스, MCP 프롬프트가 없다 [3].
+Volatility 도구의 응답에는 실행 정보 필드만 더하고 결과에 따라 붙이는 주의 문구가 없다 [4].
+
+해석 주의는 클라이언트 `siftpp-investigate`의 시스템 프롬프트에 있다 [5].
+Investigator 프롬프트는 `vol_pslist`·`vol_pstree`·`vol_cmdline`이 빈 결과여도 시스템이 깨끗하다는 증거가 아니라 보이는 범위의 한계로 보라고 적는다 [5].
+`vol_netscan`에만 나온 프로세스 이름은 실행을 증명하지 못하니 `vol_psscan`으로 확인하라고도 적는다 [5].
+Skeptic 프롬프트도 메모리 보기 하나에 기댄 주장을 조심하고 `malfind`의 알려진 오탐을 찾아보라고 적는다 [6].
+이 문구는 클라이언트 쪽 프롬프트라 다른 클라이언트로 붙으면 모델에게 전달되지 않는다.
+
+### 근거
+
+[1] 도구 설명이다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[2] 도구 요약이다.
+
+```python
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:46-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L46-L67)
+
+[3] (실행 확인) 초기화 응답의 `instructions`가 비어 있고 `resources/list`와 `prompts/list`는 빈 목록을 돌려준다.
+
+[4] Volatility 도구의 응답 필드다.
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[5] Investigator 시스템 프롬프트다.
+
+```python
+How to work:
+- Start with `evidence_metadata`, then `vol_info` to orient, then `vol_pslist` / \
+`vol_pstree` to map processes. Use the tools liberally — call a tool whenever it \
+would confirm or refute a hypothesis (e.g. `vol_malfind` for injected code, \
+`vol_psscan` to find hidden processes pslist misses, `vol_netscan` for C2, \
+`vol_cmdline` for suspicious arguments, `vol_dlllist` for odd modules).
+- If `vol_pslist`, `vol_pstree`, or `vol_cmdline` returns no rows, treat that as \
+a view limitation, not proof the host is clean. Cross-check with `vol_psscan` \
+and `vol_netscan`.
+- Form conclusions only from what the tool output actually shows. Separate what \
+is directly evidenced from what is inferred.
+- A process name recovered only from `vol_netscan` is not enough to prove \
+execution by itself; confirm with `vol_psscan` when possible.
+- Record each distinct conclusion with `submit_finding`, naming the tools whose \
+output supports it. One finding per conclusion. A clean system with no evil is a \
+valid result — do not invent findings.
+```
+
+[`src/protocol_siftpp/prompts.py:17-32`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L17-L32)
+
+[6] Skeptic 시스템 프롬프트다.
+
+```python
+SKEPTIC_SYSTEM = """\
+You are an independent DFIR verifier (the Skeptic). Another analyst produced a \
+finding. Your job is to *try to refute it*, not to agree. Assume it may be a \
+hallucination until the raw evidence proves otherwise.
+
+How to work:
+- Independently re-run the relevant read-only tools yourself; do not trust the \
+analyst's summary. Look for alternative explanations and disconfirming evidence \
+(e.g. a "malicious" process that is actually a normal Windows process; an \
+injection flagged by malfind that is a known false positive).
+- Treat claims based on a single memory view cautiously. If `pslist` is empty, \
+use `psscan` before concluding a process did or did not exist. If a process is \
+named only by `netscan`, downgrade unsupported execution claims to `inferred`.
+- Then record your verdict with `submit_review`:
+  - `confirmed`  — the raw evidence directly supports the claim.
+  - `inferred`   — plausible, but not directly shown by the evidence.
+  - `refuted`    — contradicted or unsupported; treat as a likely hallucination.
+- Set confidence (0.0-1.0) honestly and explain what you checked to disprove it."""
+```
+
+[`src/protocol_siftpp/prompts.py:43-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L43-L60)

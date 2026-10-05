@@ -1,0 +1,214 @@
+---
+cell: L04
+details:
+- id: L04.01
+  exception: false
+- id: L04.03
+  exception: false
+- id: L04.06
+  exception: false
+---
+
+# L04 기록 위변조 방지
+
+### L04.01 해시 체인
+
+**구현.** 서버 기록의 모든 항목은 앞 항목의 해시 `prev_hash`를 담고 자기 해시 `hash`를 갖는다 [1].
+`hash`는 앞 항목의 해시와 이 항목(`hash` 제외)을 키 순서로 정렬한 JSON 글을 이어 SHA-256으로 계산한다 [1][2].
+첫 항목의 앞 해시는 0 64개다 [3].
+그래서 항목을 고치거나 지우거나 순서를 바꾸면 그 뒤 첫 항목의 `prev_hash`나 `hash`가 다시 계산한 값과 어긋난다 [1][4].
+서버를 다시 시작하면 파일의 마지막 항목 해시를 이어받아 체인을 잇는다 [5].
+클라이언트 `siftpp-investigate`의 기록 `audit.jsonl`도 같은 기록 객체로 쓴다 [6].
+
+서버 기록의 끝 해시나 항목 수는 기록 밖에 남지 않는다.
+`siftpp-investigate`는 끝날 때 클라이언트 기록의 항목 수를 화면에만 출력하고 `report.json`·`report.md`에는 싣지 않는다 [6].
+`report.html`에는 `siftpp-report`를 실행할 때 다시 센 클라이언트 기록의 항목 수가 실리지만 끝 해시는 없다 [7][8].
+키를 쓰지 않으므로 파일 전체를 처음부터 다시 계산해 쓴 기록이나 마지막 항목들을 잘라 낸 기록은 체인 검증을 통과한다 [1][4].
+
+### L04.03 일련번호
+
+**구현.** 모든 항목에 1부터 늘어나는 `seq`를 매긴다 [1].
+서버를 다시 시작하면 파일의 마지막 항목의 `seq`에서 이어 센다 [5].
+기록 쓰기가 실패하면 그 번호를 건너뛰므로 빠진 번호로 쓰기 실패가 드러난다(L03) [1].
+검증 함수 `verify_chain`은 `seq`가 이어지는지는 보지 않고 해시만 다시 계산한다 [4].
+
+### L04.06 검증 도구
+
+**구현.** `verify_chain`은 기록 파일을 처음부터 읽으며 항목마다 해시를 다시 계산해 저장된 `hash`와 비교한다 [4].
+처음 어긋난 항목에서 `(False, 그 항목까지 읽은 항목 수)`를, 끝까지 맞으면 `(True, 항목 수)`를 돌려준다 [4].
+이 함수는 서버 도구가 아니고 사용자 CLI가 부른다 [9].
+`siftpp-trace <기록 파일>`은 받은 기록 파일의 체인을 검증하고 어긋나면 종료 코드 2로 끝나므로 서버 기록 `mcp-server.jsonl`도 검증할 수 있다 [9].
+`siftpp-tamper-test`는 기록 사본의 한 항목을 고쳐 검증이 실패하는지 확인한다 [10].
+`siftpp-investigate`와 `siftpp-report`는 클라이언트 기록 `audit.jsonl`만 검증하고 서버 기록은 검증하지 않는다 [6][7].
+`siftpp-verify`는 저장소 `docs/examples/`에 커밋한 클라이언트 기록 네 개를 검증한다 [11].
+
+### 근거
+
+[1] 항목에 일련번호와 앞 해시를 넣고 해시를 계산한다.
+
+```python
+    def log(self, event: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **fields,
+                "prev_hash": self._prev_hash,
+            }
+            record["hash"] = sha256_hex(self._prev_hash + _canonical(record))
+            self._prev_hash = record["hash"]
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+```
+
+[`src/protocol_siftpp/audit.py:73-86`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L73-L86)
+
+[2] 해시할 글을 만드는 함수다.
+
+```python
+def _canonical(record: dict[str, Any]) -> str:
+    """Deterministic JSON used as the hashed body (key order independent)."""
+    return json.dumps(record, sort_keys=True, default=str, ensure_ascii=False)
+```
+
+[`src/protocol_siftpp/audit.py:39-41`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L39-L41)
+
+[3] 체인의 시작 값이다.
+
+```python
+_GENESIS = "0" * 64
+```
+
+[`src/protocol_siftpp/audit.py:22-22`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L22-L22)
+
+[4] 검증 함수다.
+
+```python
+def verify_chain(path: str | Path) -> tuple[bool, int]:
+    """Re-derive the hash chain. Returns (ok, n_records). Proves the audit log
+    was not tampered with: any edit to a past record breaks the chain."""
+    prev = _GENESIS
+    n = 0
+    with Path(path).open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            n += 1
+            rec = json.loads(line)
+            stored = rec.pop("hash", None)
+            if stored != sha256_hex(prev + _canonical(rec)):
+                return False, n
+            prev = stored
+    return True, n
+```
+
+[`src/protocol_siftpp/audit.py:177-193`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L177-L193)
+
+[5] 다시 시작할 때 마지막 항목을 이어받는다.
+
+```python
+        if self.path.exists():
+            self._resume()
+
+    def _resume(self) -> None:
+        """Continue an existing log's chain instead of restarting it."""
+        last = None
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    last = line
+        if last:
+            rec = json.loads(last)
+            self._seq = int(rec.get("seq", 0))
+            self._prev_hash = rec.get("hash", _GENESIS)
+```
+
+[`src/protocol_siftpp/audit.py:57-71`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L57-L71)
+
+[6] 클라이언트의 기록 경로와 끝날 때의 검증이다.
+
+```python
+    audit = AuditLogger(out / "audit.jsonl", echo=True if args.echo else None)
+```
+
+[`src/protocol_siftpp/cli.py:114-114`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L114-L114)
+
+```python
+    ok, n = verify_chain(out / "audit.jsonl")
+    print(report.summary)
+    print(f"audit log: {n} records, hash chain {'OK' if ok else 'BROKEN'}")
+```
+
+[`src/protocol_siftpp/cli.py:133-135`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L133-L135)
+
+[7] `siftpp-report`가 실행 폴더의 `audit.jsonl`을 검증한다.
+
+```python
+def audit_summary(audit_path: Path) -> dict[str, Any]:
+    if not audit_path.is_file():
+        return {}
+    ok, n = verify_chain(audit_path)
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    kinds: dict[str, int] = {}
+    for e in events:
+        kinds[e.get("event", "?")] = kinds.get(e.get("event", "?"), 0) + 1
+    return {"ok": ok, "records": n, "kinds": kinds}
+```
+
+[`src/protocol_siftpp/report_html.py:23-31`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/report_html.py#L23-L31)
+
+```python
+    audit = audit_summary(run / "audit.jsonl")
+```
+
+[`src/protocol_siftpp/report_html.py:165-165`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/report_html.py#L165-L165)
+
+[8] `report.html`에 싣는 기록 검증 결과와 항목 수다.
+
+```python
+    integrity = ""
+    if audit:
+        ok = audit.get("ok")
+        integrity = (
+            f'<span class="pill {"ok" if ok else "bad"}">audit hash chain '
+            f'{"OK" if ok else "BROKEN"} · {audit.get("records", 0)} records</span>'
+        )
+```
+
+[`src/protocol_siftpp/report_html.py:80-86`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/report_html.py#L80-L86)
+
+[9] 사용자 CLI `siftpp-trace`의 검증이다.
+
+```python
+    path = Path(args.audit_log)
+    if not path.is_file():
+        raise SystemExit(f"Audit log not found: {path}")
+
+    ok, n = verify_chain(path)
+    status = "OK" if ok else "BROKEN"
+    print(f"hash chain {status} ({n} records) - {path}")
+    if not ok:
+        raise SystemExit(2)
+```
+
+[`src/protocol_siftpp/trace.py:46-54`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/trace.py#L46-L54)
+
+[10] 기록 사본의 한 항목을 고친다: [`src/protocol_siftpp/tamper_test.py:30-63`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/tamper_test.py#L30-L63).
+
+[11] `siftpp-verify`가 검증하는 기록 목록이다.
+
+```python
+EXAMPLES = Path("docs/examples")
+AUDITS = [
+    ("SANS srl-2018 (Windows)", EXAMPLES / "srl-2018-base-file-memory" / "audit.jsonl"),
+    ("SANS srl-2018 (Linux)", EXAMPLES / "srl-2018-linux" / "audit.jsonl"),
+    ("M57 Pat (public case)", EXAMPLES / "m57-pat-2009-12-05" / "audit.jsonl"),
+    ("SANS srl-2018 (demo-video run)", EXAMPLES / "srl-2018-live" / "audit.jsonl"),
+]
+```
+
+[`src/protocol_siftpp/verify_all.py:25-31`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/verify_all.py#L25-L31)

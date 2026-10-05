@@ -1,0 +1,187 @@
+---
+cell: P02
+details:
+- id: P02.01
+  exception: true
+---
+
+# P02 다음 작업 결정
+
+### P02.01 고정 문서·프로필 반환
+
+**구현.** 이 방식은 `evidence_metadata`의 응답에 있다 [1].
+`evidence_metadata`는 증거 정보와 함께 실행할 수 있는 도구 9개의 이름과 한 줄 요약을 `tools` 목록으로 돌려준다 [1][2].
+요약은 플러그인 정의 `READ_ONLY_PLUGINS`의 `summary`에 서버 코드가 적어 둔 문장이고 조사 상태와 관계없이 늘 같다 [2].
+요약에는 각 도구가 무엇을 보여 주는지와 분석가가 왜 쓰는지가 적혀 있다 [2].
+`vol_info` 요약의 "Run first to orient."가 이 목록의 유일한 순서 안내다 [2].
+도구 설명도 `evidence_metadata`를 먼저, `verify_evidence_integrity`를 조사 끝에 부르라고 적는다 [3].
+
+서버에는 서버 지침, MCP 리소스, MCP 프롬프트가 없다 [4].
+앞선 호출이나 결과를 보고 다음 작업을 권하는 응답도 없다.
+
+조사 절차는 클라이언트 `siftpp-investigate`가 정한다 [5].
+클라이언트 코드는 Investigator 모델이 발견사항을 낸 뒤 발견사항마다 Skeptic 모델을 부른다 [5].
+반박되거나 확신도가 낮은 발견사항은 Investigator에게 돌려 다시 조사하게 한다 [5].
+Investigator 시스템 프롬프트는 `evidence_metadata`, `vol_info`, `vol_pslist`·`vol_pstree` 순서로 시작하라고 안내한다 [6].
+이 절차와 계획은 클라이언트의 것이라 P02.03에 연결하지 않는다.
+
+**예외.** `vol_dlllist` 요약은 "spot unusual or unsigned modules"라며 서명되지 않은 모듈을 찾는 데 쓰라고 권한다 [2].
+그러나 Volatility 3 2.28.0 `windows.dlllist`의 출력 열에는 서명 정보가 없다 [7].
+서버에는 서명을 검사하는 도구가 없다 [8].
+`vol_dlllist`의 도구 설명은 서명을 말하지 않는다 [9].
+
+`vol_malfind` 요약은 결과가 쓰기·실행 권한을 함께 가진 비공개 메모리 가운데 파일이 연결되지 않은 영역("private RWX regions with no file backing")이라고 적는다 [2].
+그러나 Volatility 3 2.28.0의 `windows.malware.malfind`는 쓰기 권한이 없는 실행 영역도 바뀐 페이지가 있으면 결과에 싣는다 [10].
+비공개 메모리가 아닌 매핑 영역도 보호 속성이 `PAGE_EXECUTE_WRITECOPY`가 아니면 결과에 싣는다 [10].
+서버가 부르는 `windows.malfind`는 이 플러그인의 옛 이름이다 [11].
+
+### 근거
+
+[1] `evidence_metadata`의 응답이다.
+
+```python
+@mcp.tool()
+def evidence_metadata() -> str:
+    """Evidence path, size, acquisition sha256 (chain of custody), and the list
+    of available read-only tools. Call this first."""
+    r = get_runner()
+    return _dump({
+        "path": str(r.guard.path),
+        "sha256": r.guard.sha256,
+        "bytes": r.guard.size,
+        "read_only": True,
+        "tools": [{"name": p.tool, "summary": p.summary} for p in READ_ONLY_PLUGINS],
+    })
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:57-68`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L68)
+
+[2] 도구 요약을 정해 둔 목록이다.
+
+```python
+# Curated, READ-ONLY allowlist. Each plugin only reads the image and prints a
+# table; none writes, dumps, or touches the network. Dumping plugins
+# (windows.dumpfiles, windows.memmap --dump, *.procdump, ...) are deliberately
+# absent, so they cannot be invoked through this server.
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:42-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L42-L67)
+
+[3] 순서를 적은 도구 설명이다: [`src/protocol_siftpp/mcp_server/server.py:59-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L59-L60), [`src/protocol_siftpp/mcp_server/server.py:73`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L73), [`src/protocol_siftpp/mcp_server/server.py:127-128`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L127-L128).
+
+[4] (실행 확인) 초기화 응답의 `instructions`가 비어 있고 `resources/list`와 `prompts/list`는 빈 목록을 돌려준다.
+서버는 이름만 주어 FastMCP를 만든다.
+
+```python
+mcp = FastMCP("protocol-siftpp-readonly")
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:26-26`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L26-L26)
+
+[5] 클라이언트가 정한 조사·검토·재조사 차례다.
+
+```python
+    async def run(self, case_id: str | None = None) -> CaseReport:
+        meta = await self.mcp.call("evidence_metadata", {})
+        evidence_path = meta.get("path", "unknown")
+        evidence_sha = meta.get("sha256", "")
+        self.audit.log("run_start", evidence_path=evidence_path, evidence_sha256=evidence_sha)
+
+        await self._investigate(INITIAL_INSTRUCTION, iteration=0)
+
+        corrections_run = 0
+        for review_round in range(1, self.max_iterations + 1):
+            pending = [f for f in self.findings if f.review is None]
+            if not pending:
+                break
+            redo: list[Finding] = []
+            for f in pending:
+                await self._review(f)
+                if f.needs_reinvestigation():
+                    redo.append(f)
+            if not redo or review_round == self.max_iterations:
+                break
+            corrections_run += 1
+            self.audit.iteration(
+                n=corrections_run,
+                reason=f"{len(redo)} finding(s) refuted/low-confidence -> re-investigate",
+            )
+            await self._investigate(render_reinvestigation(redo), iteration=corrections_run)
+
+        # Review any findings produced in the final iteration.
+        for f in [f for f in self.findings if f.review is None]:
+            await self._review(f)
+```
+
+[`src/protocol_siftpp/orchestrator.py:271-300`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L271-L300)
+
+[6] Investigator 시스템 프롬프트의 순서 안내다.
+
+```python
+INVESTIGATOR_SYSTEM = """\
+You are a senior DFIR analyst investigating a Windows memory image for evidence \
+of compromise. You work only through the provided read-only forensic tools \
+(Volatility 3 plugins) — you cannot and must not alter the evidence.
+
+How to work:
+- Start with `evidence_metadata`, then `vol_info` to orient, then `vol_pslist` / \
+`vol_pstree` to map processes. Use the tools liberally — call a tool whenever it \
+would confirm or refute a hypothesis (e.g. `vol_malfind` for injected code, \
+`vol_psscan` to find hidden processes pslist misses, `vol_netscan` for C2, \
+`vol_cmdline` for suspicious arguments, `vol_dlllist` for odd modules).
+- If `vol_pslist`, `vol_pstree`, or `vol_cmdline` returns no rows, treat that as \
+a view limitation, not proof the host is clean. Cross-check with `vol_psscan` \
+and `vol_netscan`.
+- Form conclusions only from what the tool output actually shows. Separate what \
+is directly evidenced from what is inferred.
+- A process name recovered only from `vol_netscan` is not enough to prove \
+execution by itself; confirm with `vol_psscan` when possible.
+- Record each distinct conclusion with `submit_finding`, naming the tools whose \
+output supports it. One finding per conclusion. A clean system with no evil is a \
+valid result — do not invent findings.
+- For minor choices, decide and proceed; don't ask for confirmation.
+When you have investigated thoroughly and submitted your findings, stop."""
+```
+
+[`src/protocol_siftpp/prompts.py:12-34`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L12-L34)
+
+[7] Volatility 3 2.28.0 `windows.dlllist`의 출력 열은 `PID`·`Process`·`Base`·`Size`·`Name`·`Path`·`LoadCount`·`LoadTime`·`File output`이다: [`volatility3/framework/plugins/windows/dlllist.py:232-243`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dlllist.py#L232-L243).
+
+[8] 서버가 등록하는 도구 11개에 서명을 검사하는 도구가 없다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[9] `vol_dlllist`의 도구 설명이다.
+
+```python
+@mcp.tool()
+def vol_dlllist(pid: int | None = None) -> str:
+    """windows.dlllist: loaded DLLs, optionally for a single PID."""
+    return _dump(get_runner().run("vol_dlllist", pid=pid))
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:101-104`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L101-L104)
+
+[10] Volatility 3 2.28.0 `windows.malware.malfind`가 결과에 싣는 영역의 조건이다: [`volatility3/framework/plugins/windows/malware/malfind.py:138-176`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L138-L176).
+
+[11] Volatility 3 2.28.0의 `windows.malfind`는 `windows.malware.malfind.Malfind`로 옮긴 옛 이름이다: [`volatility3/framework/plugins/windows/malfind.py:11-16`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malfind.py#L11-L16).

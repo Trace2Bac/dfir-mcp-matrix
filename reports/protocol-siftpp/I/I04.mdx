@@ -1,0 +1,113 @@
+---
+cell: I04
+details:
+- id: not_applicable
+---
+
+# I04 서버 자격증명 처리
+
+### 비적용
+
+**판단.** 서버 코드는 자격증명이 필요한 외부 연동을 하지 않는다(I01).
+서버 코드가 읽는 환경변수는 증거 경로, 호출 기록 경로, 에이전트 이름, 오프라인 여부와 기록을 표준 오류에도 출력할지 정하는 `SIFTPP_ECHO`뿐이다 [1][2].
+
+자격증명은 클라이언트 `siftpp-investigate`가 모델 API에 접속할 때 쓴다 [3].
+DeepSeek 키는 환경변수 `DEEPSEEK_API_KEY`에서, Anthropic 자격증명은 Anthropic SDK의 기본 경로(`ANTHROPIC_API_KEY` 등)에서 읽는다 [3].
+클라이언트는 작업 폴더의 `.env`가 있으면 그 값을 아직 없는 환경변수로 넣는다 [4].
+클라이언트는 서버를 실행할 때 자기 환경변수 전체를 서버 프로세스에 넘기므로 이 키도 서버와 Volatility 프로세스의 환경에 들어간다 [5].
+Volatility 3 2.28.0 패키지 코드가 읽는 환경변수는 캐시와 설정 파일의 위치를 정하는 `XDG_CACHE_HOME`·`APPDATA`뿐이다 [6].
+그래서 서버 코드와 Volatility는 이 키를 읽지 않는다 [1][6].
+
+### 근거
+
+[1] 서버가 읽는 환경변수다.
+
+```python
+def _build_runner() -> VolatilityRunner:
+    evidence = os.environ.get("SIFTPP_EVIDENCE")
+    if not evidence:
+        raise RuntimeError("Set SIFTPP_EVIDENCE to the path of the memory image")
+    audit = AuditLogger(os.environ.get("SIFTPP_AUDIT_LOG", "analysis/audit.jsonl"))
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+    runner.session_start()
+    return runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:31-43`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L31-L43)
+
+[2] 기록 객체가 `SIFTPP_ECHO`를 읽는다.
+
+```python
+        if echo is None:
+            echo = os.environ.get("SIFTPP_ECHO", "") not in ("", "0")
+        self._echo = echo
+        self._color = echo and sys.stderr.isatty()
+```
+
+[`src/protocol_siftpp/audit.py:53-56`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L53-L56)
+
+[3] 클라이언트의 자격증명 읽기다.
+
+```python
+def _llm_client(provider_name: str) -> AsyncAnthropic:
+    provider = normalize_provider(provider_name)
+    if provider == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise SystemExit("Set DEEPSEEK_API_KEY or use --provider anthropic")
+        return AsyncAnthropic(
+            api_key=api_key,
+            base_url=os.environ.get("DEEPSEEK_ANTHROPIC_BASE_URL", DEEPSEEK_ANTHROPIC_BASE_URL),
+        )
+    return AsyncAnthropic()
+```
+
+[`src/protocol_siftpp/cli.py:63-73`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L63-L73)
+
+[4] `.env` 읽기다.
+
+```python
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    """Load simple KEY=VALUE pairs from an ignored local .env file."""
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().lstrip("\ufeff")
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+```
+
+[`src/protocol_siftpp/cli.py:33-45`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L33-L45)
+
+[5] 서버에 넘기는 환경변수다.
+
+```python
+def _server_params(evidence: Path, server_audit: Path, offline: bool) -> StdioServerParameters:
+    env = {
+        **os.environ,
+        "SIFTPP_EVIDENCE": str(evidence),
+        "SIFTPP_AUDIT_LOG": str(server_audit),
+    }
+    if offline:
+        env["SIFTPP_VOL_OFFLINE"] = "1"
+    return StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "protocol_siftpp.mcp_server.server"],
+        env=env,
+    )
+```
+
+[`src/protocol_siftpp/cli.py:48-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L48-L60)
+
+[6] Volatility 3 2.28.0 패키지 소스 전체에서 `environ`과 `getenv`를 찾으면 환경변수를 읽는 곳은 세 곳이다: [`volatility3/framework/constants/__init__.py:28-31`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L31), [`volatility3/framework/constants/__init__.py:34-37`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L34-L37), [`volatility3/cli/__init__.py:549-554`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L549-L554).
+Volatility가 쓰는 다른 라이브러리와 Python 표준 라이브러리는 찾지 않았다.

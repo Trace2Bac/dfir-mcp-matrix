@@ -1,0 +1,99 @@
+---
+cell: T04
+details:
+- id: T04.02
+  exception: false
+---
+
+# T04 실행 방식
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** Volatility 도구 9개는 `subprocess.run`에 인자 배열을 넘겨 Volatility 3의 `vol`을 자식 프로세스로 실행한다 [1].
+셸을 거치지 않고 표준 입력은 `DEVNULL`로 막으며 표준 출력과 표준 오류를 받는다 [1].
+자식 프로세스는 서버와 같은 계정, 파일, 네트워크 권한으로 실행된다.
+작업 폴더(`cwd`)를 따로 정하지 않으므로 서버 프로세스의 작업 폴더에서 실행된다 [1].
+
+`evidence_metadata`는 분석을 실행하지 않고 보관한 값을 돌려준다 [2].
+`verify_evidence_integrity`는 서버 프로세스 안에서 `hashlib`으로 증거를 해시한다 [3].
+Dockerfile은 서버와 Volatility를 한 컨테이너의 같은 가상 환경에 설치하고 컨테이너 안에서 둘을 나누지 않는다 [4].
+
+### 근거
+
+[1] Volatility를 자식 프로세스로 실행한다.
+
+```python
+        self.guard.assert_unchanged()  # before
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout_s,
+            )
+            timed_out = False
+            stdout = proc.stdout or b""
+            stderr = proc.stderr or b""
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\n[timed out]"
+            returncode = -1
+        duration_ms = int((time.monotonic() - started) * 1000)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:165-183`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L165-L183)
+
+[2] `evidence_metadata`의 본문이다.
+
+```python
+@mcp.tool()
+def evidence_metadata() -> str:
+    """Evidence path, size, acquisition sha256 (chain of custody), and the list
+    of available read-only tools. Call this first."""
+    r = get_runner()
+    return _dump({
+        "path": str(r.guard.path),
+        "sha256": r.guard.sha256,
+        "bytes": r.guard.size,
+        "read_only": True,
+        "tools": [{"name": p.tool, "summary": p.summary} for p in READ_ONLY_PLUGINS],
+    })
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:57-68`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L68)
+
+[3] 서버 프로세스 안의 해시 계산이다.
+
+```python
+    def full_sha256(self) -> str:
+        h = hashlib.sha256()
+        with self.path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L110-L115)
+
+[4] 컨테이너 구성이다.
+
+```dockerfile
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy
+
+COPY pyproject.toml uv.lock README.md LICENSE .python-version ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev
+
+CMD ["sh", "-lc", ".venv/bin/siftpp-demo --out analysis/demo && .venv/bin/siftpp-spoliation-test --out analysis/spoliation && .venv/bin/siftpp-tamper-test --audit analysis/demo/audit.jsonl --out analysis/tamper"]
+```
+
+[`Dockerfile:1-13`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/Dockerfile#L1-L13)

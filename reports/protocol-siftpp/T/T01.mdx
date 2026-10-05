@@ -1,0 +1,109 @@
+---
+cell: T01
+details:
+- id: T01.01
+  exception: false
+- id: T01.02
+  exception: false
+- id: T01.07
+  exception: false
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 모델이 넘기는 인자는 `vol_dlllist`·`vol_malfind`의 `pid` 하나뿐이다 [1].
+실행기 `VolatilityRunner.run`은 `pid`를 받는 플러그인인지 확인하고 `pid`가 `bool`이 아닌 0 이상의 정수인지 검사한 뒤 어긋나면 `ValueError`로 거부한다 [2].
+FastMCP가 이 예외를 `isError` 응답으로 돌려주므로 Volatility는 실행되지 않는다 [3].
+`pid`에 -1을 주면 `Error executing tool vol_dlllist: pid must be a non-negative integer`가 돌아온다 [3].
+그보다 앞서 FastMCP가 함수 서명으로 만든 인자 모델이 정수로 바꿀 수 없는 값을 거부하고 숫자 문자열 `"12"`는 정수 12로 바꾸어 넘긴다 [3].
+서버는 `pid`가 증거 안에 있는 프로세스인지는 보지 않는다 [2].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 검사는 증거 파일에 적용된다.
+처음 도구를 부를 때 서버는 증거 경로가 파일인지 확인하고 아니면 `FileNotFoundError`로 거부한다 [4].
+그 뒤 Volatility 도구는 실행 전에 증거 파일의 `stat`을 읽으므로 파일이 사라졌으면 Volatility를 부르기 전에 오류로 끝난다 [5].
+`verify_evidence_integrity`는 파일을 열어 해시하므로 파일이 없으면 오류로 끝난다 [6].
+
+### T01.07 고정 입력 경로 사용
+
+**구현.** 모델은 입력 경로를 고르지 않는다.
+분석 입력은 사용자가 환경변수 `SIFTPP_EVIDENCE`로 정한 증거 파일 하나이고 모든 Volatility 도구가 이 경로를 `-f` 뒤에 넣는다 [4][1].
+어느 도구에도 경로 인자가 없다 [7].
+이 입력이 원본인지 사본인지는 사용자가 정하고 서버는 받은 파일을 그대로 쓴다(E04).
+
+### 근거
+
+[1] 인자 배열에 들어가는 값이다.
+
+```python
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:158-163`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L158-L163)
+
+[2] `pid` 검사다.
+
+```python
+    def run(self, tool: str, *, pid: int | None = None) -> dict[str, Any]:
+        spec = _BY_TOOL.get(tool)
+        if spec is None:
+            # Architectural guard: only curated read-only tools may run.
+            raise ValueError(f"Tool {tool!r} is not an allowed read-only tool")
+        if pid is not None:
+            if not spec.takes_pid:
+                raise ValueError(f"{tool} does not take a pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                raise ValueError("pid must be a non-negative integer")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:147-156`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L147-L156)
+
+[3] (실행 확인) `vol_dlllist`를 `pid` -1로 부르면 `isError` 응답 `Error executing tool vol_dlllist: pid must be a non-negative integer`가 돌아오고 호출 기록에 항목이 남지 않는다.
+`pid`가 `"abc"`이면 `Input should be a valid integer` 오류가, `"12"`이면 `--pid 12`로 실행한 정상 응답이 돌아온다.
+
+[4] 증거 경로를 받고 파일인지 확인한다.
+
+```python
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:98-102`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L98-L102)
+
+[5] Volatility 실행 전에 `stat`을 읽는다.
+
+```python
+    def assert_unchanged(self) -> None:
+        """Cheap per-call guard: size + mtime must match acquisition."""
+        st = self.path.stat()
+        if st.st_size != self.size or st.st_mtime_ns != self._mtime_ns:
+            raise IntegrityError(f"Evidence changed during analysis: {self.path}")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:117-121`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L117-L121)
+
+[6] 해시하려고 파일을 연다.
+
+```python
+    def full_sha256(self) -> str:
+        h = hashlib.sha256()
+        with self.path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L110-L115)
+
+[7] 도구 함수의 서명이다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).

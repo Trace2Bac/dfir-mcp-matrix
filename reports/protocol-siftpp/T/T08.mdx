@@ -1,0 +1,85 @@
+---
+cell: T08
+details:
+- id: T08.01
+  exception: false
+- id: T08.02
+  exception: false
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 Volatility 도구 9개의 실행에 적용된다 [1].
+서버는 `vol`의 종료 코드를 받아 응답의 `exit_code`와 호출 기록의 `exit_code`에 싣는다 [1][2].
+종료 코드가 0이 아니면 표준 오류 끝 2,000자를 응답의 `stderr`에 싣고 0이면 표준 오류를 버린다 [2].
+종료 코드가 0이 아니어도 서버는 MCP 오류 결과를 쓰지 않고 출력과 함께 정상 응답을 돌려준다 [2][3].
+Volatility 3 2.28.0은 플러그인 요구 조건을 채우지 못하면 채우지 못한 요구 조건을 표준 출력에, 요약 한 줄을 표준 오류에 쓰고 종료 코드 1로 끝난다 [4].
+실행 중 예외가 나면 오류 설명을 표준 오류에 쓰고 종료 코드 1로 끝난다 [4].
+
+서버는 출력이 JSON으로 읽히는지 보지만 그 결과로 실패를 정하지 않는다 [2].
+JSON으로 읽히지 않는 출력은 `result_text`에 글로 싣는다 [2].
+합성 증거로 부른 Volatility 도구는 종료 코드 1로 끝났고 Volatility가 표준 출력에 쓴 오류 글이 `result_text`에 실렸다 [3].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 Volatility 도구 9개의 실행에 적용된다 [1].
+서버는 `subprocess.run`에 시간 제한 900초(`DEFAULT_TIMEOUT_S`)를 준다 [1][5].
+제한을 넘으면 Python 3.12의 `subprocess.run`이 자식 프로세스를 강제 종료하고 그때까지 받은 출력을 예외에 담아 넘긴다 [6].
+서버는 이 예외를 받아 `timed_out`을 참으로, 종료 코드를 -1로 정하고 표준 오류 끝에 `[timed out]`을 붙인다 [1].
+끊기 전에 받은 표준 출력은 해시하고 JSON으로 읽히면 `result`에, 아니면 `result_text`에 싣는다 [2].
+같은 작업을 다시 실행하지 않는다.
+
+Windows 가상 환경에서 `vol`은 `vol.exe` 실행 파일이다 [7].
+시간 제한으로 `vol.exe`를 끊은 뒤 실행 전에 없던 Python 프로세스가 남지 않았다 [7].
+
+### 근거
+
+[1] Volatility 실행과 시간 초과 처리다.
+
+```python
+        self.guard.assert_unchanged()  # before
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout_s,
+            )
+            timed_out = False
+            stdout = proc.stdout or b""
+            stderr = proc.stderr or b""
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = (exc.stderr or b"") + b"\n[timed out]"
+            returncode = -1
+        duration_ms = int((time.monotonic() - started) * 1000)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:165-183`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L165-L183)
+
+[2] 종료 코드와 출력에 따른 응답 구성이다: [`src/protocol_siftpp/mcp_server/volatility.py:186-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L186-L225).
+
+[3] (실행 확인) 합성 증거로 `vol_pslist`를 부르면 `isError`가 거짓인 응답에 `exit_code` 1, `timed_out` 거짓, `result` 비어 있음이 실린다.
+`result_text`는 Volatility가 표준 출력에 쓴 `Unsatisfied requirement` 줄로 시작하고 `stderr`는 `Unable to validate the plugin requirements`를 담는다.
+
+[4] Volatility 3 2.28.0 CLI가 요구 조건 실패([`volatility3/cli/__init__.py:505-510`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L505-L510), [`volatility3/cli/__init__.py:674-700`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L674-L700))와 실행 중 예외([`volatility3/cli/__init__.py:664-672`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L664-L672))를 출력하고 종료 코드 1로 끝내는 곳이다.
+
+[5] 시간 제한 값이다.
+
+```python
+MAX_ROWS = 300          # cap rows handed back to the agent (full output is hashed)
+MAX_RETURN_CHARS = 60_000
+DEFAULT_TIMEOUT_S = 900
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:29-31`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L29-L31)
+
+[6] CPython 3.12.13의 `subprocess.run`은 시간 제한을 넘기면 `kill()`로 자식을 끝내고 받은 출력을 예외에 담는다: [`Lib/subprocess.py:548-564`](https://github.com/python/cpython/blob/3bb231a6a5dc02b95658877318bf61501a7209e9/Lib/subprocess.py#L548-L564).
+
+[7] (실행 확인) 512MiB 난수 파일로 `vol.exe ... windows.psscan`을 시간 제한 4초로 `subprocess.run`에 넘겼다.
+4.0초에 시간 초과 예외가 났고 2초 뒤 실행 전에 없던 `python.exe` 프로세스가 남아 있지 않았다.

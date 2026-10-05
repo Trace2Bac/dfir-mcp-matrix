@@ -1,0 +1,128 @@
+---
+cell: R02
+details:
+- id: R02.01
+  exception: true
+- id: R02.02
+  exception: true
+- id: R02.06
+  exception: false
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 Volatility 도구 9개의 응답에 적용된다 [1].
+Volatility 출력이 JSON 목록이고 300행(`MAX_ROWS`)을 넘으면 앞 300행만 `result`에 싣고 `truncated`를 참으로 둔다 [1][2].
+출력이 JSON으로 읽히지 않으면 글의 앞 60,000자(`MAX_RETURN_CHARS`)만 `result_text`에 싣고 넘쳤으면 `truncated`를 참으로 둔다 [1][2].
+상한은 코드 상수이고 모델이 인자로 바꿀 수 없다 [2][3].
+JSON으로 읽힌 `result`에는 글자 수 상한이 없다 [1].
+
+클라이언트 `siftpp-investigate`는 도구 응답 글을 40,000자(`MAX_TOOL_RESULT_CHARS`)에서 다시 자르고 잘렸다는 표시를 붙이지 않는다 [4].
+그래서 300행 안이라도 응답 글이 40,000자를 넘으면 모델은 JSON 중간에서 끊긴 글을 받는다 [4].
+
+**예외.** 300행 상한은 JSON 목록의 맨 위 행에만 적용된다 [1].
+Volatility 3의 JSON 렌더러는 하위 행을 부모 행의 `__children`에 넣고 `windows.pstree`는 자식 프로세스를 하위 행으로 낸다 [5].
+그래서 `vol_pstree`는 맨 위 행인 부모 프로세스가 목록에 없는 프로세스 수만 세어 자르고 그 아래 자식 프로세스는 개수에 상관없이 모두 싣는다 [1][5].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** Volatility 출력이 JSON 목록이면 응답의 `row_count`에 자르기 전 목록의 행 수를 싣는다 [1].
+돌려준 행은 `result` 목록이고 300행을 넘어 잘렸으면 `truncated`가 참이다 [1].
+JSON으로 읽히지 않은 출력은 `row_count`가 `null`이고 전체 글자 수 대신 표준 출력 전체의 바이트 수 `output_bytes`를 싣는다 [1].
+
+**예외.** `row_count`도 맨 위 행만 센다 [1].
+`vol_pstree`의 `row_count`는 프로세스 수가 아니라 부모 프로세스가 목록에 없는 프로세스의 수다 [1][5].
+
+### R02.06 값 단위 잘림
+
+**구현.** 서버는 값 하나를 정한 길이에서 자른다.
+JSON으로 읽히지 않은 출력은 `result_text` 값 하나로 실리고 앞 60,000자에서 잘리며 `truncated`가 이를 알린다 [1].
+종료 코드가 0이 아니면 표준 오류를 `stderr` 값 하나로 싣고 끝 2,000자만 남긴다 [1].
+`stderr`가 잘렸다는 표시는 없다 [1].
+`stderr`는 종료 코드가 0이 아닐 때만 실리므로 성공한 실행에서 Volatility가 표준 오류에 남긴 경고 로그는 응답에서 버려진다 [1][6].
+
+### 근거
+
+[1] 출력을 읽고 자르는 부분과 응답 구성이다.
+
+```python
+        parsed, parse_ok = _maybe_json(out_text)
+        row_count = len(parsed) if isinstance(parsed, list) else None
+        truncated = False
+        result: Any = None
+        result_text: str | None = None
+        if parse_ok:
+            if isinstance(parsed, list) and len(parsed) > MAX_ROWS:
+                result, truncated = parsed[:MAX_ROWS], True
+            else:
+                result = parsed
+        else:
+            result_text = out_text[:MAX_RETURN_CHARS]
+            truncated = len(out_text) > MAX_RETURN_CHARS
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:194-206`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L194-L206)
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[2] 상한 상수다.
+
+```python
+MAX_ROWS = 300          # cap rows handed back to the agent (full output is hashed)
+MAX_RETURN_CHARS = 60_000
+DEFAULT_TIMEOUT_S = 900
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:29-31`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L29-L31)
+
+[3] 도구 함수의 인자는 `pid`뿐이다: [`src/protocol_siftpp/mcp_server/server.py:71-122`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L71-L122).
+
+[4] 클라이언트가 도구 응답 글을 자른다.
+
+```python
+            content, is_error = await execute_tool(block.name, dict(block.input or {}))
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": content[:MAX_TOOL_RESULT_CHARS],
+                    "is_error": is_error,
+                }
+            )
+```
+
+[`src/protocol_siftpp/orchestrator.py:85-93`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L85-L93)
+
+```python
+MAX_TOOL_RESULT_CHARS = 40_000  # cap tool output handed back to the model
+```
+
+[`src/protocol_siftpp/agent_config.py:27-27`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/agent_config.py#L27-L27)
+
+[5] Volatility 3 2.28.0의 JSON 렌더러는 하위 행을 부모 행의 `__children`에 넣고 맨 위 행만 최종 목록에 넣는다: [`volatility3/cli/text_renderer.py:578-608`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L578-L608).
+`windows.pstree`는 프로세스의 깊이를 행의 깊이로 준다: [`volatility3/framework/plugins/windows/pstree.py:153`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pstree.py#L153).
+
+[6] Volatility 3 2.28.0은 경고 이상의 로그를 `logging.StreamHandler`로 표준 오류에 출력한다: [`volatility3/cli/__init__.py:54-58`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L54-L58), [`volatility3/cli/__init__.py:271-277`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/__init__.py#L271-L277).

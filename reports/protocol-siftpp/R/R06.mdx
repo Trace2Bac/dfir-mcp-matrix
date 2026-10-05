@@ -1,0 +1,109 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 값을 응답에 그대로 싣고 그 가운데 비밀 값을 가리거나 빼는 처리를 두지 않는다.
+Volatility 출력은 행과 열을 바꾸지 않고 `result`나 `result_text`에 실린다 [1].
+비밀번호 해시나 키를 꺼내는 플러그인은 허용 목록에 없다 [2].
+그러나 `vol_cmdline`의 `Args`와 `vol_pstree`의 `Cmd`는 프로세스 명령줄 전체를 싣는다 [3].
+명령줄에 넘긴 비밀번호나 토큰도 가림 없이 모델에게 간다 [1][3].
+`vol_svcscan`의 서비스 실행 경로와 `vol_malfind`의 메모리 내용 hexdump도 그대로 실린다 [3].
+
+서버 호출 기록에는 Volatility 출력 대신 출력의 해시와 바이트 수만 남는다 [4].
+클라이언트 `siftpp-investigate`는 발견사항마다 근거 도구 출력의 앞 400자를 `output_excerpt`로 보고서 `report.json`에 싣는다 [5].
+
+### 근거
+
+[1] 출력을 응답에 싣는 부분이다.
+
+```python
+        parsed, parse_ok = _maybe_json(out_text)
+        row_count = len(parsed) if isinstance(parsed, list) else None
+        truncated = False
+        result: Any = None
+        result_text: str | None = None
+        if parse_ok:
+            if isinstance(parsed, list) and len(parsed) > MAX_ROWS:
+                result, truncated = parsed[:MAX_ROWS], True
+            else:
+                result = parsed
+        else:
+            result_text = out_text[:MAX_RETURN_CHARS]
+            truncated = len(out_text) > MAX_RETURN_CHARS
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:194-206`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L194-L206)
+
+[2] 허용 목록이다.
+
+```python
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:46-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L46-L67)
+
+[3] Volatility 3 2.28.0 플러그인의 열이다: [`windows/cmdline.py:105-106`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/cmdline.py#L105-L106), [`windows/pstree.py:170-186`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pstree.py#L170-L186), [`windows/svcscan.py:406-420`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/svcscan.py#L406-L420), [`windows/malware/malfind.py:274-289`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L274-L289).
+
+[4] 서버 기록에 남기는 값이다.
+
+```python
+        self.audit.tool_call(agent=self.agent, tool=tool, command=argv,
+                             output_sha256=out_sha, output_bytes=len(stdout),
+                             duration_ms=duration_ms, exit_code=returncode,
+                             evidence_sha256=self.guard.sha256)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:189-192`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L189-L192)
+
+[5] 클라이언트가 출력 앞부분을 근거에 담는다.
+
+```python
+def _excerpt(result: dict[str, Any], limit: int = 400) -> str:
+    if result.get("result") is not None:
+        return json.dumps(result["result"], default=str)[:limit]
+    return str(result.get("result_text", ""))[:limit]
+```
+
+[`src/protocol_siftpp/orchestrator.py:97-100`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L97-L100)
+
+```python
+        if sha:
+            self.evidence_by_tool.setdefault(name, []).append(
+                Evidence(
+                    tool=name,
+                    command=result.get("command", [name]),
+                    output_excerpt=_excerpt(result),
+                    output_sha256=sha,
+                    output_bytes=result.get("output_bytes", 0),
+                )
+            )
+```
+
+[`src/protocol_siftpp/orchestrator.py:140-149`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L140-L149)

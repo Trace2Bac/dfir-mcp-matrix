@@ -1,0 +1,249 @@
+---
+cell: E03
+details:
+- id: E03.02
+  exception: false
+- id: E03.03
+  exception: false
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 증거를 읽으려고 여는 `EvidenceGuard.full_sha256`에 적용된다 [1].
+서버 코드가 증거를 읽으려고 여는 곳은 SHA-256을 계산하는 이 함수 하나이고 `rb` 모드로 연다 [1].
+이 함수는 처음 증거를 열 때와 `verify_evidence_integrity`에서 불린다 [2][3].
+나머지는 `stat`으로 크기와 수정 시각을 읽는다 [2][4].
+서버 코드가 쓰기 모드로 여는 파일은 호출 기록뿐이다 [5].
+등록한 도구 가운데 파일을 쓰거나 지우는 도구는 없다 [6].
+
+호출 기록을 쓰는 경로에는 원본 쓰기를 막는 장치가 없다.
+서버는 `SIFTPP_AUDIT_LOG`가 `SIFTPP_EVIDENCE`와 같은 파일인지 확인하지 않는다 [7].
+두 값이 같은 파일을 가리키면 호출 기록 객체 `AuditLogger`는 증거 파일을 덧붙이기 모드로 연다 [8].
+`AuditLogger`는 파일이 이미 있으면 먼저 UTF-8 글로 읽고 마지막 줄을 JSON으로 읽는다 [9].
+그래서 UTF-8로 읽을 수 없는 바이트가 든 일반 메모리 이미지에서는 이 단계에서 예외가 나고 아무것도 쓰지 않는다 [9].
+빈 파일이나 마지막 줄이 JSON 객체인 글 파일이면 서버는 기준 해시를 계산한 뒤 `evidence_opened` 항목을 증거 파일에 덧붙인다 [7][10].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** Volatility 도구 9개는 증거 파일을 외부 도구 Volatility 3에 넘겨 읽게 하고 원본 보호를 Volatility의 동작에 맡긴다 [11].
+서버는 실행 파일, 출력 형식, 증거 경로, 플러그인 이름을 인자 배열에 고정하고 모델은 `vol_dlllist`·`vol_malfind`의 `pid`만 정한다 [11].
+`pid`는 0 이상의 정수만 받아 `--pid` 뒤에 들어가므로 Volatility 옵션으로 읽힐 값을 넘길 수 없다 [11].
+플러그인 목록에는 파일을 쓰는 `windows.dumpfiles`·`windows.memmap --dump`·`*.procdump`가 없다 [12].
+목록 안의 `windows.pslist`·`windows.psscan`·`windows.dlllist`·`windows.malfind`에도 파일을 쓰는 `--dump` 옵션이 있지만 서버는 이 옵션을 넘기지 않는다 [11][13].
+
+Volatility 3 2.28.0의 `FileLayer`는 증거 파일을 늘 `rb` 모드로 연다 [14].
+Volatility는 심볼 캐시를 증거 옆이 아니라 자기 캐시 폴더에 쓴다 [15].
+증거 파일에 쓰기 권한을 막는 마운트나 파일 권한 설정은 저장소에 없다.
+
+### 근거
+
+[1] 서버 코드가 증거 파일을 여는 곳이다.
+
+```python
+    def full_sha256(self) -> str:
+        h = hashlib.sha256()
+        with self.path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L110-L115)
+
+[2] 처음 열 때 해시하고 크기·수정 시각을 읽는다.
+
+```python
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+        g = cls(path=p)
+        st = p.stat()
+        g.size = st.st_size
+        g._mtime_ns = st.st_mtime_ns
+        g.sha256 = g.full_sha256()  # acquisition hash (chain of custody)
+        return g
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:98-108`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L98-L108)
+
+[3] `verify_evidence_integrity`가 해시를 다시 계산한다.
+
+```python
+    def verify_integrity(self) -> dict[str, Any]:
+        """Re-hash the FULL evidence file and prove it equals acquisition.
+
+        This is the spoliation proof for the integrity report (deliverable #6)."""
+        before = self.guard.sha256
+        after = self.guard.full_sha256()
+        self.audit.evidence_integrity(path=self.guard.path,
+                                      sha256_before=before, sha256_after=after)
+        return {"path": str(self.guard.path), "sha256_before": before,
+                "sha256_after": after, "unchanged": before == after}
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:227-236`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L227-L236)
+
+[4] 호출마다 크기와 수정 시각만 읽는다.
+
+```python
+    def assert_unchanged(self) -> None:
+        """Cheap per-call guard: size + mtime must match acquisition."""
+        st = self.path.stat()
+        if st.st_size != self.size or st.st_mtime_ns != self._mtime_ns:
+            raise IntegrityError(f"Evidence changed during analysis: {self.path}")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:117-121`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L117-L121)
+
+[5] 서버 코드에서 파일을 쓰기 모드로 여는 곳은 호출 기록뿐이다.
+기준 커밋의 `src/protocol_siftpp/mcp_server/`와 `audit.py`에서 `open`을 쓰기 모드로 부르는 곳은 이곳 하나다.
+
+```python
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+```
+
+[`src/protocol_siftpp/audit.py:85-86`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L85-L86)
+
+[6] 서버가 등록하는 도구다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[7] 서버는 두 환경변수를 따로 읽어 호출 기록 객체를 먼저 만들고 증거를 연 뒤 `evidence_opened`를 남긴다.
+
+```python
+def _build_runner() -> VolatilityRunner:
+    evidence = os.environ.get("SIFTPP_EVIDENCE")
+    if not evidence:
+        raise RuntimeError("Set SIFTPP_EVIDENCE to the path of the memory image")
+    audit = AuditLogger(os.environ.get("SIFTPP_AUDIT_LOG", "analysis/audit.jsonl"))
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+    runner.session_start()
+    return runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:31-43`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L31-L43)
+
+[8] 호출 기록 항목을 덧붙이기 모드로 쓴다.
+
+```python
+    def log(self, event: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **fields,
+                "prev_hash": self._prev_hash,
+            }
+            record["hash"] = sha256_hex(self._prev_hash + _canonical(record))
+            self._prev_hash = record["hash"]
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+```
+
+[`src/protocol_siftpp/audit.py:73-86`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L73-L86)
+
+[9] 기존 파일을 글로 읽어 마지막 줄의 `seq`와 `hash`를 이어받는다.
+
+```python
+        if self.path.exists():
+            self._resume()
+
+    def _resume(self) -> None:
+        """Continue an existing log's chain instead of restarting it."""
+        last = None
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    last = line
+        if last:
+            rec = json.loads(last)
+            self._seq = int(rec.get("seq", 0))
+            self._prev_hash = rec.get("hash", _GENESIS)
+```
+
+[`src/protocol_siftpp/audit.py:57-71`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L57-L71)
+
+[10] `evidence_opened` 항목이다.
+
+```python
+    def session_start(self) -> dict[str, Any]:
+        return self.audit.log("evidence_opened", path=str(self.guard.path),
+                              sha256=self.guard.sha256, bytes=self.guard.size,
+                              agent=self.agent)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:142-145`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L142-L145)
+
+[11] Volatility 실행 인자를 만드는 부분이다.
+
+```python
+    def run(self, tool: str, *, pid: int | None = None) -> dict[str, Any]:
+        spec = _BY_TOOL.get(tool)
+        if spec is None:
+            # Architectural guard: only curated read-only tools may run.
+            raise ValueError(f"Tool {tool!r} is not an allowed read-only tool")
+        if pid is not None:
+            if not spec.takes_pid:
+                raise ValueError(f"{tool} does not take a pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                raise ValueError("pid must be a non-negative integer")
+
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:147-163`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L147-L163)
+
+[12] 파일을 쓰는 플러그인을 목록에서 뺐다는 주석과 목록이다.
+
+```python
+# Curated, READ-ONLY allowlist. Each plugin only reads the image and prints a
+# table; none writes, dumps, or touches the network. Dumping plugins
+# (windows.dumpfiles, windows.memmap --dump, *.procdump, ...) are deliberately
+# absent, so they cannot be invoked through this server.
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:42-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L42-L67)
+
+[13] Volatility 3 2.28.0에서 `--dump` 옵션을 정의하는 곳이다: [`volatility3/framework/plugins/windows/pslist.py:56`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L56), [`volatility3/framework/plugins/windows/psscan.py:57`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L57), [`volatility3/framework/plugins/windows/dlllist.py:81`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dlllist.py#L81), [`volatility3/framework/plugins/windows/malware/malfind.py:39`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L39).
+
+[14] Volatility 3 2.28.0의 `FileLayer`가 파일을 여는 모드다: [`volatility3/framework/layers/physical.py:119-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/physical.py#L119-L125).
+
+[15] Volatility 3 2.28.0의 캐시 폴더와 그 아래 심볼 폴더다: [`volatility3/framework/constants/__init__.py:28-38`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L38), [`volatility3/framework/constants/__init__.py:46-51`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L46-L51).

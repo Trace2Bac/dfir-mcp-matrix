@@ -1,0 +1,138 @@
+---
+cell: D06
+details:
+- id: not_implemented
+---
+
+# D06 결론 도출
+
+### 미구현
+
+**판단.** 서버는 Volatility 출력을 그대로 돌려줄 뿐 규칙으로 판정하거나 결과끼리 잇거나 점수를 매기지 않는다.
+Volatility 도구의 응답은 플러그인 출력과 실행 정보 필드로만 이루어진다 [1].
+`pslist`와 `psscan`의 차이처럼 두 출력을 비교하는 도구도 없다 [2].
+`vol_malfind`의 의심 영역 판정은 Volatility 플러그인이 정하고 서버는 그 출력을 옮긴다 [1].
+서버는 모델을 부르지 않는다.
+
+결론은 클라이언트 `siftpp-investigate`가 부르는 모델이 만든다 [3][4].
+Investigator 모델이 도구 출력을 읽고 `submit_finding`으로 주장, 심각도, 확신도, ATT&CK 기법을 낸다 [3].
+Skeptic 모델은 같은 서버 도구를 다시 불러 반증을 찾고 `submit_review`로 `confirmed`·`inferred`·`refuted` 가운데 하나와 확신도를 낸다 [4].
+이 판정을 발견사항 확정에 쓰는 방식은 D07에서 본다.
+
+### 근거
+
+[1] Volatility 도구의 응답이다.
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[2] 서버가 등록하는 도구다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[3] Investigator의 지시와 발견사항 제출 도구다: [`src/protocol_siftpp/prompts.py:12-41`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L12-L41), [`src/protocol_siftpp/client_tools.py:7-44`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/client_tools.py#L7-L44).
+
+```python
+INVESTIGATOR_SYSTEM = """\
+You are a senior DFIR analyst investigating a Windows memory image for evidence \
+of compromise. You work only through the provided read-only forensic tools \
+(Volatility 3 plugins) — you cannot and must not alter the evidence.
+
+How to work:
+- Start with `evidence_metadata`, then `vol_info` to orient, then `vol_pslist` / \
+`vol_pstree` to map processes. Use the tools liberally — call a tool whenever it \
+would confirm or refute a hypothesis (e.g. `vol_malfind` for injected code, \
+`vol_psscan` to find hidden processes pslist misses, `vol_netscan` for C2, \
+`vol_cmdline` for suspicious arguments, `vol_dlllist` for odd modules).
+- If `vol_pslist`, `vol_pstree`, or `vol_cmdline` returns no rows, treat that as \
+a view limitation, not proof the host is clean. Cross-check with `vol_psscan` \
+and `vol_netscan`.
+- Form conclusions only from what the tool output actually shows. Separate what \
+is directly evidenced from what is inferred.
+- A process name recovered only from `vol_netscan` is not enough to prove \
+execution by itself; confirm with `vol_psscan` when possible.
+- Record each distinct conclusion with `submit_finding`, naming the tools whose \
+output supports it. One finding per conclusion. A clean system with no evil is a \
+valid result — do not invent findings.
+- For minor choices, decide and proceed; don't ask for confirmation.
+When you have investigated thoroughly and submitted your findings, stop."""
+
+INITIAL_INSTRUCTION = """\
+Investigate this Windows memory image for signs of compromise: malicious or \
+injected processes, code injection, persistence, and suspicious network \
+activity. Gather evidence with the read-only tools, then submit each conclusion \
+via submit_finding citing the supporting tools. Begin now with evidence_metadata \
+and vol_info."""
+```
+
+[`src/protocol_siftpp/prompts.py:12-41`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L12-L41)
+
+[4] Skeptic의 지시와 판정 제출 도구다.
+
+```python
+SKEPTIC_SYSTEM = """\
+You are an independent DFIR verifier (the Skeptic). Another analyst produced a \
+finding. Your job is to *try to refute it*, not to agree. Assume it may be a \
+hallucination until the raw evidence proves otherwise.
+
+How to work:
+- Independently re-run the relevant read-only tools yourself; do not trust the \
+analyst's summary. Look for alternative explanations and disconfirming evidence \
+(e.g. a "malicious" process that is actually a normal Windows process; an \
+injection flagged by malfind that is a known false positive).
+- Treat claims based on a single memory view cautiously. If `pslist` is empty, \
+use `psscan` before concluding a process did or did not exist. If a process is \
+named only by `netscan`, downgrade unsupported execution claims to `inferred`.
+- Then record your verdict with `submit_review`:
+  - `confirmed`  — the raw evidence directly supports the claim.
+  - `inferred`   — plausible, but not directly shown by the evidence.
+  - `refuted`    — contradicted or unsupported; treat as a likely hallucination.
+- Set confidence (0.0-1.0) honestly and explain what you checked to disprove it."""
+```
+
+[`src/protocol_siftpp/prompts.py:43-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L43-L60)
+
+```python
+SUBMIT_REVIEW_TOOL = {
+    "name": "submit_review",
+    "description": "Record your adversarial verdict on the finding after trying to refute it.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["confirmed", "inferred", "refuted"],
+                "description": "confirmed=evidence directly supports; inferred=plausible "
+                "but not directly shown; refuted=unsupported/contradicted.",
+            },
+            "confidence": {"type": "number", "description": "0.0-1.0"},
+            "refutation_attempt": {
+                "type": "string",
+                "description": "What you checked in trying to DISPROVE the claim.",
+            },
+            "rationale": {"type": "string", "description": "Why this verdict/confidence."},
+        },
+        "required": ["status", "confidence", "refutation_attempt", "rationale"],
+    },
+}
+```
+
+[`src/protocol_siftpp/client_tools.py:46-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/client_tools.py#L46-L67)

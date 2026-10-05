@@ -1,0 +1,167 @@
+---
+cell: E01
+details:
+- id: E01.01
+  exception: false
+- id: E01.02
+  exception: false
+- id: E01.03
+  exception: false
+---
+
+# E01 증거 등록 관리
+
+### E01.01 증거 ID·등록 목록
+
+**구현.** 서버는 증거 하나를 담는 상태 칸 `EvidenceGuard`를 둔다 [1][2].
+증거는 사용자가 환경변수 `SIFTPP_EVIDENCE`로 준 파일 하나이고 서버 프로세스 하나에 증거를 하나만 둘 수 있다 [1].
+처음 도구를 부를 때 서버가 이 파일을 열어 상태 칸을 채우고 그 뒤 모든 도구가 이 칸의 증거를 쓴다 [1][2].
+증거 ID는 따로 없고 경로와 SHA-256으로 구별한다 [2].
+모델은 `evidence_metadata`로 경로, SHA-256, 크기를 받는다 [3].
+
+상태 칸은 프로세스 메모리에만 있으므로 서버가 끝나면 사라진다 [1].
+등록 정보는 호출 기록의 `evidence_opened` 항목으로 파일에 남는다 [4].
+서버를 다시 시작하면 증거를 다시 열어 새 `evidence_opened`를 남긴다(P04.10) [4].
+
+### E01.02 수집 위치와 저장 위치 기록
+
+**구현.** 등록 정보에는 서버가 증거를 읽는 경로만 남고 증거를 가져온 단말이나 원래 경로는 없다 [2][4].
+경로는 환경변수 값을 `Path`로 바꾼 그대로이고 절대 경로로 풀지 않는다 [2].
+그래서 사용자가 상대 경로를 주면 `evidence_metadata`의 `path`와 `evidence_opened`의 `path`에 서버 작업 폴더 기준의 상대 경로가 남는다 [5].
+`siftpp-investigate`는 사용자가 `--evidence`로 준 경로를 그대로 서버에 넘긴다 [6].
+
+### E01.03 크기·등록 시각·등록자 기록
+
+**구현.** `evidence_opened` 항목에는 증거 크기 `bytes`, 기록 시각 `ts`, 에이전트 이름 `agent`가 남는다 [4][7].
+`ts`는 서버 시작 시각이 아니라 처음 도구를 불러 증거 파일 전체의 해시를 마친 뒤 기록한 시각이다 [1][2][7].
+`agent`는 환경변수 `SIFTPP_AGENT` 값이고 없으면 `investigator`다 [1].
+`siftpp-investigate`는 자기 환경변수를 그대로 서버에 넘기고 이 값을 따로 정하지 않는다 [6].
+그래서 사용자 환경에 이 값이 없으면 클라이언트로 실행한 서버의 기록에는 늘 `investigator`가 남는다 [6].
+증거 파일의 수정 시각은 서버 메모리에만 두고 기록에 남기지 않는다 [2][4].
+
+### 근거
+
+[1] 환경변수로 증거·기록·에이전트 이름을 정하고 처음 호출 때 상태 칸을 만든다.
+
+```python
+def _build_runner() -> VolatilityRunner:
+    evidence = os.environ.get("SIFTPP_EVIDENCE")
+    if not evidence:
+        raise RuntimeError("Set SIFTPP_EVIDENCE to the path of the memory image")
+    audit = AuditLogger(os.environ.get("SIFTPP_AUDIT_LOG", "analysis/audit.jsonl"))
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+    runner.session_start()
+    return runner
+
+
+def get_runner() -> VolatilityRunner:
+    global _runner
+    if _runner is None:
+        _runner = _build_runner()
+    return _runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:31-50`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L31-L50)
+
+[2] 상태 칸의 필드와 증거를 여는 처리다.
+
+```python
+@dataclass
+class EvidenceGuard:
+    """Holds the evidence path + its acquisition hash, and detects any change."""
+
+    path: Path
+    sha256: str = ""
+    size: int = 0
+    _mtime_ns: int = 0
+
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+        g = cls(path=p)
+        st = p.stat()
+        g.size = st.st_size
+        g._mtime_ns = st.st_mtime_ns
+        g.sha256 = g.full_sha256()  # acquisition hash (chain of custody)
+        return g
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:89-108`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L89-L108)
+
+[3] `evidence_metadata`의 응답이다.
+
+```python
+@mcp.tool()
+def evidence_metadata() -> str:
+    """Evidence path, size, acquisition sha256 (chain of custody), and the list
+    of available read-only tools. Call this first."""
+    r = get_runner()
+    return _dump({
+        "path": str(r.guard.path),
+        "sha256": r.guard.sha256,
+        "bytes": r.guard.size,
+        "read_only": True,
+        "tools": [{"name": p.tool, "summary": p.summary} for p in READ_ONLY_PLUGINS],
+    })
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:57-68`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L68)
+
+[4] `evidence_opened` 항목에 남기는 값이다.
+
+```python
+    def session_start(self) -> dict[str, Any]:
+        return self.audit.log("evidence_opened", path=str(self.guard.path),
+                              sha256=self.guard.sha256, bytes=self.guard.size,
+                              agent=self.agent)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:142-145`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L142-L145)
+
+[5] (실행 확인) 상대 경로 `probe-out\synthetic.bin`으로 서버를 실행하면 `evidence_metadata`의 `path`와 `evidence_opened`의 `path`가 모두 `probe-out\\synthetic.bin`이다.
+
+[6] 클라이언트가 서버에 넘기는 환경변수다.
+
+```python
+def _server_params(evidence: Path, server_audit: Path, offline: bool) -> StdioServerParameters:
+    env = {
+        **os.environ,
+        "SIFTPP_EVIDENCE": str(evidence),
+        "SIFTPP_AUDIT_LOG": str(server_audit),
+    }
+    if offline:
+        env["SIFTPP_VOL_OFFLINE"] = "1"
+    return StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "protocol_siftpp.mcp_server.server"],
+        env=env,
+    )
+```
+
+[`src/protocol_siftpp/cli.py:48-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L48-L60)
+
+[7] 기록 항목의 `seq`·`ts`를 정하는 곳이다.
+
+```python
+    def log(self, event: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **fields,
+                "prev_hash": self._prev_hash,
+            }
+            record["hash"] = sha256_hex(self._prev_hash + _canonical(record))
+            self._prev_hash = record["hash"]
+```
+
+[`src/protocol_siftpp/audit.py:73-84`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L73-L84)

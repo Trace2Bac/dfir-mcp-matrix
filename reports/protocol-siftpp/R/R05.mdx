@@ -1,0 +1,110 @@
+---
+cell: R05
+details:
+- id: R05.01
+  exception: false
+- id: R05.03
+  exception: false
+- id: R05.04
+  exception: true
+---
+
+# R05 결과 출처 표시
+
+### R05.01 증거·파일 ID
+
+**구현.** Volatility 도구 9개의 응답은 결과가 나온 증거 파일을 두 필드로 가리킨다 [1].
+`command`는 실행한 인자 배열이고 `-f` 다음 값이 증거 파일 경로다 [1][2].
+`evidence_sha256`은 그 증거 파일의 기준 해시다 [1].
+인자 배열은 목록이라 경로가 다른 인자와 섞이지 않는다 [2].
+경로는 사용자가 준 값 그대로라 상대 경로이면 서버 작업 폴더 기준이다(E01.02).
+`verify_evidence_integrity`의 응답도 `path`에 증거 파일 경로를 싣는다 [3].
+
+### R05.03 레코드 키·번호
+
+**구현.** 서버는 Volatility 출력의 열을 그대로 전달하므로 플러그인이 내는 프로세스 ID가 결과 행에 실린다(R01.01).
+`pslist`·`psscan`·`pstree`·`cmdline`·`dlllist`·`malfind`·`netscan` 행에는 `PID`가 있다 [4].
+`psscan`은 끝난 프로세스도 찾으므로 같은 `PID`가 여러 행에 나올 수 있다 [5].
+`svcscan` 행에는 서비스의 `PID`와 서비스 이름이 있다 [4].
+
+### R05.04 바이트·섹터·행 오프셋
+
+**구현.** 이 방식은 `vol_netscan`의 `Offset` 열과 `vol_psscan`의 `Offset(V)` 열에 적용된다 [6][5].
+Volatility 3 2.28.0의 `netscan`과 `psscan`은 같은 풀 스캔을 쓰고 이 풀 스캔은 Windows 10 이전 이미지에서는 커널 가상 주소 계층이 아니라 그 아래의 메모리 계층을 훑는다 [7][5].
+그래서 이 이미지의 두 열은 메모리 계층 안의 물리 주소다 [7][5].
+원시 메모리 이미지에서는 이 값이 파일 안 위치와 같지만 크래시 덤프처럼 머리말이나 구간 표가 있는 형식에서는 파일 안 위치와 다를 수 있다.
+
+`pslist`·`pstree`의 `Offset(V)`, `malfind`의 `Start VPN`, `dlllist`의 `Base`, `svcscan`의 `Offset`은 가상 주소라 이미지 안 위치가 아니다 [4].
+서버는 `psscan`에 메모리 계층의 주소로 바꿔 출력하는 `--physical`을 넘기지 않는다 [2][5].
+
+**예외.** Windows 10 이후 이미지에서는 풀 스캔이 커널 가상 주소 계층을 훑으므로 두 열이 가상 주소가 된다 [7][5].
+`netscan`의 `Offset` 열 이름과 응답 어디에도 이 값이 물리 주소인지 가상 주소인지 표시하지 않는다 [6][1].
+`psscan`의 열 이름 `Offset(V)`는 Windows 10 이전 이미지에서 물리 주소를 담는데도 가상 주소라고 표시한다 [5].
+
+### 근거
+
+[1] Volatility 도구의 응답 필드다.
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[2] 인자 배열이다.
+
+```python
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:158-163`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L158-L163)
+
+[3] `verify_evidence_integrity`의 응답이다.
+
+```python
+    def verify_integrity(self) -> dict[str, Any]:
+        """Re-hash the FULL evidence file and prove it equals acquisition.
+
+        This is the spoliation proof for the integrity report (deliverable #6)."""
+        before = self.guard.sha256
+        after = self.guard.full_sha256()
+        self.audit.evidence_integrity(path=self.guard.path,
+                                      sha256_before=before, sha256_after=after)
+        return {"path": str(self.guard.path), "sha256_before": before,
+                "sha256_after": after, "unchanged": before == after}
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:227-236`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L227-L236)
+
+[4] Volatility 3 2.28.0 플러그인이 내는 열이다: [`windows/pslist.py:356-370`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L356-L370), [`windows/pstree.py:170-186`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pstree.py#L170-L186), [`windows/cmdline.py:105-106`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/cmdline.py#L105-L106), [`windows/dlllist.py:232-243`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dlllist.py#L232-L243), [`windows/malware/malfind.py:274-289`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L274-L289), [`windows/svcscan.py:406-420`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/svcscan.py#L406-L420).
+`svcscan`의 `Offset`은 `services.exe`의 프로세스 계층을 훑어 찾은 위치다: [`windows/svcscan.py:321-339`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/svcscan.py#L321-L339).
+
+[5] Volatility 3 2.28.0 `windows.psscan`은 `netscan`과 같은 풀 스캔으로 프로세스를 찾고([`windows/psscan.py:172-177`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L172-L177)) `--physical`이 없으면 찾은 객체의 위치를 그대로 내며 열 이름은 늘 `Offset(V)`다([`windows/psscan.py:299-300`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L299-L300), [`windows/psscan.py:340`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L340)).
+객체가 커널 계층이 아닌 계층에 있을 수 있다는 것은 같은 파일의 덤프 처리 주석에도 있다: [`windows/psscan.py:273-276`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L273-L276).
+
+[6] Volatility 3 2.28.0 `windows.netscan`의 열이다: [`windows/netscan.py:510-523`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L510-L523).
+
+[7] Volatility 3 2.28.0의 풀 스캔은 Windows 10 이전이면 메모리 계층을 훑는다: [`windows/poolscanner.py:410-421`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/poolscanner.py#L410-L421).
+`netscan`은 이 풀 스캔으로 찾은 객체의 위치를 `Offset`에 싣는다: [`windows/netscan.py:381`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L381), [`windows/netscan.py:411-414`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L411-L414).

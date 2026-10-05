@@ -1,0 +1,98 @@
+---
+cell: T07
+details:
+- id: T07.01
+  exception: false
+- id: T07.02
+  exception: false
+- id: T07.05
+  exception: false
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 검사는 Volatility 도구 9개가 실행하는 `vol` 실행 파일에 적용된다 [1].
+서버는 Volatility를 부를 때마다 인자 배열을 만들면서 `vol_executable`로 실행 파일을 찾는다 [1][2].
+서버를 실행한 Python과 같은 폴더에 `vol.exe`나 `vol`이 있는지 파일 존재로 확인하고 없으면 `shutil.which`로 `PATH`를 찾는다 [2].
+둘 다 없으면 `RuntimeError`를 내고 Volatility를 실행하지 않는다 [2].
+
+참조 자료인 심볼은 서버가 확인하지 않는다 [1].
+심볼을 찾는 일은 Volatility가 하고 찾지 못하면 Volatility가 요구 조건을 채우지 못했다는 글과 함께 종료 코드 1로 끝난다(T05) [3].
+서버는 이 출력을 다른 실패와 같은 방식으로 돌려준다(R03).
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** `vol`을 찾지 못하면 서버는 다른 도구로 바꾸지 않고 `Volatility 3 'vol' executable not found in the venv or on PATH` 문구의 `RuntimeError`를 낸다 [2].
+FastMCP는 이 예외를 `Error executing tool <도구>: ` 뒤에 붙여 `isError` 응답으로 돌려준다 [4].
+이 문구로 실행 파일이 없다는 사실이 다른 실행 오류와 구별된다 [2].
+예외가 인자 배열을 만드는 단계에서 나므로 호출 기록에는 항목이 남지 않는다 [1].
+
+### T07.05 실행 환경별 경로 분기
+
+**구현.** `vol_executable`은 서버를 실행한 Python의 폴더를 먼저 보고 그다음 `PATH`를 본다 [2].
+Python 폴더에서는 Windows용 `vol.exe`를 먼저, 그다음 `vol`을 찾는다 [2].
+고른 실행 파일의 경로는 인자 배열의 첫 값으로 응답의 `command`와 호출 기록의 `command`에 남는다 [1][5].
+그래서 가상 환경의 `vol`을 썼는지 `PATH`의 `vol`을 썼는지 응답과 기록에서 알 수 있다 [5].
+고른 `vol`의 버전은 확인하지 않는다(T05) [1].
+
+### 근거
+
+[1] 인자 배열을 만들 때 실행 파일을 찾는다.
+
+```python
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+
+        self.guard.assert_unchanged()  # before
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:158-165`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L158-L165)
+
+[2] 실행 파일을 찾는 순서와 없을 때의 오류다.
+
+```python
+def vol_executable() -> str:
+    """Locate the Volatility 3 ``vol`` console script in this venv, else PATH."""
+    here = Path(sys.executable).parent
+    for name in ("vol.exe", "vol"):
+        cand = here / name
+        if cand.exists():
+            return str(cand)
+    found = shutil.which("vol")
+    if found:
+        return found
+    raise RuntimeError("Volatility 3 'vol' executable not found in the venv or on PATH")
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:72-82`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L72-L82)
+
+[3] (실행 확인) 합성 증거로 Volatility 도구를 부르면 `exit_code` 1과 함께 `result_text`에 `Unsatisfied requirement plugins.PsList.kernel.symbol_table_name` 같은 줄이 실린다.
+
+[4] MCP Python SDK 1.27.2의 FastMCP가 도구 함수의 예외를 바꾸는 곳이다: [`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/tools/base.py#L116-L117), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[5] 응답과 기록에 인자 배열을 싣는다.
+
+```python
+        self.audit.tool_call(agent=self.agent, tool=tool, command=argv,
+                             output_sha256=out_sha, output_bytes=len(stdout),
+                             duration_ms=duration_ms, exit_code=returncode,
+                             evidence_sha256=self.guard.sha256)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:189-192`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L189-L192)
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-212`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L212)

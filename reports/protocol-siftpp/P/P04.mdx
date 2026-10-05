@@ -1,0 +1,169 @@
+---
+cell: P04
+details:
+- id: P04.08
+  exception: false
+- id: P04.09
+  exception: true
+- id: P04.10
+  exception: false
+---
+
+# P04 조사 문맥 관리
+
+### P04.08 프로세스 메모리에만 보관
+
+**구현.** 서버에는 사건 ID가 없고 조사 단위는 서버 프로세스 하나다.
+서버 프로세스 하나는 환경변수 `SIFTPP_EVIDENCE`가 가리키는 증거 파일 하나만 다룬다 [1].
+처음 도구를 부를 때 서버는 실행기 `VolatilityRunner`를 만들어 전역 변수 `_runner`에 두고 이후 모든 호출이 이 객체를 쓴다 [1].
+이 객체는 증거 경로, 처음 열 때 계산한 SHA-256, 크기, 수정 시각을 담은 `EvidenceGuard`와 호출 기록 객체를 갖는다 [1][2].
+처음 연 증거의 해시와 크기·수정 시각은 뒤의 무결성 대조가 기준값으로 쓰는 값이고 프로세스가 끝나면 사라진다 [2].
+실행기를 만들다 예외가 나면 `_runner`가 비어 있으므로 다음 호출이 다시 만든다 [1].
+
+클라이언트 `siftpp-investigate`는 실행마다 사건 ID와 출력 폴더를 정하고 그 폴더 안의 `mcp-server.jsonl`을 서버의 호출 기록 경로로 넘겨 서버를 새로 실행한다 [3].
+사건 ID는 서버에 전달되지 않는다 [3].
+
+### P04.09 조사 상태를 파일·DB에 저장
+
+**구현.** 프로세스가 끝나도 남는 상태는 호출 기록 파일 하나다 [4].
+기록 경로는 환경변수 `SIFTPP_AUDIT_LOG`가 정하고 없으면 서버 프로세스의 작업 폴더 기준 `analysis/audit.jsonl`이다 [1].
+기록에는 증거를 연 사건 `evidence_opened`(경로, SHA-256, 크기), Volatility 실행 `tool_call`, 해시 재대조 `evidence_integrity`가 남는다 [5].
+서버는 이 기록을 조사 상태로 다시 읽지 않고 이어 쓸 위치를 찾을 때만 읽는다(P04.10).
+
+**예외.** 기록 파일은 조사 단위인 서버 프로세스마다 나뉘지 않는다.
+`SIFTPP_AUDIT_LOG` 없이 실행한 서버는 같은 작업 폴더의 `analysis/audit.jsonl`에 기록을 덧붙이므로 다른 증거를 다룬 서버의 기록이 한 해시 체인에 이어진다 [1][4].
+`siftpp-investigate`도 같은 `--out` 폴더로 다시 실행하면 이전 실행의 `mcp-server.jsonl`에 이어 쓴다 [3][4].
+기록 객체는 처음 만들 때만 파일의 마지막 항목을 읽고 그 뒤로는 자기 메모리의 일련번호와 앞 해시로 항목을 만든다 [4].
+그래서 두 서버 프로세스가 같은 파일에 번갈아 쓰면 한 프로세스의 항목이 다른 프로세스의 항목 해시를 잇지 않아 해시 체인이 끊긴다 [4].
+
+### P04.10 재시작 뒤 자동 복구
+
+**구현.** 서버를 다시 시작하면 기록 객체를 만들 때 기존 기록 파일의 마지막 항목을 읽어 일련번호 `seq`와 앞 항목 해시를 이어받는다 [4].
+서버가 되살리는 상태는 이 두 값뿐이다 [4].
+증거 해시의 기준값은 되살리지 않고 다시 시작한 뒤 처음 도구를 부를 때 그때의 증거 파일로 새로 계산한다 [1][2].
+앞 실행의 `evidence_opened`에 남은 해시와 새 기준값을 대조하지 않는다 [2][5].
+실행 사이에 증거를 바꾸고 같은 기록 파일로 서버를 다시 시작하면 기록에 해시가 다른 `evidence_opened` 두 개가 이어 남고 `verify_evidence_integrity`는 바뀐 파일의 해시를 기준으로 `unchanged: true`를 돌려준다 [6].
+
+### 근거
+
+[1] 실행기를 만들고 전역 변수에 둔다.
+
+```python
+def _build_runner() -> VolatilityRunner:
+    evidence = os.environ.get("SIFTPP_EVIDENCE")
+    if not evidence:
+        raise RuntimeError("Set SIFTPP_EVIDENCE to the path of the memory image")
+    audit = AuditLogger(os.environ.get("SIFTPP_AUDIT_LOG", "analysis/audit.jsonl"))
+    runner = VolatilityRunner(
+        guard=EvidenceGuard.open(evidence),
+        audit=audit,
+        agent=os.environ.get("SIFTPP_AGENT", "investigator"),
+        offline=os.environ.get("SIFTPP_VOL_OFFLINE") == "1",
+    )
+    runner.session_start()
+    return runner
+
+
+def get_runner() -> VolatilityRunner:
+    global _runner
+    if _runner is None:
+        _runner = _build_runner()
+    return _runner
+```
+
+[`src/protocol_siftpp/mcp_server/server.py:31-50`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L31-L50)
+
+[2] 처음 열 때 기준값을 계산한다.
+
+```python
+    @classmethod
+    def open(cls, path: str | Path) -> "EvidenceGuard":
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}")
+        g = cls(path=p)
+        st = p.stat()
+        g.size = st.st_size
+        g._mtime_ns = st.st_mtime_ns
+        g.sha256 = g.full_sha256()  # acquisition hash (chain of custody)
+        return g
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:98-108`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L98-L108)
+
+[3] 클라이언트가 실행마다 출력 폴더와 서버 기록 경로를 정한다.
+
+```python
+def _server_params(evidence: Path, server_audit: Path, offline: bool) -> StdioServerParameters:
+    env = {
+        **os.environ,
+        "SIFTPP_EVIDENCE": str(evidence),
+        "SIFTPP_AUDIT_LOG": str(server_audit),
+    }
+    if offline:
+        env["SIFTPP_VOL_OFFLINE"] = "1"
+    return StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "protocol_siftpp.mcp_server.server"],
+        env=env,
+    )
+```
+
+[`src/protocol_siftpp/cli.py:48-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L48-L60)
+
+```python
+    case_id = args.case_id or datetime.now(timezone.utc).strftime("case-%Y%m%d-%H%M%S")
+    out = Path(args.out) if args.out else Path("analysis") / case_id
+    out.mkdir(parents=True, exist_ok=True)
+
+    audit = AuditLogger(out / "audit.jsonl", echo=True if args.echo else None)
+    params = _server_params(evidence, out / "mcp-server.jsonl", args.offline)
+```
+
+[`src/protocol_siftpp/cli.py:110-115`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L110-L115)
+
+[4] 기록 객체는 처음 만들 때만 마지막 항목을 읽는다([`src/protocol_siftpp/audit.py:57-58`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L57-L58)).
+
+```python
+    def _resume(self) -> None:
+        """Continue an existing log's chain instead of restarting it."""
+        last = None
+        with self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    last = line
+        if last:
+            rec = json.loads(last)
+            self._seq = int(rec.get("seq", 0))
+            self._prev_hash = rec.get("hash", _GENESIS)
+```
+
+[`src/protocol_siftpp/audit.py:60-71`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L60-L71)
+
+항목을 쓸 때는 메모리의 일련번호와 앞 해시로 항목을 잇는다.
+
+```python
+    def log(self, event: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            record: dict[str, Any] = {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **fields,
+                "prev_hash": self._prev_hash,
+            }
+            record["hash"] = sha256_hex(self._prev_hash + _canonical(record))
+            self._prev_hash = record["hash"]
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+```
+
+[`src/protocol_siftpp/audit.py:73-86`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/audit.py#L73-L86)
+
+[5] 서버가 남기는 기록 사건이다: [`src/protocol_siftpp/mcp_server/volatility.py:142-145`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L142-L145), [`src/protocol_siftpp/mcp_server/volatility.py:189-192`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L189-L192), [`src/protocol_siftpp/mcp_server/volatility.py:227-236`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L227-L236).
+
+[6] (실행 확인) 합성 증거로 서버를 실행해 도구를 부르고 끝낸 뒤 증거 내용을 바꾸고 같은 기록 파일로 서버를 다시 실행했다.
+새 `evidence_opened`는 `seq` 8로 앞 항목의 해시를 이었고 바뀐 파일의 해시를 담았다.
+`verify_evidence_integrity`는 `sha256_before`와 `sha256_after`가 모두 바뀐 파일의 해시인 `unchanged: true`를 돌려주었다.

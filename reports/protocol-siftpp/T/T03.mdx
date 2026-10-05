@@ -1,0 +1,58 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 서버에는 도구 인자 밖의 조건으로 호출을 막거나 미루는 코드가 없다.
+도구 함수는 실행기를 얻은 뒤 바로 Volatility를 실행하거나 증거 정보를 돌려준다 [1].
+앞선 호출의 결과, 조사 단계, 승인, 자원 사용률을 보는 곳이 없다 [1][2].
+`evidence_metadata`를 먼저, `verify_evidence_integrity`를 마지막에 부르라는 순서는 도구 설명에만 있다 [3].
+stdio 서버라 호출자 인증은 없고 이 셀에서 결함으로 보지 않는다.
+
+증거 파일의 크기나 수정 시각이 바뀌면 Volatility 도구가 거부되지만 이 조건은 증거 무결성 대조이고 E02에서 본다.
+
+동시 실행 수를 정하는 장치도 없다.
+다만 도구 함수가 모두 동기 함수라서 MCP Python SDK 1.27.2의 FastMCP는 이벤트 루프에서 함수를 바로 부른다 [4].
+한 호출이 끝날 때까지 다른 요청을 처리하지 못하므로 도구 호출은 하나씩 차례로 실행된다 [4][5].
+이는 서버가 정한 제한이 아니라 SDK가 동기 함수를 부르는 방식에서 생기는 동작이라 T03.12에 연결하지 않는다.
+
+### 근거
+
+[1] 도구 함수의 본문이다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[2] 실행기가 Volatility를 부르기 전에 하는 일은 도구 이름·`pid` 검사와 증거 크기·수정 시각 비교뿐이다.
+
+```python
+    def run(self, tool: str, *, pid: int | None = None) -> dict[str, Any]:
+        spec = _BY_TOOL.get(tool)
+        if spec is None:
+            # Architectural guard: only curated read-only tools may run.
+            raise ValueError(f"Tool {tool!r} is not an allowed read-only tool")
+        if pid is not None:
+            if not spec.takes_pid:
+                raise ValueError(f"{tool} does not take a pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                raise ValueError("pid must be a non-negative integer")
+
+        argv = [vol_executable(), "-q", "-r", "json", "-f", str(self.guard.path)]
+        if self.offline:
+            argv.append("--offline")
+        argv.append(spec.plugin)
+        if pid is not None:
+            argv += ["--pid", str(pid)]
+
+        self.guard.assert_unchanged()  # before
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:147-165`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L147-L165)
+
+[3] 순서를 적은 도구 설명이다: [`src/protocol_siftpp/mcp_server/server.py:59-60`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L59-L60), [`src/protocol_siftpp/mcp_server/server.py:73`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L73), [`src/protocol_siftpp/mcp_server/server.py:127-128`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L127-L128).
+
+[4] MCP Python SDK 1.27.2는 동기 도구 함수를 await 없이 바로 부르고([`src/mcp/server/fastmcp/utilities/func_metadata.py:93-96`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L93-L96)) 받은 메시지마다 같은 이벤트 루프의 작업으로 처리한다([`src/mcp/server/lowlevel/server.py:673-683`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L673-L683)).
+
+[5] (실행 확인) `vol_info`와 `vol_psscan`을 동시에 보내면 걸린 시간이 1,187ms와 1,343ms였고 두 응답을 받기까지 2.55초가 걸렸다.
