@@ -136,6 +136,7 @@ def reported_servers():
 
 
 # ───────────────────────── 원고 한 파일 읽기 ─────────────────────────
+CELL_REF = re.compile(r"(?<![A-Za-z0-9_.`/])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)")
 MARK = re.compile(r"\[(\d+)\](?!\()")
 LEAD = re.compile(r"^\*\*([^*]+?)\.\*\*\s?")
 
@@ -742,6 +743,11 @@ def check_cell(cid, s, slugs):
             for sent in SENT.split(block_text(b)):
                 if "`" in sent and not MARK.search(sent):
                     warns.append("%s 표지 없는 코드 문장: %s" % (cid, sent.strip()[:70]))
+            # 원고는 그 셀만 다룬다. 다른 셀과의 경계는 셀 정의의 boundary에 있다
+            # 번호 없는 "E01"은 증거 형식(EWF) 이름으로 흔히 쓰여 뺀다
+            for x in sorted({m.group(0) for m in CELL_REF.finditer(block_text(b))
+                             if m.group(1) != cid and m.group(0) != "E01"}):
+                warns.append("%s '%s' 다른 셀 %s를 가리킨다. 원고는 이 셀만 다루고 다른 셀과의 경계는 셀 정의에 둔다" % (cid, it["label"], x))
             for ln in prose_lines(b["lines"]):
                 if sentences_in_line(ln) > 1:
                     errs.append("%s '%s' 한 줄에 문장이 둘 이상이다(문장 하나에 한 줄): %s" % (cid, it["label"], ln[:50]))
