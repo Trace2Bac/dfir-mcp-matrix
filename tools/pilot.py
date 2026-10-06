@@ -761,6 +761,16 @@ def build_data():
 def build():
     import datetime
     data = build_data()
+    # 내용이 같으면 파일을 다시 쓰지 않는다. 다시 쓰면 개발 서버가 바뀐 줄 알고 화면을 다시 컴파일한다
+    try:
+        with open(OUT, encoding="utf-8") as f:
+            old = json.load(f)
+        old.pop("updated_at", None)
+    except (OSError, ValueError):
+        old = None
+    if old == data:
+        print("%s 그대로 (바뀐 내용 없음)" % os.path.relpath(OUT, ROOT))
+        return data
     data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
