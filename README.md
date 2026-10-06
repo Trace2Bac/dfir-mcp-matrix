@@ -76,18 +76,16 @@ LLM에게 수정을 맡길 때는 [AGENTS.md](AGENTS.md)를 읽게 하세요. Cl
 
 ```
 python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(CI가 돌린다)
-python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(옛 저장소와 서버 클론 필요)
+python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(서버 클론 필요)
 python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
 python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
+python tools/pilot.py new <서버> …        # 새 서버 원고의 틀(서버 머리, 시범 셀)을 만든다
 python tools/coverage.py <서버>          # reports/<서버>/coverage.mdx 머리말의 기능 목록으로 기능→셀 대응표(같은 파일 본문)를 만든다
 ```
 
 명령을 실행하려면 Python 3.10 이상과 `requirements.txt`의 패키지가 필요합니다.
-`check`와 `fill`을 쓰려면 다음 두 가지도 있어야 합니다. 준비 방법은 CONTRIBUTING.md를 참고하세요.
-
-- 옛 매트릭스 저장소(`Claude outputs`)
-- 분석 대상 서버의 클론
+`check`와 `fill`을 쓰려면 분석 대상 서버의 클론도 있어야 합니다. 준비 방법은 CONTRIBUTING.md를 참고하세요.
 
 ## 라이선스
 

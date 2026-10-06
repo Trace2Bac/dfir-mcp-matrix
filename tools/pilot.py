@@ -2,10 +2,13 @@
 """매트릭스 도구. 저장소 어디서든 돈다(Windows·macOS·Linux).
 
   python tools/pilot.py validate          셀·축·설정·원고 머리말을 스키마와 서로 대조한다(외부 저장소 없이 돈다. CI가 돌린다)
-  python tools/pilot.py check [서버[:셀,셀] ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(옛 저장소와 서버 클론이 있어야 한다)
+  python tools/pilot.py check [서버[:셀,셀] ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(서버 클론이 있어야 한다)
   python tools/pilot.py build             사이트(web/)가 읽는 화면 데이터 web/static/data/matrix.json을 만든다
   python tools/pilot.py fill <서버>        원고의 `@발췌 경로:시작-끝` 줄을 기준 커밋 코드 블록과 링크로 바꾸고 백틱 `경로:줄`을 링크로 바꾼다
   python tools/pilot.py renumber <서버>    셀 파일마다 표지 번호를 본문에 처음 나온 차례로 다시 매기고 근거 항목을 그 차례로 옮긴다
+  python tools/pilot.py new <서버> [--repo 소유자/이름 --commit 40자] [셀ID ... | all]
+                                         새 서버 원고의 틀을 만든다. 서버 머리가 없으면 --repo·--commit으로 만들고 config의 servers에 더한다.
+                                         셀을 주지 않으면 시범 셀을, all이면 모든 셀의 틀을 만든다. 이미 있는 파일은 건드리지 않는다
 
 원본:
   matrix/cells/<축>/index.mdx     축 하나의 차례·이름·설명
@@ -366,6 +369,9 @@ def validate():
         for cid, p in files.items():
             where = os.path.relpath(p, ROOT)
             fm, _, _ = read_front(p)
+            if fm.get("details") == []:
+                errs.append("%s: 작성 중인 틀이다(pilot.py new가 만든 파일). 머리말 details와 본문을 채운다" % where)
+                continue
             errs += _schema_errors(fm, rep_schema, where)
             if fm.get("cell") != cid:
                 errs.append("%s: 머리말 cell이 파일 이름(%s)과 다르다" % (where, cid))
@@ -400,33 +406,29 @@ def validate():
     return errs, warns, notes
 
 
-# ───────────────────────── 옛 저장소 도구(fill·check만 쓴다) ─────────────────────────
+# ───────────────────────── 링크·문장 도구(fill·check만 쓴다) ─────────────────────────
+def clones_dir():
+    """분석 대상 서버의 클론을 모아 둔 폴더. 환경변수 DFIR_CLONES, 없으면 이 저장소의 부모 폴더다."""
+    return os.environ.get("DFIR_CLONES") or os.path.dirname(ROOT)
+
+
 @functools.lru_cache(None)
 def v1():
-    """옛 매트릭스 저장소(Claude outputs)의 linkify·style_lint를 읽는다.
-    환경변수 DFIR_V1 → 이 저장소 옆의 'Claude outputs' 폴더 순서로 본다."""
-    cands = [os.environ.get("DFIR_V1"), os.path.join(os.path.dirname(ROOT), "Claude outputs")]
-    for c in cands:
-        if c and os.path.isfile(os.path.join(c, "tools", "linkify.py")):
-            sys.path.insert(0, os.path.join(c, "tools"))
-            import linkify
-            import style_lint
-            _use_report_commits(linkify)
-            return linkify, style_lint
-    raise SystemExit("fill·check에는 옛 저장소(Claude outputs)가 있어야 한다. 환경변수 DFIR_V1에 그 폴더 경로를 준다.")
+    """경로·링크 변환(tools/linkify.py)과 문장 검사(tools/style_lint.py)를 읽는다.
+    두 파일은 옛 매트릭스 저장소에서 옮겨 왔다(결정 0042). 서버 저장소 목록은 reports/<서버>/index.mdx로 채운다."""
+    import linkify
+    import style_lint
+    _use_report_commits(linkify)
+    return linkify, style_lint
 
 
 def _use_report_commits(linkify):
-    """서버의 저장소·기준 커밋은 이 저장소의 reports/<서버>/index.mdx 머리말을 원본으로 쓴다.
-    옛 저장소 판정 YAML의 값은 클론 위치를 찾을 때만 쓴다."""
-    clones = os.environ.get("DFIR_CLONES") or os.path.dirname(ROOT)
+    """서버의 저장소·기준 커밋은 reports/<서버>/index.mdx 머리말을 원본으로 쓰고, 클론은 clones_dir()/<서버>에서 찾는다."""
     for n in reported_servers():
         fm = read_front(os.path.join(report_dir(n), "index.mdx"))[0]
         if not fm.get("repo") or not fm.get("commit"):
             continue
-        old = linkify.REPOS.get(n)
-        root = old[2] if old else os.path.join(clones, n)
-        linkify.REPOS[n] = (fm["repo"], fm["commit"], root)
+        linkify.REPOS[n] = (fm["repo"], fm["commit"], os.path.join(clones_dir(), n))
 
 
 def git_lines(root, sha, rel):
@@ -529,6 +531,87 @@ def renumber(name, only=None):
         res = (fm_txt + body + EVID_HEAD + "\n".join(lead + new)).rstrip("\n") + "\n"
         open(p, "w", encoding="utf-8", newline="").write(res.replace("\n", nl))
     print("%s: 표지 번호를 다시 매겼다" % name)
+
+
+# ───────────────────────── new ─────────────────────────
+INDEX_TEMPLATE = """---
+server: {name}
+repo: {repo}
+commit: {commit}
+matrix_version: "{version}"                          # 이 원고가 기준으로 삼은 매트릭스 정의 버전
+---
+
+# {name} 원고
+
+셀 원고의 머리다. 셀마다 이 폴더 아래 축 폴더의 `<축>/<셀ID>.mdx`에 쓴다.
+셀과 상세 항목의 정의는 `matrix/cells/<축>/<셀ID>.mdx`를 따른다.
+상세 항목마다 **구현**을 쓰고 그 방식이 적용되지 않는 경로나 조건이 있으면 **한계**를 따로 쓴다.
+본문의 [번호]는 그 파일 끝 **근거**의 같은 번호를 가리킨다.
+
+**기준 커밋.** [`{short}`](https://github.com/{repo}/tree/{commit})({date}).
+줄 번호는 모두 이 커밋 기준이다.
+
+**범위.** 작성 중이다.
+
+**확인 방법.** 작성 중이다.
+"""
+
+CELL_TEMPLATE = """---
+cell: {cid}
+details: []
+---
+
+# {cid} {name}
+
+{{/* 작성 중이다. 다 쓰면 이 주석을 지운다.
+머리말 details에 이 서버가 해당하는 상세를 소제목 차례대로 적는다. 어느 상세에도 해당하지 않으면 not_implemented나 not_applicable 하나를 적는다.
+상세마다 "### <상세 번호> <상세 이름>" 소제목 아래 **구현.** 단락을 쓰고, 그 방식이 적용되지 않는 경로나 조건이 있으면 **한계.** 단락을 쓴다.
+미구현·비적용이면 "### 미구현"(또는 "### 비적용") 아래 **판단.** 단락을 쓴다.
+확인 사항: {question}
+상세: {details} */}}
+
+### 근거
+"""
+
+
+def new(name, cells, repo=None, commit=None):
+    """새 서버 원고의 틀. 틀 파일은 details가 비어 화면에서 미확인으로 보이고 validate가 작성 중으로 알린다."""
+    d = report_dir(name)
+    idx = os.path.join(d, "index.mdx")
+    made = []
+    if not os.path.exists(idx):
+        if not repo or not commit or not re.match(r"^[0-9a-f]{40}$", commit):
+            raise SystemExit("새 서버는 --repo 소유자/이름 --commit <40자 커밋>을 준다")
+        r = subprocess.run(["git", "-C", os.path.join(clones_dir(), name), "show", "-s", "--format=%cs", commit],
+                           capture_output=True, text=True)
+        date = r.stdout.strip() if r.returncode == 0 else "커밋 날짜"
+        os.makedirs(d, exist_ok=True)
+        open(idx, "w", encoding="utf-8", newline="\n").write(INDEX_TEMPLATE.format(
+            name=name, repo=repo, commit=commit, short=commit[:7], date=date, version=CONFIG["version"]))
+        made.append(os.path.relpath(idx, ROOT))
+        if name not in CONFIG["servers"]:
+            p = os.path.join(MATRIX, "config.yaml")
+            text = open(p, encoding="utf-8").read()
+            last = "- %s\n" % CONFIG["servers"][-1]
+            text = text.replace(last, last + "- %s\n" % name, 1)
+            open(p, "w", encoding="utf-8", newline="\n").write(text)
+            made.append("matrix/config.yaml servers에 %s를 더함" % name)
+    want = [c["id"] for c in CELL_LIST] if cells == ["all"] else (cells or ORDER)
+    for cid in want:
+        if cid not in CELLS:
+            raise SystemExit("없는 셀: %s" % cid)
+        p = os.path.join(d, cid[0], cid + ".mdx")
+        if os.path.exists(p):
+            continue
+        c = CELLS[cid]
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w", encoding="utf-8", newline="\n").write(CELL_TEMPLATE.format(
+            cid=cid, name=c["name"], question=c["question"],
+            details=", ".join("%s %s" % (x["id"], x["name"]) for x in c.get("details") or [])))
+        made.append(os.path.relpath(p, ROOT))
+    for m in made:
+        print("  만듦:", m)
+    print("%s: 틀 %d개. 다 쓴 셀은 fill → check 차례로 돌린다" % (name, len(made)))
 
 
 # ───────────────────────── check ─────────────────────────
@@ -835,6 +918,17 @@ def main():
     elif cmd == "renumber":
         for a in args:
             renumber(*target(a))
+    elif cmd == "new":
+        if not args:
+            raise SystemExit(__doc__)
+        opts = {"--repo": None, "--commit": None}
+        rest, it = [], iter(args[1:])
+        for a in it:
+            if a in opts:
+                opts[a] = next(it, None)
+            else:
+                rest.append(a)
+        new(args[0], rest, opts["--repo"], opts["--commit"])
     else:
         raise SystemExit(__doc__)
 
