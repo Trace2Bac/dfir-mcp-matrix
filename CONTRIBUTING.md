@@ -140,7 +140,8 @@ PR을 열면 CI가 `validate`와 `build`를 실행합니다. 둘 중 하나라�
 ### 셀 정의에 두는 문장
 
 - 셀 정의에는 판정과 경계만 둡니다. `include`에는 무엇이면 해당하는지 쓰고, `exclude`에는 비슷하지만 해당하지 않는 것이나 다른 셀·상세에서 보는 것을 씁니다.
-- `boundary`에는 다른 셀과의 경계만 씁니다. 셀 전체에 걸린 판정 기준은 `scope`나 `not_implemented`·`not_applicable`에 둡니다.
+- `boundary`에는 다른 셀과의 경계만 씁니다. 다른 셀에서 보는 것은 `scope`·`not_implemented`·`not_applicable`에 쓰지 않고 `boundary`에 모읍니다.
+- `scope`에는 이 셀이 보는 대상과 셀 전체의 판정 기준을 씁니다. 미구현·비적용의 뜻은 `not_implemented`·`not_applicable`에 씁니다.
 - 원고에 무엇을 어떻게 쓰는지는 셀 정의에 적지 않습니다. 이 문서, [원고 안내](reports/README.mdx), 그 셀을 다룬 결정 기록을 봅니다. 결정 기록은 `docs/decisions`에서 셀 ID로 찾습니다(결정 0036).
 - 함께 연결할지는 아래 연결 기준을 따르므로 셀 정의에 "함께 연결합니다"를 쓰지 않습니다.
 
