@@ -97,7 +97,7 @@ export default function CellToolList({ cellId }: { cellId: string }) {
         <h2 className={styles.sectionTitle}>상세 항목</h2>
         {/* 원고가 없는 서버(미확인)는 행으로 늘어놓지 않고 수만 보인다 */}
         <div className={styles.legend}>
-          <span title="이 셀의 원고가 있는 서버 수 / 매트릭스의 전체 서버 수">조사한 서버 {studied}/{cell.total}</span>
+          <span title="이 셀의 원고가 있는 서버 수">조사한 서버 {studied}</span>
         </div>
         {cell.rows?.map((r: any) => {
           const detail = r.special ? r.name : r.id;

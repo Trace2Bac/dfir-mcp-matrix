@@ -74,7 +74,7 @@ details:                         # 상세 항목. 목록 차례가 화면 차례
 ## config.yaml
 
 ```yaml
-servers: [ChainsawMCP, mcp_dfir, …]   # 화면에 보일 서버. reports/<서버>/가 없으면 모든 셀에서 미확인(조사한 서버 수에 포함되지 않음)
+servers: [ChainsawMCP, mcp_dfir, …]   # 화면에 보일 서버. reports/<서버>/가 없으면 모든 셀에서 미확인
 version: "2026-10-06"                 # 매트릭스 정의 버전. 정의를 바꾼 날짜
 pilot_cells: [E03, T03, R02, L02]     # 원고가 담아야 하는 셀. 원고 폴더마다 이 셀 파일이 모두 있어야 한다
 ```

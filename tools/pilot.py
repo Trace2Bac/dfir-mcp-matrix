@@ -866,7 +866,7 @@ def build_data():
                   "seen": list(d.get("seen_in") or [])} for d in c.get("details") or []]
         meaning = {NOT_IMPL: c.get("not_implemented", ""), NOT_APPL: c.get("not_applicable", "")}
         rows = []
-        # 미확인은 행으로 두지 않고 셀의 studied·total(조사한 서버 수·전체 서버 수)로 보인다
+        # 미확인은 행으로 두지 않고 셀의 studied(조사한 서버 수)로 보인다
         for it in items + [{"id": x, "name": SPECIAL_NAME[x], "inc": meaning[x], "exc": "", "special": True} for x in (NOT_IMPL, NOT_APPL)]:
             members = [{"s": n} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
             seen = [x for x in it.get("seen", []) if x not in [m["s"] for m in members]]
@@ -880,7 +880,7 @@ def build_data():
         cells_out.append({"id": c["id"], "name": c["name"], "axis": c["id"][0], "q": c["question"],
                           "cond": bool(c.get("conditional")), "scope": c.get("applies_to", ""),
                           "note": c.get("boundary", ""), "defined": defined, "dscope": c.get("scope", ""),
-                          "studied": studied, "total": len(names), "rows": rows})
+                          "studied": studied, "rows": rows})
     return {"axes": {a["id"]: a["name"] for a in AXES}, "cells": cells_out, "samples": names,
             "pilot": {"cells": ORDER, "servers": list(reports)}}
 
