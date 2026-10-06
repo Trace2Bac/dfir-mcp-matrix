@@ -131,6 +131,11 @@ const config: Config = {
           label: 'Docs',
           position: 'left',
         },
+        {
+          to: '/compare',
+          label: 'Compare',
+          position: 'left',
+        },
 
         {
           href: 'https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2',
