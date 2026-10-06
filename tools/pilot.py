@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""매트릭스 도구. 저장소 어디서든 돌린다(Windows는 PYTHONUTF8=1).
+"""매트릭스 도구. 저장소 어디서든 돈다(Windows·macOS·Linux).
 
   python tools/pilot.py validate          셀·축·설정·원고 머리말을 스키마와 서로 대조한다(외부 저장소 없이 돈다. CI가 돌린다)
   python tools/pilot.py check [서버[:셀,셀] ...]   validate + 원고 형식·표지·근거·발췌 원문 일치·문장 점검(옛 저장소와 서버 클론이 있어야 한다)
@@ -818,4 +818,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows 콘솔(cp949 등)이 못 그리는 글자가 출력에 있어도 멈추지 않게 한다. 파일은 늘 utf-8로 읽고 쓴다
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     main()

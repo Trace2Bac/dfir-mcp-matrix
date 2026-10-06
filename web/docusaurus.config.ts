@@ -56,8 +56,9 @@ const config: Config = {
   url: 'https://trace2bac.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  // 로컬 개발 서버(npm start)는 BASE_URL=/ 로 띄워 http://localhost:3000/ 에서 바로 연다
-  baseUrl: process.env.BASE_URL ?? '/dfir-mcp-architecture-matrix-v2/',
+  // 로컬 개발 서버(docusaurus start)는 http://localhost:3000/ 에서 바로 열도록 /를 쓰고, build·serve는 GitHub Pages 경로를 쓴다.
+  // 명령 줄에서 환경변수를 붙이는 방식(BASE_URL=/ …)은 Windows cmd에서 돌지 않아 실행한 명령으로 가른다. BASE_URL을 주면 그 값을 쓴다
+  baseUrl: process.env.BASE_URL ?? (process.argv.includes('start') ? '/' : '/dfir-mcp-architecture-matrix-v2/'),
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
