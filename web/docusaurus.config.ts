@@ -6,6 +6,7 @@ import path from 'path';
 import evidenceLinks from './src/remark/evidenceLinks';
 import noSingleTilde from './src/remark/noSingleTilde';
 import sentenceLines from './src/remark/sentenceLines';
+import matrixDataPlugin from './plugins/matrix-data';
 import reportLayout from './src/remark/reportLayout';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
@@ -173,6 +174,8 @@ const config: Config = {
     },
   } satisfies Preset.ThemeConfig,
   plugins: [
+    // 화면 데이터(static/data/matrix.json)를 만들고 원본이 바뀌면 다시 만든다
+    matrixDataPlugin,
     [
       '@docusaurus/plugin-content-docs',
       {
