@@ -40,7 +40,7 @@ SPECIAL_OF_NAME = {v: k for k, v in SPECIAL_NAME.items()}
 # ── 원고 표시어 ── 원고(reports/)에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
 TERMS = {
     "impl": "구현",                 # 단락 머리 **구현.**
-    "limit": "한계",                # 단락 머리 **한계.**(구현의 미비점, 있을 때만)
+    "limit": "한계",                # 단락 머리 **한계.**(방식이 적용되지 않는 경로, 있을 때만)
     "judge": "판단",                # 미구현·비적용의 단락 머리 **판단.**
     "evidence": "근거",             # 소제목 ### 근거
     "excerpt": "@발췌",             # 근거의 발췌 지시어
@@ -374,7 +374,7 @@ def validate():
             for d in det:
                 iid = str(d.get("id"))
                 if "exception" in d:
-                    errs.append("%s: %s에 exception을 쓰지 않는다(예외 표시는 없앴다, 결정 0033). 미비점은 본문 **%s.**에 쓴다" % (where, iid, TERMS["limit"]))
+                    errs.append("%s: %s에 exception을 쓰지 않는다(예외 표시는 없앴다, 결정 0033). 방식이 적용되지 않는 경로는 본문 **%s.**에 쓴다" % (where, iid, TERMS["limit"]))
                 if iid in SPECIAL:
                     pass
                 elif not detail_name(iid) or not iid.startswith(cid + "."):
@@ -607,7 +607,7 @@ def check_cell(cid, s, slugs):
         else:
             ok_l = [[TERMS["impl"]], [TERMS["impl"], TERMS["limit"]]]
         if labs not in ok_l:
-            errs.append("%s '%s'의 단락 머리가 %s 가운데 하나여야 한다(지금 %s). **%s.**는 구현의 미비점이 있을 때만 쓴다"
+            errs.append("%s '%s'의 단락 머리가 %s 가운데 하나여야 한다(지금 %s). **%s.**는 방식이 적용되지 않는 경로가 있을 때만 쓴다"
                         % (cid, it["label"], " 또는 ".join(map(str, ok_l)), labs, TERMS["limit"]))
         for b in u["blocks"]:
             if not MARK.search(block_text(b)):
