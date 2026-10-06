@@ -1,6 +1,6 @@
 // 서버 원고(머리말에 cell이 있는 파일)를 셀 화면처럼 읽기 쉽게 묶는다. 원고 글은 바꾸지 않고 화면의 틀만 만든다.
 // - 상세 소제목(###)과 "근거" 소제목에 클래스를 달아 구분선으로 나눈다.
-// - "**구현.**"·"**예외.**"·"**판단.**"로 시작하는 단락부터 다음 이름표나 소제목 앞까지를 한 덩어리로 묶고
+// - "**구현.**"·"**한계.**"·"**판단.**"로 시작하는 단락부터 다음 이름표나 소제목 앞까지를 한 덩어리로 묶고
 //   굵은 머리를 셀 화면의 포함·제외처럼 이름표로 보인다.
 // - 근거 소절은 "[n] "으로 시작하는 단락부터 다음 항목 앞까지를 한 덩어리로 묶고, 발췌 아래 출처 링크 단락에 클래스를 단다.
 // - 발췌 코드의 공통 들여쓰기를 화면에서만 걷어 낸다.
@@ -9,7 +9,7 @@
 type Node = {type: string; value?: string; depth?: number; children?: Node[]; data?: any; url?: string};
 
 const EVID_HEADING = '근거';
-const LABELS: Record<string, string> = {구현: 'impl', 예외: 'exc', 판단: 'judge'};
+const LABELS: Record<string, string> = {구현: 'impl', 한계: 'limit', 판단: 'judge'};
 const EVID_HEAD = /^\[(\d+)\]\s?/;
 
 const textOf = (n: Node): string => n.value ?? (n.children ?? []).map(textOf).join('');

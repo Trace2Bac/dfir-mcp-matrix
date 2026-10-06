@@ -93,13 +93,6 @@ export default function CellToolList({ cellId }: { cellId: string }) {
         {/* 원고가 없는 서버(미확인)는 행으로 늘어놓지 않고 수만 보인다 */}
         <div className={styles.legend}>
           <span title="이 셀의 원고가 있는 서버 수 / 매트릭스의 전체 서버 수">조사한 서버 {studied}/{cell.total}</span>
-          {cell.rows?.some((r: any) => r.m?.some((m: any) => m.d)) && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className={styles.badge}>예외</span>
-              원고에 예외 단락이 있는 서버
-            </>
-          )}
         </div>
         {cell.rows?.map((r: any) => {
           const detail = r.special ? r.name : r.id;
@@ -143,7 +136,6 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                       className={`${styles.chip} ${m.s === openServer && detail === openDetail ? styles.chipActive : ''}`}
                     >
                       {m.s}
-                      {m.d && <span className={styles.badge}>예외</span>}
                     </Link>
                   ))}
                 </div>

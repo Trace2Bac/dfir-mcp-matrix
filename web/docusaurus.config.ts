@@ -91,7 +91,7 @@ const config: Config = {
           path: '../reports',
           routeBasePath: 'reports',
           sidebarPath: './sidebars.ts',
-          // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾸고, 구현·예외·근거를 덩어리로 묶은 뒤 문장마다 줄을 나눈다
+          // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾸고, 구현·한계·근거를 덩어리로 묶은 뒤 문장마다 줄을 나눈다
           remarkPlugins: [noSingleTilde, evidenceLinks, reportLayout, sentenceLines],
           editUrl: editUrlIn('reports'),
           sidebarItemsGenerator: async ({defaultSidebarItemsGenerator, ...args}) =>

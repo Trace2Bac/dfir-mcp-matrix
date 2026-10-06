@@ -2,9 +2,7 @@
 cell: P02
 details:
 - id: P02.01
-  exception: false
 - id: P02.02
-  exception: true
 ---
 
 # P02 다음 작업 결정
@@ -27,15 +25,22 @@ docstring은 증거 유형에 맞춰 다음에 실행할 도구를 정할 때 �
 Sleuth Kit 도구가 광학 매체에서 실패할 때 이미지를 다시 판별해 대체 도구를 권하는 동작은 P01에서 본다.
 이미 있는 사건을 `scan_evidence`로 다시 열면 적재한 자료가 있는지에 따라 분석 도구를 바로 쓰라거나 추출 도구를 실행하라고 알린다 [7].
 `start_extraction_batch`는 작업을 백그라운드로 넘긴 뒤 기다리지 말고 검색·상관 분석·발견사항 제출을 이어 하라고 알린다 [8].
+복합 도구는 필요한 `source`가 적재되지 않았으면 그 이름과 먼저 실행할 도구 호출 문자열을 `suggestion`으로 묶어 `missing_sources`에 싣는다 [9].
+예를 들어 `find_persistence_mechanisms`는 `registry.system`이 없으면 `run_registry_parser('<image_path>', hive='SYSTEM')`을 권한다 [9].
+`scan_hidden_processes`·`scan_kernel_modules`는 대조할 두 Volatility 자료가 모두 없으면 `run_volatility_batch`로 두 플러그인을 먼저 실행하라는 `hint`를 돌려준다 [10].
+`detect_timestomping`은 MFT 자료가 없으면 오류 응답의 `suggestion`에 먼저 실행할 도구 호출을 싣는다 [11].
 이 권고들은 응답의 문구와 목록이고 서버가 다음 호출을 대신 고르지는 않는다.
 
-`mulder investigate` 오케스트레이터는 단계마다 계획 역할의 모델에게 도구 실행 계획을 세우게 한다 [9].
+`mulder investigate` 오케스트레이터는 단계마다 계획 역할의 모델에게 도구 실행 계획을 세우게 한다 [12].
 오케스트레이터는 이 서버를 쓰는 MCP 클라이언트라서 P02.03에 연결하지 않는다.
 
-**예외.** 적재한 `source`가 하나라도 있는 사건을 다시 열면 `scan_evidence`는 카탈로그 단계가 압축을 이미 풀었으니 다시 풀지 말라는 고정 문구를 돌려준다 [7].
+**한계.** 적재한 `source`가 하나라도 있는 사건을 다시 열면 `scan_evidence`는 카탈로그 단계가 압축을 이미 풀었으니 다시 풀지 말라는 고정 문구를 돌려준다 [7].
 서버는 압축을 실제로 풀었는지 보지 않는다 [7].
 `audit_tool_coverage`의 권고는 확장자로 정한 유형을 따르므로 확장자가 `.raw`·`.001`인 디스크 이미지에는 메모리 분석 도구를 권한다 [5].
 같은 유형에 정한 도구가 사건 안 어느 증거에서든 한 번 불렸으면 다른 증거 항목의 권고에서도 빠진다 [5].
+`detect_timestomping`과 `find_file_staging`은 MFT 자료가 없으면 서버에 등록되지 않은 도구 `run_ez_tool`을 권한다 [11].
+`assess_recovery`는 `ez.usnjrnl`이 없으면 `parse_usn_journal('<image_path>')`를 권한다 [13].
+`parse_usn_journal`은 이미지 경로가 아니라 시각 범위를 받아 이미 적재한 자료를 읽는 조회 도구라서 이 권고대로는 `ez.usnjrnl`을 만들 수 없다 [13].
 
 ### 근거
 
@@ -242,4 +247,139 @@ def get_tool_guide(category: str = "all") -> dict[str, object]:
 
 [`src/mulder/server/tools/jobs.py:190-194`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L190-L194)
 
-[9] 오케스트레이터의 추출 계획 역할 지시문이다: [`src/mulder/orchestrator/prompts/extract_planner.md:1-14`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/prompts/extract_planner.md#L1-L14).
+[9] 적재되지 않은 `source`마다 권할 호출을 짝지어 돌려준다.
+응답의 `missing_sources`에 넣는 곳은 [`src/mulder/server/tools/composite/core.py:483-484`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L483-L484)이다.
+
+```python
+def _check_missing_sources(
+    required: list[tuple[str, str]],
+) -> list[dict[str, str]]:
+    """Return a list of missing sources with suggested extraction commands.
+
+    *required* is a list of ``(source_name, suggested_command)`` pairs.
+    Only returns entries for sources not yet indexed.  Uses prefix
+    matching so ``volatility.netscan.host1`` satisfies ``volatility.netscan``.
+
+    Network sources (netscan/connscan/sockscan) are treated as
+    interchangeable; having any one satisfies the requirement.
+    """
+    missing = []
+    for src, cmd in required:
+        if src in _NETWORK_SOURCE_ALTERNATIVES:
+            if not any(_source_exists(alt) for alt in _NETWORK_SOURCE_ALTERNATIVES):
+                missing.append({"source": src, "suggestion": cmd})
+        elif not _source_exists(src):
+            missing.append({"source": src, "suggestion": cmd})
+    return missing
+```
+
+[`src/mulder/server/tools/composite/core.py:182-201`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L182-L201)
+
+```python
+    missing = _check_missing_sources(
+        [
+            ("volatility.svcscan", "run_volatility('svcscan', '<memory_path>')"),
+            ("registry.system", "run_registry_parser('<image_path>', hive='SYSTEM')"),
+            ("registry.software", "run_registry_parser('<image_path>', hive='SOFTWARE')"),
+            ("ez.shimcache", "run_shimcache_parser('<image_path>')"),
+            ("ez.amcache", "run_amcache_parser('<image_path>')"),
+            ("ez.prefetch", "run_prefetch_parser('<image_path>')"),
+        ]
+    )
+```
+
+[`src/mulder/server/tools/composite/persistence.py:278-287`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/persistence.py#L278-L287)
+
+[10] 대조할 두 자료가 모두 없을 때의 안내다.
+
+```python
+        return {
+            "tool_call_id": tc_id,
+            "status": "success",
+            "results": [],
+            "source": _SRC_PSSCAN,
+            "result_count": 0,
+            "hint": (
+                "No pslist or psscan data indexed yet. Run "
+                "run_volatility_batch(['pslist', 'psscan'], memory_path) first."
+            ),
+        }
+```
+
+[`src/mulder/server/tools/core.py:634-644`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L634-L644)
+
+```python
+        return {
+            "tool_call_id": tc_id,
+            "status": "success",
+            "results": [],
+            "source": _SRC_MODSCAN,
+            "result_count": 0,
+            "hint": (
+                "No modules or modscan data indexed yet. Run "
+                "run_volatility_batch(['modules', 'modscan'], memory_path) first."
+            ),
+        }
+```
+
+[`src/mulder/server/tools/core.py:751-761`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L751-L761)
+
+[11] MFT 자료가 없을 때 권하는 호출이다.
+기준 커밋의 `src/mulder`에는 `run_ez_tool`을 정의하거나 등록하는 곳이 없다.
+
+```python
+        return {
+            "tool_call_id": tc_id,
+            "status": "error",
+            "error_message": (
+                "No MFT data indexed. Run MFTECmd first: run_ez_tool('MFTECmd', '<image_path>')"
+            ),
+            "suggestion": "run_ez_tool('MFTECmd', '<image_path>')",
+        }
+```
+
+[`src/mulder/server/tools/artifacts.py:1179-1186`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L1179-L1186)
+
+```python
+    missing = _check_missing_sources(
+        [
+            ("tsk.filelist", "run_fls('<image_path>')"),
+            ("ez.mft", "run_ez_tool('MFTECmd', '<image_path>')"),
+        ]
+    )
+```
+
+[`src/mulder/server/tools/composite/exfil.py:501-506`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/exfil.py#L501-L506)
+
+[12] 오케스트레이터의 추출 계획 역할 지시문이다: [`src/mulder/orchestrator/prompts/extract_planner.md:1-14`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/prompts/extract_planner.md#L1-L14).
+
+[13] `assess_recovery`의 권고와 `parse_usn_journal`의 서명이다.
+
+```python
+    missing = _check_missing_sources(
+        [
+            ("tsk.filelist", "run_fls('<image_path>')"),
+            ("ez.prefetch", "run_prefetch_parser('<image_path>')"),
+            ("ez.usnjrnl", "parse_usn_journal('<image_path>')"),
+        ]
+    )
+```
+
+[`src/mulder/server/tools/composite/misc.py:779-785`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/misc.py#L779-L785)
+
+```python
+@mcp.tool()
+@tool_access(Role.EXTRACT_ANALYST | Role.CROSS_EXECUTOR)
+def parse_usn_journal(t_start: str, t_end: str) -> dict[str, object]:
+    """Return USN Journal entries within a time range, parsed by MFTECmd (EZ Tools).
+
+    The NTFS change journal records every file system modification
+    (create, delete, rename, etc.).  Read-only.
+    """
+    ctx = get_ctx()
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+    windows = ctx.db.get_windows_by_source(_SRC_USNJRNL, t_start, t_end)
+```
+
+[`src/mulder/server/tools/eztools.py:181-192`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/eztools.py#L181-L192)

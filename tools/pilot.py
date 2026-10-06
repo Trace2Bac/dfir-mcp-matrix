@@ -12,7 +12,7 @@
   matrix/cells/<축>/<ID>.mdx      셀 하나의 질문·상세 정의
   matrix/config.yaml              화면에 보일 서버, 시범 셀
   reports/<서버>/index.mdx        서버 원고의 머리(저장소·기준 커밋)
-  reports/<서버>/<축>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·예외·근거
+  reports/<서버>/<축>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·한계·근거
 형식은 matrix/README.md와 reports/README.mdx에 있다.
 """
 import functools
@@ -40,7 +40,7 @@ SPECIAL_OF_NAME = {v: k for k, v in SPECIAL_NAME.items()}
 # ── 원고 표시어 ── 원고(reports/)에 쓰는 낱말. 다국어로 나눌 때 여기와 web/의 화면 글자를 언어별로 늘린다.
 TERMS = {
     "impl": "구현",                 # 단락 머리 **구현.**
-    "exc": "예외",                  # 단락 머리 **예외.**
+    "limit": "한계",                # 단락 머리 **한계.**(구현의 미비점, 있을 때만)
     "judge": "판단",                # 미구현·비적용의 단락 머리 **판단.**
     "evidence": "근거",             # 소제목 ### 근거
     "excerpt": "@발췌",             # 근거의 발췌 지시어
@@ -156,7 +156,7 @@ def parse_cell(path):
            "errors": [], "warns": []}
     for d in fm.get("details") or []:
         iid = str(d.get("id", ""))
-        sec["items"].append({"id": iid, "dagger": bool(d.get("exception")),
+        sec["items"].append({"id": iid,
                              "label": SPECIAL_NAME[iid] if iid in SPECIAL else "%s %s" % (iid, detail_name(iid) or "")})
     pre, *subs = re.split(r"^### ", body, flags=re.M)
     for ln in pre.split("\n"):
@@ -373,9 +373,10 @@ def validate():
                 errs.append("%s: 원고에는 unknown(미확인)을 쓰지 않는다. 조사하지 않은 셀은 파일을 두지 않는다" % where)
             for d in det:
                 iid = str(d.get("id"))
+                if "exception" in d:
+                    errs.append("%s: %s에 exception을 쓰지 않는다(예외 표시는 없앴다, 결정 0033). 미비점은 본문 **%s.**에 쓴다" % (where, iid, TERMS["limit"]))
                 if iid in SPECIAL:
-                    if d.get("exception"):
-                        errs.append("%s: %s에는 exception을 붙이지 않는다" % (where, iid))
+                    pass
                 elif not detail_name(iid) or not iid.startswith(cid + "."):
                     errs.append("%s: 정의에 없는 상세 %s(지운 상세라면 결정 기록이나 git 이력에서 옮긴 곳을 찾는다)" % (where, iid))
     linked = {(cid, str(d.get("id"))) for n in reported_servers() for cid, p in cell_files(n).items()
@@ -602,12 +603,12 @@ def check_cell(cid, s, slugs):
             warns.append("%s 소제목 '%s'의 이름이 정의 '%s'와 다르다" % (cid, u["label"], it["label"]))
         labs = [b["label"] for b in u["blocks"]]
         if it["id"] in SPECIAL:
-            want_l = [TERMS["judge"]]
+            ok_l = [[TERMS["judge"]]]
         else:
-            want_l = [TERMS["impl"], TERMS["exc"]] if it["dagger"] else [TERMS["impl"]]
-        if labs != want_l:
-            errs.append("%s '%s'의 머리말이 %s여야 한다(지금 %s). 예외는 exception: true일 때만, 그때는 반드시 쓴다"
-                        % (cid, it["label"], want_l, labs))
+            ok_l = [[TERMS["impl"]], [TERMS["impl"], TERMS["limit"]]]
+        if labs not in ok_l:
+            errs.append("%s '%s'의 단락 머리가 %s 가운데 하나여야 한다(지금 %s). **%s.**는 구현의 미비점이 있을 때만 쓴다"
+                        % (cid, it["label"], " 또는 ".join(map(str, ok_l)), labs, TERMS["limit"]))
         for b in u["blocks"]:
             if not MARK.search(block_text(b)):
                 errs.append("%s '%s' %s에 근거 표지가 없다" % (cid, it["label"], b["label"]))
@@ -728,9 +729,9 @@ def build_data():
         for c in CELL_LIST:
             s = reports.get(n, {}).get(c["id"])
             if not s or not s["items"]:
-                link[n][c["id"]] = [{"상세": UNKNOWN, "예외": False}]
+                link[n][c["id"]] = [{"상세": UNKNOWN}]
                 continue
-            link[n][c["id"]] = [{"상세": it["id"], "예외": it["dagger"]} for it in s["items"]]
+            link[n][c["id"]] = [{"상세": it["id"]} for it in s["items"]]
     cells_out = []
     for c in CELL_LIST:
         defined = bool(c.get("scope"))
@@ -740,7 +741,7 @@ def build_data():
         rows = []
         # 미확인은 행으로 두지 않고 셀의 studied·total(조사한 서버 수·전체 서버 수)로 보인다
         for it in items + [{"id": x, "name": SPECIAL_NAME[x], "inc": meaning[x], "exc": "", "special": True} for x in (NOT_IMPL, NOT_APPL)]:
-            members = [{"s": n, "d": r["예외"]} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
+            members = [{"s": n} for n in names for r in link[n][c["id"]] if r["상세"] == it["id"]]
             seen = [x for x in it.get("seen", []) if x not in [m["s"] for m in members]]
             row = {"id": it["id"], "name": it["name"], "inc": it["inc"], "exc": it["exc"], "m": members, "seen": seen}
             if it["id"] in SPECIAL:

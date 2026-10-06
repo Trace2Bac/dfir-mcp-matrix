@@ -53,7 +53,7 @@ conditional: false               # 지원 기능이 있는 서버에만 보는 �
 boundary: …                      # (선택) 다른 셀과의 경계 설명. 화면에 셀 설명으로 보인다
 
 # ── 아래는 정의를 쓴 셀만 둔다. 시범 셀(config.yaml의 pilot_cells)은 반드시 쓴다 ──
-scope: …                         # 적용 범위. 예외 표시를 판단하는 범위
+scope: …                         # 적용 범위. 상세를 연결하는 범위
 not_implemented: …               # 이 셀에서 미구현의 뜻
 not_applicable: …                # 이 셀에서 비적용의 뜻
 
