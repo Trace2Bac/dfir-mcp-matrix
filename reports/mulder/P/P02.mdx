@@ -3,6 +3,7 @@ cell: P02
 details:
 - id: P02.01
 - id: P02.02
+- id: P02.04
 ---
 
 # P02 다음 작업 결정
@@ -41,6 +42,19 @@ Sleuth Kit 도구가 광학 매체에서 실패할 때 이미지를 다시 판�
 `detect_timestomping`과 `find_file_staging`은 MFT 자료가 없으면 서버에 등록되지 않은 도구 `run_ez_tool`을 권한다 [11].
 `assess_recovery`는 `ez.usnjrnl`이 없으면 `parse_usn_journal('<image_path>')`를 권한다 [13].
 `parse_usn_journal`은 이미지 경로가 아니라 시각 범위를 받아 이미 적재한 자료를 읽는 조회 도구라서 이 권고대로는 `ez.usnjrnl`을 만들 수 없다 [13].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 응답을 `finalize_composite_result`로 만드는 복합 도구 11개에 적용된다 [14].
+복합 도구는 조사 목적마다 코드에 정해 둔 하위 조회를 차례로 실행하고 그 결과를 한 목록으로 합친다 [15].
+예를 들어 `find_persistence_mechanisms`는 인자 없이 레지스트리, 서비스, 이벤트 로그, 시작 폴더, EZ Tools 실행 흔적, 예약 작업, 시작 파일을 찾는 수집 함수 7개를 정해진 차례로 실행한다 [15].
+`finalize_composite_result`는 하위 조회의 호출 ID를 복합 도구의 호출 기록 항목에 함께 남긴다 [16].
+모델은 어느 복합 도구를 부를지만 고르고 그 안의 단계는 서버 코드가 정한다.
+
+**한계.** 하위 조회가 쓰는 `_keyword_sub_query`는 요청한 `source`가 사건 DB에 없으면 모든 `source`를 검색한다 [17].
+그 결과로 만든 항목에는 다른 `source`에서 찾았다는 표시가 없다 [18].
+예를 들어 `find_persistence_mechanisms`의 서비스 설치 항목은 어느 `source`에서 찾았든 `source`에 요청한 이름 `evtx.system`을 적는다 [18].
+모든 `source`를 검색했다는 사실은 하위 조회의 호출 기록 이름(`._search(all)`)에만 남는다 [17].
 
 ### 근거
 
@@ -383,3 +397,79 @@ def parse_usn_journal(t_start: str, t_end: str) -> dict[str, object]:
 ```
 
 [`src/mulder/server/tools/eztools.py:181-192`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/eztools.py#L181-L192)
+
+[14] 복합 도구 11개가 `finalize_composite_result`를 부르는 곳이다: [`src/mulder/server/tools/composite/execution.py:250`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/execution.py#L250), [`src/mulder/server/tools/composite/execution.py:323`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/execution.py#L323), [`src/mulder/server/tools/composite/exfil.py:301`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/exfil.py#L301), [`src/mulder/server/tools/composite/exfil.py:508`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/exfil.py#L508), [`src/mulder/server/tools/composite/lateral.py:378`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/lateral.py#L378), [`src/mulder/server/tools/composite/misc.py:650`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/misc.py#L650), [`src/mulder/server/tools/composite/misc.py:740`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/misc.py#L740), [`src/mulder/server/tools/composite/misc.py:787`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/misc.py#L787), [`src/mulder/server/tools/composite/misc.py:870`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/misc.py#L870), [`src/mulder/server/tools/composite/persistence.py:289`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/persistence.py#L289), [`src/mulder/server/tools/composite/process.py:402`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/process.py#L402).
+
+[15] `find_persistence_mechanisms`는 수집 함수를 정해진 차례로 부른다.
+
+```python
+def find_persistence_mechanisms() -> dict[str, object]:
+    """Detect persistence mechanisms across registry, services, event logs, and timeline.
+
+    Searches Windows registry hives for known autorun keys (Run, RunOnce,
+    Userinit, AppInit_DLLs, etc.), cross-references with Volatility service
+    scan output, checks event logs for service installation and scheduled
+    task events, queries EZ Tools shimcache/amcache/prefetch for execution
+    of persistence-related tools, and inspects TSK file listings and the
+    Plaso timeline for modifications to startup directories.  Read-only.
+    """
+    ctx = get_ctx()
+    composite_id = make_tool_call_id()
+    t0 = time.monotonic()
+    sub_call_ids: list[str] = []
+    mechanisms: list[dict[str, Any]] = []
+
+    _collect_registry_persistence(mechanisms, sub_call_ids)
+    _collect_service_persistence(mechanisms, sub_call_ids)
+    _collect_evtx_service_installs(mechanisms, sub_call_ids)
+    _collect_startup_dir_modifications(mechanisms, sub_call_ids)
+    _collect_ez_execution_persistence(mechanisms, sub_call_ids)
+    _collect_scheduled_task_persistence(mechanisms, sub_call_ids)
+    _collect_startup_files(mechanisms, sub_call_ids)
+```
+
+[`src/mulder/server/tools/composite/persistence.py:254-276`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/persistence.py#L254-L276)
+
+[16] 결과를 합친 뒤 하위 조회 ID와 함께 호출 기록에 남긴다: [`src/mulder/server/tools/composite/core.py:407-485`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L407-L485).
+
+[17] 요청한 `source`가 없으면 검색 범위를 비우고 호출 기록 이름에 `all`을 적는다.
+
+```python
+    effective_source = source_name if source_name and _source_exists(source_name) else None
+    results = ctx.db.search_windows(
+        query, source_name=effective_source, max_results=k, match="any"
+    )
+    windows = [w for w, _sname in results]
+
+    actual_label = effective_source or "all"
+    elapsed = (time.monotonic() - t0) * 1000
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name=f"{tool_name}._search({actual_label})",
+```
+
+[`src/mulder/server/tools/composite/core.py:269-279`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L269-L279)
+
+[18] 서비스 설치 항목의 `source`는 요청한 이름으로 정해져 있다.
+
+```python
+    evtx_wins, tc_evtx = _keyword_sub_query(
+        "service installation event 7045 new service installed",
+        "find_persistence_mechanisms",
+        source_name=_SRC_EVTX_SYSTEM,
+        k=20,
+    )
+    sub_call_ids.append(tc_evtx)
+    for w in evtx_wins:
+        if "7045" in w.raw_text or "service" in w.raw_text.lower():
+            mechanisms.append(
+                {
+                    "type": "service_install_event",
+                    "source": _SRC_EVTX_SYSTEM,
+                    "evidence_text": w.raw_text.strip()[:_PREVIEW_CHAR_LIMIT],
+                    "source_window": slim_window(w),
+                }
+            )
+```
+
+[`src/mulder/server/tools/composite/persistence.py:123-139`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/persistence.py#L123-L139)

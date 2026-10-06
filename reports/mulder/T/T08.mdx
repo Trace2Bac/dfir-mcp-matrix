@@ -6,6 +6,7 @@ details:
 - id: T08.03
 - id: T08.04
 - id: T08.05
+- id: T08.08
 ---
 
 # T08 실행 종료 판별
@@ -91,6 +92,17 @@ Hayabusa 도구는 출력 파일을 미리 만들어 두므로 파일이 있는�
 사건 DB에 적재하는 도구의 응답은 `tool_response`가 최상위 `status`를 `success`로 두고 도구 결과는 `preview` 글에만 담는다 [35].
 `run_volatility`는 플러그인 오류·시간 초과 결과도 이 경로로 돌려주므로 그 작업은 `completed`가 된다 [36].
 `get_completed_results`가 작업마다 돌려주는 `status`는 작업 기록에 없는 키를 읽어 늘 `unknown`이다 [37].
+
+### T08.08 라이브러리 예외를 실패로 구별
+
+**구현.** `run_volatility_batch`는 Volatility 3를 서버 프로세스 안에서 라이브러리로 부르고 플러그인마다 라이브러리가 낸 예외를 처리한다 [38].
+예외가 나면 그 플러그인의 `status`를 `error`, `error_type`을 `exception`으로 정하고 다음 플러그인을 실행한다 [38].
+`netscan`이 지원되지 않는다는 예외면 `connscan`·`sockscan`으로 다시 실행하고 그것도 실패하면 `error_type`을 `plugin_unsupported`로 정한다 [38].
+
+**한계.** python-evtx로 EVTX를 읽는 `_parse_evtx_file`은 파일을 읽다 예외가 나면 서버 로그에 경고만 남기고 빈 글을 돌려준다 [39].
+레코드 하나를 읽다 예외가 나면 debug 로그만 남기고 그 레코드를 건너뛴다 [39].
+폴더를 파싱하는 경로는 빈 글이 나온 파일을 표시 없이 결과에서 뺀다 [40].
+`index_evtx_file`은 파싱 실패와 `event_ids`에 맞는 이벤트가 없는 경우를 같은 `No events parsed` 오류로 돌려준다 [41].
 
 ### 근거
 
@@ -1087,3 +1099,103 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 ```
 
 [`src/mulder/server/jobs.py:511-519`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L511-L519)
+
+[38] 플러그인마다 라이브러리 예외를 처리해 오류 상태로 정한다.
+
+```python
+        except Exception as exc:
+            err_msg = str(exc)[:300]
+            is_netscan = short == "netscan"
+
+            if is_netscan and any(
+                kw in err_msg.lower() for kw in ("unsupported", "not valid", "unable to validate")
+            ):
+                fallback = _run_netscan_fallback_batch(
+                    ctx, automagics, memory_path, plugin_list, full_name
+                )
+                if fallback:
+                    results[plugin_name] = fallback
+                else:
+                    results[plugin_name] = {
+                        "plugin": full_name,
+                        "status": "error",
+                        "error_type": "plugin_unsupported",
+                        "source_name": f"volatility.{short}",
+                        "error_message": err_msg,
+                    }
+            else:
+                results[plugin_name] = {
+                    "plugin": full_name,
+                    "status": "error",
+                    "error_type": "exception",
+                    "source_name": f"volatility.{short}",
+                    "error_message": err_msg,
+                }
+```
+
+[`src/mulder/server/tools/extract/volatility.py:714-741`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/volatility.py#L714-L741)
+
+[39] python-evtx 파서는 레코드 예외를 건너뛰고 파일 예외에서 빈 글을 돌려준다.
+
+```python
+    try:
+        with Evtx(str(evtx_path)) as evtx:
+            for record in evtx.records():
+                try:
+                    xml_str = record.xml()
+                    event_id = _extract_event_id(xml_str)
+                    if event_ids is not None and int(event_id) not in event_ids:
+                        continue
+                    timestamp = str(record.timestamp())
+                    one_line = xml_str.replace("\n", " ").replace("\r", "")
+                    lines.append(f"{timestamp} | {event_id} | {channel} | {one_line}")
+                except Exception:
+                    logger.debug("Skipping malformed record in %s", evtx_path, exc_info=True)
+    except Exception:
+        logger.warning("Failed to parse EVTX file %s", evtx_path, exc_info=True)
+        return channel, ""
+
+    return channel, "\n".join(lines)
+```
+
+[`src/mulder/extractors/disk.py:51-68`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/disk.py#L51-L68)
+
+[40] 폴더 파싱 경로는 글이 있는 파일만 결과에 넣는다.
+
+```python
+    results: list[object] = []
+    files = sorted(Path(evtx_dir).rglob("*.evtx")) if evtx_dir else [Path(evtx_path)]
+    for ef in files:
+        channel, text = _parse_evtx_file(ef)
+        if text:
+            summary = extract_and_index(text, f"evtx.{channel}", str(ef), "python-evtx")
+            results.append(summary)
+```
+
+[`src/mulder/server/tools/extract/evtx.py:263-269`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L263-L269)
+
+[41] `index_evtx_file`은 글이 비면 사유를 가리지 않고 같은 오류를 돌려준다.
+
+```python
+    id_filter = set(event_ids) if event_ids else None
+    channel, text = _parse_evtx_file(evtx_path, event_ids=id_filter)
+    if text:
+        summary = extract_and_index(text, f"evtx.{channel}", str(evtx_path), "python-evtx")
+
+        auto_indexed = []
+        if _is_security_log(filename):
+            auto_indexed = _auto_index_companion_logs(extract_dir, image_path)
+
+        elapsed = (time.monotonic() - t0) * 1000
+        response = tool_response(
+            tc_id, "index_evtx_file", params, summary, f"evtx.{channel}", elapsed
+        )
+        if auto_indexed:
+            response["auto_indexed_companions"] = auto_indexed
+        return response
+
+    elapsed = (time.monotonic() - t0) * 1000
+    return error_response(tc_id, "index_evtx_file", params, f"No events parsed from {filename}")
+```
+
+[`src/mulder/server/tools/extract/evtx.py:583-601`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L583-L601)

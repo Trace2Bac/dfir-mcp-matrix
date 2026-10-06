@@ -5,6 +5,7 @@ details:
 - id: P05.03
 - id: P05.05
 - id: P05.08
+- id: P05.09
 ---
 
 # P05 사건 자료 정리
@@ -45,6 +46,15 @@ Prefetch·Amcache·ShimCache·레지스트리 하이브처럼 꺼낸 파일을 �
 **한계.** 이 판단은 `source` 수만 센다 [5].
 `source`를 적재하지 않은 사건은 발견사항, `narrative`, 증거 해시 목록, 호출 기록이 있어도 모두 지운다 [2][5].
 DB를 열거나 메타데이터를 읽다가 오류가 나면 `replace=True`일 때 그 DB와 호출 기록을 함께 지운다 [11].
+
+### P05.09 진행 중인 세션이 있는 사건의 초기화 거부
+
+**구현.** `scan_evidence`는 사건을 만들기 전에 지금 열린 사건을 닫는다 [2].
+job store에 끝나지 않은 batch가 있으면 닫기가 오류로 멈추므로 `replace=True`로도 사건을 지우지 않는다 [3].
+이때 `scan_evidence`는 `scan_evidence failed:` 뒤에 그 batch가 아직 실행 중이라는 문구를 붙여 오류로 답한다 [12].
+진행 여부는 job store의 batch 상태로만 판단한다 [3].
+
+**한계.** `run_parallel`이 실행하는 작업과 모델이 따로 부른 도구는 job store에 포함되지 않아 진행 중이어도 초기화를 막지 않는다 [13].
 
 ### 근거
 
@@ -295,3 +305,39 @@ def _cleanup_tsk_extract_dir(dir_path: str) -> None:
 ```
 
 [`src/mulder/server/app.py:497-520`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L497-L520)
+
+[12] `scan_evidence`는 사건을 만들다 난 예외를 오류 응답으로 돌려준다.
+
+```python
+    try:
+        result = _scan_evidence_inner(ev_path, case_id, replace)
+    except Exception as exc:
+        logger.exception("scan_evidence failed for %r", ev_path)
+        return error_response(
+            tc_id,
+            "scan_evidence",
+            params,
+            f"scan_evidence failed: {exc}",
+            (time.monotonic() - t0) * 1000,
+```
+
+[`src/mulder/server/tools/case.py:122-131`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/case.py#L122-L131)
+
+[13] `run_parallel`은 job store를 거치지 않고 도구 함수를 바로 부른다.
+
+```python
+    batch_id = f"bp_{uuid4().hex[:8]}"
+    results: list[Any] = [None] * len(tasks)
+    open_case_id = get_ctx().case_id if has_ctx() else None
+
+    async def _run_one(idx: int, tool_name: str, arguments: dict[str, Any]) -> None:
+        """Execute a single task and store its result at *idx*."""
+        token = current_batch_id.set(batch_id)
+        try:
+            fn = _tool_dispatch.get(tool_name)
+            if fn is None:
+                results[idx] = {"error": f"Unknown tool: {tool_name}"}
+                return
+```
+
+[`src/mulder/server/app.py:691-702`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L691-L702)

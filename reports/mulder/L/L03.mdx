@@ -17,12 +17,13 @@ details:
 
 다른 기록 장치와 처리기도 쓰기 실패를 결과 전달로 넘기지 않는다.
 `audited_tool`은 성공 뒤 기록이 실패하면 예외 처리에서 `output_hash`를 `"error"`로 한 번 더 쓰고 예외를 다시 올린다 [4].
-`carve_sqlite_from_raw`는 데이터베이스를 찾지 못한 응답을 `try` 블록 안에서 기록하고 이 블록은 `OSError`가 나면 `error_response`를 돌려준다 [5].
-그래서 그 쓰기가 `OSError`로 실패하면 `error_response`로 기록을 다시 시도한다 [5].
-이 다시 쓰기가 성공하면 결과 대신 이미지 읽기 오류 응답이 나간다 [5].
-작업 관리 도구는 기록 호출을 감싼 `try` 블록에서 `RuntimeError`만 처리해 경고 로그를 남기고 기록을 건너뛰므로 파일 쓰기 오류는 그대로 올라간다 [6].
-백그라운드 작업에서 기록이 실패하면 작업 처리기가 예외를 처리해 작업을 `failed`로 두고 결과를 싣지 않는다 [7].
-`run_parallel`은 하위 도구의 예외를 처리해 그 작업의 결과를 오류 문구로 바꾼다 [8].
+작업 관리 도구는 기록 호출을 감싼 `try` 블록에서 `RuntimeError`만 처리해 경고 로그를 남기고 기록을 건너뛰므로 파일 쓰기 오류는 그대로 올라간다 [5].
+백그라운드 작업에서 기록이 실패하면 작업 처리기가 예외를 처리해 작업을 `failed`로 두고 결과를 싣지 않는다 [6].
+
+**한계.** `carve_sqlite_from_raw`는 데이터베이스를 찾지 못한 응답을 `try` 블록 안에서 기록하고 이 블록은 `OSError`가 나면 `error_response`를 돌려준다 [7].
+그래서 기록 쓰기의 `OSError`를 이미지 읽기 오류로 처리해 그 오류 응답을 돌려주고 그 응답의 기록을 한 번 더 쓴다 [7].
+이 다시 쓰기가 성공하면 결과 대신 이미지 읽기 오류 응답이 나가고 호출 기록에도 실제 원인과 다른 오류 항목이 남는다 [7].
+`run_parallel`은 하위 도구의 기록 실패도 예외로 처리해 그 작업의 결과를 오류 문구로 바꾸고 나머지 작업의 결과는 그대로 돌려준다 [8].
 
 ### 근거
 
@@ -122,7 +123,40 @@ details:
 
 [`src/mulder/server/helpers.py:193-214`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L193-L214)
 
-[5] `carve_sqlite_from_raw`의 기록 호출과 `OSError` 처리다.
+[5] `start_extraction_batch`의 기록 호출은 `RuntimeError`만 처리해 경고 로그를 남기고 기록을 건너뛴다.
+같은 처리가 [`src/mulder/server/tools/jobs.py:231-241`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L231-L241)과 [`src/mulder/server/tools/jobs.py:76-86`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L76-L86)에도 있다.
+
+```python
+    try:
+        ctx = get_ctx()
+        ctx.audit.log_tool_call(
+            tool_call_id=tc_id,
+            tool_name="start_extraction_batch",
+            params={"tasks": [t["tool"] for t in tasks]},
+            output_hash=hash_output({"batch_id": batch.batch_id}),
+            duration_ms=elapsed,
+        )
+    except RuntimeError:
+        logger.warning("Audit skipped: no active case context for start_extraction_batch")
+```
+
+[`src/mulder/server/tools/jobs.py:169-179`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L169-L179)
+
+[6] 작업 처리기는 예외를 처리해 작업 상태와 서버 로그에 적는다.
+
+```python
+        except Exception as exc:
+            logger.exception("Job %s (%s) failed", job_id, tool_name)
+            with self._lock:
+                job.status = "failed"
+                job.error = f"{tool_name} failed: {exc}"
+                job.completed_at = time.monotonic()
+            logger.info("%s %s|%s|%s", _JOB_COMPLETE_MARKER, tool_name, "failed", job.error)
+```
+
+[`src/mulder/server/jobs.py:274-280`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L274-L280)
+
+[7] `carve_sqlite_from_raw`의 기록 호출과 `OSError` 처리다.
 
 ```python
     try:
@@ -160,39 +194,6 @@ details:
 ```
 
 [`src/mulder/server/tools/phone.py:167-176`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/phone.py#L167-L176)
-
-[6] `start_extraction_batch`의 기록 호출은 `RuntimeError`만 처리해 경고 로그를 남기고 기록을 건너뛴다.
-같은 처리가 [`src/mulder/server/tools/jobs.py:231-241`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L231-L241)과 [`src/mulder/server/tools/jobs.py:76-86`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L76-L86)에도 있다.
-
-```python
-    try:
-        ctx = get_ctx()
-        ctx.audit.log_tool_call(
-            tool_call_id=tc_id,
-            tool_name="start_extraction_batch",
-            params={"tasks": [t["tool"] for t in tasks]},
-            output_hash=hash_output({"batch_id": batch.batch_id}),
-            duration_ms=elapsed,
-        )
-    except RuntimeError:
-        logger.warning("Audit skipped: no active case context for start_extraction_batch")
-```
-
-[`src/mulder/server/tools/jobs.py:169-179`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/jobs.py#L169-L179)
-
-[7] 작업 처리기는 예외를 처리해 작업 상태와 서버 로그에 적는다.
-
-```python
-        except Exception as exc:
-            logger.exception("Job %s (%s) failed", job_id, tool_name)
-            with self._lock:
-                job.status = "failed"
-                job.error = f"{tool_name} failed: {exc}"
-                job.completed_at = time.monotonic()
-            logger.info("%s %s|%s|%s", _JOB_COMPLETE_MARKER, tool_name, "failed", job.error)
-```
-
-[`src/mulder/server/jobs.py:274-280`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L274-L280)
 
 [8] `run_parallel`은 하위 도구의 예외를 오류 결과로 바꾼다.
 
