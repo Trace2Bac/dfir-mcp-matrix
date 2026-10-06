@@ -335,11 +335,11 @@ def validate():
             for d in c.get("details") or []:
                 if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다
                     warns.append("%s: %s에 include가 아직 없다" % (f, d.get("id")))
-                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과의 경계는 boundary에 쓴다(결정 0044)
+                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과 차이점은 boundary에 쓴다(결정 0044)
                 other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or ""))
                                 if x != c["id"]})
                 if other:
-                    warns.append("%s: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과의 경계는 boundary에 쓴다" % (f, d.get("id"), ", ".join(other)))
+                    warns.append("%s: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 boundary에 쓴다" % (f, d.get("id"), ", ".join(other)))
             for k in ("not_implemented", "not_applicable"):
                 if not c.get(k):
                     errs.append("%s: 정의를 쓴 셀인데 %s가 없다" % (f, k))
@@ -431,7 +431,7 @@ def validate():
                 errs.append("matrix/candidates.yaml: %s에 name이 없다" % iid)
             other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or "")) if x != cid})
             if other:
-                warns.append("matrix/candidates.yaml: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과의 경계는 셀의 boundary에 쓴다" % (iid, ", ".join(other)))
+                warns.append("matrix/candidates.yaml: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 셀의 boundary에 쓴다" % (iid, ", ".join(other)))
             seen_ids.add(iid)
     if behind:
         notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 정의는 그 버전의 결정 기록에 있다"
@@ -743,11 +743,11 @@ def check_cell(cid, s, slugs):
             for sent in SENT.split(block_text(b)):
                 if "`" in sent and not MARK.search(sent):
                     warns.append("%s 표지 없는 코드 문장: %s" % (cid, sent.strip()[:70]))
-            # 원고는 그 셀만 다룬다. 다른 셀과의 경계는 셀 정의의 boundary에 있다
+            # 원고는 그 셀만 다룬다. 다른 셀과 차이점은 셀 정의의 boundary에 있다
             # 번호 없는 "E01"은 증거 형식(EWF) 이름으로 흔히 쓰여 뺀다
             for x in sorted({m.group(0) for m in CELL_REF.finditer(block_text(b))
                              if m.group(1) != cid and m.group(0) != "E01"}):
-                warns.append("%s '%s' 다른 셀 %s를 가리킨다. 원고는 이 셀만 다루고 다른 셀과의 경계는 셀 정의에 둔다" % (cid, it["label"], x))
+                warns.append("%s '%s' 다른 셀 %s를 가리킨다. 원고는 이 셀만 다루고 다른 셀과 차이점은 셀 정의의 boundary에 둔다" % (cid, it["label"], x))
             for ln in prose_lines(b["lines"]):
                 if sentences_in_line(ln) > 1:
                     errs.append("%s '%s' 한 줄에 문장이 둘 이상이다(문장 하나에 한 줄): %s" % (cid, it["label"], ln[:50]))
