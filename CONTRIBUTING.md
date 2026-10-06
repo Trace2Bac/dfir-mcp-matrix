@@ -35,7 +35,7 @@ cd web && npm ci && npm start                          # http://localhost:3000/ 
 - 사이트 `web/build/`: `npm run build`가 만듭니다.
 
 생성물은 저장소에 올리지 않습니다(`.gitignore`). `npm start`와 `npm run build`는 실행할 때마다 화면 데이터를 먼저 다시 만듭니다.
-CI는 PR이 열리거나 갱신될 때, 그리고 `main`에 푸시될 때마다 사이트를 빌드해 Actions 아티팩트 `matrix-site`로 올립니다.
+CI는 버전 태그를 올릴 때만 사이트를 빌드해 Actions 아티팩트 `matrix-site`로 올리고 GitHub Pages에 배포합니다. PR과 `main` 푸시에서는 돌지 않습니다.
 
 무엇을 고치려면 어느 파일을 열어야 하는지는 다음 표와 같습니다.
 
@@ -58,7 +58,7 @@ python tools/pilot.py check         # 원고를 고쳤으면. 형식·표지·�
 cd web && npm start                # 화면으로 본다. 원고를 고치면 다시 그린다
 ```
 
-PR을 열면 CI가 `validate`와 `build`를 실행합니다. 둘 중 하나라도 실패하면 PR에 빨간 X가 표시됩니다.
+CI는 PR에서 돌지 않으므로 PR을 열기 전에 `validate`와 `check`를 로컬에서 실행합니다. CI는 버전 태그를 올릴 때 `validate`와 `build`를 실행하고, 둘 중 하나라도 실패하면 배포하지 않습니다.
 `check`는 서버 클론이 있어야 하므로 CI가 아니라 로컬에서 실행합니다.
 
 ## 정의를 바꾸는 때와 버전

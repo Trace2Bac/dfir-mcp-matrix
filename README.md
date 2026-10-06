@@ -40,7 +40,7 @@ cd web && npm ci && npm start      # http://localhost:3000/
 `npm start`와 `npm run build`는 먼저 `python tools/pilot.py build`를 실행해 화면 데이터를 만듭니다.
 그래서 Python과 Node.js 20 이상이 모두 설치되어 있어야 합니다.
 
-CI는 PR이 열리거나 갱신될 때, 그리고 `main`에 푸시될 때마다 사이트를 빌드합니다. GitHub Pages에는 매트릭스 버전 태그(`v<날짜>`, 예: `v2026-10-06`)를 올릴 때만 배포합니다(`.github/workflows/matrix.yml`).
+CI는 매트릭스 버전 태그(`v<날짜>`, 예: `v2026-10-06`)를 올릴 때만 사이트를 빌드하고 GitHub Pages에 배포합니다(`.github/workflows/matrix.yml`). PR과 `main` 푸시에서는 돌지 않습니다.
 
 ## 축
 
@@ -63,7 +63,7 @@ docs/
   decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
 web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
 tools/pilot.py   validate·check·build·fill·renumber
-.github/workflows/matrix.yml   PR(열기·갱신)과 main 푸시마다 validate·build, 버전 태그(v<날짜>)면 GitHub Pages에 배포
+.github/workflows/matrix.yml   버전 태그(v<날짜>)를 올릴 때만 validate·build 후 GitHub Pages에 배포
 ```
 
 ## 기여하기
@@ -74,7 +74,7 @@ LLM에게 수정을 맡길 때는 [AGENTS.md](AGENTS.md)를 읽게 하세요. Cl
 자주 쓰는 명령은 다음과 같습니다.
 
 ```
-python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(CI가 돌린다)
+python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(태그를 올리면 CI도 돌린다)
 python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(서버 클론 필요)
 python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
