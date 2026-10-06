@@ -16,10 +16,9 @@
 원고에는 다음 내용이 들어갑니다.
 
 - **구현**: 그 방식이 서버의 어느 도구나 경로에 있고 어떻게 동작하는지
-- **예외**: 구현에 적은 적용 범위 안에서 그 방식이 적용되지 않는 경우
+- **한계**: 구현에 적은 적용 범위 안에서 그 방식이 적용되지 않는 경로나 조건
 - **근거**: 위 설명을 뒷받침하는 자료(주로 기준 커밋의 코드 위치와 발췌)
 
-서버가 해당하는 상세에 예외가 있으면, 화면에서 그 상세 아래 서버 버튼에 **예외 표시**(주황 테두리)가 붙습니다.
 용어의 자세한 정의는 [용어 사전](docs/glossary/README.mdx)에 있습니다.
 
 ## 매트릭스 보기
@@ -36,12 +35,12 @@ cd web && npm ci && npm start      # http://localhost:3000/
 
 - 첫 화면에서 전체 셀 구조를 볼 수 있습니다.
 - 셀을 누르면 그 셀의 상세 항목과, 상세마다 해당하는 서버가 나옵니다.
-- 서버를 누르면 그 서버의 원고(구현, 예외, 근거)가 열립니다.
+- 서버를 누르면 그 서버의 원고(구현, 한계, 근거)가 열립니다.
 
 `npm start`와 `npm run build`는 먼저 `python tools/pilot.py build`를 실행해 화면 데이터를 만듭니다.
 그래서 Python과 Node.js 20 이상이 모두 설치되어 있어야 합니다.
 
-CI는 PR이 열리거나 갱신될 때, 그리고 `main`에 푸시될 때마다 사이트를 빌드합니다. `main` 푸시일 때는 빌드한 사이트를 GitHub Pages에 배포합니다(`.github/workflows/matrix.yml`).
+CI는 PR이 열리거나 갱신될 때, 그리고 `main`에 푸시될 때마다 사이트를 빌드합니다. GitHub Pages에는 매트릭스 버전 태그(`v<날짜>`, 예: `v2026-10-06`)를 올릴 때만 배포합니다(`.github/workflows/matrix.yml`).
 
 ## 축
 
@@ -64,7 +63,7 @@ docs/
   decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
 web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
 tools/pilot.py   validate·check·build·fill·renumber
-.github/workflows/matrix.yml   PR(열기·갱신)과 main 푸시마다 validate·build, main이면 GitHub Pages에 배포
+.github/workflows/matrix.yml   PR(열기·갱신)과 main 푸시마다 validate·build, 버전 태그(v<날짜>)면 GitHub Pages에 배포
 ```
 
 ## 기여하기

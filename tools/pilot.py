@@ -101,6 +101,10 @@ def load_matrix():
 
 AXES, CELL_LIST, CONFIG = load_matrix()
 CELLS = {c.get("id"): c for c in CELL_LIST}
+# 구현 사례가 아직 없는 상세 후보(matrix/candidates.yaml, 결정 0043). {셀ID: [상세, …]}
+_CAND_PATH = os.path.join(MATRIX, "candidates.yaml")
+CANDIDATES = (load_yaml(_CAND_PATH) or {}) if os.path.exists(_CAND_PATH) else {}
+CANDIDATE_IDS = {str(d.get("id")) for items in CANDIDATES.values() for d in (items or [])}
 ORDER = list(CONFIG["pilot_cells"])
 
 
@@ -328,8 +332,13 @@ def validate():
             errs.append("%s: 조건부 셀에 applies_to가 없다" % f)
         if c.get("scope"):
             for d in c.get("details") or []:
-                if not d.get("include") or not d.get("exclude"):
-                    warns.append("%s: %s에 include·exclude가 아직 없다" % (f, d.get("id")))
+                if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다
+                    warns.append("%s: %s에 include가 아직 없다" % (f, d.get("id")))
+                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과의 경계는 boundary에 쓴다(결정 0044)
+                other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or ""))
+                                if x != c["id"]})
+                if other:
+                    warns.append("%s: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과의 경계는 boundary에 쓴다" % (f, d.get("id"), ", ".join(other)))
             for k in ("not_implemented", "not_applicable"):
                 if not c.get(k):
                     errs.append("%s: 정의를 쓴 셀인데 %s가 없다" % (f, k))
@@ -392,14 +401,37 @@ def validate():
                     errs.append("%s: %s에 exception을 쓰지 않는다(예외 표시는 없앴다, 결정 0033). 방식이 적용되지 않는 경로는 본문 **%s.**에 쓴다" % (where, iid, TERMS["limit"]))
                 if iid in SPECIAL:
                     pass
+                elif iid in CANDIDATE_IDS and not detail_name(iid):
+                    errs.append("%s: 후보 상세 %s에 연결했다. matrix/candidates.yaml의 그 항목을 셀 파일의 details로 옮긴다" % (where, iid))
                 elif not detail_name(iid) or not iid.startswith(cid + "."):
                     errs.append("%s: 정의에 없는 상세 %s(지운 상세라면 결정 기록이나 git 이력에서 옮긴 곳을 찾는다)" % (where, iid))
     linked = {(cid, str(d.get("id"))) for n in reported_servers() for cid, p in cell_files(n).items()
               for d in (read_front(p)[0].get("details") or [])}
     cand = [d["id"] for c in CELL_LIST if c.get("scope") for d in c.get("details") or []
             if (c["id"], d["id"]) not in linked and not d.get("seen_in")]
-    notes = ["정의를 쓴 셀에서 구현 사례(원고 연결·seen_in)가 없는 상세 %d개(화면에 후보로 보인다): %s"
+    notes = ["구현 사례(원고 연결·seen_in)가 없는 상세 %d개. 사례를 찾을 때까지 matrix/candidates.yaml로 옮긴다: %s"
              % (len(cand), " ".join(cand))] if cand else []
+    # 후보 파일: 셀이 있고 번호가 그 셀의 것이며 셀 정의의 상세와 겹치지 않아야 한다
+    seen_ids = set()
+    for cid, items in CANDIDATES.items():
+        if cid not in CELLS:
+            errs.append("matrix/candidates.yaml: 없는 셀 %s" % cid)
+            continue
+        own = {str(d.get("id")) for d in CELLS[cid].get("details") or []}
+        for d in items or []:
+            iid = str(d.get("id"))
+            if not re.match(r"^%s\.\d\d$" % re.escape(cid), iid):
+                errs.append("matrix/candidates.yaml: %s 아래의 %s는 그 셀의 상세 번호가 아니다" % (cid, iid))
+            elif iid in own:
+                errs.append("matrix/candidates.yaml: %s가 셀 정의의 상세와 겹친다. 셀로 옮겼으면 후보에서 지운다" % iid)
+            elif iid in seen_ids:
+                errs.append("matrix/candidates.yaml: %s가 두 번 있다" % iid)
+            if not d.get("name"):
+                errs.append("matrix/candidates.yaml: %s에 name이 없다" % iid)
+            other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or "")) if x != cid})
+            if other:
+                warns.append("matrix/candidates.yaml: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과의 경계는 셀의 boundary에 쓴다" % (iid, ", ".join(other)))
+            seen_ids.add(iid)
     if behind:
         notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 정의는 그 버전의 결정 기록에 있다"
                      % (CONFIG["version"], " ".join(behind)))

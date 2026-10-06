@@ -80,13 +80,13 @@ export default function CellToolList({ cellId }: { cellId: string }) {
         <dl className={styles.defs}>
           {cell.dscope && (
             <div>
-              <dt>적용 범위</dt>
+              <dt>확인 범위</dt>
               <dd><Sentences text={cell.dscope} /></dd>
             </div>
           )}
           {cell.note && (
             <div>
-              <dt>다른 셀과의 경계</dt>
+              <dt>다른 셀과 차이점</dt>
               <dd><Sentences text={cell.note} /></dd>
             </div>
           )}
