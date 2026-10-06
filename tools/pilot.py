@@ -342,6 +342,7 @@ def validate():
         elif not CELLS[cid].get("scope"):
             errs.append("matrix/config.yaml: 시범 셀 %s에 정의(scope·not_implemented·not_applicable·include·exclude)가 없다" % cid)
     rep_schema = _schema("report.schema.json")
+    behind = []  # 원고 기준 버전이 지금 매트릭스 버전보다 낮은 서버
     for n in reported_servers():
         idx = os.path.join(report_dir(n), "index.mdx")
         if not os.path.exists(idx):
@@ -350,6 +351,14 @@ def validate():
             fm, _, _ = read_front(idx)
             if fm.get("server") != n:
                 errs.append("reports/%s/index.mdx: 머리말 server가 %s가 아니다" % (n, n))
+            mv = str(fm.get("matrix_version", ""))
+            # 버전은 날짜(YYYY-MM-DD)라 문자열 그대로 비교하면 날짜 순서다
+            if mv and not re.match(r"^\d{4}-\d{2}-\d{2}$", mv):
+                errs.append("reports/%s/index.mdx: matrix_version은 날짜(YYYY-MM-DD)여야 한다(지금 %s)" % (n, mv))
+            elif mv > CONFIG["version"]:
+                errs.append("reports/%s/index.mdx: matrix_version %s가 matrix/config.yaml version %s보다 나중이다" % (n, mv, CONFIG["version"]))
+            elif mv < CONFIG["version"]:
+                behind.append("%s(%s)" % (n, mv or "없음"))
         files = cell_files(n)
         for cid in ORDER:
             if cid not in files:
@@ -385,6 +394,9 @@ def validate():
             if (c["id"], d["id"]) not in linked and not d.get("seen_in")]
     notes = ["정의를 쓴 셀에서 구현 사례(원고 연결·seen_in)가 없는 상세 %d개(화면에 후보로 보인다): %s"
              % (len(cand), " ".join(cand))] if cand else []
+    if behind:
+        notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 정의는 그 버전의 결정 기록에 있다"
+                     % (CONFIG["version"], " ".join(behind)))
     return errs, warns, notes
 
 
