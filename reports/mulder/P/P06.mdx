@@ -1,0 +1,263 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 열린 사건 문맥 `_ctx`(사건 ID, DB 연결, 호출 기록 객체)는 모듈 전역 변수 하나다 [1].
+세션마다 문맥을 따로 두는 코드가 없어 `--transport streamable-http`로 실행하면 연결한 클라이언트가 모두 같은 열린 사건을 쓴다 [1][2].
+job store의 작업·batch·전달한 결과 목록, EVTX·TSK 추출 폴더 목록, `source` 목록 캐시, 디스크 이미지 정보 캐시, IOC 조회 캐시도 프로세스 메모리에만 있다 [3].
+이 상태에는 유효 시간이나 개수 한도가 없고 프로세스가 끝나면 사라진다 [3].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 사건 DB에는 적재한 `source`와 `window`, 발견사항, `narrative`, 증거 해시 목록, 북마크, 진행 기록(`progress`), 키-값 표(`kv_store`)가 있다 [4].
+`kv_store`에는 `run_fls`가 찾은 파티션 오프셋과 EVTX 추출 폴더 경로 같은 중간값이 들어간다 [5].
+호출 기록은 `AuditLog`가 호출마다 JSONL 한 줄을 덧붙이고 `fsync`로 디스크에 쓴다 [6].
+북마크와 진행 기록의 docstring은 DB에 남아 문맥 압축 뒤에도 남는다고 적는다 [7].
+발견사항을 남기는 방식은 D05에서 본다.
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** `--case-id`를 주고 서버를 실행하면 `init_server`가 그 사건의 DB를 바로 연다 [8].
+`--case-id`가 없으면 모델이 `open_case`를 불러야 같은 사건을 다시 읽는다 [8].
+사건을 열 때 `AuditLog`는 기존 JSONL을 처음부터 읽어 호출 ID 목록과 도구별 호출 횟수를 다시 만든다 [9].
+그래서 다시 시작한 서버에서도 발견사항의 인용 확인과 마감 조건이 앞 프로세스의 호출 기록을 본다 [9].
+파티션 오프셋은 `kv_store`에서 다시 읽는다 [5].
+
+**한계.** EVTX 추출 폴더는 서버가 정상 종료할 때 지우지만 `kv_store`의 폴더 경로는 남는다 [10].
+다시 시작한 서버에서 `index_evtx_file`은 그 경로를 읽고 폴더가 없어 `run_evtx_parser`를 먼저 부르라는 오류를 낸다 [11].
+`run_evtx_parser`를 `force` 없이 다시 부르면 그 이미지에서 만든 `evtx.manifest` `source`가 있어 건너뛴다 [12].
+job store의 batch는 다시 만들어지지 않고 그 결과는 P03.03에서 본다.
+
+### 근거
+
+[1] 열린 사건 문맥은 모듈 전역 변수 하나다.
+
+```python
+_cfg: ServerConfig | None = None
+_ctx: ServerContext | None = None
+_ctx_lock = threading.Lock()
+_job_store: JobStore | None = None
+
+
+def get_cfg() -> ServerConfig:
+    """Return the server config or raise if not initialised."""
+    if _cfg is None:
+        raise RuntimeError("Server not initialised. Call init_server() first.")
+    return _cfg
+
+
+def get_ctx() -> ServerContext:
+    """Return the active case context or raise if no case is loaded."""
+    if _ctx is None:
+        raise RuntimeError("No case loaded. Call scan_evidence or open_case first.")
+    return _ctx
+
+
+def has_ctx() -> bool:
+    """Return True if a case is currently loaded."""
+    return _ctx is not None
+```
+
+[`src/mulder/server/app.py:238-260`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L238-L260)
+
+[2] 서버 명령의 전송 방식 선택이다.
+
+```python
+@click.option(
+    "--transport",
+    default="stdio",
+    show_default=True,
+    type=click.Choice(["stdio", "streamable-http"]),
+    help="MCP transport to use.",
+)
+```
+
+[`src/mulder/cli.py:56-62`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/cli.py#L56-L62)
+
+[3] 메모리 상태는 [`src/mulder/server/jobs.py:145-147`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/jobs.py#L145-L147), [`src/mulder/server/tools/extract/evtx.py:44`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L44), [`src/mulder/server/tools/extract/tsk.py:174`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/tsk.py#L174), [`src/mulder/server/tools/composite/core.py:104-105`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L104-L105), [`src/mulder/server/tools/tsk.py:46`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/tsk.py#L46), [`src/mulder/server/tools/enrichment.py:129`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/enrichment.py#L129)에 있다.
+
+[4] 사건 DB의 표 정의는 [`src/mulder/db.py:47-136`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L47-L136)이다.
+
+[5] 오프셋과 추출 폴더 경로를 `kv_store`에 쓰고 오프셋은 [`src/mulder/server/tools/extract/tsk.py:166-169`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/tsk.py#L166-L169)에서 다시 읽는다.
+
+```python
+    ctx = get_ctx()
+    ctx.db.set_kv(f"{_KV_OFFSET_PREFIX}{image_path}", str(partition_offset))
+    ctx.db.set_kv(
+        f"{_KV_SOURCE_OFFSET_PREFIX}tsk.filelist:{image_path}",
+        str(partition_offset),
+    )
+```
+
+[`src/mulder/server/tools/extract/tsk.py:677-682`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/tsk.py#L677-L682)
+
+```python
+        ctx = get_ctx()
+        ctx.db.set_kv("evtx_extract_dir", extract_dir)
+        ctx.db.set_kv(f"evtx_extract_dir:{evtx_path}", extract_dir)
+```
+
+[`src/mulder/server/tools/extract/evtx.py:321-323`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L321-L323)
+
+[6] 호출 기록을 덧붙이고 디스크에 쓴다.
+
+```python
+    def _append(self, entry: dict[str, object]) -> None:
+        """Append ``entry`` to the JSONL log file and update in-memory indexes."""
+        with self._lock:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._log_path, "a") as fh:
+                fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._index_entry(entry)
+```
+
+[`src/mulder/audit.py:114-122`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/audit.py#L114-L122)
+
+[7] 북마크와 진행 기록의 docstring이다.
+
+```python
+    """Bookmark a specific window for later review.
+
+    Use this to flag interesting evidence that doesn't yet warrant a
+    full finding. Bookmarks persist in the database and survive context
+    compaction. Review bookmarks later with get_bookmarks(). Read-only
+    on evidence (writes only to case DB metadata).
+```
+
+[`src/mulder/server/tools/core.py:1282-1287`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L1282-L1287)
+
+```python
+    """Record investigation progress for a specific system.
+
+    Call this after completing analysis of each system to track which
+    tools were run and which investigation questions were addressed.
+    Progress records persist in the database and survive context
+    compaction.
+```
+
+[`src/mulder/server/tools/review.py:312-317`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/review.py#L312-L317)
+
+[8] 시작할 때 DB가 있을 때만 사건을 연다.
+
+```python
+    if case_id is not None:
+        validate_case_id(case_id)
+        if (db_dir / f"{case_id}.db").exists():
+            load_case(case_id)
+        else:
+            # The orchestrator passes --case-id to every agent session, including
+            # the catalog one that runs before scan_evidence creates the case.
+            logger.warning(
+                "Case '%s' has no database yet; starting without it "
+                "(scan_evidence will create it).",
+                case_id,
+            )
+```
+
+[`src/mulder/server/app.py:367-378`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/app.py#L367-L378)
+
+[9] 기존 호출 기록 파일을 다시 읽어 색인을 만든다.
+발견사항의 인용 확인은 이 색인을 쓴다([`src/mulder/server/tools/findings.py:283`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L283)).
+
+```python
+    def _load_existing(self) -> None:
+        """Populate in-memory indexes from an existing JSONL file."""
+        if not self._log_path.exists():
+            return
+        parse_errors = 0
+        with open(self._log_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    parse_errors += 1
+                    continue
+                if isinstance(entry, dict):
+                    self._index_entry(cast(dict[str, object], entry))
+        if parse_errors > 0:
+            logger.warning(
+                "Audit log %s: %d lines failed to parse (possible corruption)",
+                self._log_path,
+                parse_errors,
+            )
+```
+
+[`src/mulder/audit.py:57-79`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/audit.py#L57-L79)
+
+[10] 프로세스가 끝날 때 추출 폴더를 지운다.
+
+```python
+def _cleanup_temp_dirs() -> None:
+    """Remove all extraction temp directories."""
+    with _evtx_lock:
+        dirs = list(_evtx_extract_dirs.values())
+        _evtx_extract_dirs.clear()
+    for path in dirs:
+        shutil.rmtree(path, ignore_errors=True)
+    with _tsk_lock:
+        tsk_dirs = list(_tsk_extract_dirs)
+        _tsk_extract_dirs.clear()
+    for path in tsk_dirs:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_cleanup_temp_dirs)
+```
+
+[`src/mulder/server/tools/extract/evtx.py:136-150`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L136-L150)
+
+[11] `kv_store`의 경로를 읽지만 폴더가 없으면 오류를 낸다.
+
+```python
+    if not extract_dir:
+        ctx = get_ctx()
+        if image_path:
+            extract_dir = ctx.db.get_kv(f"evtx_extract_dir:{image_path}") or ""
+        if not extract_dir:
+            extract_dir = ctx.db.get_kv("evtx_extract_dir") or ""
+
+    if not extract_dir or not Path(extract_dir).is_dir():
+        return error_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            "No EVTX extraction directory found. Call run_evtx_parser on a disk image first.",
+        )
+```
+
+[`src/mulder/server/tools/extract/evtx.py:509-522`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L509-L522)
+
+[12] 같은 이미지에서 만든 `evtx.` `source`가 있으면 건너뛰고 이미지 추출은 `evtx.manifest`를 그 이미지 경로로 적재한다([`src/mulder/server/tools/extract/evtx.py:347`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L347)).
+
+```python
+    if not force:
+        existing = sources_already_indexed(["evtx.", "ez.evtx"], evidence_path=evtx_path)
+        if existing:
+            return tool_response(
+                tc_id,
+                "run_evtx_parser",
+                params,
+                {
+                    "status": "skipped",
+                    "reason": "Sources already indexed from prior extraction",
+                    "existing_sources": existing,
+                },
+                "evtx",
+                0.0,
+            )
+```
+
+[`src/mulder/server/tools/extract/evtx.py:295-309`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L295-L309)

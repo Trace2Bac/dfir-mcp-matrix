@@ -1,0 +1,268 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.05
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 사건 ID, 마지막 호출 시각, `Session` 저장소는 `SessionContext`의 필드이고 등록한 증거 목록은 실행 환경 객체의 필드다 [1][2].
+서버 프로세스가 끝나거나 세션이 정리되면 이 상태가 사라진다 [3].
+`camel-sdk-core`는 `Session`을 `Execute` 호출 사이에 남는 저장소로 안내하고 비싼 결과를 캐시해 다시 쓰라고 권한다 [4].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 호출 기록 `audit-<CaseId>.clef`에는 `Execute`마다 실행한 스크립트 전문과 시작·끝 상태가 남는다 [5].
+그 안에서 돈 명령마다 호스트·명령·인자·sudo 여부·종료 코드·걸린 시간도 남는다 [6].
+`SetCaseId`·`SetEvidence`·`VerifyEvidence`의 결과와 모델이 `audit*` 함수로 적은 기록도 같은 파일에 남는다 [7][8].
+서버는 이 파일을 다시 읽지 않아 사건 ID·등록한 증거·`Session` 저장소를 이 파일로 되살리지 않는다 [9].
+그래서 P06.04에는 연결하지 않는다.
+workflow가 만든 Plaso 저장 파일 같은 파생물도 워크스테이션에 남지만 그 보관은 D01에서 본다.
+
+### P06.05 만료
+
+**구현.** 서버 안의 `IdleSessionSweeper`가 1분마다 세션을 훑는다 [10].
+15분 넘게 호출이 없으면 SSH 연결만 끊고 사건 ID·등록한 증거·`Session` 저장소는 남긴다 [10][3].
+4시간 넘게 호출이 없으면 세션을 지워 그 상태를 모두 버린다 [10][3].
+도구 호출이 진행 중인 세션은 건너뛴다 [3].
+정리 사실은 서버 로그에만 남고 사건 호출 기록에는 남지 않는다 [3].
+
+### 근거
+
+[1] 세션 문맥의 필드와 생성이다.
+
+```csharp
+public sealed class SessionContext : IDisposable
+{
+    public readonly AuditEnvironment Environment;
+    public readonly CamelToolkitsApi ToolkitsApi;
+    public readonly CamelWorkflowsApi WorkflowsApi;
+    public DateTimeOffset LastAccess = DateTimeOffset.UtcNow;
+
+    /// <summary>The MCP session id (set when the context is created); the default audit case id.</summary>
+    public string SessionId = "";
+
+    /// <summary>
+    /// The audit case id this session's tool executions are recorded under. Defaults to <see cref="SessionId"/>
+    /// (one case per session) and can be set by the agent via the <c>SetCaseId</c> tool to a human-readable case
+    /// label, so the per-case audit file is named for the investigation rather than an opaque session id.
+    /// </summary>
+    public string CaseId = "";
+```
+
+[`src/Camel.Server/Sessions.cs:19-34`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/Sessions.cs#L19-L34)
+
+```csharp
+    public SessionContext(IConfigurationRoot config)
+    {
+        Environment = AuditEnvironment.CreateFromConfig(config);
+        ToolkitsApi = new CamelToolkitsApi(Environment, config);
+        WorkflowsApi = new CamelWorkflowsApi(ToolkitsApi);
+    }
+```
+
+[`src/Camel.Server/Sessions.cs:71-76`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/Sessions.cs#L71-L76)
+
+[2] 등록한 증거는 실행 환경 객체에 한 번만 들어간다.
+
+```csharp
+    protected EvidenceInfo[] CaseEvidence { get; private set; } = Array.Empty<EvidenceInfo>();
+
+    // Set once TrySetCaseEvidence succeeds. Evidence is write-once per environment (i.e. per session), so the
+    // spoliation guard can't be silently repointed mid-investigation.
+    private bool evidenceRegistered;
+
+    /// <summary>True once case evidence has been registered for this environment (see <see cref="TrySetCaseEvidence"/>).</summary>
+    public bool EvidenceRegistered => evidenceRegistered;
+
+    /// <summary>
+    /// Registers the original case evidence for this environment — once. Returns true if accepted; false if
+    /// evidence was already registered, in which case nothing changes and the existing evidence stands. Evidence
+    /// is deliberately write-once per session so an analyst (or a confused agent) cannot silently repoint the
+    /// spoliation guard part-way through a case; changing it requires a fresh session. The caller (the
+    /// <c>SetEvidence</c> MCP tool) is responsible for auditing a refused second attempt as a spoliation event.
+    /// </summary>
+    public bool TrySetCaseEvidence(EvidenceInfo[] evidence)
+    {
+        if (evidenceRegistered) return false;
+        CaseEvidence = evidence ?? Array.Empty<EvidenceInfo>();
+        evidenceRegistered = true;
+        return true;
+    }
+```
+
+[`src/Camel.Environments/AuditEnvironment.cs:208-230`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Environments/AuditEnvironment.cs#L208-L230)
+
+[3] 오래 쉰 세션을 정리하고 연결만 끊거나 세션을 지운다.
+
+```csharp
+    public void SweepIdle(TimeSpan disconnectTtl, TimeSpan evictTtl)
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var kv in sessions)
+        {
+            if (!kv.Value.IsValueCreated) continue;
+            var ctx = kv.Value.Value;
+            if (ctx.IsBusy) continue;                       // a call in flight must keep its connection
+            var idle = now - ctx.LastAccess;
+            if (idle > evictTtl)
+            {
+                Runtime.Info("Evicting idle MCP session {0} (inactive longer than {1}).", kv.Key, evictTtl);
+                End(kv.Key);
+            }
+            else if (idle > disconnectTtl && ctx.DisconnectIdle())
+            {
+                Runtime.Info("Released idle SSH connection for MCP session {0} (inactive longer than {1}); session state retained.",
+                    kv.Key, disconnectTtl);
+            }
+        }
+    }
+```
+
+[`src/Camel.Server/Sessions.cs:151-171`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/Sessions.cs#L151-L171)
+
+[4] `camel-sdk-core`의 `Session` 설명이다: [`docs/Camel.core.md:122-140`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/docs/Camel.core.md#L122-L140).
+
+[5] 실행의 시작과 끝을 스크립트와 함께 기록한다.
+
+```csharp
+    /// <summary>
+    /// Records an execution boundary (the <c>Execute</c> code-mode call that frames a set of tool
+    /// executions) in the audit trail: the phase (<c>started</c>/<c>completed</c>/<c>failed</c>/<c>cancelled</c>),
+    /// the script that ran, and — on completion — success and duration. Lets the trail group a case's tool
+    /// executions under the agent step that drove them.
+    /// </summary>
+    [DebuggerStepThrough]
+    public static void AuditExecution(string phase, string? script = null, bool? success = null, long? durationMs = null) =>
+        _auditLogger?.ForContext("EventType", "execution")
+            .Information("EXECUTION {Phase} (success={Success} {DurationMs}ms)\n{Script}", phase, success, durationMs, script);
+```
+
+[`src/Camel.Runtime/Runtime.cs:197-206`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L197-L206)
+
+```csharp
+        var auditSw = Stopwatch.StartNew();
+        AuditExecution("started", script);   // records the exact code this execution ran, under the case file
+```
+
+[`src/Camel.Server/MCPServer.cs:310-311`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L310-L311)
+
+[6] 명령마다 기록하는 항목이다.
+
+```csharp
+    /// <summary>
+    /// Records one command execution in the audit trail: the host it ran on, the command and arguments, whether
+    /// it ran under sudo, its exit code, duration, and whether it completed. <c>CaseId</c>/<c>ExecutionId</c>/
+    /// <c>Workflow</c>/<c>Toolkit</c>/<c>Operation</c> are supplied ambiently from the log context. This is the
+    /// row a judge lands on when tracing a finding back to "the specific tool execution that produced it".
+    /// </summary>
+    [DebuggerStepThrough]
+    public static void AuditCommand(string host, string command, string arguments, bool sudo, int? exitCode, long durationMs, bool completed) =>
+        _auditLogger?.ForContext("EventType", "command")
+            .Information("CMD {Host} {Command} {Arguments} (sudo={Sudo} exit={ExitCode} completed={Completed} {DurationMs}ms)",
+                host, command, arguments, sudo, exitCode, completed, durationMs);
+```
+
+[`src/Camel.Runtime/Runtime.cs:185-195`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L185-L195)
+
+[7] `SetCaseId`가 사건 ID를 정하고 기록 파일 이름을 알린다.
+
+```csharp
+    [McpServerTool(Name = "SetCaseId"), Description(
+        "Set the case identifier for this session's audit trail. Call this ONCE at the start of an investigation " +
+        "with a short, human-readable case id (e.g. 'srl-2018-rd01'). Every subsequent Execute tool " +
+        "execution in this session is recorded in a per-case audit log file named for this id (audit-<caseId>.clef), " +
+        "so findings can be traced to the exact tool executions that produced them. One case per session; call " +
+        "again to switch cases. Returns the case id that was set.")]
+    public string SetCaseId(string caseId, RequestContext<CallToolRequestParams> context)
+    {
+        var session = registry.GetOrCreate(SessionId(context.Server));
+        var previous = session.CaseId;
+        session.CaseId = string.IsNullOrWhiteSpace(caseId) ? session.SessionId : caseId.Trim();
+        // Record the case association in the (new) case's audit file so the switch itself is auditable.
+        using (PushAuditProperty("CaseId", session.CaseId))
+            AuditEvent("case", "Case id set to {CaseId} (was {Previous}) for session {SessionId}",
+                session.CaseId, previous, session.SessionId);
+        return $"Case id set to '{session.CaseId}' for this session. Audit trail file: audit-{session.CaseId}.clef";
+    }
+```
+
+[`src/Camel.Server/MCPServer.cs:51-67`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L51-L67)
+
+[8] 모델이 부르는 기록 함수가 같은 기록기에 쓴다.
+
+```csharp
+          // auditInfo/auditError additionally record the line in the per-case audit log (CLEF) as an
+          // information/error event, so agent-surfaced output survives in the trail, not just the response.
+          .SetValue("auditInfo", new Action<string>((s) => AuditInfo(s, output)))
+          .SetValue("auditError", new Action<string>((s) => AuditError(s, output)))
+          // auditFinding stages a structured forensic finding (observation/interpretation/confidence + the
+          // execution ids that prove it) as a `finding` event; auditReviewRec marks a high-consequence decision
+          // a human should review as a `human-judgement-recommended` event. Both also echo to the response.
+          .SetValue("auditFinding", new Action<string, string, string, string>(
+              (observation, interpretation, confidence, evidenceExecutionIds) =>
+                  AuditFinding(observation, interpretation, confidence, evidenceExecutionIds, output)))
+          .SetValue("auditReviewRec", new Action<string>((s) => AuditReviewRec(s, output)))
+          // IR-accuracy events: auditFalsePositive (a lead checked and rejected as benign), auditMissingEvidence
+          // (a gap — absent/cleared/disabled logs), auditHallucination (the agent caught itself inventing an
+          // artifact/method/field). Surfacing these in the trail is positive evidence of investigative rigour.
+          .SetValue("auditFalsePositive", new Action<string>((s) => AuditFalsePositive(s, output)))
+          .SetValue("auditMissingEvidence", new Action<string>((s) => AuditMissingEvidence(s, output)))
+          .SetValue("auditHallucination", new Action<string>((s) => AuditHallucination(s, output)))
+```
+
+[`src/Camel.Server/MCPServer.cs:241-257`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L241-L257)
+
+[9] 호출 기록 로거는 `CaseId` 속성으로 파일을 나눈다.
+
+```csharp
+    public static void WithAuditLog(string auditDir)
+    {
+        System.IO.Directory.CreateDirectory(auditDir);
+        _auditLogger = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .MinimumLevel.Information()
+            .WriteTo.Map(
+                keyPropertyName: "CaseId",
+                defaultKey: "unknown",
+                configure: (caseId, wt) => wt.File(
+                    new Serilog.Formatting.Compact.CompactJsonFormatter(),
+                    System.IO.Path.Combine(auditDir, $"audit-{SanitizeCaseId(caseId)}.clef")))
+            .CreateLogger();
+    }
+```
+
+[`src/Camel.Runtime/Runtime.cs:161-174`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Runtime/Runtime.cs#L161-L174)
+
+[10] 정리 주기와 두 기준 시간이다.
+
+```csharp
+public sealed class IdleSessionSweeper : BackgroundService
+{
+    private readonly SessionRegistry registry;
+    private readonly TimeSpan interval = TimeSpan.FromMinutes(1);
+    // Release an idle session's SSH connection after 15 min (its in-memory Session storage is retained so a
+    // returning client keeps its cached results) ...
+    private readonly TimeSpan disconnectTtl = TimeSpan.FromMinutes(15);
+    // ... and fully evict a session only after it has been abandoned for hours, to bound slot/memory growth.
+    private readonly TimeSpan evictTtl = TimeSpan.FromHours(4);
+
+    public IdleSessionSweeper(SessionRegistry registry) => this.registry = registry;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(interval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+                registry.SweepIdle(disconnectTtl, evictTtl);
+        }
+        catch (OperationCanceledException) { /* shutting down */ }
+    }
+```
+
+[`src/Camel.Server/Sessions.cs:188-209`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/Sessions.cs#L188-L209)

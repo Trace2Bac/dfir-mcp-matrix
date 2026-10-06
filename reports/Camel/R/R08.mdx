@@ -1,0 +1,340 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.02
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** `TimelineEvent`는 Plaso가 낸 정수 시각 `Timestamp`를 바꾸지 않고 싣는다 [1].
+`HayabusaAlert`의 `Timestamp`는 hayabusa가 낸 시각 문자열을 그대로 둔다 [2].
+`GrepLinesAsync`·`ReadFilesAsync`처럼 줄을 그대로 돌려주는 메서드도 원래 시각 표기를 바꾸지 않는다 [3][4].
+
+EZ Tools 출력을 읽는 모델은 다르다.
+Shimcache 모델은 시각 문자열을 `EzParse.ToDate`로 바꾼 `DateTime`만 싣고 원래 문자열은 버린다 [5][6].
+
+`AnalyzeBrowserActivityAsync`는 Chromium의 WebKit 마이크로초와 Firefox의 Unix 마이크로초를 UTC `DateTime`으로 바꾼 값만 `LastVisited`·`StartTime`에 싣고 원래 정수는 버린다 [7][8].
+WebKit 값이 0 이하이거나 17,000,000,000,000,000 이상이면 시각을 비운다 [7].
+Firefox 값은 0 이하일 때 시각을 비운다 [7].
+
+### R08.02 정규화 시간과 변환 전 값 병기
+
+**구현.** `TimelineEvent`는 원래 정수 `Timestamp` 옆에 그 값을 UTC `DateTimeOffset`으로 바꾼 `Time` 속성을 둔다 [1].
+`Time`은 마이크로초 값을 1000으로 나눠 밀리초까지만 남긴다 [1].
+`AnalyzeAuthLogAsync`의 `AuthEvent`는 syslog 시각을 바꾼 `Time`과 로그 줄 원문 `Raw`를 한 항목에 싣는다 [9].
+syslog 시각에는 연도가 없어 서버가 올해나 작년 연도를 붙인다 [9].
+응답은 연도를 가정했다는 것을 알리지 않아 R08.04에는 연결하지 않는다 [9].
+`DetectTimelinePivotsAsync`는 hayabusa 경보를 그대로 둔 `Alert`와 그 시각을 바꾼 `PivotTime`을 한 항목에 싣는다 [10].
+
+**한계.** 같은 보고서의 `Findings`에 서버가 만든 무차별 대입 항목은 `Time`이 비어 있고 `Raw`에 로그 줄이 아니라 서버가 쓴 문장이 들어간다 [11].
+이 항목도 필드 이름이 `Raw`라 로그 원문 줄과 구별되지 않는다 [11].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** `TimelineEvent`의 `Time`과 `TimelinePivot`의 `PivotTime`은 오프셋 0의 `DateTimeOffset`이라 값에 UTC가 들어 있다 [1][10].
+Shimcache 모델의 `LastModifiedTimeUTC`는 필드 이름에 UTC를 적는다 [5].
+`Timestamp`에는 단위와 시간대가 값이나 필드 이름에 없고 모델 주석과 schema 문서에만 UTC 마이크로초라고 적혀 있다 [1][12].
+
+**한계.** 시간대 없는 시각 문자열을 바꾸는 파서는 그 값을 UTC로 가정한다.
+`EzParse.ToDate`와 `ParseSyslogTime`은 `AssumeUniversal`로 문자열을 UTC 시각으로 읽는다 [6][9].
+syslog 줄의 시각에는 시간대가 없고 서버는 그 호스트의 시간대를 확인하지 않는다 [9].
+그래서 호스트 시간대가 UTC가 아니면 `AuthEvent`의 `Time`은 UTC 값으로 보이지만 실제 시각과 다르다 [9].
+
+### 근거
+
+[1] Plaso 사건 모델의 시각 필드다.
+
+```csharp
+/// <summary>A single Plaso timeline event (from psort/psteal json_line output).</summary>
+public class TimelineEvent
+{
+    /// <summary>Event time as a POSIX timestamp in microseconds (UTC).</summary>
+    public long Timestamp { get; set; }
+    [JsonPropertyName("timestamp_desc")] public string? TimestampDesc { get; set; }
+    [JsonPropertyName("data_type")] public string? DataType { get; set; }
+    public string? Parser { get; set; }
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    public string? Filename { get; set; }
+    public string? Inode { get; set; }
+    public string? Message { get; set; }
+    [JsonPropertyName("sha256_hash")] public string? Sha256Hash { get; set; }
+    [JsonPropertyName("md5_hash")] public string? Md5Hash { get; set; }
+
+    /// <summary>
+    /// The event's tagging-plugin tag, present only when the timeline was tagged (see
+    /// <see cref="Camel.Toolkits.TimelineToolkit.PsortTagAsync"/>) and the event matched a rule. Use
+    /// <see cref="Labels"/> for the category names.
+    /// </summary>
+    public EventTag? Tag { get; set; }
+
+    /// <summary>The category labels applied to this event by the tagging plugin (e.g. "application_execution"), or empty.</summary>
+    [JsonIgnore]
+    public string[] Labels => Tag?.Labels ?? [];
+
+    /// <summary>The event time as a UTC <see cref="DateTimeOffset"/> (Plaso stores microseconds since epoch).</summary>
+    [JsonIgnore]
+    public DateTimeOffset Time => DateTimeOffset.FromUnixTimeMilliseconds(Timestamp / 1000);
+}
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineModels.cs:8-37`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineModels.cs#L8-L37)
+
+[2] hayabusa 경보 모델은 시각을 문자열로 둔다.
+
+```csharp
+/// <summary>A single hayabusa Sigma detection from json-timeline (JSONL output, standard profile).</summary>
+public class HayabusaAlert
+{
+    public string? Timestamp { get; set; }
+    public string? RuleTitle { get; set; }
+    public string? Level { get; set; }
+    public string? Computer { get; set; }
+    public string? Channel { get; set; }
+    public int EventID { get; set; }
+    public long RecordID { get; set; }
+    public string? RuleID { get; set; }
+    /// <summary>Rule-specific extracted fields (shape varies per detection).</summary>
+    public JsonElement Details { get; set; }
+    /// <summary>Additional raw event fields not surfaced in <see cref="Details"/>.</summary>
+    public JsonElement ExtraFieldInfo { get; set; }
+}
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineModels.cs:46-61`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineModels.cs#L46-L61)
+
+[3] 일치한 줄을 그대로 나눠 돌려준다.
+
+```csharp
+    public async Task<string[]?> GrepLinesAsync(string path, IEnumerable<string> patterns, bool ignoreCase = true, int? maxMatches = null)
+    {
+        var pats = patterns.Where(p => !string.IsNullOrWhiteSpace(p)).ToArray();
+        if (pats.Length == 0) return [];
+        if (!auditEnvironment.FileExists(path)) return null;
+
+        // Ship the pattern set as a base64 temp file so regex metacharacters never hit the shell; grep -f gives
+        // OR semantics across the lines. rc==1 (no match) is normalised to success; rc>=2 (real error) propagates.
+        var b64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", pats)));
+        var tmp = "/tmp/camel_grep_" + Guid.NewGuid().ToString("N") + ".pat";
+        var flags = ignoreCase ? "-E -i" : "-E";
+        var cap = maxMatches is int n and > 0 ? $" | head -n {n}" : "";
+        var script = $"echo {b64} | base64 -d > {tmp}; grep {flags} -f {tmp} {Q(path)}{cap}; rc=${{PIPESTATUS[0]}}; rm -f {tmp}; exit $((rc==1?0:rc))";
+        var r = await auditEnvironment.ExecuteCommandAsync("bash", $"-c \"{script}\"", false);
+        return r.IsCompleted ? r.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries) : null;
+    }
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:307-322`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L307-L322)
+
+[4] 파일마다 경로와 내용을 돌려준다.
+
+```csharp
+    public Task<List<(string Path, string Content)>> ReadFilesAsync(IEnumerable<string> paths, bool sudo = true) =>
+        ReadGlobAsync(string.Join(" ", paths), sudo);
+```
+
+[`src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs:750-751`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs#L750-L751)
+
+```csharp
+    private async Task<List<(string Path, string Content)>> ReadGlobAsync(string glob, bool sudo)
+    {
+        // Base64 the script so the glob/quoting never fights the SSH command shell (same trick as the EZ-tools
+        // downloader). Each file is prefixed with a SOH byte + "<path>\n" then its bytes, so files come back in a
+        // single command and split cleanly on the SOH delimiter (which text artifacts never contain).
+        var script = $"for f in {glob}; do [ -f \"$f\" ] || continue; printf '\\001%s\\n' \"$f\"; cat -- \"$f\"; done";
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(script));
+        var r = await auditEnvironment.ExecuteCommandAsync("bash", $"-c \"echo {b64} | base64 -d | bash\"", sudo);
+        var result = new List<(string, string)>();
+        if (!r.IsCompleted || r.Output.Length == 0) return result;
+        foreach (var chunk in r.Output.Split('', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var nl = chunk.IndexOf('\n');
+            if (nl < 0) continue;
+            result.Add((chunk[..nl], chunk[(nl + 1)..]));
+        }
+        return result;
+    }
+```
+
+[`src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs:765-782`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs#L765-L782)
+
+[5] CSV 열 가운데 고른 열만 모델에 옮기고 시각은 바꾼 값만 둔다.
+
+```csharp
+/// <summary>AppCompatCacheParser: a single Shimcache (AppCompatCache) entry (CSV output).</summary>
+public class ShimcacheEntry
+{
+    public int ControlSet { get; set; }
+    public int CacheEntryPosition { get; set; }
+    public string Path { get; set; } = "";
+    public DateTime? LastModifiedTimeUTC { get; set; }
+    public string? Executed { get; set; }
+    public bool Duplicate { get; set; }
+    public string SourceFile { get; set; } = "";
+
+    public static ShimcacheEntry FromRow(IReadOnlyDictionary<string, string> r) => new()
+    {
+        ControlSet = EzParse.ToInt(r.Get("ControlSet")),
+        CacheEntryPosition = EzParse.ToInt(r.Get("CacheEntryPosition")),
+        Path = r.Get("Path") ?? "",
+        LastModifiedTimeUTC = EzParse.ToDate(r.Get("LastModifiedTimeUTC")),
+        Executed = r.Get("Executed"),
+        Duplicate = EzParse.ToBool(r.Get("Duplicate")),
+        SourceFile = r.Get("SourceFile") ?? "",
+    };
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs:438-458`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs#L438-L458)
+
+[6] EZ Tools 시각 문자열을 UTC로 가정해 읽는다.
+
+```csharp
+    public static DateTime? ToDate(string? s) =>
+        DateTime.TryParse(s, CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d) ? d : null;
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs:344-346`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs#L344-L346)
+
+[7] WebKit·Firefox 마이크로초를 UTC `DateTime`으로 바꾸고 범위 밖이면 `null`로 둔다.
+
+```csharp
+    private static readonly DateTime WebKitEpoch = new(1601, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    // Chrome/Edge timestamps are microseconds since 1601-01-01 UTC.
+    private static DateTime? WebKitTime(long micros) =>
+        micros > 0 && micros < 13000000000000000L + 4000000000000000L ? WebKitEpoch.AddTicks(micros * 10) : null;
+
+    // Firefox PRTime is microseconds since 1970-01-01 UTC.
+    private static DateTime? FirefoxTime(long micros) =>
+        micros > 0 ? UnixEpoch.AddTicks(micros * 10) : null;
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs:152-161`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs#L152-L161)
+
+[8] 이력 쿼리는 행마다 방문 수와 마지막 방문 시각을 읽어 항목 하나로 옮기고 시각은 변환한 값만 싣는다.
+
+```csharp
+            var urls = await WindowsAnalysis.SqliteQueryAsync(db,
+                "SELECT url,title,visit_count,last_visit_time FROM urls WHERE last_visit_time>0 ORDER BY last_visit_time DESC LIMIT 5000");
+            if (urls is { Length: > 0 })
+            {
+                sources.Add(db);
+                history.AddRange(urls.Select(r => new BrowserHistoryEntry
+                {
+                    Browser = browser, Url = Str(r, "url") ?? "", Title = Str(r, "title"),
+                    VisitCount = Num(r, "visit_count"), LastVisited = WebKitTime(Num(r, "last_visit_time")), Source = db,
+                }).Where(h => h.Url.Length > 0));
+            }
+            var dls = await WindowsAnalysis.SqliteQueryAsync(db,
+                "SELECT d.target_path AS target_path, d.total_bytes AS total_bytes, d.start_time AS start_time, " +
+                "(SELECT url FROM downloads_url_chains c WHERE c.id=d.id ORDER BY chain_index DESC LIMIT 1) AS url " +
+                "FROM downloads d ORDER BY d.start_time DESC LIMIT 2000");
+            if (dls is { Length: > 0 })
+                downloads.AddRange(dls.Select(r => new BrowserDownload
+                {
+                    Browser = browser, Url = Str(r, "url"), TargetPath = Str(r, "target_path"),
+                    TotalBytes = Num(r, "total_bytes"), StartTime = WebKitTime(Num(r, "start_time")), Source = db,
+                }));
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs:50-70`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs#L50-L70)
+
+```csharp
+            var urls = await WindowsAnalysis.SqliteQueryAsync(db,
+                "SELECT url,title,visit_count,last_visit_date FROM moz_places WHERE last_visit_date IS NOT NULL ORDER BY last_visit_date DESC LIMIT 5000");
+            if (urls is not { Length: > 0 }) continue;
+            sources.Add(db);
+            history.AddRange(urls.Select(r => new BrowserHistoryEntry
+            {
+                Browser = "Firefox", Url = Str(r, "url") ?? "", Title = Str(r, "title"),
+                VisitCount = Num(r, "visit_count"), LastVisited = FirefoxTime(Num(r, "last_visit_date")), Source = db,
+            }).Where(h => h.Url.Length > 0));
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs:76-84`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.Browser.cs#L76-L84)
+
+[9] 인증 로그 줄을 파싱해 시각과 원문을 싣고 연도와 UTC를 가정한다.
+
+```csharp
+    private static AuthEvent? ParseAuthLine(string line)
+    {
+        var m = SyslogPrefix.Match(line);
+        var msg = m.Success ? m.Groups["msg"].Value : line;
+        var proc = m.Success ? m.Groups["proc"].Value : "";
+        DateTime? time = m.Success ? ParseSyslogTime(m.Groups["ts"].Value) : null;
+        string? ip = IpRe.Match(line) is { Success: true } im ? im.Groups["ip"].Value : null;
+
+        string? user = null, type = null;
+        if (proc.StartsWith("sshd"))
+        {
+            if (msg.StartsWith("Accepted")) { type = "sshd-accepted"; user = Cap(msg, @"Accepted \S+ for (?<u>\S+) from"); }
+            else if (msg.StartsWith("Failed password")) { type = "sshd-failed"; user = Cap(msg, @"for (?:invalid user )?(?<u>\S+) from"); }
+            else if (msg.StartsWith("Invalid user")) { type = "sshd-failed"; user = Cap(msg, @"Invalid user (?<u>\S+)"); }
+        }
+        else if (proc.StartsWith("sudo")) { type = "sudo"; user = Cap(msg, @"^\s*(?<u>\S+)\s*:"); }
+        else if (proc.StartsWith("su")) { type = "su"; user = Cap(msg, @"user (?<u>\S+)"); }
+        else if (proc.StartsWith("useradd")) { type = "useradd"; user = Cap(msg, @"name=(?<u>\S+?),"); }
+        else if (proc.StartsWith("usermod")) type = "usermod";
+        else if (proc.StartsWith("groupadd")) type = "groupadd";
+        if (msg.Contains("authorized_keys") || msg.Contains("Found matching")) type ??= "new-ssh-key";
+
+        return type is null ? null : new AuthEvent { Time = time, Type = type, User = user, SourceIp = ip, Raw = line.Trim() };
+    }
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs:157-180`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs#L157-L180)
+
+```csharp
+    // Parse "MMM d HH:mm:ss" (no year). Attach the most plausible year: this year, or last year if that would put
+    // the date in the future (logs near a year boundary). Approximate, used only for ordering.
+    private static DateTime? ParseSyslogTime(string ts)
+    {
+        ts = Regex.Replace(ts.Trim(), @"\s+", " ");
+        foreach (var y in new[] { DateTime.UtcNow.Year, DateTime.UtcNow.Year - 1 })
+            if (DateTime.TryParseExact($"{ts} {y}", "MMM d HH:mm:ss yyyy", CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt) && dt <= DateTime.UtcNow.AddDays(1))
+                return dt;
+        return null;
+    }
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs:185-195`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs#L185-L195)
+
+[10] 경보 원문과 바꾼 시각을 한 항목에 싣는다.
+
+```csharp
+        // One pivot per distinct minute (the loudest alert of that minute), earliest first, capped.
+        var distinct = alerts
+            .Select(a => (Alert: a, Time: ParseTime(a.Timestamp)))
+            .Where(x => x.Time is not null)
+            .GroupBy(x => new DateTimeOffset(x.Time!.Value.UtcDateTime.AddTicks(-(x.Time.Value.UtcDateTime.Ticks % TimeSpan.TicksPerMinute)), TimeSpan.Zero))
+            .Select(g => g.First())
+            .OrderBy(x => x.Time)
+            .Take(maxPivots)
+            .ToArray();
+
+        // Slice the super timeline around each pivot in parallel (independent psort calls).
+        var pivots = await Task.WhenAll(distinct.Select(async x =>
+        {
+            var surrounding = await Timeline.PsortAsync(storageFile, slice: Iso(x.Time!.Value), sliceSize: sliceSizeMinutes) ?? [];
+            return new TimelinePivot { Alert = x.Alert, PivotTime = x.Time!.Value, Surrounding = surrounding };
+```
+
+[`src/Camel.Workflows/TimelineAnalysis/TimelineAnalysisWorkflow.cs:215-229`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/TimelineAnalysis/TimelineAnalysisWorkflow.cs#L215-L229)
+
+[11] 서버가 만든 무차별 대입 항목의 `Raw`는 서버 문장이다.
+
+```csharp
+        var findings = new List<AuthEvent>();
+        foreach (var ip in sshFailIps.Where(s => s.Failed >= BruteForceThreshold))
+            findings.Add(new AuthEvent { Type = "ssh-bruteforce", SourceIp = ip.Ip, Raw = $"{ip.Failed} failed SSH auth(s) from {ip.Ip}" + (ip.Successful > 0 ? $", then {ip.Successful} accepted" : "") });
+```
+
+[`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs:123-125`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs#L123-L125)
+
+[12] schema 문서의 `Timestamp` 설명이다: [`docs/Camel.schema.md:540`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/docs/Camel.schema.md#L540).

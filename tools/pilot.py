@@ -9,7 +9,7 @@
 
 원본:
   matrix/cells/<축>/index.mdx     축 하나의 차례·이름·설명
-  matrix/cells/<축>/<ID>.mdx      셀 하나의 질문·상세 정의
+  matrix/cells/<축>/<ID>.mdx      셀 하나의 확인 사항·상세 정의
   matrix/config.yaml              화면에 보일 서버, 시범 셀
   reports/<서버>/index.mdx        서버 원고의 머리(저장소·기준 커밋)
   reports/<서버>/<축>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·한계·근거

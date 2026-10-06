@@ -1,0 +1,282 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.02
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 외부 도구 출력을 적재하는 경로는 시각 문자열을 바꾸지 않고 `raw_text`에 그대로 둔다 [1].
+`get_raw_output`은 이 `raw_text`를 돌려주므로 외부 도구가 낸 시각 표기가 그대로 모델에게 간다 [2].
+
+서버가 출력을 다시 만드는 도구는 다르다.
+`parse_browser_history`는 Chrome·Firefox·Safari의 시각 정수를 SQLite `datetime`으로 바꾼 값만 적재하고 원래 정수는 버린다 [3].
+`parse_ios_artifacts`도 iOS 앱 DB의 시각을 같은 방식으로 바꾼 값만 적재한다 [4].
+
+### R08.02 정규화 시간과 변환 전 값 병기
+
+**구현.** 적재 함수는 `window`마다 본문에서 찾은 시각 하나를 ISO 형식으로 바꿔 `event_time`에 넣고 본문 `raw_text`는 그대로 둔다 [1][5].
+`search`·`get_timeline`과 `windowed_response`를 쓰는 조회 도구는 `window`의 `event_time`과 `raw_text`를 한 항목에 함께 싣는다 [6].
+`query_registry_value`는 8바이트 이진 값이 1980년부터 2100년 사이의 FILETIME으로 풀리면 원래 hex 값 `data` 옆에 풀어 쓴 시각 `decoded`를 둔다 [7][8].
+
+정규화 값은 원래 값보다 정보가 적다.
+ISO 형식 정규식은 초 단위까지만 읽어 소수 초와 시간대 표기를 버린다 [5].
+연도가 없는 syslog 시각에는 정규화하는 시점의 현재 연도를 채운다 [5].
+`window` 하나는 레코드 여러 개를 담지만 `event_time`은 하나뿐이다 [1][5].
+응답은 `event_time`이 서버가 정규화하거나 연도를 가정한 값이라는 것을 알리지 않아 R08.04에는 연결하지 않는다 [6].
+
+**한계.** 조회 응답은 `raw_text`를 잘라 싣는다 [6].
+`search`와 `windowed_response`는 300자, `get_timeline`은 500자, `correlate_across_sources`는 200자에서 자른다 [6].
+`event_time`은 4096자 `window` 전체에서 찾은 값이라 그 시각이 든 줄이 잘린 뒤쪽에 있으면 응답에는 정규화 값만 남는다 [6][5].
+잘림 자체는 R02.06에서 본다.
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** `query_registry_value`가 FILETIME을 풀어 쓴 `decoded`는 UTC 시간대가 붙은 시각이라 값 끝에 `+00:00`이 붙는다 [8].
+`window`의 `event_time`과 `parse_browser_history`가 바꾼 시각에는 시간대 표기가 없다 [3][5].
+
+**한계.** 같은 응답의 키 수정 시각 `last_written`은 python-registry가 돌려준 값을 `isoformat()`으로 바꾼 것이다 [9].
+`uv.lock`은 python-registry를 1.3.1로 고정하지만 그 소스를 확인하지 못했다 [10].
+그래서 이 값에 시간대가 붙는지는 확인하지 못했다 [9].
+
+### 근거
+
+[1] 출력을 줄 단위 `window`로 나눈다.
+줄 끝 줄바꿈을 남기고(`keepends=True`) 4096자보다 긴 줄은 조각으로 나눈다.
+`window`마다 `_parse_timestamp`로 `event_time`을 정하는 곳은 [`src/mulder/server/extract_helpers.py:210-220`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/extract_helpers.py#L210-L220)이다.
+
+```python
+    for line_no, line in enumerate(raw_output.splitlines(keepends=True), start=1):
+        pieces = (
+            [line[i : i + budget] for i in range(0, len(line), budget)]
+            if len(line) > budget
+            else [line]
+        )
+        for piece in pieces:
+            if current and current_len + len(piece) > budget:
+                text = "".join(current)
+                if text.strip():
+                    yield text, first_line, last_line
+                current = []
+                current_len = 0
+                first_line = line_no
+            current.append(piece)
+            current_len += len(piece)
+            last_line = line_no
+
+    if current:
+        text = "".join(current)
+        if text.strip():
+            yield text, first_line, last_line
+```
+
+[`src/mulder/server/extract_helpers.py:132-153`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/extract_helpers.py#L132-L153)
+
+[2] `window`의 `raw_text`를 줄바꿈으로 이어 돌려준다.
+도구 설명의 "Retrieve full raw text"는 [`src/mulder/server/tools/core.py:879`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L879)에 있다.
+
+```python
+    ctx = get_ctx()
+    page, total = ctx.db.get_windows_page(source_name, after_id=after_id, limit=limit)
+    raw_text = "\n".join(w.raw_text for w in page)
+
+    next_after = page[-1].window_id if page else after_id
+
+    result: dict[str, object] = {
+        "status": "success",
+        "source_name": source_name,
+        "total_windows": total,
+        "returned_windows": len(page),
+        "next_after_id": next_after,
+        "has_more": len(page) == limit,
+        "raw_text": raw_text,
+    }
+```
+
+[`src/mulder/server/tools/core.py:897-911`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L897-L911)
+
+[3] 브라우저 시각을 SQLite `datetime`으로 바꿔 조회하고 행을 탭으로 잇는다.
+
+```python
+                    if browser == "chrome":
+                        rows = conn.execute(
+                            "SELECT url, title, visit_count, "
+                            "datetime(last_visit_time/1000000-11644473600, "
+                            "'unixepoch') as visit_time "
+                            "FROM urls ORDER BY last_visit_time DESC LIMIT 500"
+                        ).fetchall()
+                    elif browser == "firefox":
+                        rows = conn.execute(
+                            "SELECT url, title, visit_count, "
+                            "datetime(last_visit_date/1000000, 'unixepoch') as visit_time "
+                            "FROM moz_places WHERE visit_count > 0 "
+                            "ORDER BY last_visit_date DESC LIMIT 500"
+                        ).fetchall()
+                    elif browser == "safari":
+                        rows = conn.execute(
+                            "SELECT hi.url, hv.title, "
+                            "datetime(hv.visit_time + 978307200, 'unixepoch') as visit_time "
+                            "FROM history_items hi "
+                            "JOIN history_visits hv ON hi.id = hv.history_item "
+                            "ORDER BY hv.visit_time DESC LIMIT 500"
+                        ).fetchall()
+```
+
+[`src/mulder/server/tools/artifacts.py:204-225`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L204-L225)
+
+```python
+                    if rows:
+                        header = f"=== {browser.upper()} History ({rel_path}) ===\n"
+                        lines = [header]
+                        for r in rows:
+                            lines.append("\t".join(str(v) for v in dict(r).values()))
+                        all_results.append("\n".join(lines))
+```
+
+[`src/mulder/server/tools/artifacts.py:231-236`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L231-L236)
+
+[4] iOS 앱 DB 조회문이 시각을 바꾼다: [`src/mulder/server/tools/phone.py:427`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/phone.py#L427), [`src/mulder/server/tools/phone.py:453`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/phone.py#L453), [`src/mulder/server/tools/phone.py:485`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/phone.py#L485).
+
+[5] 시각 정규식과 정규화다.
+
+```python
+_WINDOW_CHAR_BUDGET = 4096
+
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+_PLASO_DATE_RE = re.compile(r"(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})")
+_SYSLOG_RE = re.compile(
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})"
+)
+```
+
+[`src/mulder/server/extract_helpers.py:28-35`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/extract_helpers.py#L28-L35)
+
+```python
+    m = _ISO_RE.search(text)
+    if m:
+        try:
+            return datetime.fromisoformat(m.group(0)).isoformat()
+        except ValueError:
+            pass
+
+    m = _SYSLOG_RE.search(text)
+    if m:
+        month_str, day, hour, minute, second = m.groups()
+        try:
+            dt = datetime(
+                year=reference_year or datetime.now().year,
+                month=_SYSLOG_MONTHS[month_str],
+                day=int(day),
+                hour=int(hour),
+                minute=int(minute),
+                second=int(second),
+            )
+            return dt.isoformat()
+```
+
+[`src/mulder/server/extract_helpers.py:60-79`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/extract_helpers.py#L60-L79)
+
+[6] `window` 필드와 응답의 본문 자르기다.
+`search`의 300자는 [`src/mulder/server/tools/core.py:52-61`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L52-L61), `get_timeline`의 500자는 [`src/mulder/server/tools/core.py:1231-1240`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L1231-L1240), `correlate_across_sources`의 200자는 [`src/mulder/server/tools/core.py:53`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L53)과 [`src/mulder/server/tools/core.py:432`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L432)에 있다.
+
+```python
+class WindowRow(BaseModel):
+    """A single windowed slice of evidence text from an indexed source."""
+
+    window_id: int | None = None
+    source_id: int
+    line_start: int
+    line_end: int
+    event_time: str | None
+    raw_text: str
+```
+
+[`src/mulder/models.py:10-18`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/models.py#L10-L18)
+
+```python
+def truncate_raw_text(d: dict[str, Any], cap: int = _DEFAULT_TEXT_CAP) -> None:
+    """Truncate ``raw_text`` in a window dict in-place if it exceeds *cap*."""
+    raw = d.get("raw_text", "")
+    if cap and len(raw) > cap:
+        d["raw_text"] = raw[:cap] + "..."
+        d["full_text_available"] = True
+```
+
+[`src/mulder/server/helpers.py:244-249`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L244-L249)
+
+[7] 레지스트리 값을 필드로 나눈다.
+
+```python
+    vtype = value.value_type()
+    raw = value.value()
+    result: dict[str, Any] = {
+        "name": value.name(),
+        "type": _REGISTRY_VALUE_TYPE_NAMES.get(vtype, f"UNKNOWN({vtype})"),
+    }
+
+    if (
+        vtype in (Registry.RegSZ, Registry.RegExpandSZ)
+        or vtype == Registry.RegDWord
+        or vtype == Registry.RegQWord
+        or vtype == Registry.RegMultiSZ
+    ):
+        result["data"] = raw
+    elif vtype == Registry.RegBin:
+        result["data"] = raw.hex()
+        if len(raw) == 8:
+            decoded = _try_decode_filetime(raw)
+            if decoded:
+                result["decoded"] = decoded
+    elif vtype == Registry.RegNone:
+        result["data"] = raw.hex() if isinstance(raw, bytes) else raw
+    else:
+        result["data"] = str(raw)
+
+    return result
+```
+
+[`src/mulder/server/tools/extract/registry_query.py:105-130`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/registry_query.py#L105-L130)
+
+[8] FILETIME을 UTC 기준 시각으로 푼다.
+기준 시각은 [`src/mulder/server/tools/extract/registry_query.py:32`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/registry_query.py#L32)에서 UTC 시간대를 붙여 만든다.
+
+```python
+    ticks = int.from_bytes(raw, "little")
+    if ticks == 0:
+        return None
+    try:
+        dt = _FILETIME_EPOCH + timedelta(microseconds=ticks // 10)
+        if (
+            datetime(1980, 1, 1, tzinfo=timezone.utc)
+            < dt
+            < datetime(2100, 1, 1, tzinfo=timezone.utc)
+        ):
+            return dt.isoformat()
+    except (OverflowError, OSError):
+        pass
+    return None
+```
+
+[`src/mulder/server/tools/extract/registry_query.py:74-87`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/registry_query.py#L74-L87)
+
+[9] 키 수정 시각을 라이브러리 값으로 만든다.
+
+```python
+        last_written = key.timestamp().isoformat() if key.timestamp() else None
+```
+
+[`src/mulder/server/tools/extract/registry_query.py:268-268`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/registry_query.py#L268-L268)
+
+[10] `uv.lock`이 고정한 python-registry 버전이다.
+
+```text
+name = "python-registry"
+version = "1.3.1"
+```
+
+[`uv.lock:2299-2300`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/uv.lock#L2299-L2300)

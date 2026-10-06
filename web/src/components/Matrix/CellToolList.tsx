@@ -65,8 +65,13 @@ export default function CellToolList({ cellId }: { cellId: string }) {
   
   return (
     <div className={styles.cellPage}>
-      {/* 셀 질문: 이 셀이 서버에 묻는 것 */}
-      {cell.q && <p className={styles.question}>{cell.q}</p>}
+      {/* 확인 사항: 이 셀이 서버에서 무엇을 분류하는지 */}
+      {cell.q && (
+        <div className={styles.question}>
+          <span className={styles.questionLabel}>확인 사항</span>
+          {cell.q}
+        </div>
+      )}
 
       {!defined && <p className={styles.notice}>상세 항목 이름만 정했고 조사는 아직 없습니다.</p>}
       {defined && studied === 0 && <p className={styles.notice}>상세 항목 정의는 있지만 조사한 서버가 없습니다.</p>}

@@ -1,0 +1,322 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.02
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 외부 도구 출력의 시각은 서버가 바꾸지 않는다.
+기본 처리는 출력 글을 그대로 담는다 [1].
+`fls`의 시각 열은 Sleuth Kit이 출력한 문자열 그대로 `name`·`path` 글 안에 남는다 [2][3].
+`istat` 파서는 시각 문자열을 `value`에 그대로 둔다 [4].
+이벤트 로그 파서는 `SystemTime` 값을, regipy 파서는 플러그인이 낸 `timestamp`·`last_write` 값을 문자열로 옮긴다 [5][6].
+
+서버가 결과를 다시 만드는 처리기는 다르다.
+`detect_timestomping`은 앞선 `istat` 출력에서 시각 문자열의 괄호 속 시간대를 떼고 `Date.parse`로 밀리초 값을 만든다 [7].
+결과에는 그 값을 `toISOString()`으로 바꾼 문자열만 들어가고 원래 문자열은 없다 [8].
+
+### R08.02 정규화 시간과 변환 전 값 병기
+
+**구현.** `istat` 파서는 시각마다 원래 문자열 `value`와 `Date.parse`로 푼 밀리초 값 `epoch`를 한 항목에 둔다 [4].
+괄호 속 `(UTC)`만 ` UTC`로 바꿔 풀고 다른 시간대 표기는 바꾸지 않은 채 `Date.parse`에 넘긴다 [4].
+응답은 `epoch`가 서버가 계산한 값이라는 것을 알리지 않아 R08.04에는 연결하지 않는다 [4].
+
+Plaso 파서의 JSON 분기는 정수 시각을 ISO 문자열로 바꾸고 원래 객체를 `extra`에 남긴다 [9].
+매핑된 `filter_timeline`은 l2tcsv 글을 내므로 이 분기에 닿지 않는다 [10][9].
+
+**한계.** `Date.parse`가 풀지 못한 시각은 `epoch`를 0으로 적는다 [4].
+응답에는 1970-01-01 시각과 풀이 실패를 가르는 값이 없다 [4].
+파서는 이때 `epoch_zero_timestamp` 이상 징후를 붙이고 조작이나 풀이 실패일 수 있다고 적는다 [11].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** Sleuth Kit은 시각 문자열 끝에 괄호로 시간대 약칭을 붙인다 [3].
+서버는 `fls`·`istat`에 시간대 인자 `-z`를 넘기지 않으므로 그 약칭은 서버 프로세스 환경의 지역 시간대다 [12][3].
+`fls`의 `name`과 `istat`의 `value`는 이 문자열을 그대로 싣는다 [2][4].
+`detect_timestomping`이 만든 시각 문자열은 `toISOString()`이 붙인 UTC 표기 `Z`로 끝난다 [8].
+`istat`의 `epoch`는 단위를 필드 이름이나 값에 적지 않는다 [4].
+이벤트 로그·regipy 시각은 도구가 낸 표기를 따른다 [5][6].
+
+### 근거
+
+[1] 파서가 없는 연산의 기본 처리다.
+
+```typescript
+    default:
+      // Fallback: wrap raw output in basic structure
+      return ok({
+        summary: raw.split("\n").slice(0, 3).join("\n"),
+        data: { raw: raw.length > 10000 ? raw.slice(0, 10000) + "\n...[truncated]" : raw },
+        recordCount: raw.split("\n").filter(Boolean).length,
+        anomalies: [],
+        rawTruncated: raw.length > 10000,
+      });
+```
+
+[`src/parsers/index.ts:106-114`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/index.ts#L106-L114)
+
+[2] `fls` 줄을 나누고 이상 징후를 찾는다.
+
+```typescript
+// Handles: d/d 33329-144-6:\tname  |  r/r * 1234-128-3:\tname (deleted)  |  r/- 5678:\tname
+const FLS_LINE_RE = /^([rdvl*-])\/([rdvl*-])\s+(\*\s+)?(\S+?):\s+(.+)$/;
+const FLS_SIMPLE_RE = /^([rdvl*-])\/([rdvl*-])\s+(\*\s+)?(\d+[-\d]*):\t(.+)$/;
+```
+
+[`src/parsers/fls.ts:17-19`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/fls.ts#L17-L19)
+
+```typescript
+    const [, typeChar, allocFlag, deletedMarker, inode, name] = match;
+    const deleted = deletedMarker !== undefined || allocFlag === "-" || allocFlag === "*";
+    const reallocated = allocFlag === "-";
+    const type = typeChar === "d" ? "directory" as const :
+                 typeChar === "r" ? "file" as const :
+                 typeChar === "l" ? "link" as const : "other" as const;
+
+    const entry: FlsEntry = {
+      type,
+      inode: inode!,
+      name: name!.replace(/\s*\(deleted\)\s*$/, ""),
+      path: name!.replace(/\s*\(deleted\)\s*$/, ""),
+      deleted,
+      reallocated,
+    };
+    entries.push(entry);
+
+    // Anomaly detection: suspicious paths
+    const lowerName = entry.name.toLowerCase();
+    if (lowerName.match(/\.(exe|dll|bat|ps1|vbs|js|hta|scr)$/) &&
+        (lowerName.includes("temp") || lowerName.includes("tmp") || lowerName.includes("appdata"))) {
+      suspiciousPaths.push(entry.name);
+    }
+    // Hidden executable in system directory
+    if (entry.deleted && lowerName.match(/\.(exe|dll)$/)) {
+      suspiciousPaths.push(`[DELETED] ${entry.name}`);
+    }
+```
+
+[`src/parsers/fls.ts:47-73`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/fls.ts#L47-L73)
+
+[3] Sleuth Kit 4.15.0은 시각을 지역 시간으로 바꿔 괄호 속 시간대 약칭을 붙이고 `-l` 출력에서 이름 뒤에 탭으로 시각·크기·gid·uid를 출력한다: [`tsk/fs/fs_name.c:305-322`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/fs/fs_name.c#L305-L322), [`tsk/fs/fs_name.c:493-549`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/fs/fs_name.c#L493-L549).
+저장소는 Sleuth Kit 버전을 정하지 않는다.
+
+[4] `istat` 시각을 `value`와 `epoch`로 둔다.
+
+```typescript
+    // Timestamps: Created, Modified, Accessed, Changed
+    const tsMatch = line.match(/(Created|File Modified|MFT Modified|Accessed|Changed|Written|Entry Modified):\s*(.+)/i);
+    if (tsMatch) {
+      const dateStr = tsMatch[2]!.trim();
+      const epoch = Date.parse(dateStr.replace(/ \(UTC\)$/, " UTC"));
+      const label = currentSection ? `${currentSection}.${tsMatch[1]}` : tsMatch[1]!;
+      timestamps.push({
+        label,
+        value: dateStr,
+        epoch: isNaN(epoch) ? 0 : epoch,
+      });
+    }
+```
+
+[`src/parsers/istat.ts:80-91`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/istat.ts#L80-L91)
+
+[5] 이벤트 로그 파서의 JSONL 분기다.
+
+```typescript
+  // Try JSONL format first (evtx_dump -o jsonl output)
+  if (raw.trimStart().startsWith("{")) {
+    const lines = raw.split("\n").filter(l => l.trim());
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        const evt = (obj["Event"] ?? obj) as Record<string, unknown>;
+        const sys = (evt["System"] ?? {}) as Record<string, unknown>;
+        const provider = (sys["Provider"] ?? {}) as Record<string, unknown>;
+        const providerAttrs = (provider["#attributes"] ?? provider) as Record<string, unknown>;
+        const timeCreated = (sys["TimeCreated"] ?? {}) as Record<string, unknown>;
+        const timeAttrs = (timeCreated["#attributes"] ?? timeCreated) as Record<string, unknown>;
+        const execAttrs = ((sys["Execution"] ?? {}) as Record<string, unknown>)["#attributes"] as Record<string, unknown> | undefined;
+        const eventData = (evt["EventData"] ?? {}) as Record<string, unknown>;
+
+        const eventId = typeof sys["EventID"] === "number" ? sys["EventID"] : parseInt(String(sys["EventID"] ?? "0"), 10);
+        const timestamp = String(timeAttrs["SystemTime"] ?? "");
+        const source = String(providerAttrs["Name"] ?? "");
+        const computer = String(sys["Computer"] ?? "");
+        const channel = String(sys["Channel"] ?? "");
+        const recordId = typeof sys["EventRecordID"] === "number" ? sys["EventRecordID"] : parseInt(String(sys["EventRecordID"] ?? "0"), 10);
+        const user = String(eventData["TargetUserName"] ?? eventData["SubjectUserName"] ?? "");
+        const level = String(sys["Level"] ?? "");
+        const message = JSON.stringify(eventData).slice(0, 500);
+
+        events.push({ eventId, timestamp, source, computer, user, level, message, recordId, channel, raw: line.slice(0, 1000) });
+```
+
+[`src/parsers/evtx.ts:39-64`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/evtx.ts#L39-L64)
+
+[6] regipy 결과 JSON을 항목으로 옮긴다.
+
+```typescript
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const entries: RegripperEntry[] = [];
+      let plugin = "regipy";
+      let hive = "";
+
+      // regipy output: { "plugin_name": [{...entries...}], ... }
+      for (const [key, val] of Object.entries(parsed)) {
+        plugin = key;
+        if (Array.isArray(val)) {
+          for (const item of val) {
+            if (typeof item === "object" && item !== null) {
+              const obj = item as Record<string, unknown>;
+              entries.push({
+                key: String(obj["path"] ?? obj["key"] ?? obj["name"] ?? key),
+                value: String(obj["value"] ?? obj["value_name"] ?? ""),
+                data: String(obj["data"] ?? obj["value_data"] ?? JSON.stringify(obj)),
+                timestamp: String(obj["timestamp"] ?? obj["last_write"] ?? obj["modified"] ?? ""),
+                type: String(obj["type"] ?? obj["value_type"] ?? "REG_SZ"),
+              });
+            }
+          }
+        }
+      }
+
+```
+
+[`src/parsers/regripper.ts:33-58`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/regripper.ts#L33-L58)
+
+[7] `detect_timestomping`은 `istat` 글에서 시각을 뽑아 `Date.parse`로 푼다.
+
+```typescript
+  const pairs: TimestampPair[] = [];
+  for (const entry of istatEntries) {
+    const raw = ctx.rawOutputs.get(entry.id as string) ?? "";
+    // Parse SI vs FN timestamps from istat output
+    const siCreated = extractTimestamp(raw, "STANDARD_INFORMATION", "Created");
+    const fnCreated = extractTimestamp(raw, "FILE_NAME", "Created");
+    const siModified = extractTimestamp(raw, "STANDARD_INFORMATION", "Modified");
+    const fnModified = extractTimestamp(raw, "FILE_NAME", "Modified");
+    if (siCreated && fnCreated) {
+      pairs.push({ siCreated, fnCreated, siModified: siModified ?? siCreated, fnModified: fnModified ?? fnCreated, filename: entry.tool, inode: entry.id as string });
+    }
+  }
+```
+
+[`src/handlers/in-process.ts:49-60`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L49-L60)
+
+```typescript
+function extractTimestamp(raw: string, section: string, field: string): number | null {
+  // Match istat timestamp format: "2021-01-01 12:00:00 (UTC)" or ISO "2021-01-01T12:00:00Z"
+  const sectionRegex = new RegExp(`\\$${section}[\\s\\S]*?${field}[:\\s]+([\\d\\-T:.Z+\\s]+?)(?:\\s*\\(|\\n|$)`, "i");
+  const match = raw.match(sectionRegex);
+  if (match?.[1]) {
+    const cleaned = match[1].trim().replace(/\s*\(.*\)$/, "");
+    const ts = Date.parse(cleaned);
+    return isNaN(ts) ? null : ts;
+  }
+  return null;
+}
+```
+
+[`src/handlers/in-process.ts:866-876`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/handlers/in-process.ts#L866-L876)
+
+[8] 결과의 시각은 `toISOString()` 문자열로만 남는다.
+
+```typescript
+  for (const pair of pairs) {
+    // Rule 1: $SI Created earlier than $FN Created (impossible without tampering)
+    if (pair.siCreated > 0 && pair.fnCreated > 0 && pair.siCreated < pair.fnCreated) {
+      anomalies.push({
+        type: "timestomping_si_before_fn",
+        severity: "CRITICAL",
+        description: `$SI Created is BEFORE $FN Created for "${pair.filename}" (inode ${pair.inode}). This is physically impossible without timestamp manipulation.`,
+        evidence: `$SI: ${new Date(pair.siCreated).toISOString()}, $FN: ${new Date(pair.fnCreated).toISOString()}`,
+        confidence: 0.95,
+        falsePositiveRate: "LOW",
+      });
+    }
+```
+
+[`src/intelligence/timestomping.ts:29-40`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/intelligence/timestomping.ts#L29-L40)
+
+[9] Plaso 파서의 JSON 분기와 CSV 분기다.
+
+```typescript
+      // Plaso timestamps can be ISO strings or microsecond epoch integers
+      let ts = obj["datetime"] ?? obj["timestamp"] ?? "";
+      if (typeof ts === "number") {
+        ts = new Date(ts / 1000).toISOString(); // microseconds → ms → ISO
+      }
+```
+
+[`src/parsers/plaso.ts:28-32`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/plaso.ts#L28-L32)
+
+```typescript
+    } catch {
+      // Not JSON — try L2tCSV format
+      const parts = line.split(",");
+      if (parts.length >= 6) {
+        events.push({
+          timestamp: parts[0] ?? "",
+          timestampDesc: parts[1] ?? "",
+          source: parts[2] ?? "",
+          sourceLong: parts[3] ?? "",
+          message: parts.slice(5).join(","),
+          filename: parts[4] ?? "",
+          inode: "",
+          parser: "",
+          extra: {},
+        });
+      }
+```
+
+[`src/parsers/plaso.ts:51-66`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/plaso.ts#L51-L66)
+
+[10] 타임라인 연산의 매핑이다.
+
+```typescript
+    generate_timeline: { binary: "log2timeline", buildArgs: (p, ev, _off, out) => [...(p["parsers"] ? ["--parsers", (p["parsers"] as string[]).join(",")] : []), "--status_view", "none", "--storage_file", `${out}/timeline.plaso`, ev] },
+    filter_timeline: { binary: "psort", buildArgs: (p, _, _o4, out) => ["-o", "l2tcsv", ...(p["start"] ? ["--slice", `${p["start"]}`] : []), "--storage_file", `${out}/timeline.plaso`] },
+    get_timeline_context: { binary: "psort", buildArgs: (p, _, _o5, out) => ["-o", "l2tcsv", "--slice", String(p["timestamp"] ?? ""), "--slice_size", String(p["window_minutes"] ?? 5), "--storage_file", `${out}/timeline.plaso`] },
+```
+
+[`src/server.ts:181-183`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L181-L183)
+
+[11] `epoch`가 0이면 이상 징후를 붙인다.
+
+```typescript
+  for (const ts of timestamps) {
+    if (ts.epoch === 0 && ts.value !== "0") {
+      anomalies.push({
+        type: "epoch_zero_timestamp",
+        severity: "MEDIUM",
+        description: `Timestamp "${ts.label}" is epoch-0 (1970-01-01) — may indicate manipulation or parse failure`,
+        affectedItems: [`inode ${inode}`],
+      });
+    }
+  }
+```
+
+[`src/parsers/istat.ts:126-135`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/parsers/istat.ts#L126-L135)
+
+[12] `fls`·`istat` 매핑에는 `-l`이 있고 `-z`가 없다.
+
+```typescript
+    list_directory: { binary: "fls", buildArgs: (p, ev, off) => [...(p["recursive"] ? ["-r"] : []), "-l", "-p", ...(p["show_deleted"] ? ["-d"] : []), "-o", String(off), ev, ...(p["inode"] ? [String(p["inode"])] : [])] },
+    list_partitions: { binary: "mmls", buildArgs: (_, ev) => [ev] },
+    get_file_metadata: { binary: "istat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
+    extract_file: { binary: "icat", buildArgs: (p, ev, off) => ["-o", String(off), ev, String(p["inode"])] },
+    search_filename: { binary: "fls", buildArgs: (p, ev, off) => {
+      const args = ["-r", "-l", "-p", "-o", String(off), ev];
+      const startInode = (p["start_inode"] ?? p["inode"]) as string | undefined;
+      if (startInode) args.push(startInode);
+      return args;
+    } },
+```
+
+[`src/server.ts:161-170`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L161-L170)

@@ -1,0 +1,280 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 실행기 `run`의 결과를 그대로 돌려주는 도구는 외부 도구가 출력한 시각 문자열을 바꾸지 않고 `stdout`에 싣는다 [1].
+서버는 일부 도구에서 외부 도구가 시각을 출력하는 방식을 환경변수나 인자로 정한다.
+TSK 도구 일부는 `env TZ=UTC`를 앞에 붙여 실행하고 `tsk.mactime`은 `-z UTC`를 넘긴다 [2].
+`net.pcap_identity_timeline`은 tcpdump `-tttt` 출력의 시각 문자열을 그대로 `timestamp`에 둔다 [3].
+
+서버가 시각을 다시 만드는 도구는 원래 값을 버린다.
+`misc.chat_db_export`는 Skype·WhatsApp의 Unix 시각을 초 단위 UTC ISO 문자열로 바꾸고 원래 정수는 싣지 않는다 [4].
+WhatsApp 시각은 밀리초 값을 1000으로 나눈 몫으로 바꿔 밀리초를 버린다 [4].
+`ez.pecmd`의 libscca 대체 파서는 실행 시각을 ISO 문자열로 바꿔 CSV에 쓰고 원래 FILETIME 값은 쓰지 않는다 [5].
+`af.timestomp_drift`는 MFTECmd CSV의 시각을 `datetime`으로 파싱한 뒤 `isoformat()`으로 다시 적는다 [6][7].
+`misc.device_install_inventory`는 setupapi.dev.log의 시각을 초 단위까지만 남기고 `/`를 `-`로 바꾼다 [8].
+이 도구들은 바꾼 값과 원래 값을 함께 싣지 않아 R08.02에는 연결하지 않는다.
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** `misc.chat_db_export`는 바꾼 시각을 `ts_utc`·`start_utc`·`finish_utc` 필드에 두고 값 끝에 `+00:00`을 붙인다 [4][9].
+`ez.pecmd`의 libscca 대체 파서는 시간대 정보가 없는 시각에 UTC를 붙여 `+00:00`이 든 ISO 문자열로 쓴다 [5].
+
+서버가 만든 다른 시각에는 시간대 표기가 없다.
+`af.timestomp_drift`는 CSV 값에 시간대 표기가 없으면 시간대 없는 `isoformat()` 값을 `si_ts`·`fn_ts`에 적는다 [7][6].
+서버 지침은 시각이 늘 UTC라고 적지만 이 문장은 응답 값의 표시가 아니므로 이 상세의 구현으로 세지 않는다 [10].
+
+**한계.** `misc.device_install_inventory`의 `first_seen`·`last_seen`·`coverage_window`에는 시간대가 없고 코드 주석은 이 값을 로그의 현지 시각이라고 적는다 [8][11].
+서버 지침이 시각은 늘 UTC라고 적으므로 이 값은 UTC로 잘못 읽힌다 [10].
+
+### 근거
+
+[1] 실행기는 표준 출력을 UTF-8 대체 문자 방식으로 풀고 상한만 적용한다.
+
+```python
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        # Complete stdout goes to the trace sidecar (popped by _log_tool);
+        # the agent-facing copy below keeps the byte/line caps.
+        result["_stdout_full"] = stdout[:STDOUT_SIDECAR_CAP]
+        result["_stdout_chars"] = len(stdout)
+
+        if len(stdout) > OUTPUT_CAP:
+            stdout = stdout[:OUTPUT_CAP]
+            result["truncated"] = True
+
+        if line_cap is not None:
+            stdout, line_truncated = _apply_line_cap(stdout, line_cap)
+            if line_truncated:
+                result["truncated"] = True
+
+        result["stdout"] = stdout
+```
+
+[`core/executor.py:172-188`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/executor.py#L172-L188)
+
+[2] TSK 도구의 시간대를 실행 환경과 인자로 정한다.
+
+```python
+# sudo resets the environment, so the host's local zone would leak into
+# printed times (a reviewer then reads a 4-hour offset as a contradiction).
+_UTC = ["env", "TZ=UTC"]
+```
+
+[`tools/sleuthkit.py:10-12`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L10-L12)
+
+```python
+    cmd = ["mactime", "-b", bodyfile, "-z", "UTC"]
+```
+
+[`tools/sleuthkit.py:212-212`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/sleuthkit.py#L212-L212)
+
+[3] 패킷 블록에서 신원 행을 만든다.
+
+```python
+    def add_row(order: int, header: _re.Match, block: str, kind: str,
+                field: str, value: str) -> None:
+        decoded = unquote_plus(value.strip())
+        if not decoded:
+            return
+        matches = _match_roster(decoded, roster)
+        confidence = "high" if matches and (kind in {"url_param", "cookie", "email"}) else (
+            "medium" if matches else "low"
+        )
+        excerpt = " ".join(block.split())[:240]
+        rows.append({
+            "order": order,
+            "timestamp": header.group("ts"),
+            "source_ip": header.group("src"),
+            "source_port": int(header.group("src_port")),
+            "destination_ip": header.group("dst"),
+            "destination_port": int(header.group("dst_port")),
+            "host": (host_re.search(block).group(1).strip()
+                     if host_re.search(block) else ""),
+            "user_agent": (ua_re.search(block).group(1).strip()
+                           if ua_re.search(block) else ""),
+            "identity_type": kind,
+            "field": field,
+            "value": decoded,
+            "roster_matches": matches,
+            "confidence": confidence,
+            "evidence_excerpt": excerpt,
+        })
+```
+
+[`tools/network.py:503-530`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/network.py#L503-L530)
+
+[4] Unix 시각을 초 단위 UTC 문자열로 바꿔 이름이 `_utc`로 끝나는 필드에 두고 WhatsApp 밀리초 값은 1000으로 나눈다.
+
+```python
+def _utc(ts) -> str:
+    """Unix seconds → UTC ISO string; '' on anything unparseable."""
+    try:
+        return datetime.fromtimestamp(
+            int(ts), tz=timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+```
+
+[`core/chat_db.py:40-46`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L40-L46)
+
+```python
+                t = {
+                    "start_utc": _utc(r.get("starttime")),
+                    "finish_utc": _utc(r.get("finishtime")),
+```
+
+[`core/chat_db.py:116-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L116-L118)
+
+```python
+                m = {
+                    # WhatsApp timestamps are unix MILLIseconds.
+                    "ts_utc": _utc((r.get("timestamp") or 0) // 1000),
+```
+
+[`core/chat_db.py:186-188`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L186-L188)
+
+[5] libscca가 준 시각을 ISO 문자열로 바꾸고 시간대가 없으면 UTC를 붙인다.
+
+```python
+    def _iso(value) -> str:
+        """A zero FILETIME (1601-01-01) means 'not set', never a timestamp."""
+        if isinstance(value, datetime.datetime):
+            if value.year <= 1601:
+                return ""
+            return value.replace(tzinfo=value.tzinfo or datetime.timezone.utc).isoformat()
+        return "" if value is None else str(value)
+```
+
+[`tools/eztools.py:397-403`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L397-L403)
+
+[6] 시각 차이와 USN 간격을 계산한다.
+
+```python
+                si = _parse_iso(row.get("LastModified0x10") or row.get("Modified0x10") or "")
+                fn = _parse_iso(row.get("LastModified0x30") or row.get("Modified0x30") or "")
+                if si is None or fn is None:
+                    continue
+                delta = abs((si - fn).total_seconds())
+                if delta <= threshold_seconds:
+                    continue
+                drift_records.append({
+                    "path": row.get("ParentPath", "") + "\\" + row.get("FileName", ""),
+                    "si_ts": si.isoformat(),
+                    "fn_ts": fn.isoformat(),
+                    "delta_sec": round(delta, 3),
+                    "mft_record": int(row.get("EntryNumber") or row.get("MftRecord") or 0),
+                })
+```
+
+[`tools/antiforensics.py:80-93`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L80-L93)
+
+```python
+    usns.sort()
+    gaps: list[dict] = []
+    for i in range(1, len(usns)):
+        d = usns[i] - usns[i - 1]
+        if d > gap_threshold:
+            gaps.append({"prior_usn": usns[i - 1], "next_usn": usns[i], "delta": d})
+```
+
+[`tools/antiforensics.py:278-283`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L278-L283)
+
+[7] CSV 시각을 `datetime`으로 파싱한다.
+`Z`가 없는 문자열은 시간대 없는 값이 된다.
+
+```python
+def _parse_iso(ts: str) -> Optional[datetime.datetime]:
+    """Parse an MFTECmd / EvtxECmd ISO-ish timestamp. Returns None on failure."""
+    if not ts:
+        return None
+    s = str(ts).strip().replace("Z", "+00:00")
+    for fmt in (None, "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            if fmt is None:
+                return datetime.datetime.fromisoformat(s)
+            return datetime.datetime.strptime(s, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+```
+
+[`tools/antiforensics.py:31-43`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/antiforensics.py#L31-L43)
+
+[8] setupapi.dev.log 시각을 초 단위까지만 남긴다.
+
+```python
+_SECTION_START_RE = re.compile(r"^>>>\s+Section start\s+(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)")
+```
+
+[`core/device_inventory.py:31-31`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/device_inventory.py#L31-L31)
+
+```python
+        # Timestamp is on the following Section start line (within a few lines).
+        ts = None
+        for j in range(i + 1, min(i + 4, n)):
+            sm = _SECTION_START_RE.match(lines[j])
+            if sm:
+                ts = sm.group(1).replace("/", "-")
+                break
+```
+
+[`core/device_inventory.py:112-118`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/device_inventory.py#L112-L118)
+
+[9] Skype 메시지 행을 정한 필드로 만든다.
+
+```python
+    want_m = [c for c in ("timestamp", "author", "from_dispname", "chatname",
+                          "dialog_partner", "body_xml") if c in mcols]
+    if mcols and {"timestamp", "author"} - set(want_m):
+        partial = True
+    if want_m:
+        try:
+            for row in conn.execute(
+                    f"SELECT {', '.join(want_m)} FROM Messages ORDER BY timestamp"):
+                r = dict(zip(want_m, row))
+                body = _TAG_RE.sub("", str(r.get("body_xml") or "")).strip()
+                m = {
+                    "ts_utc": _utc(r.get("timestamp")),
+                    "author": str(r.get("author") or ""),
+                    "author_display": str(r.get("from_dispname") or ""),
+                    "chat": str(r.get("chatname") or ""),
+                    "partner": str(r.get("dialog_partner") or ""),
+                    "body": body[:_BODY_CAP],
+                }
+                msgs.append(m)
+```
+
+[`core/chat_db.py:82-100`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/chat_db.py#L82-L100)
+
+[10] 서버 지침이다.
+
+```python
+mcp = FastMCP(
+    "trudi-sift",
+    instructions=(
+        "TRUDI SIFT MCP Server — exposes SANS SIFT Workstation forensic tools as typed MCP tools. "
+        "All tools are read-only with respect to evidence. "
+        "Output paths must be within analysis/, exports/, or reports/ directories. "
+        "Timestamps are always UTC."
+    ),
+)
+```
+
+[`server.py:38-46`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/server.py#L38-L46)
+
+[11] 코드 주석은 `coverage_window`가 로그의 현지 시각이라고 적는다.
+
+```python
+        coverage_window: {start, end} | None # min/max event timestamp
+                                             # ("YYYY-MM-DD HH:MM:SS", local log time)
+```
+
+[`core/device_inventory.py:81-82`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/device_inventory.py#L81-L82)
