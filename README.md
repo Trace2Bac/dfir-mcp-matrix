@@ -50,7 +50,7 @@ CI는 매트릭스 버전 태그(`v<날짜>`, 예: `v2026-10-06`)를 올릴 때�
 | E | 원본 증거 관리 | Evidence management |
 | T | 도구 실행 통제 | Tool execution control |
 | R | 실행 결과 전달 | Result delivery |
-| F | 발견사항·결론 관리 | Findings and conclusions |
+| F | 발견사항과 결론 | Findings and conclusions |
 | L | 서버 기록 | Logging |
 | D | 파생물 관리 | Derivative management |
 | I | 외부 연동 통제 | Integration control |
