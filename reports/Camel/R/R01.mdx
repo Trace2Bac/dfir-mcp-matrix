@@ -77,14 +77,15 @@ SDK 메서드는 도구 출력을 파싱한 객체를 스크립트에 돌려주�
 
 ### R01.11 응답 항목 선별
 
-**구현.** 서버가 정한 규칙으로 응답 목록에 실을 항목을 고르는 곳은 `TriageHostAsync`·`AnalyzeAuthLogAsync`·`FindWmiPersistenceAsync`다 [29][30][31].
+**구현.** 서버가 정한 규칙으로 응답 목록에 실을 항목을 고르는 곳은 `TriageHostAsync`·`AnalyzeAuthLogAsync`·`BulkExtractorAsync`다 [29][30][31].
 `TriageHostAsync`는 하위 분석 보고서 가운데 발견사항이나 의심 항목을 담은 목록만 골라 `TopFindings`에 한 줄씩 모은다 [29].
 그 목록은 계정·로그인·인증 로그 분석의 `Findings`, 지속성·shell 기록 분석의 `Suspicious`, 파일 분석의 setuid 파일과 임시 폴더 실행 파일이다 [29].
 계정·로그인 항목은 모두 싣고 인증 로그 항목은 10개, 지속성·shell 기록 항목은 15개, 파일 항목은 종류마다 10개까지 싣는다 [29].
 항목마다 영역 머리표를 붙여 한 줄 문자열로 바꿀 뿐 하위 분석이 정한 판정을 바꾸거나 더하지 않는다 [29].
 `AnalyzeAuthLogAsync`는 파싱한 인증 사건 가운데 `sshd-accepted`·`sshd-failed`·`sudo`·`useradd`·`usermod`·`new-ssh-key` 종류만 늦은 시각 차례로 골라 `Events`에 싣는다 [30].
-`FindWmiPersistenceAsync`는 WMI 저장소에서 꺼낸 consumer 가운데 `CommandLineEventConsumer`·`ActiveScriptEventConsumer` 두 종류만 보고서의 `Consumers`에 싣는다 [31].
-다른 종류의 consumer는 보고서에 실리지 않고 filter 이름 목록 `Filters`와 연결 목록 `Bindings`는 모두 실린다 [31].
+`BulkExtractorAsync`는 bulk_extractor가 출력 폴더에 쓴 feature 파일 가운데 `*_histogram.txt`·`*_stopped.txt`와 주석이 아닌 줄이 없는 파일을 빼고 남은 파일만 돌려준다 [31].
+남은 파일마다 주석이 아닌 줄의 수와 같은 범주 histogram 파일의 앞 5개 값을 싣는다 [31].
+이 선별은 SDK 메서드 안에서 일어나므로 호출자 스크립트는 고른 뒤의 배열만 받는다 [31].
 
 ### 근거
 
@@ -744,23 +745,30 @@ public record TimelinePivotReport
 
 [`src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs:131-133`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/LinuxAnalysis/LinuxAnalysisWorkflow.Logins.cs#L131-L133)
 
-[31] 두 종류의 consumer만 남겨 `Consumers`에 싣고 `Filters`·`Bindings`는 그대로 싣는다.
+[31] feature 파일 가운데 histogram·중단 기록 파일과 빈 파일을 빼고 건수와 앞 5개 값을 싣는다.
 
 ```csharp
-        // Only the attacker-favored consumer types are persistence leads; the stock built-in types are noise.
-        var consumers = subs.Consumers.Where(c => WmiAttackerConsumerTypes.Contains(c.Type)).ToArray();
+        // For each non-empty feature file emit "path<TAB>count<TAB>top|values" — the top values come from the
+        // category's *_histogram.txt (lines "n=<count>\t<value>", most-frequent first). One pass, one round trip.
+        var dir = Q(outputDir.TrimEnd('/'));
+        var script =
+            $"for f in {dir}/*.txt; do case \"$f\" in *_histogram.txt|*_stopped.txt) continue;; esac; " +
+            "n=$(grep -vc '^#' \"$f\" 2>/dev/null); [ \"$n\" -gt 0 ] || continue; " +
+            "h=\"${f%.txt}_histogram.txt\"; " +
+            "tv=$(grep -v '^#' \"$h\" 2>/dev/null | head -5 | sed 's/^n=[0-9]*\\t//' | paste -sd '|' -); " +
+            "printf '%s\\t%s\\t%s\\n' \"$f\" \"$n\" \"$tv\"; done";
+        var b64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(script));
+        var r = await auditEnvironment.ExecuteCommandAsync("bash", $"-c \"echo {b64} | base64 -d | bash\"", false);
+        if (!r.IsCompleted) return [];
+        return r.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(l => l.Split('\t'))
+            .Where(p => p.Length >= 2 && long.TryParse(p[1], out _))
+            .Select(p => new BulkFeatureFile
+            {
+                Path = p[0], Name = p[0].Split('/').Last(),
+                Category = p[0].Split('/').Last().Replace(".txt", ""), Count = long.Parse(p[1]),
+                TopValues = p.Length > 2 ? p[2].Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : [],
+            }).ToArray();
 ```
 
-[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:451-452`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L451-L452)
-
-```csharp
-        var report = new WmiPersistenceReport
-        {
-            SuspiciousConsumers = suspicious.ToArray(),
-            Consumers = consumers,
-            Bindings = subs.Bindings,
-            Filters = subs.Filters,
-        };
-```
-
-[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:477-483`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L477-L483)
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:438-458`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L438-L458)
