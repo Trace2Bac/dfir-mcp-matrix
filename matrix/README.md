@@ -101,7 +101,7 @@ pilot_cells: [E03, T03, R02, L02]     # 원고가 담아야 하는 셀. 원고 �
 
 ## 셀 다루기 (드묾)
 
-셀은 거의 바뀌지 않습니다. 분석 중에 셀을 바꿔야 할 것 같으면 [정의 문제 목록](../docs/definition-issues/README.mdx)에 적고, 검토 주기에 모아서 바꾸며 `config.yaml`의 `version`을 그 날짜로 바꿉니다([CONTRIBUTING.md](../CONTRIBUTING.md#정의를-바꾸는-때와-버전)). 셀을 바꿀 때는 다음 표를 따릅니다.
+셀은 거의 바뀌지 않습니다. 분석 중에 셀을 바꿔야 할 것 같으면 GitHub 이슈나 토론에 올리고, 검토 주기에 모아서 바꾸며 `config.yaml`의 `version`을 그 날짜로 바꿉니다([CONTRIBUTING.md](../CONTRIBUTING.md#정의를-바꾸는-때와-버전)). 셀을 바꿀 때는 다음 표를 따릅니다.
 
 | 하려는 일 | 고칠 곳 |
 |---|---|
