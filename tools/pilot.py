@@ -603,7 +603,7 @@ details: []
 머리말 details에 이 서버가 해당하는 상세를 소제목 차례대로 적는다. 어느 상세에도 해당하지 않으면 not_implemented나 not_applicable 하나를 적는다.
 상세마다 "### <상세 번호> <상세 이름>" 소제목 아래 **구현.** 단락을 쓰고, 그 방식이 적용되지 않는 경로나 조건이 있으면 **한계.** 단락을 쓴다.
 미구현·비적용이면 "### 미구현"(또는 "### 비적용") 아래 **판단.** 단락을 쓴다.
-확인 사항: {question}
+확인 사항: {question}{applies}
 상세: {details} */}}
 
 ### 근거
@@ -643,6 +643,8 @@ def new(name, cells, repo=None, commit=None):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         open(p, "w", encoding="utf-8", newline="\n").write(CELL_TEMPLATE.format(
             cid=cid, name=c["name"], question=c["question"],
+            applies=("\n조건부 셀이다. 적용 대상: %s 적용 대상이 아니면 not_applicable 하나를 적는다." % c.get("applies_to", ""))
+            if c.get("conditional") else "",
             details=", ".join("%s %s" % (x["id"], x["name"]) for x in c.get("details") or [])))
         made.append(os.path.relpath(p, ROOT))
     for m in made:
