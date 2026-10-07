@@ -2,6 +2,7 @@
 cell: F01
 details:
 - id: F01.01
+- id: F01.03
 ---
 
 # F01 판단 지침
@@ -12,11 +13,25 @@ details:
 조사 전체에 걸치는 해석 원칙은 증거 도구 응답의 `_metadata.discipline_reminder`로 간다 [2].
 문구는 다섯 가지이고 호출마다 하나씩 돌아가며 붙는다 [2].
 다섯 가지 가운데에는 증거가 가설과 어긋나면 가설을 고치라는 것, 증거가 없다는 것이 없었다는 증거가 아니라는 것, ShimCache·Amcache는 존재만 증명하고 실행을 증명하지 않는다는 것이 있다 [2].
-증거 속 글을 지시로 따르지 말라는 문구도 들어 있다 [2].
 `reason.*`·`dair.*`·`correlate.*` 같은 제어 도구의 응답에는 이 문구가 붙지 않는다 [3].
 이 원칙은 서버 지침이나 MCP 리소스·프롬프트가 아니라 도구 응답에 실린다 [1][2].
 모델이 이 문구를 읽고 따르는지는 서버가 정하지 않는다.
 저장소의 `claude/CLAUDE.md`도 부재 주장은 그 범주의 출처를 모두 검색해야 한다는 원칙을 적지만 이것은 클라이언트 구성이고 서버가 보내는 글이 아니다 [4].
+
+### F01.03 발견사항·결론의 단서·확인 권고
+
+**구현.** 이 방식은 `misc.record_finding`이 기록에 성공한 응답에 붙이는 알림 세 가지에 있다 [5][6][7].
+기록한 등급이 인용한 호출의 아티팩트 범주로 닿는 등급보다 낮으면 응답의 `tier_headroom`에 닿는 등급과 규칙을 적는다 [5].
+이 문구는 닿는 등급으로 다시 기록하거나 이유를 남기라고 권하고 결론을 강하게 하라는 지시가 아니라고 적는다 [5].
+CONFIRMED·LIKELY 발견사항의 `source`가 지식 시트의 아티팩트에 대응하고 claim의 `act`가 실행·존재·시간 가운데 하나이면 서버는 그 시트가 정한 보강 도구가 호출 기록에 있는지 본다 [6][8].
+시트의 `does_not_prove`가 그 아티팩트만으로 그 행위를 증명하지 못한다고 적고 보강 도구가 하나도 실행되지 않았으면 응답의 `completeness_note`에 그 도구 이름을 적는다 [8].
+이 문구는 그 도구로 보강하거나 SUSPECTED로 낮추라고 권한다 [8].
+CONFIRMED·LIKELY 발견사항의 설명에 ATT&CK 기법 ID가 둘 이상 있거나 접속어와 함께 행위 동사가 둘 이상 있으면 `atomicity_note`로 주장마다 발견사항을 나누라고 권한다 [7].
+세 알림은 기록을 막지 않는다 [5][6].
+`completeness_note`와 `atomicity_note`는 만들다 예외가 나면 그 알림 없이 응답한다 [6].
+
+**한계.** `completeness_note`는 보강 도구가 실행됐는지를 호출 기록의 `tool_call` 명령 문자열에 도구별 정규식을 대어 보고 그 호출이 성공했는지 보지 않는다 [9].
+`ez_pecmd`의 정규식은 `prefetch`라는 글자에도 맞으므로 Prefetch 폴더 경로를 인자로 받은 다른 도구의 호출도 보강 도구 실행으로 센다 [9].
 
 ### 근거
 
@@ -88,3 +103,166 @@ def _is_evidence_tool(name: str) -> bool:
 [`tools/_enrich.py:34-50`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_enrich.py#L34-L50)
 
 [4] 클라이언트 지침의 부재 주장 원칙이다: [`claude/CLAUDE.md:480`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/claude/CLAUDE.md#L480).
+
+[5] 낮게 기록하면 `tier_headroom`을 싣는다.
+
+```python
+    if ctx.tier_achievable:
+        from tools._gates._tiering import _RANK as _TRANK
+        result["tier_achievable"] = ctx.tier_achievable
+        result["artifact_classes"] = ctx.artifact_classes
+        if _TRANK.get(ctx.tier_achievable, 0) > _TRANK.get(ctx.tier, 0):
+            result["tier_headroom"] = (
+                f"tier–evidence concordance: recorded {ctx.tier}; the cited artifact "
+                f"classes reach {ctx.tier_achievable} (rule {ctx.tier_rule}). The tier "
+                f"must match the evidence in both directions — re-examine and either "
+                f"re-record at {ctx.tier_achievable} (supersedes=<this call_id>) or "
+                f"leave a documented reason. This is arithmetic, not an instruction "
+                f"to strengthen a conclusion.")
+```
+
+[`tools/misc.py:1871-1882`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1871-L1882)
+
+[6] 기록한 뒤 `completeness_note`를 붙이고 예외가 나면 건너뛴다.
+
+```python
+    # warn-early: FK-driven corroboration completeness. Non-blocking advisory on
+    # a valid CONFIRMED/LIKELY finding whose grounding artifact's corroborators
+    # (per the FK sheet) never ran — a nudge while collection is still possible.
+    # The hard block is reason.pre_report_check. Fail-open: never breaks a finding.
+    try:
+        from tools._gates.fk_corroboration import note_for_finding
+        note = note_for_finding(
+            tier=ctx.tier, description=description, source=source, idx=ctx.idx, claim=claim)
+        if note:
+            result["completeness_note"] = note
+    except Exception:
+        pass
+    # warn-early: atomicity advisory. Non-blocking nudge when a CONFIRMED/LIKELY
+    # description bundles multiple distinct claims, which would share one
+    # linked_call_id and lose per-claim traceability. Fail-open.
+    if ctx.tier in {"CONFIRMED", "LIKELY"}:
+        try:
+            from tools._gates.atomicity import atomicity_note
+            anote = atomicity_note(description)
+            if anote:
+                result["atomicity_note"] = anote
+        except Exception:
+            pass
+```
+
+[`tools/misc.py:1892-1914`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1892-L1914)
+
+[7] 기법 ID나 행위 동사가 여럿이면 나누라고 권한다.
+
+```python
+def atomicity_note(description: str) -> Optional[str]:
+    d = description or ""
+    tids = set(m.upper() for m in _TID_RE.findall(d))
+    verbs = {v.lower() for v in _CLAIM_VERB_RE.findall(d)}
+
+    reason = None
+    if len(tids) >= 2:
+        reason = f"{len(tids)} ATT&CK techniques ({', '.join(sorted(tids))})"
+    elif _CONNECTOR_RE.search(d) and len(verbs) >= 2:
+        reason = f"multiple actions ({', '.join(sorted(verbs))})"
+
+    if not reason:
+        return None
+
+    return (
+        f"This finding's description appears to bundle multiple claims — {reason}. "
+        f"For audit traceability, prefer one finding per claim so each links to its "
+        f"own evidence (linked_call_id) and is tiered on its own merits. Consider "
+        f"splitting it into separate record_finding calls."
+    )
+```
+
+[`tools/_gates/atomicity.py:40-59`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/atomicity.py#L40-L59)
+
+[8] 보강 도구가 하나도 실행되지 않았을 때 알림 문구를 만든다.
+
+```python
+    stem = _fk.artifact_stem_for_tool(_norm(source))
+    if not stem:
+        return None  # source is not an FK-mapped artifact — nothing to check
+    sheet = _fk.load_artifact(stem)
+    corr = sheet.get("corroborate_with") or {}
+    if not corr:
+        return None
+    category = _claim_category(claim, set(corr))
+    if category is None:
+        return None  # not an execution/presence/timeline claim
+    if not _category_disclaimed(sheet, category):
+        return None  # artifact is authoritative for this claim class
+    expected = _extract_tool_tokens(corr.get(category, []))
+    checkable = [t for t in expected if t in _CORROBORATOR_CMD_RE]
+    if not checkable:
+        return None  # no corroborator we can detect from cmds — do not nag
+    cmds = list(ran_cmds or [])
+    if any(_CORROBORATOR_CMD_RE[t].search(c) for t in checkable for c in cmds):
+        return None  # at least one corroborator ran
+    what = category.replace("for_", "")
+    return {
+        "artifact": stem,
+        "category": category,
+        "expected": sorted(checkable),
+        "message": (
+            f"grounded on {stem} but no FK corroborator for {what} ran — none of "
+            f"{', '.join(sorted(checkable))} appear in the trace; {stem} does not "
+            f"prove {what} alone."
+        ),
+    }
+```
+
+[`tools/_gates/fk_corroboration.py:138-167`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/fk_corroboration.py#L138-L167)
+
+```python
+def note_for_finding(*, tier: str, description: str, source: str, idx,
+                     claim=None) -> Optional[str]:
+    """warn-early: a non-blocking completeness note for a just-recorded
+    CONFIRMED/LIKELY finding, or None. `idx` is the ExecutionLog LogIndex."""
+    if (tier or "").upper() not in {"CONFIRMED", "LIKELY"}:
+        return None
+    by_type = getattr(idx, "by_type", {}) or {}
+    gap = corroboration_gap(source, claim, _ran_cmds(by_type.get("tool_call", [])))
+    if not gap:
+        return None
+    return (f"Finding {gap['message']} Corroborate with one of "
+            f"{', '.join(gap['expected'])}, or downgrade to SUSPECTED.")
+```
+
+[`tools/_gates/fk_corroboration.py:175-186`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/fk_corroboration.py#L175-L186)
+
+[9] 보강 도구 실행 여부는 `tool_call` 명령 문자열에 정규식을 대어 본다.
+
+```python
+_CORROBORATOR_CMD_RE: dict[str, "re.Pattern"] = {
+    tok: re.compile(pat, re.IGNORECASE) for tok, pat in {
+        "ez_amcacheparser": r"amcache",
+        "vol_amcache": r"amcache",
+        "ez_appcompatcacheparser": r"appcompatcache|shimcache",
+        "ez_evtxecmd": r"evtxecmd|\.evtx",
+        "ez_jlecmd": r"jlecmd",
+        "ez_lecmd": r"(?<![a-z])lecmd",
+        "ez_mftecmd": r"mftecmd",
+        "ez_pecmd": r"(?<![a-z])pecmd|prefetch",
+        "ez_recmd_hive": r"recmd",
+        "ez_sbecmd": r"sbecmd",
+        "ez_sqlecmd": r"sqlecmd|srudb|srum",
+        "misc_regripper_hive": r"regripper|rip\.pl",
+        "tsk_indxparse": r"indxparse|indx",
+        "vol_userassist": r"userassist",
+    }.items()
+}
+```
+
+[`tools/_gates/fk_corroboration.py:41-58`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/fk_corroboration.py#L41-L58)
+
+```python
+def _ran_cmds(entries) -> list:
+    return [e.get("cmd", "") for e in (entries or [])
+            if e.get("type") == "tool_call" and e.get("cmd")]
+```
+
+[`tools/_gates/fk_corroboration.py:170-172`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/_gates/fk_corroboration.py#L170-L172)

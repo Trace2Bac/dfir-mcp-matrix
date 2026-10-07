@@ -1,0 +1,132 @@
+---
+cell: F01
+details:
+- id: not_implemented
+---
+
+# F01 판단 지침
+
+### 미구현
+
+**판단.** 서버의 도구 설명과 응답 어디에도 조사 전체의 해석 원칙, 결론 서술 방식, 발견사항의 단서, 판단 편향 경고를 적지 않는다.
+서버에는 서버 지침(`instructions`), MCP 리소스, MCP 프롬프트가 없다 [1].
+도구 설명 11개는 각 플러그인이 무엇을 보여 주는지만 적는다 [2].
+`evidence_metadata`와 `verify_evidence_integrity`의 설명에는 먼저 부르라거나 조사 끝에 부르라는 호출 순서가 더 있다 [2].
+`evidence_metadata`가 돌려주는 도구 요약도 플러그인의 용도만 적는다 [3].
+Volatility 도구의 응답은 플러그인 출력과 실행 정보 필드만 담는다 [4].
+서버에는 발견사항이나 결론을 받는 도구가 없으므로 기록하려는 발견사항에 단서를 붙이는 응답도 없다 [2].
+
+판단에 관한 안내는 클라이언트 `siftpp-investigate`의 시스템 프롬프트와 클라이언트 도구 설명에 있다 [5][6].
+Investigator 프롬프트는 도구 출력이 실제로 보여 주는 것만으로 결론을 내고 직접 증거로 드러난 것과 추론한 것을 나누라고 적는다 [5].
+같은 프롬프트는 결론 하나마다 발견사항 하나를 `submit_finding`으로 내라고 적는다 [5].
+같은 프롬프트는 악성 흔적이 없는 결과도 유효한 결과이니 발견사항을 지어내지 말라고 적는다 [5].
+`submit_finding`의 설명은 인용한 도구 출력이 실제로 보여 주는 것만 주장하라고 적는다 [6].
+Skeptic 프롬프트는 발견사항을 받아들이지 말고 반박하려 하며 원래 증거가 보여 주기 전까지 환각일 수 있다고 가정하라고 적는다 [7].
+이 문구는 클라이언트가 모델에게 넣는 것이라 다른 MCP 클라이언트로 서버를 쓰면 모델에게 전달되지 않는다.
+
+### 근거
+
+[1] (실행 확인) 초기화 응답의 `instructions`가 비어 있고 `resources/list`와 `prompts/list`는 빈 목록을 돌려준다.
+
+[2] 도구 설명이다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[3] 도구 요약이다.
+
+```python
+READ_ONLY_PLUGINS: tuple[PluginSpec, ...] = (
+    PluginSpec("vol_info", "windows.info",
+               "Image metadata: OS build, architecture, KDBG. Run first to orient."),
+    PluginSpec("vol_pslist", "windows.pslist",
+               "Active processes from the EPROCESS list (PID, PPID, name, start time)."),
+    PluginSpec("vol_pstree", "windows.pstree",
+               "Process tree showing parent/child relationships."),
+    PluginSpec("vol_psscan", "windows.psscan",
+               "Processes found by pool scanning; reveals hidden/terminated procs pslist misses."),
+    PluginSpec("vol_cmdline", "windows.cmdline",
+               "Command line of each process; spot suspicious arguments or paths."),
+    PluginSpec("vol_dlllist", "windows.dlllist",
+               "Loaded DLLs (optionally for one PID); spot unusual or unsigned modules.",
+               takes_pid=True),
+    PluginSpec("vol_malfind", "windows.malfind",
+               "Injected/hidden code: private RWX regions with no file backing (optionally one PID).",
+               takes_pid=True),
+    PluginSpec("vol_netscan", "windows.netscan",
+               "Network connections and sockets recovered from the pool."),
+    PluginSpec("vol_svcscan", "windows.svcscan",
+               "Windows services; spot malicious services or persistence."),
+)
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:46-67`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L46-L67)
+
+[4] Volatility 도구의 응답 필드다.
+
+```python
+        return {
+            "tool": tool,
+            "plugin": spec.plugin,
+            "command": argv,
+            "exit_code": returncode,
+            "timed_out": timed_out,
+            "evidence_sha256": self.guard.sha256,
+            "integrity_ok": True,
+            "output_sha256": out_sha,
+            "output_bytes": len(stdout),
+            "duration_ms": duration_ms,
+            "row_count": row_count,
+            "truncated": truncated,
+            "result": result,
+            "result_text": result_text,
+            "stderr": stderr.decode("utf-8", errors="replace")[-2000:]
+            if returncode != 0 else "",
+        }
+```
+
+[`src/protocol_siftpp/mcp_server/volatility.py:208-225`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/volatility.py#L208-L225)
+
+[5] Investigator 시스템 프롬프트다.
+
+```python
+How to work:
+- Start with `evidence_metadata`, then `vol_info` to orient, then `vol_pslist` / \
+`vol_pstree` to map processes. Use the tools liberally — call a tool whenever it \
+would confirm or refute a hypothesis (e.g. `vol_malfind` for injected code, \
+`vol_psscan` to find hidden processes pslist misses, `vol_netscan` for C2, \
+`vol_cmdline` for suspicious arguments, `vol_dlllist` for odd modules).
+- If `vol_pslist`, `vol_pstree`, or `vol_cmdline` returns no rows, treat that as \
+a view limitation, not proof the host is clean. Cross-check with `vol_psscan` \
+and `vol_netscan`.
+- Form conclusions only from what the tool output actually shows. Separate what \
+is directly evidenced from what is inferred.
+- A process name recovered only from `vol_netscan` is not enough to prove \
+execution by itself; confirm with `vol_psscan` when possible.
+- Record each distinct conclusion with `submit_finding`, naming the tools whose \
+output supports it. One finding per conclusion. A clean system with no evil is a \
+valid result — do not invent findings.
+```
+
+[`src/protocol_siftpp/prompts.py:17-32`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L17-L32)
+
+[6] `submit_finding`의 설명이다.
+
+```python
+SUBMIT_FINDING_TOOL = {
+    "name": "submit_finding",
+    "description": (
+        "Record ONE evidence-backed conclusion. Call once per distinct finding. "
+        "Only claim what the cited tool outputs actually show."
+    ),
+```
+
+[`src/protocol_siftpp/client_tools.py:7-12`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/client_tools.py#L7-L12)
+
+[7] Skeptic 시스템 프롬프트다.
+
+```python
+SKEPTIC_SYSTEM = """\
+You are an independent DFIR verifier (the Skeptic). Another analyst produced a \
+finding. Your job is to *try to refute it*, not to agree. Assume it may be a \
+hallucination until the raw evidence proves otherwise.
+```
+
+[`src/protocol_siftpp/prompts.py:43-46`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/prompts.py#L43-L46)

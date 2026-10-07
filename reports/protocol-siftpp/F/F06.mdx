@@ -5,6 +5,7 @@ details:
 - id: F06.03
 - id: F06.04
 - id: F06.05
+- id: F06.07
 ---
 
 # F06 보고 산출물 구성
@@ -44,7 +45,6 @@ Skeptic이 검토하며 다시 부른 도구 호출은 검토하는 발견사항
 **구현.** 이 방식은 사용자가 `siftpp-investigate`를 실행해야 만들어지는 `report.json`·`report.md`와 `siftpp-report`를 실행해야 만들어지는 `report.html`에 있다 [1][2].
 보고서 요약은 확정한 발견사항 수, 전체 발견사항 수, 재조사 차례 수, 증거 해시 재대조 결과를 담는다 [7].
 재대조 결과는 조사 끝에 부른 `verify_evidence_integrity`의 `unchanged`가 참이면 `verified`, 아니면 `FAILED`다 [7].
-발견사항은 Skeptic 판정에 따라 `confirmed`·`inferred`·`refuted`·`draft`로 나뉘어 실린다 [1][2].
 발견사항마다 Skeptic 판정의 이유가 실리고 `report.json`에는 반증하려고 확인한 내용 `refutation_attempt`도 실린다 [1][8].
 `report.html`은 클라이언트 기록 `audit.jsonl`의 해시 체인 검증 결과와 항목 수, 사건 종류별 개수를 싣는다 [2].
 서버 기록 `mcp-server.jsonl`의 체인 검증 결과는 어느 보고서에도 없다 [2][1].
@@ -59,6 +59,21 @@ Skeptic이 검토하며 다시 부른 도구 호출은 검토하는 발견사항
 출력 폴더는 `--out`으로 정하고 없으면 `analysis/<사건 ID>`다 [6].
 `siftpp-report --run <실행 폴더>`는 그 폴더의 `report.json`과 `audit.jsonl`로 외부 자원 없는 HTML 파일 하나를 쓴다 [2].
 `siftpp-gui`는 `docs/examples/`와 `analysis/` 아래 실행 폴더의 같은 HTML을 웹으로 보여 준다 [13].
+
+### F06.07 판단의 확정 상태 표시
+
+**구현.** 이 방식은 사용자가 `siftpp-investigate`를 실행해야 만들어지는 `report.json`·`report.md`와 `siftpp-report`를 실행해야 만들어지는 `report.html`에 있다 [1][2].
+발견사항은 Skeptic 판정에 따라 `confirmed`·`inferred`·`refuted`·`draft`로 나뉘어 실린다 [1][2].
+`report.md`는 이 차례로 상태마다 `## <상태> (<개수>)` 소제목을 두고 그 아래에 발견사항을 싣는다 [1].
+`report.html`도 같은 차례로 상태마다 절을 나누고 발견사항 카드마다 상태 표시를 붙인다 [2].
+`report.html`의 통계 칸은 `confirmed`·`inferred`·`refuted` 발견사항 수를 싣는다 [2].
+`report.json`은 발견사항마다 상태 `status`와 Skeptic 판정 `review`를 싣는다 [8].
+상태는 Skeptic 모델이 `submit_review`로 낸 판정 값이다 [12].
+Skeptic이 판정을 내지 않으면 클라이언트가 상태를 `inferred`로 정하고 판정을 받지 못했다는 문구를 판정 이유로 싣는다 [14].
+조사 끝에 아직 검토하지 않은 발견사항을 모두 검토하므로 끝까지 실행한 조사의 보고서에는 `draft` 상태가 남지 않는다 [15].
+재조사에서 다시 낸 주장은 새 발견사항으로 실리고 앞 발견사항은 앞 상태 그대로 함께 실린다 [15].
+상태 값마다의 뜻은 어느 보고서에도 적지 않는다 [1][2].
+`report.html`의 바닥글은 발견사항의 상태를 Skeptic이 정한다고만 적는다 [16].
 
 ### 근거
 
@@ -325,3 +340,59 @@ async def run_report(request: Any) -> HTMLResponse:
 ```
 
 [`src/protocol_siftpp/gui.py:133-140`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/gui.py#L133-L140)
+
+[14] Skeptic이 판정을 내지 않으면 클라이언트가 상태를 정한다.
+
+```python
+        review = holder.get("review")
+        if review is None:  # skeptic never submitted -> treat as unverified inference
+            review = SkepticReview(
+                status=FindingStatus.inferred,
+                confidence=min(finding.confidence, 0.4),
+                refutation_attempt="no verdict returned",
+                rationale="Skeptic did not submit a review; downgraded to inferred.",
+            )
+        finding.review = review
+        finding.status = review.status
+        finding.confidence = review.confidence
+        finding.updated_at = datetime.now(timezone.utc)
+```
+
+[`src/protocol_siftpp/orchestrator.py:246-257`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L246-L257)
+
+[15] 검토와 재조사 반복이다.
+
+```python
+        corrections_run = 0
+        for review_round in range(1, self.max_iterations + 1):
+            pending = [f for f in self.findings if f.review is None]
+            if not pending:
+                break
+            redo: list[Finding] = []
+            for f in pending:
+                await self._review(f)
+                if f.needs_reinvestigation():
+                    redo.append(f)
+            if not redo or review_round == self.max_iterations:
+                break
+            corrections_run += 1
+            self.audit.iteration(
+                n=corrections_run,
+                reason=f"{len(redo)} finding(s) refuted/low-confidence -> re-investigate",
+            )
+            await self._investigate(render_reinvestigation(redo), iteration=corrections_run)
+
+        # Review any findings produced in the final iteration.
+        for f in [f for f in self.findings if f.review is None]:
+            await self._review(f)
+```
+
+[`src/protocol_siftpp/orchestrator.py:279-300`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L279-L300)
+
+[16] `report.html`의 바닥글이다.
+
+```python
+<footer>Generated from report.json + audit.jsonl · findings are confirmed/inferred/refuted by an adversarial Skeptic; every finding cites a tool command + output SHA-256.</footer>
+```
+
+[`src/protocol_siftpp/report_html.py:154-154`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/report_html.py#L154-L154)
