@@ -3,9 +3,14 @@ import Link from '@docusaurus/Link';
 import styles from './Matrix.module.css';
 
 export default function GridBoard({ data }: any) {
+  // 축 수만큼 열을 만든다. 축은 matrix/cells/<축>/index.mdx에서 오므로 축을 더해도 여기를 고치지 않는다
+  const n = Object.keys(data.axes).length;
   return (
     <div className={styles.scroll}>
-      <div className={styles.grid}>
+      <div
+        className={styles.grid}
+        style={{ gridTemplateColumns: `repeat(${n}, minmax(140px, 1fr))`, minWidth: `${n * 150}px` }}
+      >
         {Object.keys(data.axes).map(ax => (
           <div key={ax} className={styles.col}>
             <Link to={`/${ax}/`} className={styles.colhead} style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}>

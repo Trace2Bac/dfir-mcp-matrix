@@ -1,0 +1,102 @@
+---
+cell: D10
+details:
+- id: D10.02
+---
+
+# D10 산출물 식별·재생성 처리
+
+### D10.02 입력·작업별 고유 이름
+
+**구현.** 유일한 이름을 쓰는 방식은 `ListDeletedFilesAsync`의 내부 bodyfile과 `RunIdsAsync`의 기본 출력 폴더에만 있다 [1][2].
+`ListDeletedFilesAsync`는 삭제 항목을 찾으려고 `/tmp/camel_deleted_<GUID>.body`에 bodyfile을 만들고 그 파일을 지우지 않는다 [1].
+이름에 호출마다 새로 만든 GUID가 들어가므로 다른 실행의 bodyfile과 겹치지 않는다 [1].
+결과에는 이 경로를 싣지 않는다 [1].
+`RunIdsAsync`는 `outDir`가 없으면 `/tmp/camel_suricata_<GUID>` 폴더를 만들어 Suricata 로그를 쓰고 그 폴더를 지우지 않는다 [2][3].
+이 두 경로 밖의 파생물 이름은 스크립트가 정하고 서버는 앞 파생물과 구분하지 않는다.
+툴킷 공통 함수가 만드는 `/tmp/camel_ez_<GUID>` 같은 임시 폴더는 호출 안에서 지우므로 이 상세에 넣지 않는다 [4].
+
+### 근거
+
+
+[1] GUID 이름의 bodyfile을 만들고 지우지 않는다.
+
+```csharp
+    public async Task<WorkflowResult<DeletedFilesReport>> ListDeletedFilesAsync(string image, int? offset = null, int maxFiles = 2000)
+    {
+        using var _audit = AuditScope();
+        using var op = Begin("Listing deleted files in {0} (offset {1})", image, offset?.ToString() ?? "none");
+
+        var bodyfile = $"/tmp/camel_deleted_{Guid.NewGuid():N}.body";
+        if (!await DiskAnalysis.FlsBodyfileAsync(image, bodyfile, offset))
+            return WorkflowResult<DeletedFilesReport>.Failure(
+                $"Failed to walk '{image}' (offset {offset}) for deleted files. Check the offset (mmls) and that a filesystem exists there.");
+
+        // The bodyfile names every deleted entry with a "(deleted)" / "(deleted-realloc)" suffix; pull just those
+        // server-side rather than transferring the whole bodyfile.
+        var lines = await DiskAnalysis.GrepLinesAsync(bodyfile, ["deleted"], ignoreCase: false);
+        if (lines is null)
+            return WorkflowResult<DeletedFilesReport>.Failure($"Could not read the bodyfile '{bodyfile}'.");
+
+        var entries = lines.Select(ParseDeletedRow).Where(e => e is not null).Select(e => e!)
+            .OrderByDescending(e => e.Size).Take(maxFiles).ToArray();
+
+        op.Complete();
+        var report = new DeletedFilesReport { DeletedFiles = entries, Count = entries.Length };
+        return WorkflowResult<DeletedFilesReport>.Success(report,
+            entries.Length == 0
+                ? $"No deleted files found in '{image}' (offset {offset})."
+                : $"Found {lines.Length} deleted entry/entries in '{image}'; {entries.Count(e => e.Recoverable)} recoverable. " +
+                  $"Largest: {string.Join("; ", entries.Take(3).Select(e => $"{e.Path} ({e.Size} bytes)"))}.");
+    }
+```
+
+[`src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.Recovery.cs:126-152`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.Recovery.cs#L126-L152)
+
+[2] `outDir`가 없으면 GUID 이름의 폴더를 쓴다.
+
+```csharp
+    public async Task<WorkflowResult<IdsReport>> RunIdsAsync(string pcap, string? outDir = null)
+    {
+        outDir ??= "/tmp/camel_suricata_" + Guid.NewGuid().ToString("N");
+        using var _audit = AuditScope();
+        using var op = Begin("Running Suricata IDS over {0}", pcap);
+
+        var alerts = await PacketAnalysis.SuricataAsync(pcap, outDir);
+```
+
+[`src/Camel.Workflows/PacketAnalysis/PacketAnalysisWorkflow.Threats.cs:190-196`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/PacketAnalysis/PacketAnalysisWorkflow.Threats.cs#L190-L196)
+
+[3] Suricata 로그를 그 폴더에 쓰고 지우지 않는다.
+
+```csharp
+    public async Task<SuricataAlert[]?> SuricataAsync(string pcap, string outDir, bool sudo = false)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outDir);
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {Q(outDir)}", false);
+        if (await RunAsync("Suricata", $"-r {Q(pcap)} -l {Q(outDir)}", sudo || Tools["Suricata"].Sudo) is null) return null;
+        if (Tools["Suricata"].Sudo || sudo)
+            await auditEnvironment.ExecuteCommandAsync("chown", $"-R $(id -un):$(id -gn) {Q(outDir)}", true);
+```
+
+[`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:363-369`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L363-L369)
+
+[4] GUID 임시 폴더를 만들고 `finally`에서 지운다.
+
+```csharp
+    public async Task<T[]?> ExecuteToolJsonAsync<T>(string name, string args, string pattern = "*.json")
+    {
+        string dir = "/tmp/camel_ez_" + Guid.NewGuid().ToString("N");
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {dir}", false);
+        try
+        {
+            if (await ExecuteToolTextAsync(name, $"{args} --json {dir}") is null) return null;
+            return await DownloadJsonLinesAsync<T>(dir, pattern);
+        }
+        // Sync ExecuteCommand has no cancellation token, so cleanup runs even after the async work was
+        // cancelled; guarded so a teardown failure can never mask the method's result.
+        finally { try { auditEnvironment.ExecuteCommand("rm", $"-rf {dir}", out _, false); } catch { } }
+    }
+```
+
+[`src/Camel.Toolkits/Toolkit.cs:356-368`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Toolkit.cs#L356-L368)

@@ -20,7 +20,7 @@ matrix/
 ├─ candidates.yaml           구현 사례가 아직 없는 상세 후보(화면에 보이지 않는다)
 ├─ cells/
 │  ├─ index.mdx              매트릭스 화면(셀 표)
-│  └─ <축>/                  축 하나(P·E·T·R·L·D·I)
+│  └─ <축>/                  축 하나(P·E·T·R·F·L·D·I)
 │     ├─ index.mdx           축의 차례·이름·설명
 │     └─ <ID>.mdx            셀 하나의 확인 사항과 상세 항목
 └─ schema/                   위 파일들과 원고 머리말의 JSON Schema(validate가 쓴다)

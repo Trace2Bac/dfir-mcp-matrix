@@ -1,0 +1,284 @@
+---
+cell: F01
+details:
+- id: F01.04
+---
+
+# F01 판단 지침
+
+### F01.04 조사 상태에 따른 판단 편향 경고
+
+**구현.** 분류 도구 연산의 응답에는 추론 엔진 상태로 고른 `self_correction_trigger`가 붙는다 [1].
+증거 충돌도가 0.3을 넘으면 우세 가설을 다시 보라는 `CONFLICT`를, 엔트로피가 멈추면 우세 가설을 반증해 보라는 `STUCK`을, 엔트로피가 늘면 새 가설을 세우라는 `DIVERGING`을 싣는다 [1].
+앞의 세 경우가 아니고 편향 경고가 있으면 다른 설명을 생각해 보라는 `BIAS`를 싣는다 [1].
+편향 경고 `bias_warnings`는 6번 이상의 조사 행동 가운데 75%를 넘는 수가 우세 가설을 겨누면 확증 편향 위험을 적고 그 가설을 반증할 도구를 권한다 [2].
+anchoring 경고는 8번 이상의 조사 행동에서 첫 행동 뒤 행동의 85%를 넘는 수가 첫 행동과 같은 분류일 때 붙는다 [3].
+tunnel vision 경고는 8번 이상의 조사 행동 뒤 한 번도 겨누지 않은 가설이 12개 가운데 3개 이상일 때 붙는다 [3].
+행동이 겨눈 가설은 모델이 밝힌 의도가 아니라 서버가 호출 분류별 후보 가운데 지금 신념이 가장 높은 가설로 추정한 값이다 [4].
+분류별 후보에는 `ransomware`와 `benign_anomaly`가 없어 이 두 가설은 늘 겨누지 않은 가설로 세어진다 [4].
+그래서 8번째 조사 행동부터는 나머지 가설 10개를 모두 한 번 이상 겨누지 않는 한 tunnel vision 경고가 붙는다 [3][4].
+실행 흔적 연산은 분류 이름 `execution_artifacts`가 대상 가설 표에 없어 대상 가설이 `null`이 된다 [4].
+실패한 호출과 규칙이 발화하지 않은 호출도 행동 이력에 들어가 편향 계산에 쓰인다 [5].
+이 문구들은 이번 호출의 출력을 합친 뒤의 추론 상태와 그때까지의 호출 이력으로 고른다 [1][2].
+
+**한계.** 수렴 상태는 규칙이 발화한 성공 호출에서만 갱신되고 실패한 호출과 규칙이 발화하지 않은 호출은 앞 상태를 그대로 돌려준다 [6][7].
+그래서 앞선 호출로 상태가 `DIVERGING`이 되면 아무 신호가 없던 다음 호출의 응답에도 "new contradictory evidence found"라는 `DIVERGING` 문구가 그대로 붙는다 [1][7].
+실패한 호출의 `isError` 응답도 같은 응답 객체에 오류만 더하므로 이 문구가 붙는다 [8].
+
+### 근거
+
+
+[1] 응답의 `reasoning`과 `self_correction_trigger`다.
+
+```typescript
+      reasoning: {
+        entropy: reasoningUpdate.entropy,
+        convergence: reasoningUpdate.convergenceState,
+        conflict: reasoningUpdate.conflict,
+        dominant_hypothesis: reasoningUpdate.dominantHypothesis,
+        rules_fired: reasoningUpdate.triggeredRules,
+        bias_warnings: reasoningUpdate.biasWarnings,
+        comeback_triggered: reasoningUpdate.comebackTriggered,
+        // Self-correction signal (arXiv:2601.00828 — external feedback > intrinsic self-correction)
+        // Provides SPECIFIC contradicting evidence, not just "conflict detected"
+        self_correction_trigger: reasoningUpdate.conflict > 0.3
+          ? { type: "CONFLICT", conflict_k: reasoningUpdate.conflict, message: `Evidence conflict K=${reasoningUpdate.conflict.toFixed(2)} detected. Prior hypothesis may need revision.`, contradicting_evidence: reasoningUpdate.triggeredRules.slice(-2).join("; "), action: "Re-examine with contradicting evidence. The most recent signals conflict with the dominant hypothesis — investigate the alternative." }
+          : reasoningUpdate.convergenceState === "STUCK"
+            ? { type: "STUCK", entropy: reasoningUpdate.entropy, message: "Entropy plateau detected — investigation not learning.", action: "Try FALSIFYING the leading hypothesis instead of confirming it. Look for evidence that would DISPROVE your current theory." }
+            : reasoningUpdate.convergenceState === "DIVERGING"
+              ? { type: "DIVERGING", entropy: reasoningUpdate.entropy, message: "Entropy increasing — new contradictory evidence found.", action: "A new signal contradicts prior conclusions. Register a new hypothesis to account for the divergent evidence." }
+              : reasoningUpdate.biasWarnings.length > 0
+                ? { type: "BIAS", bias_type: reasoningUpdate.biasWarnings[0]?.type ?? "unknown", message: `${reasoningUpdate.biasWarnings[0]?.type ?? "unknown"} bias detected.`, action: "Consider alternative explanations. You may be confirming what you expect rather than testing what you don't." }
+                : null,
+      },
+```
+
+[`src/server.ts:2107-2126`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2107-L2126)
+
+[2] 확증 편향 경고다.
+
+```typescript
+/** Confirmation bias: >75% of actions target the leading hypothesis */
+function checkConfirmationBias(
+  history: readonly ActionRecord[],
+  leadingHypothesis: string | null
+): BiasWarning | null {
+  if (!leadingHypothesis || history.length < 6) return null;
+
+  const targetingLeading = history.filter(a => a.targetedHypothesis === leadingHypothesis).length;
+  const ratio = targetingLeading / history.length;
+
+  if (ratio > CONFIRMATION_THRESHOLD) {
+    const severity = ratio > 0.9 ? "HIGH" as const : "MEDIUM" as const;
+    return {
+      type: "confirmation" as BiasType,
+      severity,
+      description: `${(ratio * 100).toFixed(0)}% of ${history.length} actions target the leading hypothesis "${leadingHypothesis}". ` +
+        `Confirmation bias risk: investigating only what supports the current theory.`,
+      suggestion: `Test alternative hypotheses. Run tools that could DISPROVE "${leadingHypothesis}" — ` +
+        `e.g., if hypothesis is "insider threat", check for external C2 indicators that would suggest APT instead.`,
+    };
+  }
+  return null;
+```
+
+[`src/reasoning/bias-detector.ts:45-66`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/bias-detector.ts#L45-L66)
+
+[3] anchoring과 tunnel vision 경고의 조건이다.
+
+```typescript
+/** Anchoring: first finding drives 85%+ of subsequent actions */
+function checkAnchoring(history: readonly ActionRecord[]): BiasWarning | null {
+  if (history.length < 8) return null;
+
+  // Check if the category of the first finding dominates subsequent actions
+  const firstCategory = history[0]?.category;
+  if (!firstCategory) return null;
+
+  const subsequent = history.slice(1);
+  const sameCategoryCount = subsequent.filter(a => a.category === firstCategory).length;
+  const ratio = sameCategoryCount / subsequent.length;
+
+  if (ratio > ANCHORING_THRESHOLD) {
+    return {
+      type: "anchoring" as BiasType,
+      severity: "MEDIUM",
+      description: `${(ratio * 100).toFixed(0)}% of actions remain in the "${firstCategory}" category. ` +
+        `Anchoring risk: first finding may be overly influencing investigation direction.`,
+      suggestion: `Broaden investigation scope. Consider other artifact categories: ` +
+        `registry, event logs, network, user activity. The first finding may not be the most significant.`,
+    };
+  }
+  return null;
+}
+```
+
+[`src/reasoning/bias-detector.ts:69-92`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/bias-detector.ts#L69-L92)
+```typescript
+/** Tunnel vision: multiple hypotheses have zero predictions tested */
+function checkTunnelVision(
+  history: readonly ActionRecord[],
+  allHypotheses: readonly string[]
+): BiasWarning | null {
+  if (history.length < TUNNEL_VISION_MIN_ACTIONS) return null;
+
+  const testedHypotheses = new Set(history.map(a => a.targetedHypothesis).filter(Boolean));
+  const untestedCount = allHypotheses.filter(h => !testedHypotheses.has(h)).length;
+
+  if (untestedCount >= TUNNEL_VISION_UNTESTED) {
+    const untested = allHypotheses.filter(h => !testedHypotheses.has(h)).slice(0, 4);
+    const severity = untestedCount >= 6 ? "HIGH" as const : "MEDIUM" as const;
+    return {
+      type: "tunnel_vision" as BiasType,
+      severity,
+      description: `${untestedCount} of ${allHypotheses.length} hypotheses have zero predictions tested after ${history.length} actions. ` +
+        `Tunnel vision risk: alternative explanations not considered.`,
+      suggestion: `Consider testing: ${untested.join(", ")}. ` +
+        `Run at least one tool that specifically targets each untested hypothesis.`,
+    };
+  }
+```
+
+[`src/reasoning/bias-detector.ts:94-115`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/bias-detector.ts#L94-L115)
+
+[4] 행동이 겨눈 가설은 분류별 후보에서 서버가 고른다.
+
+```typescript
+export function inferTargetedHypothesis(
+  tool: string,
+  category: string,
+  activeHypotheses: readonly { id: string; belief: number }[]
+): string | null {
+  // Map tool categories to most-related hypothesis types
+  const categoryHypothesisMap: Record<string, string[]> = {
+    filesystem: ["apt_targeted", "apt_opportunistic", "insider_data_theft", "data_exfiltration"],
+    registry: ["persistence_established", "apt_targeted", "credential_compromise"],
+    event_logs: ["credential_compromise", "lateral_movement", "anti_forensics"],
+    execution: ["apt_targeted", "apt_opportunistic", "persistence_established"],
+    persistence: ["persistence_established", "apt_targeted", "supply_chain"],
+    memory: ["apt_targeted", "apt_opportunistic"],
+    network: ["apt_targeted", "data_exfiltration", "lateral_movement"],
+    anti_forensics: ["anti_forensics", "apt_targeted"],
+    user_activity: ["insider_data_theft", "insider_sabotage", "data_exfiltration"],
+    browser: ["insider_data_theft", "credential_compromise"],
+  };
+
+  const candidates = categoryHypothesisMap[category] ?? [];
+  if (candidates.length === 0) return null;
+
+  // Return the highest-belief hypothesis from candidates
+  const ranked = activeHypotheses
+    .filter(h => candidates.includes(h.id))
+    .sort((a, b) => b.belief - a.belief);
+
+  return ranked[0]?.id ?? candidates[0] ?? null;
+}
+```
+
+[`src/reasoning/bias-detector.ts:121-149`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/bias-detector.ts#L121-L149)
+
+[5] 행동 이력에는 모든 분류 연산 호출이 들어간다.
+
+```typescript
+    if (!success) {
+      // Failed tools don't update beliefs but do record for bias analysis
+      this.recordAction(tool, category, 0);
+      return this.buildUpdate([]);
+    }
+```
+
+[`src/reasoning/engine.ts:40-44`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L40-L44)
+```typescript
+
+    // No rules fired — still record for bias analysis
+    this.recordAction(tool, category, 0);
+    return this.buildUpdate(firedRules);
+```
+
+[`src/reasoning/engine.ts:96-99`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L96-L99)
+
+[6] 수렴 상태는 규칙이 발화한 성공 호출에서만 바뀐다.
+
+```typescript
+    // Fuse accumulated evidence into global belief state
+    if (firedRules.length > 0) {
+      const prevEntropy = this.getEntropy();
+      const { combined, conflict } = combine(this.beliefMass, evidenceMass);
+      this.beliefMass = combined;
+
+      // Update tool reliability (adaptive)
+      const newEntropy = this.getEntropy();
+      const infoGain = prevEntropy - newEntropy;
+      this.updateReliability(tool, infoGain > SIGNIFICANT_UPDATE_THRESHOLD);
+      this.recordAction(tool, category, infoGain);
+
+      // Update convergence tracker
+      const dominant = this.getDominantHypothesis();
+      const { tracker, state, comebackTriggered } = updateConvergence(
+        this.convergenceTracker, newEntropy, conflict,
+        dominant ? { hypothesis: dominant.id, belief: dominant.belief } : null
+      );
+      this.convergenceTracker = tracker;
+      if (comebackTriggered) this.totalComebacks++;
+```
+
+[`src/reasoning/engine.ts:64-83`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L64-L83)
+```typescript
+  private buildUpdate(firedRules: readonly string[]): ReasoningUpdate {
+    return {
+      beliefState: this.getBeliefState(),
+      conflict: 0,
+      entropy: this.getEntropy(),
+      convergenceState: this.convergenceTracker.state,
+      biasWarnings: this.getBiasWarnings(),
+      triggeredRules: firedRules,
+      comebackTriggered: null,
+      dominantHypothesis: this.getDominantHypothesis(),
+    };
+  }
+```
+
+[`src/reasoning/engine.ts:205-216`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L205-L216)
+
+[7] 실패한 호출과 규칙이 발화하지 않은 호출은 앞 수렴 상태를 담은 갱신 값을 돌려준다.
+
+```typescript
+    if (!success) {
+      // Failed tools don't update beliefs but do record for bias analysis
+      this.recordAction(tool, category, 0);
+      return this.buildUpdate([]);
+    }
+```
+
+[`src/reasoning/engine.ts:40-44`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L40-L44)
+
+```typescript
+
+  private buildUpdate(firedRules: readonly string[]): ReasoningUpdate {
+    return {
+      beliefState: this.getBeliefState(),
+      conflict: 0,
+      entropy: this.getEntropy(),
+      convergenceState: this.convergenceTracker.state,
+      biasWarnings: this.getBiasWarnings(),
+      triggeredRules: firedRules,
+      comebackTriggered: null,
+      dominantHypothesis: this.getDominantHypothesis(),
+    };
+```
+
+[`src/reasoning/engine.ts:204-215`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/reasoning/engine.ts#L204-L215)
+
+[8] 실패한 호출은 같은 응답 객체에 `error`를 더해 `isError`로 돌려준다.
+
+```typescript
+    if (!success && errorMsg) {
+      if (isLongRunning) {
+        server.notification({ method: "notifications/progress", params: { progressToken: name, progress: 100, total: 100, message: `Failed: ${errorMsg.slice(0, 50)}` } });
+      }
+      const errorResponse = { ...response, error: errorMsg };
+      return { content: [{ type: "text" as const, text: JSON.stringify(errorResponse) }], structuredContent: errorResponse, isError: true };
+    }
+```
+
+[`src/server.ts:2145-2151`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L2145-L2151)
