@@ -136,7 +136,10 @@ def reported_servers():
 
 
 # ───────────────────────── 원고 한 파일 읽기 ─────────────────────────
-CELL_REF = re.compile(r"(?<![A-Za-z0-9_.`/])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)")
+# 셀 번호의 첫 글자는 축 폴더(matrix/cells/<축>/index.mdx)에서 읽는다. 축을 더해도 정규식을 고치지 않는다
+AXIS_CHARS = "".join(sorted({str(a["id"]) for a in AXES}))
+CELL_REF = re.compile(r"(?<![A-Za-z0-9_.`/])([" + AXIS_CHARS + r"]\d\d)(?:\.\d\d)?(?!\d)")
+OTHER_REF = re.compile(r"(?<![\w.])([" + AXIS_CHARS + r"]\d\d)(?:\.\d\d)?(?!\d)")
 MARK = re.compile(r"\[(\d+)\](?!\()")
 LEAD = re.compile(r"^\*\*([^*]+?)\.\*\*\s?")
 
@@ -336,7 +339,7 @@ def validate():
                 if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다
                     warns.append("%s: %s에 include가 아직 없다" % (f, d.get("id")))
                 # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과 차이점은 boundary에 쓴다(결정 0044)
-                other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or ""))
+                other = sorted({x for x in OTHER_REF.findall(str(d.get("exclude") or ""))
                                 if x != c["id"]})
                 if other:
                     warns.append("%s: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 boundary에 쓴다" % (f, d.get("id"), ", ".join(other)))
@@ -429,7 +432,7 @@ def validate():
                 errs.append("matrix/candidates.yaml: %s가 두 번 있다" % iid)
             if not d.get("name"):
                 errs.append("matrix/candidates.yaml: %s에 name이 없다" % iid)
-            other = sorted({x for x in re.findall(r"(?<![\w.])([PETRLDI]\d\d)(?:\.\d\d)?(?!\d)", str(d.get("exclude") or "")) if x != cid})
+            other = sorted({x for x in OTHER_REF.findall(str(d.get("exclude") or "")) if x != cid})
             if other:
                 warns.append("matrix/candidates.yaml: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 셀의 boundary에 쓴다" % (iid, ", ".join(other)))
             seen_ids.add(iid)

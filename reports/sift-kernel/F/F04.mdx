@@ -1,0 +1,466 @@
+---
+cell: F04
+details:
+- id: F04.02
+- id: F04.03
+- id: F04.04
+- id: F04.07
+- id: F04.08
+- id: F04.11
+---
+
+# F04 발견사항·결론 기록 관리
+
+### F04.02 발견사항 필드 구분 저장
+
+**구현.** 발견사항은 커널 도구 `register_finding`으로 받는다 [1].
+받는 필드는 분류 `type`, 설명 `description`, 근거 `evidence`, 사건 시각 `temporal_range`, `mitre_technique`·`mitre_tactic`, `affected_hosts`, `iocs`, 지지·반박 가설 ID `supports_hypotheses`·`contradicts_hypotheses`다 [1].
+서버는 발견사항 ID, 확신도 `confidence`, 등록 시각 `registeredAt`을 직접 정한다 [2].
+확신도는 근거 항목 수와 근거 도구의 분류 수로 정한다 [3].
+근거 1개면 `INFERRED`, 2개 이상이고 분류가 하나면 `SUPPORTED`, 분류가 둘 이상이면 `CONFIRMED`다 [3].
+제목·심각도 필드는 따로 없다 [1].
+
+서버가 보는 것은 `type`·`description`이 비어 있지 않고 `evidence`가 배열인지뿐이다 [4].
+`type`의 값 목록은 입력 schema에만 있다 [5].
+MCP SDK 1.29.0의 `Server`는 `tools/call` 요청의 모양만 검사하고 인자를 도구의 입력 schema와 대조하지 않는다 [6].
+그래서 목록 밖의 `type`이나 형식이 다른 `mitre_tactic`도 그대로 남고 F04.10에는 연결하지 않는다 [1][4][6].
+
+발견사항은 서버 프로세스 메모리의 `Map`에만 있다 [7].
+SQLite 파일에 `findings` 테이블과 저장 함수 `saveFinding`이 있지만 서버는 그 함수를 부르지 않는다 [8].
+그래서 서버를 다시 시작하면 발견사항이 사라지고 F04.06에는 연결하지 않는다.
+HTTP 전송은 요청마다 서버 객체를 새로 만들어 발견사항 `Map`도 요청마다 새로 생긴다 [9].
+`reset_investigation`은 발견사항과 가설을 흔적 없이 비운다 [10].
+
+`reassess_finding`은 근거 항목을 덧붙이고 확신도를 다시 계산해 덮어쓴 뒤 `lastReassessed`에 시각을 넣는다 [11].
+앞 확신도는 그 호출의 응답에만 나가고 저장되지 않는다 [12].
+발견사항을 철회하거나 설명을 고치는 도구는 없다.
+가설 상태도 덮어쓰기만 한다(F04.08).
+그래서 F04.05에는 연결하지 않는다.
+판정 필드 없이 자유 글만 남기는 노트 도구도 없어 F04.01에는 연결하지 않는다.
+
+### F04.03 근거 증거·호출 참조
+
+**구현.** 이 방식은 `register_finding`의 `evidence`와 `reassess_finding`의 `additional_evidence`에 적용된다 [1][11].
+`evidence`는 호출 기록 항목 ID 목록이고 `reassess_finding`은 받은 ID를 그 목록 뒤에 덧붙인다 [1][11].
+근거 증거 파일이나 파생물 경로를 받는 필드는 없고 호출 기록 항목이 원래 출력 파일을 가리킨다 [1].
+
+### F04.04 사건 시각과 작성 시각 분리
+
+**구현.** 이 방식은 `register_finding`에 적용된다 [1][2].
+사건 시각은 모델이 넘기는 선택 인자 `temporal_range`(`start`·`end`)이고 작성 시각 `registeredAt`은 서버가 등록할 때 기록한다 [1][2].
+`reassess_finding`은 다시 평가한 시각을 `lastReassessed`에 따로 둔다 [11].
+서버는 `temporal_range`의 형식을 보지 않고 받은 값을 그대로 둔다 [1].
+
+### F04.07 가설 지지·반박 근거 연결
+
+**구현.** 이 방식은 `register_hypothesis`와 `register_finding`에 적용된다 [13][14].
+`register_hypothesis`는 설명만 받아 `OPEN` 상태의 가설을 만들고 지지·반박 발견사항 목록을 비워 둔다 [13].
+`register_finding`에 `supports_hypotheses`·`contradicts_hypotheses`를 주면 그 가설의 `supportingFindings`·`contradictingFindings`에 새 발견사항 ID를 덧붙인다 [14][15].
+`get_hypothesis_status`는 가설마다 상태와 지지·반박 발견사항 수를 돌려준다 [16].
+연결은 발견사항을 등록할 때만 하고 `reassess_finding`은 가설 쪽을 바꾸지 않는다 [11][12].
+가설도 서버 메모리의 `Map`에만 있다 [7].
+
+**한계.** `register_finding`은 받은 가설 ID가 있는지 보지 않고 발견사항의 `supportsHypotheses`·`contradictsHypotheses`에 그대로 넣는다 [1].
+가설을 갱신할 때는 없는 ID를 건너뛴다 [14].
+그래서 발견사항은 어떤 가설을 지지한다고 적혀 있는데 그 가설에는 연결이 없을 수 있다.
+
+### F04.08 가설 상태 관리
+
+**구현.** 이 방식은 `register_finding`이 가설을 갱신할 때 적용된다 [14].
+상태는 `OPEN`·`SUPPORTED`·`REFUTED`이고 서버 규칙으로 정한다 [17].
+반박이 지지보다 많으면 `REFUTED`, 지지가 2개 이상이고 반박이 없으면 `SUPPORTED`, 그 밖에는 `OPEN`이다 [17].
+갱신할 때마다 상태를 다시 계산하고 `SUPPORTED`·`REFUTED`가 되면 `resolvedAt`에 시각을 넣는다 [15].
+가설에는 지금 상태와 `resolvedAt`만 남는다 [15].
+다음 갱신이 상태를 바꾸면 앞 상태와 `resolvedAt`을 덮어쓰고 `OPEN`으로 돌아가면 `resolvedAt`을 지운다 [15].
+지지 목록과 반박 목록이 따로 쌓여 지지와 반박이 들어온 차례도 다시 볼 수 없다 [15].
+그래서 가설 상태가 바뀐 차례는 F04.05에 해당하지 않는다.
+
+**한계.** 지지·반박 발견사항은 `register_finding`에 모델이 준 가설 ID로 이어지고 서버는 그 발견사항의 내용이 가설과 맞는지 보지 않는다 [14].
+
+### F04.11 근거·확신도 필드 필수 입력
+
+**구현.** 이 방식은 `register_finding`의 근거 `evidence`에 적용된다 [5][4][18].
+입력 schema는 `type`·`description`·`evidence`를 필수 인자로 두고 `evidence`는 항목이 하나 이상인 배열로 정한다 [5].
+MCP SDK 1.29.0의 `Server`는 인자를 입력 schema와 대조하지 않는다 [6].
+서버 코드는 `evidence`가 배열이 아니면 필수 인자 오류를 돌려주고 빈 배열이면 근거가 없는 발견사항이라며 등록을 거부한다 [4][18].
+확신도는 입력 인자가 아니고 서버가 근거 수와 분류 수로 정한다 [2][3].
+
+### 근거
+
+[1] `register_finding`이 받는 필드와 입력 객체 구성이다.
+
+```typescript
+      const input = {
+        type: toolParams["type"] as Finding["type"],
+        description: toolParams["description"] as string,
+        evidence: (toolParams["evidence"] as string[]).map((id) => id as unknown as LedgerEntryId),
+      } as RegisterFindingInput;
+
+      // Build mutable object then cast — exactOptionalPropertyTypes requires this pattern
+      const mutableInput: Record<string, unknown> = { ...input };
+      if (toolParams["temporal_range"]) mutableInput["temporalRange"] = toolParams["temporal_range"];
+      if (toolParams["mitre_technique"]) mutableInput["mitreTechnique"] = toolParams["mitre_technique"];
+      if (toolParams["mitre_tactic"]) mutableInput["mitreTactic"] = toolParams["mitre_tactic"];
+      if (toolParams["affected_hosts"]) mutableInput["affectedHosts"] = toolParams["affected_hosts"];
+      if (toolParams["iocs"]) mutableInput["iocs"] = toolParams["iocs"];
+      if (toolParams["supports_hypotheses"]) mutableInput["supportsHypotheses"] = (toolParams["supports_hypotheses"] as string[]).map((id) => id as unknown as Finding["supportsHypotheses"][number]);
+      if (toolParams["contradicts_hypotheses"]) mutableInput["contradictsHypotheses"] = (toolParams["contradicts_hypotheses"] as string[]).map((id) => id as unknown as Finding["contradictsHypotheses"][number]);
+
+      const finalInput = mutableInput as unknown as RegisterFindingInput;
+```
+
+[`src/server.ts:689-705`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L689-L705)
+
+[2] 서버가 ID·확신도·등록 시각을 넣는다.
+
+```typescript
+  const finding: Finding = {
+    id: nanoid() as unknown as FindingId,
+    type: input.type,
+    description: input.description,
+    evidence: input.evidence,
+    confidence,
+    temporalRange: input.temporalRange,
+    mitreTechnique: input.mitreTechnique,
+    mitreTactic: input.mitreTactic,
+    affectedHosts: input.affectedHosts ?? [],
+    iocs: input.iocs ?? [],
+    supportsHypotheses: input.supportsHypotheses ?? [],
+    contradictsHypotheses: input.contradictsHypotheses ?? [],
+    registeredAt: new Date().toISOString(),
+    lastReassessed: undefined,
+  };
+```
+
+[`src/domain/finding.ts:94-109`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/finding.ts#L94-L109)
+
+[3] 확신도 계산 규칙이다.
+
+```typescript
+export function computeConfidence(
+  evidence: readonly LedgerEntryId[],
+  getCategoryForEntry: (id: LedgerEntryId) => ArtifactCategory | undefined,
+): ConfidenceLevel {
+  if (evidence.length === 0) return "HYPOTHESIZED";
+  if (evidence.length === 1) return "INFERRED";
+
+  // Check if evidence comes from different artifact categories
+  const categories = new Set<ArtifactCategory>();
+  for (const id of evidence) {
+    const cat = getCategoryForEntry(id);
+    if (cat) categories.add(cat);
+  }
+
+  if (categories.size >= 2) return "CONFIRMED";
+  return "SUPPORTED";
+}
+```
+
+[`src/domain/finding.ts:35-51`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/finding.ts#L35-L51)
+
+[4] 서버가 보는 필수 인자 검사다.
+
+```typescript
+      if (!toolParams["type"] || !toolParams["description"] || !Array.isArray(toolParams["evidence"])) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Missing required parameters", required: ["type", "description", "evidence"], guidance: "Provide type (finding category), description (what was found), and evidence (array of ledger entry IDs that support this finding)" }) }], isError: true };
+      }
+```
+
+[`src/server.ts:686-688`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L686-L688)
+
+[5] `register_finding` 입력 schema의 `type` 목록이다.
+
+```typescript
+    register_finding: { type: "object", properties: { type: { type: "string", enum: ["initial_access", "execution", "persistence", "privilege_escalation", "defense_evasion", "credential_access", "lateral_movement", "collection", "command_and_control", "exfiltration", "impact", "anti_forensics", "anomaly", "ioc"] }, description: { type: "string" }, evidence: { type: "array", items: { type: "string" }, minItems: 1, description: "Ledger entry IDs that support this finding (at least one required)" }, temporal_range: { type: "object", properties: { start: { type: "string" }, end: { type: "string" } } }, mitre_technique: { type: "string" }, mitre_tactic: { type: "string" }, affected_hosts: { type: "array", items: { type: "string" } }, iocs: { type: "array", items: { type: "object", properties: { type: { type: "string" }, value: { type: "string" } } } }, supports_hypotheses: { type: "array", items: { type: "string" } }, contradicts_hypotheses: { type: "array", items: { type: "string" } } }, required: ["type", "description", "evidence"] },
+```
+
+[`src/server.ts:78-78`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L78-L78)
+
+[6] MCP SDK 1.29.0의 `Server`는 `tools/call` 처리기를 `CallToolRequestSchema` 검사와 결과 검사로만 감싼다: [`src/server/index.ts:247-285`](https://github.com/modelcontextprotocol/typescript-sdk/blob/e12cbd7078db388152f6e839abdbe09ba01f3f32/src/server/index.ts#L247-L285).
+버전은 의존성 파일에서 확인했다.
+
+```json
+    "@modelcontextprotocol/sdk": "1.29.0",
+```
+
+[`package.json:33-33`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/package.json#L33-L33)
+
+```json
+    "node_modules/@modelcontextprotocol/sdk": {
+      "version": "1.29.0",
+      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.29.0.tgz",
+```
+
+[`package-lock.json:495-497`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/package-lock.json#L495-L497)
+
+[7] 발견사항과 가설은 서버 객체 안의 `Map`이다.
+
+```typescript
+  const findings: Map<string, Finding> = new Map();
+  const hypotheses: Map<string, Hypothesis> = new Map();
+```
+
+[`src/server.ts:304-305`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L304-L305)
+
+[8] 발견사항 테이블과 저장 함수는 정의만 있다.
+기준 커밋에서 `saveFinding`을 찾으면 이 정의 한 곳만 나온다.
+
+```typescript
+      CREATE TABLE IF NOT EXISTS findings (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        description TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        temporal_start TEXT,
+        temporal_end TEXT,
+        mitre_technique TEXT,
+        mitre_tactic TEXT,
+        affected_hosts TEXT DEFAULT '[]',
+        iocs TEXT DEFAULT '[]',
+        supports_hypotheses TEXT DEFAULT '[]',
+        contradicts_hypotheses TEXT DEFAULT '[]',
+        registered_at TEXT NOT NULL,
+        last_reassessed TEXT
+      );
+```
+
+[`src/adapters/sqlite-ledger.ts:40-56`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/sqlite-ledger.ts#L40-L56)
+
+```typescript
+  saveFinding(f: Finding): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO findings (id, type, description, evidence, confidence, temporal_start, temporal_end, mitre_technique, mitre_tactic, affected_hosts, iocs, supports_hypotheses, contradicts_hypotheses, registered_at, last_reassessed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      f.id as string, f.type, f.description, JSON.stringify(f.evidence), f.confidence,
+      f.temporalRange?.start ?? null, f.temporalRange?.end ?? null,
+      f.mitreTechnique ?? null, f.mitreTactic ?? null,
+      JSON.stringify(f.affectedHosts), JSON.stringify(f.iocs),
+      JSON.stringify(f.supportsHypotheses), JSON.stringify(f.contradictsHypotheses),
+      f.registeredAt, f.lastReassessed ?? null
+    );
+  }
+```
+
+[`src/adapters/sqlite-ledger.ts:98-110`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/adapters/sqlite-ledger.ts#L98-L110)
+
+[9] HTTP 전송은 요청마다 서버 객체를 만든다.
+
+```typescript
+    // Create transport and server for each session
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID() });
+    const server = createSiftKernelServer(config);
+```
+
+[`src/http-transport.ts:48-50`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/http-transport.ts#L48-L50)
+
+[10] `reset_investigation`은 발견사항과 가설을 비운다.
+
+```typescript
+    if (name === "reset_investigation") {
+      const prevFindings = findings.size;
+      const prevHypotheses = hypotheses.size;
+      const prevEntries = ledgerStore.getAllEntries().length;
+      capabilityGraph.reset();
+      methodology.reset();
+      disclosure.reset();
+      reasoningEngine.reset();
+      findings.clear();
+      hypotheses.clear();
+      ledgerStore.clear();
+      return { content: [{ type: "text" as const, text: JSON.stringify({
+        status: "RESET_COMPLETE",
+        cleared: { findings: prevFindings, hypotheses: prevHypotheses, ledger_entries: prevEntries },
+        message: "Investigation state reset. All findings, hypotheses, and ledger entries cleared. Ready for a new case.",
+      }) }] };
+    }
+```
+
+[`src/server.ts:477-493`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L477-L493)
+
+[11] 다시 평가할 때 근거를 대조하고 확신도와 시각을 덮어쓴다.
+
+```typescript
+  // Validate new evidence
+  const missingEvidence = additionalEvidence.filter(
+    (id) => !existingLedgerIds.has(id as string),
+  );
+  if (missingEvidence.length > 0) {
+    return err(
+      findingError(
+        "reassess",
+        `Additional evidence IDs not found: ${missingEvidence.join(", ")}`,
+        "Provide valid ledger entry IDs.",
+        finding.id,
+      ),
+    );
+  }
+
+  const allEvidence = [...finding.evidence, ...additionalEvidence];
+  const newConfidence = computeConfidence(allEvidence, getCategoryForEntry);
+
+  return ok({
+    ...finding,
+    evidence: allEvidence,
+    confidence: newConfidence,
+    lastReassessed: new Date().toISOString(),
+  });
+```
+
+[`src/domain/finding.ts:124-147`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/finding.ts#L124-L147)
+
+[12] `reassess_finding`은 앞 확신도를 응답에만 싣는다.
+
+```typescript
+      const result = reassessFinding(finding, additionalEvidence, existingIds, getCat);
+      if (result.isErr()) return { content: [{ type: "text" as const, text: JSON.stringify({ error: result.error.message }) }], isError: true };
+
+      findings.set(findingId, result.value);
+      return { content: [{ type: "text" as const, text: JSON.stringify({ finding_id: findingId, old_confidence: finding.confidence, new_confidence: result.value.confidence }) }] };
+```
+
+[`src/server.ts:809-813`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L809-L813)
+
+[13] 가설을 만든다.
+
+```typescript
+    if (name === "register_hypothesis") {
+      const hyp = createHypothesis({ description: toolParams["description"] as string });
+      hypotheses.set(hyp.id as string, hyp);
+      methodology.setOpenHypothesesCount([...hypotheses.values()].filter(h => h.status === "OPEN").length);
+      return { content: [{ type: "text" as const, text: JSON.stringify({ success: true, hypothesis_id: hyp.id }) }] };
+    }
+```
+
+[`src/server.ts:789-794`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L789-L794)
+
+```typescript
+export function createHypothesis(input: RegisterHypothesisInput): Hypothesis {
+  return {
+    id: nanoid() as unknown as HypothesisId,
+    description: input.description,
+    status: "OPEN",
+    supportingFindings: [],
+    contradictingFindings: [],
+    registeredAt: new Date().toISOString(),
+    resolvedAt: undefined,
+  };
+}
+```
+
+[`src/domain/hypothesis.ts:10-20`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/hypothesis.ts#L10-L20)
+
+[14] 발견사항 등록 때 가설을 갱신하고 없는 가설 ID는 건너뛴다.
+
+```typescript
+      // Wire hypothesis updates (C3 fix) — update hypotheses when a finding supports/contradicts them
+      const supportsHyps = (toolParams["supports_hypotheses"] as string[] | undefined) ?? [];
+      const contradictsHyps = (toolParams["contradicts_hypotheses"] as string[] | undefined) ?? [];
+      for (const hid of supportsHyps) {
+        const h = hypotheses.get(hid);
+        if (h) {
+          hypotheses.set(hid, updateHypothesis(h, { type: "support", findingId: finding.id }));
+        }
+      }
+      for (const hid of contradictsHyps) {
+         const h = hypotheses.get(hid);
+         if (h) {
+           hypotheses.set(hid, updateHypothesis(h, { type: "contradict", findingId: finding.id }));
+         }
+       }
+
+       // Update methodology's view of open hypotheses for CORRELATE→REPORT gating
+       methodology.setOpenHypothesesCount([...hypotheses.values()].filter(h => h.status === "OPEN").length);
+```
+
+[`src/server.ts:767-784`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L767-L784)
+
+[15] 가설 갱신은 목록에 덧붙이고 상태와 `resolvedAt`을 다시 정한다.
+
+```typescript
+export function updateHypothesis(
+  hypothesis: Hypothesis,
+  action: { type: "support" | "contradict"; findingId: FindingId },
+): Hypothesis {
+  const supporting = action.type === "support"
+    ? [...hypothesis.supportingFindings, action.findingId]
+    : hypothesis.supportingFindings;
+  const contradicting = action.type === "contradict"
+    ? [...hypothesis.contradictingFindings, action.findingId]
+    : hypothesis.contradictingFindings;
+
+  const status = computeHypothesisStatus(supporting, contradicting);
+  const resolvedAt = (status === "SUPPORTED" || status === "REFUTED")
+    ? new Date().toISOString()
+    : undefined;
+
+  return {
+    ...hypothesis,
+    supportingFindings: supporting,
+    contradictingFindings: contradicting,
+    status,
+    resolvedAt,
+  };
+}
+```
+
+[`src/domain/hypothesis.ts:35-58`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/hypothesis.ts#L35-L58)
+
+[16] `get_hypothesis_status`의 응답이다.
+
+```typescript
+    if (name === "get_hypothesis_status") {
+      return { content: [{ type: "text" as const, text: JSON.stringify([...hypotheses.values()].map((h) => ({ id: h.id, description: h.description, status: h.status, supporting: h.supportingFindings.length, contradicting: h.contradictingFindings.length }))) }] };
+    }
+```
+
+[`src/server.ts:638-640`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/server.ts#L638-L640)
+
+[17] 가설 상태 규칙이다.
+
+```typescript
+export function computeHypothesisStatus(
+  supporting: readonly FindingId[],
+  contradicting: readonly FindingId[],
+): HypothesisStatus {
+  if (supporting.length === 0 && contradicting.length === 0) return "OPEN";
+  if (contradicting.length > supporting.length) return "REFUTED";
+  if (supporting.length >= 2 && contradicting.length === 0) return "SUPPORTED";
+  if (supporting.length > 0 && contradicting.length === 0) return "OPEN"; // Not enough to confirm
+  return "OPEN"; // Mixed evidence — still investigating
+}
+```
+
+[`src/domain/hypothesis.ts:23-32`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/hypothesis.ts#L23-L32)
+
+[18] 근거가 비었거나 호출 기록에 없으면 등록을 거부한다.
+
+```typescript
+  // CRITICAL INVARIANT: No finding without evidence
+  if (input.evidence.length === 0) {
+    return err(
+      findingError(
+        "register",
+        "Cannot register a finding with zero evidence. Every finding MUST link to at least one ledger entry.",
+        "Run forensic tools first, then reference their ledger entry IDs in the evidence array.",
+      ),
+    );
+  }
+
+  // Validate evidence links exist
+  const missingEvidence = input.evidence.filter(
+    (id) => !existingLedgerIds.has(id as string),
+  );
+  if (missingEvidence.length > 0) {
+    return err(
+      findingError(
+        "register",
+        `Evidence IDs not found in ledger: ${missingEvidence.join(", ")}`,
+        "Ensure all evidence IDs reference existing ledger entries from prior tool executions.",
+      ),
+    );
+  }
+```
+
+[`src/domain/finding.ts:62-85`](https://github.com/Sathvik-1007/sift-kernel/blob/ea51bec90d4cb543e4aa6063af6e85ae3e4d9396/src/domain/finding.ts#L62-L85)

@@ -1,0 +1,119 @@
+---
+cell: F04
+details:
+- id: not_applicable
+---
+
+# F04 발견사항·결론 기록 관리
+
+### 비적용
+
+**판단.** 서버에는 발견사항, 결론, 가설을 받는 도구가 없다 [1].
+
+발견사항은 클라이언트 `siftpp-investigate`가 클라이언트 도구 `submit_finding`으로 받는다 [2].
+도구 설명은 `submit_finding`을 근거가 있는 결론 하나를 기록하는 도구로 적는다 [2].
+이 도구는 주장 `claim`, 심각도 `severity`, 확신도 `confidence`, ATT&CK 기법 `mitre_attack`, 근거 도구 이름 `cited_tools`, 근거 설명 `rationale`을 받는다 [2].
+클라이언트는 심각도가 허용 값이 아니면 `medium`으로 바꾸고 ATT&CK 기법 ID는 앞뒤 공백을 지우고 대문자로 바꿀 뿐 목록과 대조하지 않는다 [3][4].
+발견사항은 프로세스 메모리에 두었다가 조사가 끝나면 `report.json`에 쓰고 제출 사실은 클라이언트 기록 `finding_submitted`에 남긴다 [3][5].
+Skeptic의 판정은 같은 발견사항의 `status`·`confidence`·`review`를 덮어쓴다 [6].
+재조사에서 다시 낸 주장은 새 발견사항으로 더해지고 앞 발견사항과 잇는 필드는 없다 [3][7].
+
+### 근거
+
+[1] 서버가 등록하는 도구다: [`src/protocol_siftpp/mcp_server/server.py:57-129`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/mcp_server/server.py#L57-L129).
+
+[2] 클라이언트 도구 `submit_finding`의 입력 형식이다: [`src/protocol_siftpp/client_tools.py:7-44`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/client_tools.py#L7-L44).
+
+[3] 클라이언트가 발견사항을 만든다.
+
+```python
+    def _record_finding(self, args: dict[str, Any], iteration: int) -> Finding:
+        evidence: list[Evidence] = []
+        for tool in args.get("cited_tools", []):
+            evs = self.evidence_by_tool.get(tool)
+            if evs:
+                evidence.append(evs[-1])
+        try:
+            severity = Severity(args.get("severity", "medium"))
+        except ValueError:
+            severity = Severity.medium
+        finding = Finding(
+            claim=args["claim"],
+            severity=severity,
+            confidence=float(args.get("confidence", 0.5)),
+            mitre_attack=args.get("mitre_attack", []),
+            evidence=evidence,
+            iteration=iteration,
+            status=FindingStatus.draft,
+        )
+        self.findings.append(finding)
+```
+
+[`src/protocol_siftpp/orchestrator.py:153-172`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L153-L172)
+
+[4] ATT&CK 기법 ID의 정규화다.
+
+```python
+    @field_validator("mitre_attack")
+    @classmethod
+    def _normalize_techniques(cls, v: list[str]) -> list[str]:
+        return [t.strip().upper() for t in v if t.strip()]
+```
+
+[`src/protocol_siftpp/schema.py:86-89`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/schema.py#L86-L89)
+
+[5] 클라이언트가 제출 사실을 기록하고 보고서를 쓴다.
+
+```python
+        self.audit.log(
+            "finding_submitted",
+            agent="investigator",
+            finding_id=finding.id,
+            claim=finding.claim,
+            severity=severity.value,
+            confidence=finding.confidence,
+            cited_tools=args.get("cited_tools", []),
+            rationale=args.get("rationale", ""),
+        )
+```
+
+[`src/protocol_siftpp/orchestrator.py:173-182`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L173-L182)
+
+```python
+    (out / "report.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    (out / "report.md").write_text(render_markdown(report), encoding="utf-8")
+```
+
+[`src/protocol_siftpp/cli.py:131-132`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/cli.py#L131-L132)
+
+[6] Skeptic 판정을 발견사항에 덮어쓴다.
+
+```python
+        finding.review = review
+        finding.status = review.status
+        finding.confidence = review.confidence
+        finding.updated_at = datetime.now(timezone.utc)
+```
+
+[`src/protocol_siftpp/orchestrator.py:254-257`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/orchestrator.py#L254-L257)
+
+[7] 발견사항의 필드다.
+
+```python
+class Finding(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    claim: str
+    severity: Severity = Severity.medium
+    confidence: float = Field(0.5, ge=0.0, le=1.0)
+    status: FindingStatus = FindingStatus.draft
+    evidence: list[Evidence] = Field(default_factory=list)
+    mitre_attack: list[str] = Field(
+        default_factory=list, description="ATT&CK technique IDs, e.g. ['T1055']"
+    )
+    review: SkepticReview | None = None
+    iteration: int = Field(0, description="Self-correction round this finding belongs to")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+```
+
+[`src/protocol_siftpp/schema.py:71-84`](https://github.com/tupils1/protocol-siftpp/blob/ae5e7d599df9aa3cbb726a9fd7dfed9fb4d98615/src/protocol_siftpp/schema.py#L71-L84)

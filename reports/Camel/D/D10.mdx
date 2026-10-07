@@ -1,0 +1,328 @@
+---
+cell: D10
+details:
+- id: D10.02
+---
+
+# D10 산출물 식별·재생성 처리
+
+### D10.02 입력·작업별 고유 이름
+
+**구현.** 유일한 이름을 쓰는 방식은 `ListDeletedFilesAsync`의 내부 bodyfile과 `RunIdsAsync`의 기본 출력 폴더에만 있다 [1][2].
+`ListDeletedFilesAsync`는 삭제 항목을 찾으려고 `/tmp/camel_deleted_<GUID>.body`에 bodyfile을 만들고 그 파일을 지우지 않는다 [1].
+이름에 호출마다 새로 만든 GUID가 들어가므로 다른 실행의 bodyfile과 겹치지 않는다 [1].
+결과에는 이 경로를 싣지 않는다 [1].
+`RunIdsAsync`는 `outDir`가 없으면 `/tmp/camel_suricata_<GUID>` 폴더를 만들어 Suricata 로그를 쓰고 그 폴더를 지우지 않는다 [2][3].
+이 두 경로 밖의 파생물 이름은 스크립트가 정하고 서버는 앞 파생물과 구분하지 않는다.
+툴킷 공통 함수가 만드는 `/tmp/camel_ez_<GUID>` 같은 임시 폴더는 호출 안에서 지우므로 이 상세에 넣지 않는다 [4].
+
+이 두 경로 밖의 파생물은 같은 작업을 다시 하면 앞 파생물이 따로 남지 않거나 이번 결과와 섞인다.
+표준 출력을 셸 `>`로 인자 경로의 파일에 쓰는 메서드는 같은 경로로 다시 부르면 앞 파일을 알리지 않고 덮어쓴다 [5].
+`Log2TimelineAsync`는 `storageFile`이 이미 있으면 그 파일에 이어 쓰고 그 뒤 `PsortAsync`는 두 실행이 넣은 사건을 가리지 않고 함께 내보낸다 [6].
+`PsortTagAsync`는 저장 파일 안의 태그를 그 자리에서 고친다 [7].
+`RunToDirAsync`는 도구를 실행한 뒤 `outputDir`의 파일을 모두 나열해 돌려주므로 같은 폴더를 다시 쓰면 앞 실행의 파일이 이번 결과 목록에 섞인다 [8].
+`ForemostAsync`·`BulkExtractorAsync`의 설명은 `outputDir`이 미리 없어야 한다고 적지만 서버 코드는 폴더가 있는지 보지 않고 외부 도구에 맡긴다 [9].
+foremost와 bulk_extractor가 이미 있는 폴더를 거부하는지는 실행해 보지 않아 확인하지 못했다.
+
+`GenerateFilesystemTimelineAsync`의 기본 bodyfile 이름은 오프셋으로만 정해져 같은 오프셋으로 다시 부르면 다른 이미지·다른 사건의 실행이라도 같은 파일을 쓴다 [10].
+fls 출력은 셸 `>`로 이 파일에 쓰이므로 앞 bodyfile을 알리지 않고 덮어쓴다 [11].
+그러면 앞 실행이 돌려받은 `BodyfilePath`는 나중 실행이 쓴 내용을 가리킨다 [10].
+메모리 타임라인 워크플로 `GenerateTimelineAsync`는 bodyfile 이름을 `volatility.body`로 고정한다 [12][13].
+그래서 같은 폴더에 다른 이름의 타임라인을 다시 만들면 두 타임라인이 bodyfile 경로 하나를 함께 쓴다 [12].
+이때 앞 bodyfile이 남는지는 Volatility 3이 같은 이름의 파일을 어떻게 다루는지에 달려 있고 확인하지 못했다 [12].
+같은 타임라인 경로로 다시 부르면 `MactimeToFileAsync`가 셸 `>`로 앞 타임라인 파일을 덮어쓴다 [14].
+
+### 근거
+
+
+[1] GUID 이름의 bodyfile을 만들고 지우지 않는다.
+
+```csharp
+    public async Task<WorkflowResult<DeletedFilesReport>> ListDeletedFilesAsync(string image, int? offset = null, int maxFiles = 2000)
+    {
+        using var _audit = AuditScope();
+        using var op = Begin("Listing deleted files in {0} (offset {1})", image, offset?.ToString() ?? "none");
+
+        var bodyfile = $"/tmp/camel_deleted_{Guid.NewGuid():N}.body";
+        if (!await DiskAnalysis.FlsBodyfileAsync(image, bodyfile, offset))
+            return WorkflowResult<DeletedFilesReport>.Failure(
+                $"Failed to walk '{image}' (offset {offset}) for deleted files. Check the offset (mmls) and that a filesystem exists there.");
+
+        // The bodyfile names every deleted entry with a "(deleted)" / "(deleted-realloc)" suffix; pull just those
+        // server-side rather than transferring the whole bodyfile.
+        var lines = await DiskAnalysis.GrepLinesAsync(bodyfile, ["deleted"], ignoreCase: false);
+        if (lines is null)
+            return WorkflowResult<DeletedFilesReport>.Failure($"Could not read the bodyfile '{bodyfile}'.");
+
+        var entries = lines.Select(ParseDeletedRow).Where(e => e is not null).Select(e => e!)
+            .OrderByDescending(e => e.Size).Take(maxFiles).ToArray();
+
+        op.Complete();
+        var report = new DeletedFilesReport { DeletedFiles = entries, Count = entries.Length };
+        return WorkflowResult<DeletedFilesReport>.Success(report,
+            entries.Length == 0
+                ? $"No deleted files found in '{image}' (offset {offset})."
+                : $"Found {lines.Length} deleted entry/entries in '{image}'; {entries.Count(e => e.Recoverable)} recoverable. " +
+                  $"Largest: {string.Join("; ", entries.Take(3).Select(e => $"{e.Path} ({e.Size} bytes)"))}.");
+    }
+```
+
+[`src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.Recovery.cs:126-152`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.Recovery.cs#L126-L152)
+
+[2] `outDir`가 없으면 GUID 이름의 폴더를 쓴다.
+
+```csharp
+    public async Task<WorkflowResult<IdsReport>> RunIdsAsync(string pcap, string? outDir = null)
+    {
+        outDir ??= "/tmp/camel_suricata_" + Guid.NewGuid().ToString("N");
+        using var _audit = AuditScope();
+        using var op = Begin("Running Suricata IDS over {0}", pcap);
+
+        var alerts = await PacketAnalysis.SuricataAsync(pcap, outDir);
+```
+
+[`src/Camel.Workflows/PacketAnalysis/PacketAnalysisWorkflow.Threats.cs:190-196`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/PacketAnalysis/PacketAnalysisWorkflow.Threats.cs#L190-L196)
+
+[3] Suricata 로그를 그 폴더에 쓰고 지우지 않는다.
+
+```csharp
+    public async Task<SuricataAlert[]?> SuricataAsync(string pcap, string outDir, bool sudo = false)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outDir);
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {Q(outDir)}", false);
+        if (await RunAsync("Suricata", $"-r {Q(pcap)} -l {Q(outDir)}", sudo || Tools["Suricata"].Sudo) is null) return null;
+        if (Tools["Suricata"].Sudo || sudo)
+            await auditEnvironment.ExecuteCommandAsync("chown", $"-R $(id -un):$(id -gn) {Q(outDir)}", true);
+```
+
+[`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:363-369`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L363-L369)
+
+[4] GUID 임시 폴더를 만들고 `finally`에서 지운다.
+
+```csharp
+    public async Task<T[]?> ExecuteToolJsonAsync<T>(string name, string args, string pattern = "*.json")
+    {
+        string dir = "/tmp/camel_ez_" + Guid.NewGuid().ToString("N");
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {dir}", false);
+        try
+        {
+            if (await ExecuteToolTextAsync(name, $"{args} --json {dir}") is null) return null;
+            return await DownloadJsonLinesAsync<T>(dir, pattern);
+        }
+        // Sync ExecuteCommand has no cancellation token, so cleanup runs even after the async work was
+        // cancelled; guarded so a teardown failure can never mask the method's result.
+        finally { try { auditEnvironment.ExecuteCommand("rm", $"-rf {dir}", out _, false); } catch { } }
+    }
+```
+
+[`src/Camel.Toolkits/Toolkit.cs:356-368`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Toolkit.cs#L356-L368)
+
+[5] 셸 `>`로 인자 경로의 파일에 표준 출력을 쓴다.
+다른 메서드는 [`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:187-191`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L187-L191)(`FlsBodyfileAsync`), [`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:363-371`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L363-L371)(`BlklsAsync`), [`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:504-508`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L504-L508)(`MactimeToFileAsync`)이다.
+
+```csharp
+    public async Task<bool> IcatAsync(string image, long inode, string outputFile, int? offset = null)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputFile);   // never redirect extracted bytes over evidence
+        return await ExecuteToolTextAsync("Icat", Offset(offset) + Q(image) + $" {inode} > {Q(outputFile)}") is not null;
+    }
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:207-211`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L207-L211)
+
+[6] 저장 파일이 있으면 이어 쓴다고 설명하고 `PsortAsync`는 저장 파일 전체를 내보낸다.
+
+```csharp
+    /// <summary>
+    /// Parses <paramref name="source"/> (a disk image, mounted path, directory, or file) into the Plaso
+    /// storage file <paramref name="storageFile"/>. When <paramref name="storageFile"/> already exists, plaso
+    /// <em>appends</em> to it — this is how a triage timeline is grown one source at a time (e.g. parse the
+    /// event logs, then append a full <c>$MFT</c> bodyfile via <paramref name="parsers"/> = "mactime").
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineToolkit.cs:27-31`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineToolkit.cs#L27-L31)
+
+```csharp
+    public Task<TimelineEvent[]?> PsortAsync(string storageFile, string? filter = null, string? slice = null, int? sliceSize = null) =>
+        ExecuteToolJsonLinesFileAsync<TimelineEvent>("Psort",
+            f => $"-o json_line -w {Q(f)}" +
+                 (slice is not null ? $" --slice {Qd(slice)}" : "") +
+                 (sliceSize is not null ? $" --slice_size {sliceSize}" : "") +
+                 $" {Q(storageFile)}" + (filter is not null ? $" {Qd(filter)}" : ""));
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineToolkit.cs:71-76`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineToolkit.cs#L71-L76)
+
+[7] 태그를 저장 파일 안에 다시 쓴다.
+
+```csharp
+    /// <summary>
+    /// Runs psort's <c>tagging</c> analysis plugin over <paramref name="storageFile"/>, labelling events that
+    /// match the rules in <paramref name="taggingFile"/> (the Plaso-shipped <c>tag_windows.txt</c> /
+    /// <c>tag_linux.txt</c> / <c>tag_macos.txt</c>). The tags are <em>persisted back into the storage file</em>
+    /// (written with <c>-o null</c>, no timeline emitted), so a subsequent <see cref="PsortAsync"/> can filter
+    /// on them (<c>"tag contains 'application_execution'"</c>) and each returned event carries its
+    /// <see cref="TimelineEvent.Labels"/>. Idempotent in effect — re-tagging re-applies the same labels.
+    /// Returns true on success.
+    /// </summary>
+    public async Task<bool> PsortTagAsync(string storageFile, string taggingFile)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(storageFile);   // tagging rewrites the storage file in place
+        return await ExecuteToolTextAsync("Psort",
+            $"-q --analysis tagging --tagging-file {Q(taggingFile)} -o null {Q(storageFile)}") is not null;
+    }
+```
+
+[`src/Camel.Toolkits/Timeline/TimelineToolkit.cs:78-92`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/Timeline/TimelineToolkit.cs#L78-L92)
+
+[8] 실행 뒤 폴더의 파일을 모두 나열한다.
+
+```csharp
+    // Runs a tool that writes files into outDir; creates the dir (as login user), runs, hands files back, lists them.
+    private async Task<string[]?> RunToDirAsync(string outDir, bool sudo, Func<Task<string?>> run)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outDir);
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {Q(outDir)}", false);
+        if (await run() is null) return null;
+        if (sudo) await auditEnvironment.ExecuteCommandAsync("chown", $"-R $(id -un):$(id -gn) {Q(outDir)}", true);
+        var find = await auditEnvironment.ExecuteCommandAsync("find", $"{Q(outDir)} -maxdepth 1 -type f -printf '%p\\n'", false);
+        return find.IsCompleted
+            ? find.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToArray()
+            : [];
+    }
+```
+
+[`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:435-446`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L435-L446)
+
+[9] 폴더가 없어야 한다고 설명하고 폴더를 확인하지 않고 실행한다.
+
+```csharp
+    /// <summary>
+    /// Signature-carves files out of <paramref name="input"/> (a raw image, device, or an unallocated-space
+    /// extract from <see cref="BlklsAsync"/>) into <paramref name="outputDir"/> with <c>foremost</c>.
+    /// <paramref name="fileTypes"/> selects the carver signatures (default <c>all</c> — foremost carves nothing
+    /// without an explicit <c>-t</c>). The directory must not already exist (foremost creates it). Returns the
+    /// carved files (type/name/size/offset from <c>audit.txt</c>), or null on failure.
+    /// </summary>
+    public async Task<CarvedFile[]?> ForemostAsync(string input, string outputDir, string fileTypes = "all", bool sudo = false)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputDir);
+        if (ParentDir(outputDir) is { Length: > 0 } parent)
+            await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {Q(parent)}", false);
+        if (await RunAsync("Foremost", $"-t {fileTypes} -i {Q(input)} -o {Q(outputDir)}", sudo) is null) return null;
+        await ChownBackAsync(outputDir, sudo || Tools["Foremost"].Sudo);
+        var audit = await auditEnvironment.ExecuteCommandAsync("cat", $"{Q(outputDir.TrimEnd('/'))}/audit.txt", false);
+        return audit.IsCompleted ? ParseForemostAudit(audit.Output, outputDir) : [];
+    }
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:373-389`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L373-L389)
+
+```csharp
+    /// <summary>
+    /// Runs <c>bulk_extractor</c> over <paramref name="input"/> (image, device, or extract) into
+    /// <paramref name="outputDir"/>, scanning for forensic features (emails, URLs, domains, credit-card numbers,
+    /// phone numbers, IP addresses, …) regardless of filesystem. The directory must not already exist. Returns
+    /// the non-empty feature files with their hit counts, or null on failure.
+    /// </summary>
+    public async Task<BulkFeatureFile[]?> BulkExtractorAsync(string input, string outputDir, bool sudo = false)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputDir);
+        if (ParentDir(outputDir) is { Length: > 0 } parent)
+            await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {Q(parent)}", false);
+        if (await RunAsync("BulkExtractor", $"-o {Q(outputDir)} {Q(input)}", sudo) is null) return null;
+        await ChownBackAsync(outputDir, sudo || Tools["BulkExtractor"].Sudo);
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:425-437`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L425-L437)
+
+[10] 기본 bodyfile 경로를 오프셋으로 정하고 지우지 않고 돌려준다.
+
+```csharp
+    public async Task<WorkflowResult<FilesystemTimeline>> GenerateFilesystemTimelineAsync(
+        string imageFile, int? offset = null, string timezone = "UTC", string? bodyfilePath = null)
+    {
+        bodyfilePath ??= $"/tmp/camel_bodyfile_{offset ?? 0}.txt";
+        using var _audit = AuditScope();
+        using var op = Begin("Generating filesystem timeline for {0} (offset {1})", imageFile, offset?.ToString() ?? "none");
+
+        // Confirm a filesystem actually lives at the offset before walking it (avoids an empty/garbage timeline).
+        var fs = await DiskAnalysis.FsStatAsync(imageFile, offset);
+        if (fs is null || string.IsNullOrWhiteSpace(fs.FileSystemType))
+            return WorkflowResult<FilesystemTimeline>.Failure(
+                $"No valid filesystem found at sector offset {offset} of '{imageFile}'. " +
+                $"Check the partition table (mmls) for a correct partition start sector.");
+
+        // Walk the filesystem into a mactime bodyfile, then sort it into a timeline.
+        if (!await DiskAnalysis.FlsBodyfileAsync(imageFile, bodyfilePath, offset))
+            return WorkflowResult<FilesystemTimeline>.Failure(
+                $"Failed to generate the fls bodyfile for '{imageFile}' (offset {offset}).");
+
+        var entries = await DiskAnalysis.MactimeAsync(bodyfilePath, timezone);
+        if (entries is null)
+            return WorkflowResult<FilesystemTimeline>.Failure($"mactime failed to process bodyfile '{bodyfilePath}'.");
+
+        op.Complete();
+        return WorkflowResult<FilesystemTimeline>.Success(
+            new FilesystemTimeline(bodyfilePath, entries),
+            $"Generated {entries.Length} timeline entries for the {fs.FileSystemType} filesystem (offset {offset}).");
+    }
+```
+
+[`src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.cs:154-181`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/DiskAnalysis/DiskAnalysisWorkflow.cs#L154-L181)
+
+[11] fls bodyfile을 셸 `>`로 쓴다.
+
+```csharp
+    public async Task<bool> FlsBodyfileAsync(string image, string outputFile, int? offset = null, string mountPoint = "/")
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputFile);   // never redirect the bodyfile over evidence
+        return await ExecuteToolTextAsync("Fls", $"-r -m {Q(mountPoint)} {Offset(offset)}{Q(image)} > {Q(outputFile)}") is not null;
+    }
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:187-191`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L187-L191)
+
+[12] `-o` 폴더에 `volatility.body`를 쓰게 하고 그 경로를 돌려준다.
+
+```csharp
+    /// <summary>
+    /// Generates a mactime <em>bodyfile</em> of every timestamped artifact in <paramref name="image"/>
+    /// (processes, threads, handles, sockets, registry keys, …) via <c>timeliner --create-bodyfile</c>, which
+    /// writes <c>volatility.body</c> into <paramref name="outputDir"/> (the global <c>-o</c> directory;
+    /// <c>-r none</c> suppresses the large, unneeded stdout table). The directory is created if missing. Feed
+    /// the result to <c>mactime</c> to render a timeline. Returns the bodyfile path, or null on failure.
+    /// </summary>
+    public async Task<string?> TimelinerBodyfileAsync(string image, string outputDir)
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputDir);   // never write the bodyfile (and chown) onto evidence
+        // Created as the login user so the (sudo'd) plugin can write into it.
+        await auditEnvironment.ExecuteCommandAsync("mkdir", $"-p {outputDir}", false);
+
+        if (await ExecuteToolTextAsync("Volatility3", $"-o {outputDir} -f {image} -r none timeliner --create-bodyfile") is null)
+            return null;
+
+        // The plugin runs under sudo, so the bodyfile lands root-owned; hand it back so a non-sudo mactime can read it.
+        if (Tools["Volatility3"].Sudo)
+            await auditEnvironment.ExecuteCommandAsync("chown", $"-R $(id -un):$(id -gn) {outputDir}", true);
+
+        var bodyfile = $"{outputDir.TrimEnd('/')}/volatility.body";
+        var test = await auditEnvironment.ExecuteCommandAsync("test", $"-s '{bodyfile}'", false);
+        return test.IsCompleted ? bodyfile : null;
+```
+
+[`src/Camel.Toolkits/MemoryAnalysis/MemoryAnalysisToolkit.cs:240-262`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/MemoryAnalysis/MemoryAnalysisToolkit.cs#L240-L262)
+
+[13] 메모리 타임라인 워크플로가 bodyfile과 타임라인 파일을 함께 만든다: [`src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs:250-282`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/MemoryAnalysis/MemoryAnalysisWorkflow.cs#L250-L282).
+
+[14] `MactimeToFileAsync`는 셸 `>`로 타임라인 파일을 쓴다.
+
+```csharp
+    public async Task<bool> MactimeToFileAsync(string bodyfile, string outputFile, string timezone = "UTC")
+    {
+        auditEnvironment.FailIfEvidenceSpoliationRisk(outputFile);   // never redirect the timeline over evidence
+        return await ExecuteToolTextAsync("Mactime", $"-z {timezone} -b {Q(bodyfile)} > {Q(outputFile)}") is not null;
+    }
+```
+
+[`src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs:504-508`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/DiskAnalysis/DiskAnalysisToolkit.cs#L504-L508)

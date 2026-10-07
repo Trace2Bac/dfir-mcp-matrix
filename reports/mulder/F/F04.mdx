@@ -1,0 +1,583 @@
+---
+cell: F04
+details:
+- id: F04.01
+- id: F04.02
+- id: F04.03
+- id: F04.04
+- id: F04.05
+- id: F04.06
+- id: F04.10
+- id: F04.11
+---
+
+# F04 발견사항·결론 기록 관리
+
+### F04.01 자유 노트
+
+**구현.** `bookmark_window`는 `window_id` 하나에 자유 글 `note`와 선택 인자 `source_name`을 붙여 북마크로 남긴다 [1].
+도구 설명은 발견사항으로 올리기 전의 단서를 표시하는 용도라고 적는다 [1].
+북마크 행에는 서버가 작성 시각 `created_at`을 넣고 `window_id`는 외래 키로 `windows` 행을 가리킨다 [2].
+`get_bookmarks`는 메모와 함께 그 `window` 본문 앞부분과 사건 시각을 돌려준다 [3].
+`submit_narrative`는 판정 필드나 근거 참조 없이 조사 서술 한 편을 자유 글로 받아 남긴다 [4].
+도구 설명은 이 서술을 결론 절이 있는 공식 사건 보고서로 쓰라고 적는다 [4].
+같은 설명은 이 서술이 최종 산출물의 보고서 페이지가 된다고 적는다 [4].
+
+### F04.02 발견사항 필드 구분 저장
+
+**구현.** `submit_finding`은 제목·설명·심각도·확신도·근거 호출·근거 `source`·ATT&CK ID·사건 시각을 따로 받는다 [5].
+배제한 가설은 따로 두지 않고 제목 앞에 `[NEGATIVE]`를 붙인 발견사항으로 남긴다 [6].
+이 접두어가 붙은 발견사항은 보고서 마감 게이트의 개수와 사건 시각 요구에서 빠진다 [6].
+가설의 상태나 지지·반박 근거를 따로 두는 필드는 없어 F04.07·F04.08에는 연결하지 않는다 [7].
+
+### F04.03 근거 증거·호출 참조
+
+**구현.** 발견사항은 근거 호출 ID 목록 `evidence_refs`와 근거 `source` 이름 목록 `sources`를 필드로 가진다 [7].
+`sources`는 `source` 행의 ID가 아니라 이름 목록이다 [7].
+
+### F04.04 사건 시각과 작성 시각 분리
+
+**구현.** 발견사항은 사건 시각 `event_time_start`·`event_time_end`와 작성 시각 `submitted_at`을 다른 필드로 가진다 [7].
+`submitted_at`은 `submit_finding`이 UTC 현재 시각으로 넣고 `update_finding`은 이 필드를 받지 않는다 [8].
+사건 시각은 모델이 넣는 선택 값이고 서버는 ISO-8601이 아니거나 자정 정각으로 끝나는 값을 비우고 경고를 돌려준다 [9].
+`deduplicate_findings`로 합친 발견사항의 사건 시각은 합친 발견사항들의 가장 이른 시작과 가장 늦은 끝으로 바뀐다 [10].
+
+### F04.05 수정·철회 이력
+
+**구현.** `update_finding`은 DB의 발견사항 행을 그 자리에서 고치고 호출 기록에 바꾼 필드의 새 값과 시각을 남긴다 [11][12].
+`delete_finding`은 행을 지우고 호출 기록에 `finding_id`만 남긴다 [13].
+`deduplicate_findings`는 흡수한 발견사항의 제목·ID·심각도·확신도·설명을 남기는 발견사항의 설명 끝에 붙이고 흡수한 행을 지운다 [10].
+호출 기록에는 남긴 발견사항과 흡수한 ID의 대응을 인자로 남긴다 [10].
+DB 행에는 수정 시각이나 이전 값 열이 없다 [14].
+
+**한계.** `submit_finding`의 호출 기록에는 `description`과 사건 시각이 빠지므로 제출한 뒤 이 둘을 고치면 처음 값은 어디에도 남지 않는다 [15].
+`delete_finding`으로 지운 발견사항의 내용은 호출 기록에도 남지 않는다 [13].
+`update_finding`이 다시 읽는 단계에서 예외로 끝나면 DB만 바뀌고 호출 기록에는 그 수정이 남지 않는다 [11][12].
+`submit_narrative`를 다시 부르면 앞 서술을 새 서술로 바꾸고 호출 기록에는 서술의 길이만 남으므로 앞 서술은 어디에도 남지 않는다 [4][16][17].
+
+### F04.06 파일·DB에 저장
+
+**구현.** 발견사항은 사건마다 하나인 SQLite 파일 `<case_id>.db`의 `findings` 테이블에 쓴다 [14][18].
+쓰기는 DB 쓰기 대기열을 거쳐 트랜잭션으로 끝난다 [18].
+북마크도 같은 파일의 `bookmarks` 테이블에 남는다 [2].
+`submit_narrative`로 받은 서술은 같은 파일의 `case_metadata` 테이블 `narrative` 열에 같은 쓰기 대기열로 쓴다 [17].
+호출 기록 파일에는 제출마다 `finding_id`와 근거 호출을 담은 `finding` 항목이 따로 남는다 [19].
+
+### F04.10 판정·분류 값 기준 대조
+
+**구현.** `submit_finding`은 `Finding` 자료 모델을 만들며 `severity`가 다섯 값 가운데 하나인지, `confidence`가 `confirmed`·`inference` 가운데 하나인지 검사하고 어긋나면 `validation` 오류로 거부한다 [5][7].
+
+**한계.** `update_finding`은 받은 값을 자료 모델 검사 없이 DB에 쓴 뒤 그 행을 다시 읽는다 [11].
+`severity`에 정해진 값 밖의 문자열을 넘기면 DB에는 그 값이 저장되고 다시 읽는 단계의 자료 모델 검사에서 예외로 끝난다 [11][20].
+그 뒤에는 같은 행을 읽는 `get_findings`와 `finalize_report`도 같은 검사에서 예외로 끝난다 [20].
+
+### F04.11 근거·확신도 필드 필수 입력
+
+**구현.** 이 방식은 발견사항을 받는 `submit_finding`에 적용된다 [21].
+`submit_finding`의 입력 schema는 근거 호출 `evidence_refs`, 근거 `source` 목록 `sources`, 확신도 `confidence`를 기본값 없는 필수 인자로 둔다 [21].
+`Finding` 자료 모델은 `evidence_refs`가 빈 목록이면 만들어지지 않으므로 `submit_finding`은 그 제출을 `validation` 오류로 거부한다 [7][5].
+`confidence`는 `confirmed`·`inference` 가운데 하나여야 하므로 빈 문자열도 같은 검사에서 거부된다 [7][5].
+
+**한계.** `sources`는 필수 인자이지만 자료 모델이 빈 목록을 받는다 [7].
+`update_finding`에 빈 `evidence_refs` 목록을 넘기면 자료 모델 검사 없이 DB에 빈 목록이 저장되고 다시 읽는 단계에서 예외로 끝난다 [11][20].
+
+### 근거
+
+[1] 북마크 도구는 메모를 받아 행을 넣는다.
+
+```python
+def bookmark_window(
+    window_id: int,
+    note: str,
+    source_name: str = "",
+) -> dict[str, object]:
+    """Bookmark a specific window for later review.
+
+    Use this to flag interesting evidence that doesn't yet warrant a
+    full finding. Bookmarks persist in the database and survive context
+    compaction. Review bookmarks later with get_bookmarks(). Read-only
+    on evidence (writes only to case DB metadata).
+
+    Args:
+        window_id: The window_id to bookmark.
+        note: Why this window is interesting.
+        source_name: Source name for context (optional).
+    """
+    ctx = get_ctx()
+    bookmark_id = ctx.db.add_bookmark(window_id, source_name, note)
+
+    return {
+        "status": "success",
+        "bookmark_id": bookmark_id,
+        "window_id": window_id,
+        "note": note,
+    }
+```
+
+[`src/mulder/server/tools/core.py:1277-1302`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L1277-L1302)
+
+[2] 북마크 행에 작성 시각을 넣는다.
+테이블은 [`src/mulder/db.py:109-117`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L109-L117), 외래 키 설정은 [`src/mulder/db.py:233`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L233)이다.
+
+```python
+        def _do_insert() -> int:
+            """Insert a bookmark row and return its auto-generated ID."""
+            now = datetime.now(timezone.utc).isoformat()
+            with self._engine.begin() as conn:
+                result = conn.execute(
+                    insert(bookmarks_t).values(
+                        window_id=window_id,
+                        source_name=source_name,
+                        note=note,
+                        created_at=now,
+                    )
+                )
+                if result.inserted_primary_key is None:
+                    raise RuntimeError("INSERT did not return a primary key for bookmark")
+                return int(result.inserted_primary_key[0])
+```
+
+[`src/mulder/db.py:1206-1220`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1206-L1220)
+
+[3] 북마크마다 `window` 본문과 사건 시각을 붙인다.
+
+```python
+    for bm in bookmarks:
+        entry: dict[str, object] = dict(bm)
+        wid = int(str(bm["window_id"]))
+        row = window_map.get(wid)
+        if row:
+            raw = row.raw_text
+            if len(raw) > _TIMELINE_TEXT_CAP:
+                raw = raw[:_TIMELINE_TEXT_CAP] + "..."
+            entry["raw_text"] = raw
+            entry["event_time"] = row.event_time
+        enriched.append(entry)
+```
+
+[`src/mulder/server/tools/core.py:1330-1340`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/core.py#L1330-L1340)
+
+[4] `submit_narrative`는 서술 하나를 받아 DB에 넘기고 받았다는 응답만 돌려준다.
+
+```python
+def submit_narrative(narrative: str) -> dict[str, object]:
+    """Submit the long-form investigation narrative report.
+
+    Write this as an official incident report in markdown with these
+    sections: Background, Incident Timeline, Key Findings, Impact
+    Assessment, Recommendations, and Conclusion.  Use full paragraphs,
+    not bullet points.  This becomes the "Report" page in the final
+    output.
+
+    Can be called multiple times; each call replaces the previous
+    narrative.
+    """
+    ctx = get_ctx()
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+
+    ctx.db.set_narrative(narrative)
+
+    result: dict[str, object] = {
+        "tool_call_id": tc_id,
+        "status": "accepted",
+        "length": len(narrative),
+    }
+```
+
+[`src/mulder/server/tools/findings.py:539-561`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L539-L561)
+
+[5] 자료 모델을 만들다 어긋나면 `validation` 오류로 돌려준다.
+
+```python
+    try:
+        finding = Finding(
+            finding_id=finding_id,
+            case_id=case_metadata.case_id,
+            title=title,
+            description=description,
+            severity=cast(Literal["critical", "high", "medium", "low", "info"], severity),
+            confidence=cast(Literal["confirmed", "inference"], confidence),
+            evidence_refs=evidence_refs,
+            sources=sources,
+            mitre_attack_ids=mitre_attack_ids or [],
+            event_time_start=event_time_start,
+            event_time_end=event_time_end,
+            submitted_at=now,
+        )
+    except Exception as exc:
+        return error_response(
+            tc_id,
+            "submit_finding",
+            {"title": title, "evidence_refs": evidence_refs},
+            f"Validation error: {exc}",
+            (time.monotonic() - t0) * 1000,
+            error_type="validation",
+        )
+```
+
+[`src/mulder/server/tools/findings.py:311-334`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L311-L334)
+
+[6] `[NEGATIVE]` 접두어가 붙은 발견사항은 시각 경고에서 빠진다.
+마감 게이트는 [`src/mulder/server/tools/findings.py:112`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L112)에서 이 접두어로 발견사항을 거른다.
+
+```python
+    if event_time_start or title.startswith(_NEGATIVE_PREFIX):
+        return None
+    if severity in _TS_EXEMPT_SEVERITIES:
+        return None
+    return (
+        "This finding has no event_time_start and will block finalize_report "
+        "(timestamp_coverage gate). Either call update_finding with a precise "
+        "ISO-8601 event_time_start copied from tool output, set severity to "
+        "'info' if it describes a state rather than a timed event, or prefix "
+        f"the title with '{_NEGATIVE_PREFIX}' if it records a hypothesis you "
+        "ruled out. Do not fabricate a timestamp."
+    )
+```
+
+[`src/mulder/server/tools/findings.py:84-95`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L84-L95)
+
+[7] 발견사항 자료 모델이다.
+
+```python
+class Finding(BaseModel):
+    """An investigative finding backed by evidence references."""
+
+    finding_id: str
+    case_id: str
+    title: str
+    description: str
+    severity: Literal["critical", "high", "medium", "low", "info"]
+    confidence: Literal["confirmed", "inference"]
+    evidence_refs: list[str]
+    sources: list[str]
+    mitre_attack_ids: list[str] = []
+    event_time_start: str | None = None
+    event_time_end: str | None = None
+    submitted_at: str
+
+    @model_validator(mode="after")
+    def _check_evidence_refs_nonempty(self) -> Finding:
+        """Require at least one evidence_refs entry (tool_call_id citations)."""
+        if not self.evidence_refs:
+            raise ValueError("evidence_refs must contain at least one tool_call_id")
+        return self
+```
+
+[`src/mulder/models.py:44-65`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/models.py#L44-L65)
+
+[8] 제출 시각은 서버가 정한다.
+수정 도구의 인자는 [`src/mulder/server/tools/findings.py:379-390`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L379-L390)이고 `submitted_at`이 없다.
+
+```python
+    case_metadata = ctx.db.get_case_metadata()
+    finding_id = f"f_{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc).isoformat()
+```
+
+[`src/mulder/server/tools/findings.py:296-298`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L296-L298)
+
+[9] 사건 시각을 검사해 비운다.
+
+```python
+def _sanitize_event_time(ts: str | None) -> tuple[str | None, str | None]:
+    """Validate an event timestamp and nullify day-precision placeholders.
+
+    Returns ``(cleaned_value, warning_message)``.  If the timestamp ends
+    in ``T00:00:00Z`` it is almost certainly a fabricated day-level
+    placeholder and is replaced with ``None``.
+    """
+    if not ts:
+        return None, None
+    if _MIDNIGHT_RE.search(ts):
+        return None, (
+            f"Timestamp '{ts}' looks like a day-precision placeholder "
+            f"(T00:00:00). Nullified; omit timestamps you don't have "
+            f"precise values for."
+        )
+    try:
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None, f"Timestamp '{ts}' is not valid ISO-8601. Nullified."
+    return ts, None
+```
+
+[`src/mulder/server/tools/findings.py:225-244`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L225-L244)
+
+[10] 남기는 발견사항을 고치고 흡수한 행을 지운다.
+합치는 규칙은 [`src/mulder/server/tools/findings.py:956-992`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L956-L992), 호출 기록은 [`src/mulder/server/tools/findings.py:1142-1151`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L1142-L1151)에 있다.
+
+```python
+        if not dry_run:
+            if suffix not in representative.description:
+                representative.description += suffix
+            ctx.db.update_finding(
+                representative.finding_id,
+                description=representative.description,
+                severity=representative.severity,
+                confidence=representative.confidence,
+                sources=representative.sources,
+                evidence_refs=representative.evidence_refs,
+                mitre_attack_ids=representative.mitre_attack_ids,
+                event_time_start=representative.event_time_start,
+                event_time_end=representative.event_time_end,
+            )
+            for fid in delete_ids:
+                ctx.db.delete_finding(fid)
+```
+
+[`src/mulder/server/tools/findings.py:1102-1117`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L1102-L1117)
+
+[11] 받은 값을 그대로 DB에 쓰고 다시 읽는다.
+
+```python
+    update_kwargs: dict[str, object] = {}
+    for field, value in [
+        ("title", title),
+        ("description", description),
+        ("severity", severity),
+        ("confidence", confidence),
+        ("evidence_refs", evidence_refs),
+        ("sources", sources),
+        ("mitre_attack_ids", mitre_attack_ids),
+        ("event_time_start", event_time_start),
+        ("event_time_end", event_time_end),
+    ]:
+        if value is not None:
+            update_kwargs[field] = value
+
+    ctx.db.update_finding(finding_id, **update_kwargs)
+
+    updated = ctx.db.get_finding(finding_id)
+```
+
+[`src/mulder/server/tools/findings.py:450-467`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L450-L467)
+
+[12] 수정 호출 기록에는 바꾼 필드의 새 값만 들어간다.
+
+```python
+    ctx.db.update_finding(finding_id, **update_kwargs)
+
+    updated = ctx.db.get_finding(finding_id)
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="update_finding",
+        params={"finding_id": finding_id, **update_kwargs},
+        output_hash=hash_output(update_kwargs),
+        duration_ms=(time.monotonic() - t0) * 1000,
+    )
+```
+
+[`src/mulder/server/tools/findings.py:465-474`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L465-L474)
+
+[13] 삭제는 행을 지우고 호출 기록에 `finding_id`만 남긴다.
+
+```python
+    deleted = ctx.db.delete_finding(finding_id)
+
+    if not deleted:
+        return error_response(
+            tc_id,
+            "delete_finding",
+            {"finding_id": finding_id},
+            f"Finding '{finding_id}' not found.",
+            (time.monotonic() - t0) * 1000,
+            error_type="not_found",
+        )
+
+    result: dict[str, object] = {
+        "tool_call_id": tc_id,
+        "finding_id": finding_id,
+        "status": "deleted",
+    }
+    elapsed = (time.monotonic() - t0) * 1000
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="delete_finding",
+        params={"finding_id": finding_id},
+        output_hash=hash_output(result),
+        duration_ms=elapsed,
+    )
+```
+
+[`src/mulder/server/tools/findings.py:509-533`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L509-L533)
+
+[14] `findings` 테이블에는 수정 시각이나 이전 값 열이 없다.
+
+```python
+findings_t = Table(
+    "findings",
+    metadata,
+    Column("finding_id", Text, primary_key=True),
+    Column("case_id", Text, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("description", Text, nullable=False),
+    Column("severity", Text, nullable=False),
+    Column("confidence", Text, nullable=False),
+    Column("evidence_refs", Text, nullable=False),
+    Column("sources", Text, nullable=False),
+    Column("mitre_attack_ids", Text),
+    Column("event_time_start", Text),
+    Column("event_time_end", Text),
+    Column("submitted_at", Text, nullable=False),
+)
+```
+
+[`src/mulder/db.py:82-97`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L82-L97)
+
+[15] 제출 호출 기록의 인자에는 `description`과 사건 시각이 없다.
+
+```python
+    elapsed = (time.monotonic() - t0) * 1000
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="submit_finding",
+        params={
+            "title": title,
+            "severity": severity,
+            "confidence": confidence,
+            "evidence_refs": evidence_refs,
+            "sources": sources,
+            "mitre_attack_ids": mitre_attack_ids or [],
+        },
+        output_hash=hash_output(result),
+        duration_ms=elapsed,
+    )
+```
+
+[`src/mulder/server/tools/findings.py:359-373`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L359-L373)
+
+[16] 호출 기록에는 서술의 길이만 인자로 남는다.
+
+```python
+    elapsed = (time.monotonic() - t0) * 1000
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="submit_narrative",
+        params={"length": len(narrative)},
+        output_hash=hash_output(result),
+        duration_ms=elapsed,
+    )
+```
+
+[`src/mulder/server/tools/findings.py:563-570`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L563-L570)
+
+[17] 서술은 사건 메타데이터 행의 `narrative` 열을 덮어쓴다.
+
+```python
+    def set_narrative(self, narrative: str) -> None:
+        """Store or replace the investigation narrative in case metadata."""
+        case_id = self._get_case_id()
+
+        def _do_update() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    update(case_metadata_t)
+                    .where(case_metadata_t.c.case_id == case_id)
+                    .values(narrative=narrative)
+                )
+
+        self._wq.submit(_do_update)
+```
+
+[`src/mulder/db.py:1000-1012`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1000-L1012)
+
+[18] 발견사항 행을 쓰기 대기열로 넣는다.
+사건 DB 파일 이름은 [`src/mulder/db.py:444`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L444)에서 정한다.
+
+```python
+    def insert_finding(self, finding: Finding) -> None:
+        """Persist a Finding to the database."""
+
+        def _do_insert() -> None:
+            """Persist a single finding row."""
+            with self._engine.begin() as conn:
+                conn.execute(
+                    insert(findings_t).values(
+                        finding_id=finding.finding_id,
+                        case_id=finding.case_id,
+                        title=finding.title,
+                        description=finding.description,
+                        severity=finding.severity,
+                        confidence=finding.confidence,
+                        evidence_refs=json.dumps(finding.evidence_refs),
+                        sources=json.dumps(finding.sources),
+                        mitre_attack_ids=json.dumps(finding.mitre_attack_ids),
+                        event_time_start=finding.event_time_start,
+                        event_time_end=finding.event_time_end,
+                        submitted_at=finding.submitted_at,
+                    )
+                )
+
+        self._wq.submit(_do_insert)
+```
+
+[`src/mulder/db.py:1014-1037`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1014-L1037)
+
+[19] 제출마다 `finding` 항목을 호출 기록 파일에 덧붙인다.
+
+```python
+    def log_finding_submission(
+        self,
+        finding_id: str,
+        evidence_refs: list[str],
+    ) -> None:
+        """Record a finding submission and its evidence tool-call references."""
+        entry: dict[str, object] = {
+            "type": "finding",
+            "finding_id": finding_id,
+            "evidence_refs": evidence_refs,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._append(entry)
+```
+
+[`src/mulder/audit.py:181-193`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/audit.py#L181-L193)
+
+[20] DB 행을 다시 읽을 때 자료 모델을 만든다.
+`get_findings`는 [`src/mulder/db.py:1127-1148`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1127-L1148), `finalize_report`는 [`src/mulder/server/tools/findings.py:664`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L664)에서 같은 모델로 읽는다.
+
+```python
+    def get_finding(self, finding_id: str) -> Finding | None:
+        """Return a single finding by ID, or None if not found."""
+        stmt = select(findings_t).where(findings_t.c.finding_id == finding_id)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).fetchone()
+        if row is None:
+            return None
+        return Finding(
+            finding_id=row.finding_id,
+            case_id=row.case_id,
+            title=row.title,
+            description=row.description,
+            severity=row.severity,
+            confidence=row.confidence,
+            evidence_refs=json.loads(row.evidence_refs),
+            sources=json.loads(row.sources),
+            mitre_attack_ids=json.loads(row.mitre_attack_ids) if row.mitre_attack_ids else [],
+            event_time_start=row.event_time_start,
+            event_time_end=row.event_time_end,
+            submitted_at=row.submitted_at,
+        )
+```
+
+[`src/mulder/db.py:1105-1125`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1105-L1125)
+
+[21] `submit_finding`의 근거와 확신도 인자에는 기본값이 없다.
+
+```python
+def submit_finding(
+    title: str,
+    description: str,
+    severity: str,
+    confidence: str,
+    evidence_refs: list[str],
+    sources: list[str],
+    mitre_attack_ids: list[str] | None = None,
+    event_time_start: str | None = None,
+    event_time_end: str | None = None,
+) -> dict[str, object]:
+```
+
+[`src/mulder/server/tools/findings.py:249-259`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L249-L259)

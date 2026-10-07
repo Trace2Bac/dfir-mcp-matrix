@@ -1,0 +1,362 @@
+---
+cell: F05
+details:
+- id: F05.01
+---
+
+# F05 발견사항·결론 근거 검증
+
+### F05.01 근거 참조 존재 확인
+
+**구현.** 이 방식은 발견사항을 받는 `submit_finding`과 고치는 `update_finding`에 있다 [1].
+두 도구는 `evidence_refs`의 호출 ID가 모두 호출 기록 색인에 있어야 발견사항을 받거나 고친다 [1][2].
+
+색인은 호출 기록 파일에 남은 모든 `tool_call` 항목의 ID다 [3].
+오류로 끝난 호출과 복합 도구의 하위 조회도 `tool_call` 항목으로 남으므로 그 ID도 검사를 통과한다 [4].
+서버는 인용한 호출의 출력이 주장을 뒷받침하는지 보지 않고 도구 설명에서 직접 읽은 호출을 인용하라고 안내만 한다 [5].
+그래서 F05.02에 해당하는 내용 대조는 없다.
+
+`sources`에 적은 자료 이름은 제출할 때 사건 DB와 대조하지 않는다 [6].
+보고서 마감 게이트는 사건 전체의 발견사항이 인용한 증거 `source`가 3개 미만이면 보고서를 막는다 [7].
+이 셈은 DB의 `source` 이름과 인용 문자열 가운데 한쪽이 다른 쪽에 들어 있으면 인용으로 치므로 빈 문자열 하나가 모든 `source`를 인용한 것으로 센다 [8].
+
+`confidence`는 모델이 정한다 [6].
+`confirmed`인데 근거 호출이 2개 미만이면 응답에 안내만 붙이고 받아들인다 [9].
+`deduplicate_findings`로 합친 발견사항은 무리 안에 `confirmed`가 하나라도 있으면 `confirmed`가 되고 근거를 다시 대조하지 않는다 [10].
+제목이 `[NEGATIVE]`로 시작하는 부재 주장도 같은 검사만 거치고 그 주장에 필요한 자료·기간·실패를 대조하는 코드는 없다 [11].
+조사 결론을 담은 보고서 서술을 받는 `submit_narrative`는 근거 참조를 받지 않고 서술을 그대로 저장한다 [12].
+
+같은 저장소의 `mulder investigate` 오케스트레이터는 반론 단계 `alternative_narrative`에서 계획 역할의 모델에게 지금의 발견사항을 검토해 반론 분석을 계획하게 한다 [13].
+오케스트레이터는 이 단계 전에 `build_consistency_report`로 발견사항 제목·설명에서 정규식으로 뽑은 IOC가 겹치는 발견사항을 묶고 그 목록을 계획 프롬프트에 넣는다 [14].
+이 단계는 서버를 쓰는 클라이언트의 동작이라 F05.04에 연결하지 않는다.
+
+**한계.** `update_finding`에 빈 `evidence_refs`를 넘기면 대조할 값이 없어 검사를 통과하고 DB에 빈 목록이 저장된다 [2][15].
+저장 뒤 되읽는 단계에서 `Finding` 검사가 예외를 내 호출은 실패하지만 DB의 빈 목록은 그대로 남는다 [16][15].
+그 뒤로는 발견사항 전체를 읽는 `get_findings`와 `finalize_report`도 같은 검사에서 예외로 끝난다 [15].
+
+### 근거
+
+[1] 제출한 근거 호출 ID를 호출 기록 색인과 대조한다.
+
+```python
+    invalid_refs = [ref for ref in evidence_refs if not ctx.audit.has_tool_call(ref)]
+    if invalid_refs:
+        recent_ids = sorted(ctx.audit.tool_call_ids)[-10:]
+        resp = error_response(
+            tc_id,
+            "submit_finding",
+            {"title": title, "evidence_refs": evidence_refs},
+            f"Invalid evidence_ref(s): {', '.join(invalid_refs)} not found in the audit log",
+            (time.monotonic() - t0) * 1000,
+        )
+        resp["valid_refs"] = recent_ids
+        return resp
+```
+
+[`src/mulder/server/tools/findings.py:283-294`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L283-L294)
+
+[2] 수정할 때도 `evidence_refs`가 주어지면 같은 대조를 한다.
+빈 목록이면 `invalid_refs`가 비어 통과한다.
+
+```python
+    if evidence_refs is not None:
+        invalid_refs = [ref for ref in evidence_refs if not ctx.audit.has_tool_call(ref)]
+        if invalid_refs:
+            recent_ids = sorted(ctx.audit.tool_call_ids)[-10:]
+            resp = error_response(
+                tc_id,
+                "update_finding",
+                {"finding_id": finding_id, "evidence_refs": evidence_refs},
+                f"Invalid evidence_ref(s): {', '.join(invalid_refs)} not found in the audit log",
+                (time.monotonic() - t0) * 1000,
+            )
+            resp["valid_refs"] = recent_ids
+            return resp
+```
+
+[`src/mulder/server/tools/findings.py:426-438`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L426-L438)
+
+[3] 색인은 `tool_call` 항목의 ID를 모두 담고 대조는 집합에 있는지만 본다.
+
+```python
+        entry_type = entry.get("type")
+        if entry_type == "tool_call" and "tool_call_id" in entry:
+            tcid = entry["tool_call_id"]
+            if not isinstance(tcid, str):
+                return
+            self._tool_call_ids.add(tcid)
+            self._tool_calls[tcid] = entry
+```
+
+[`src/mulder/audit.py:87-93`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/audit.py#L87-L93)
+
+```python
+    def has_tool_call(self, tool_call_id: str) -> bool:
+        """Return True if ``tool_call_id`` appears in this audit log."""
+        return tool_call_id in self._tool_call_ids
+```
+
+[`src/mulder/audit.py:150-152`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/audit.py#L150-L152)
+
+[4] 오류 응답도 호출 기록에 항목을 남긴다.
+복합 도구의 하위 조회 기록은 [`src/mulder/server/tools/composite/core.py:231-237`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/composite/core.py#L231-L237)이다.
+
+```python
+    """Build an audited error response and log the tool call."""
+    if has_ctx():
+        ctx = get_ctx()
+        ctx.audit.log_tool_call(
+            tool_call_id=tc_id,
+            tool_name=tool_name,
+            params=params,
+            output_hash=hash_output({"error": error}),
+            duration_ms=elapsed_ms,
+            batch_id=current_batch_id.get(),
+        )
+```
+
+[`src/mulder/server/helpers.py:409-419`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/helpers.py#L409-L419)
+
+[5] 근거 호출을 고르는 기준은 도구 설명에만 있다.
+
+```python
+    """Record a forensic finding with validated evidence references and metadata.
+
+    Call after discovering evidence worth reporting. Every evidence_ref
+    must be a tool_call_id from a prior tool invocation (validated against
+    the audit log). The evidence_ref must be from a tool call whose output
+    you directly examined and that specifically supports this finding's
+    claims. Citing a tool_call_id from a search you did not review is
+    insufficient.
+```
+
+[`src/mulder/server/tools/findings.py:260-267`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L260-L267)
+
+[6] 제출 인자로 자료 모델을 만들 때 `sources`와 `confidence`를 그대로 넣는다.
+
+```python
+    try:
+        finding = Finding(
+            finding_id=finding_id,
+            case_id=case_metadata.case_id,
+            title=title,
+            description=description,
+            severity=cast(Literal["critical", "high", "medium", "low", "info"], severity),
+            confidence=cast(Literal["confirmed", "inference"], confidence),
+            evidence_refs=evidence_refs,
+            sources=sources,
+            mitre_attack_ids=mitre_attack_ids or [],
+            event_time_start=event_time_start,
+            event_time_end=event_time_end,
+            submitted_at=now,
+        )
+```
+
+[`src/mulder/server/tools/findings.py:311-325`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L311-L325)
+
+[7] 마감 게이트 5의 인용 `source` 셈이다.
+최소 개수 3은 [`src/mulder/server/tools/findings.py:42`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L42)에 있다.
+
+```python
+    finding_source_names: set[str] = set()
+    for f in findings:
+        finding_source_names.update(f.sources)
+
+    evidence_names = {s.source_name for s in sources if is_evidence_source(s)}
+    total = len(evidence_names)
+    advisory = False
+    if total > 0:
+        cited_count = sum(1 for n in evidence_names if source_is_cited(n, finding_source_names))
+        coverage_pct = round(cited_count / total * 100, 1)
+        passed = cited_count >= min(_MIN_CITED_SOURCES, total)
+```
+
+[`src/mulder/server/tools/findings.py:181-191`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L181-L191)
+
+[8] 부분 문자열로 인용을 맞춘다.
+
+```python
+    if not source_name:
+        return False
+    return any(source_name in fs or fs in source_name for fs in finding_sources)
+```
+
+[`src/mulder/patterns.py:139-141`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/patterns.py#L139-L141)
+
+[9] 근거가 2개 미만인 `confirmed` 발견사항에는 안내만 붙인다.
+
+```python
+    thin_evidence_warning: str | None = None
+    if finding.confidence == "confirmed" and len(finding.evidence_refs) < 2:
+        thin_evidence_warning = (
+            "Note: this finding is marked 'confirmed' but cites only "
+            f"{len(finding.evidence_refs)} evidence source(s). Best practice "
+            "requires 2+ independent sources for 'confirmed' confidence. "
+            "Consider whether 'inference' is more appropriate."
+        )
+```
+
+[`src/mulder/server/tools/findings.py:336-343`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L336-L343)
+
+[10] 합친 발견사항의 근거와 확신도를 정한다.
+
+```python
+    best.sources = sorted(all_sources)
+    best.evidence_refs = sorted(all_refs)
+    best.mitre_attack_ids = sorted(all_mitre)
+    best.severity = highest_severity
+    if any(f.confidence == "confirmed" for f in group):
+        best.confidence = "confirmed"
+    if starts:
+        best.event_time_start = min(starts)
+        best.event_time_end = max(ends)
+```
+
+[`src/mulder/server/tools/findings.py:980-988`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L980-L988)
+
+[11] `[NEGATIVE]` 접두어는 시각 게이트와 최소 개수 게이트에서만 쓴다.
+
+```python
+# Findings the timestamp_coverage gate leaves alone: negative findings and
+# state-not-event severities. Keep in step with _evaluate_finalize_gates.
+_NEGATIVE_PREFIX = "[NEGATIVE]"
+_TS_EXEMPT_SEVERITIES = ("info", "informational")
+```
+
+[`src/mulder/server/tools/findings.py:69-72`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L69-L72)
+
+```python
+    non_negative = [f for f in findings if not f.title.startswith(_NEGATIVE_PREFIX)]
+```
+
+[`src/mulder/server/tools/findings.py:112-112`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L112-L112)
+
+[12] `submit_narrative`는 서술 하나만 받아 검사 없이 저장한다.
+
+```python
+def submit_narrative(narrative: str) -> dict[str, object]:
+    """Submit the long-form investigation narrative report.
+
+    Write this as an official incident report in markdown with these
+    sections: Background, Incident Timeline, Key Findings, Impact
+    Assessment, Recommendations, and Conclusion.  Use full paragraphs,
+    not bullet points.  This becomes the "Report" page in the final
+    output.
+
+    Can be called multiple times; each call replaces the previous
+    narrative.
+    """
+    ctx = get_ctx()
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+
+    ctx.db.set_narrative(narrative)
+
+    result: dict[str, object] = {
+        "tool_call_id": tc_id,
+        "status": "accepted",
+        "length": len(narrative),
+    }
+```
+
+[`src/mulder/server/tools/findings.py:539-561`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L539-L561)
+
+[13] 오케스트레이터의 반론 단계 설정이다.
+
+```python
+ALTERNATIVE_NARRATIVE: PhaseConfig = PhaseConfig(
+    name="alternative_narrative",
+    mode="split",
+    planner_system_prompt=NARRATIVE_PLANNER_PROMPT,
+    planner_prompt_template=(
+        "Case ID: {case_id}\n"
+        "Call open_case(case_id='{case_id}') as your FIRST action.\n\n"
+        "{case_briefing}Review current findings and plan counter-analysis.\n\n{consistency_report}"
+    ),
+    planner_allowed_tools=get_tools_for_role(Role.NARRATIVE_PLANNER),
+    planner_max_turns=15,
+    executor_system_prompt=NARRATIVE_EXECUTOR_PROMPT,
+    executor_prompt_template=_EXECUTOR_CASE_ID_PREFIX + "{plan}",
+    executor_allowed_tools=get_tools_for_role(Role.NARRATIVE_EXECUTOR),
+    executor_max_turns=35,
+    analyst_system_prompt=NARRATIVE_ANALYST_PROMPT,
+    analyst_prompt_template=(
+        "Case ID: {case_id}\n"
+        "Call open_case(case_id='{case_id}') as your FIRST action.\n\n"
+        "Execution results:\n{execution_results}\n\n"
+        "Investigation questions:\n{investigation_questions}"
+    ),
+    analyst_allowed_tools=get_tools_for_role(Role.NARRATIVE_ANALYST),
+    analyst_max_turns=35,
+)
+```
+
+[`src/mulder/orchestrator/phases.py:191-215`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/phases.py#L191-L215)
+
+[14] 공유 IOC로 발견사항을 묶어 반론 단계 프롬프트 값으로 넘긴다.
+함수 전체는 [`src/mulder/orchestrator/evidence.py:352-421`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/evidence.py#L352-L421)이다.
+
+```python
+        for f in findings:
+            text = f"{f.title} {f.description}"
+
+            ioc_set = extract_iocs_from_text(text)
+            iocs: set[str] = set()
+            for ip in ioc_set.ips:
+                iocs.add(f"ip:{ip}")
+            for path in ioc_set.paths:
+                iocs.add(f"path:{path[:60]}")
+            for proc in ioc_set.processes:
+                iocs.add(f"proc:{proc.lower()}")
+            for h in ioc_set.hashes:
+                iocs.add(f"hash:{h}")
+            for domain in ioc_set.domains:
+                iocs.add(f"domain:{domain.lower()}")
+
+            for ioc in iocs:
+                if ioc not in ioc_to_findings:
+                    ioc_to_findings[ioc] = []
+                ioc_to_findings[ioc].append(f.finding_id)
+```
+
+[`src/mulder/orchestrator/evidence.py:377-396`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/evidence.py#L377-L396)
+
+```python
+        # Phase 4: Alternative narrative + audit (split-mode, with consistency preamble)
+        consistency_report = self._server.build_consistency_report()
+        narrative_vars = {
+            "consistency_report": consistency_report or "",
+            "case_briefing": self._case_briefing,
+            "case_id": self._case_id,
+        }
+        alt_result = await self._run_split_phase(ALTERNATIVE_NARRATIVE, prompt_vars=narrative_vars)
+```
+
+[`src/mulder/orchestrator/runner.py:325-332`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/runner.py#L325-L332)
+
+[15] 수정 값을 DB에 쓴 뒤 다시 읽는다.
+DB는 목록을 JSON으로 그대로 쓰고([`src/mulder/db.py:1054-1063`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1054-L1063)) 읽을 때 `Finding`을 만든다([`src/mulder/db.py:1112-1125`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1112-L1125), [`src/mulder/db.py:1132-1148`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/db.py#L1132-L1148)).
+
+```python
+        if value is not None:
+            update_kwargs[field] = value
+
+    ctx.db.update_finding(finding_id, **update_kwargs)
+
+    updated = ctx.db.get_finding(finding_id)
+```
+
+[`src/mulder/server/tools/findings.py:462-467`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/findings.py#L462-L467)
+
+[16] 자료 모델이 빈 `evidence_refs`를 거부한다.
+
+```python
+    @model_validator(mode="after")
+    def _check_evidence_refs_nonempty(self) -> Finding:
+        """Require at least one evidence_refs entry (tool_call_id citations)."""
+        if not self.evidence_refs:
+            raise ValueError("evidence_refs must contain at least one tool_call_id")
+        return self
+```
+
+[`src/mulder/models.py:60-65`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/models.py#L60-L65)
