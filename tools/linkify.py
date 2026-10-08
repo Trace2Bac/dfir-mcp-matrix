@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """원고의 `경로:줄` 백틱을 기준 커밋의 GitHub blob 링크로 바꾼다(pilot.py fill·check가 쓴다).
 저장소에 실제로 있는 파일만 바꾸고, 없는 경로는 보고만 한다(인용 검증 겸용).
-옛 매트릭스 저장소(Claude outputs)의 tools/linkify.py를 옮겨 왔다(결정 0042)."""
+옛 매트릭스 저장소(Claude outputs)의 tools/linkify.py를 옮겨 왔다."""
 import re, os
 
 # 서버 이름 -> (저장소 slug, 기준 커밋, 로컬 클론 경로). pilot.py가 reports/<서버>/index.mdx 머리말로 채운다.

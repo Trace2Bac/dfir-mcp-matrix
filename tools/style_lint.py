@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """원고 문장 기계 점검(작성 규칙 0004, docs/writing-rules/). 코드 백틱·링크 URL·표 구분선은 빼고 본다.
    pilot.py check가 쓰고, 따로 돌릴 때는 python tools/style_lint.py <파일> [...]   걸린 줄과 규칙을 출력한다. 0건이면 통과.
-   옛 매트릭스 저장소(Claude outputs)의 tools/style_lint.py를 옮겨 왔다(결정 0042)."""
+   옛 매트릭스 저장소(Claude outputs)의 tools/style_lint.py를 옮겨 왔다."""
 import re
 import sys
 

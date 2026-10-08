@@ -449,7 +449,7 @@ def clones_dir():
 @functools.lru_cache(None)
 def v1():
     """경로·링크 변환(tools/linkify.py)과 문장 검사(tools/style_lint.py)를 읽는다.
-    두 파일은 옛 매트릭스 저장소에서 옮겨 왔다(결정 0042). 서버 저장소 목록은 reports/<서버>/index.mdx로 채운다."""
+    두 파일은 옛 매트릭스 저장소에서 옮겨 왔다. 서버 저장소 목록은 reports/<서버>/index.mdx로 채운다."""
     import linkify
     import style_lint
     _use_report_commits(linkify)
