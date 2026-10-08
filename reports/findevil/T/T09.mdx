@@ -1,0 +1,200 @@
+---
+cell: T09
+details:
+- id: not_applicable
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### 비적용
+
+**판단.** 서버는 살아 있는 단말이나 서버에 접속하거나 그 상태를 바꾸는 도구를 두지 않는다.
+도구 45개는 증거 폴더 아래 파일을 읽거나, 모델이 넘긴 글과 서버 기록을 읽어 결과를 만든다 [1].
+증거 경로 인자는 `_validate_evidence_path`로 경로가 환경변수 `FINDEVIL_EVIDENCE_DIR`의 폴더 안인지 확인한다 [2].
+`baseline_create`의 `output_file`, `baseline_diff`의 `baseline_file`, `build_timeline`의 `fs_subpath`는 이 확인을 거치지 않는다 [3][4][5].
+서버가 실행하는 외부 프로그램은 파일을 읽는 운영체제 명령과 메모리 덤프를 읽는 Volatility 3이고 원격 호스트에 접속하는 명령은 없다 [6][7].
+
+서버가 쓰는 파일은 서버 기록 파일 둘과 `baseline_create`의 기준 파일이다 [8][9].
+`audit.json`에 호출 기록을 남긴다 [8].
+`get_audit_trail_invocations.jsonl`에는 `get_audit_trail`을 부를 때마다 시각과 인자를 한 줄씩 남긴다 [9].
+`baseline_create`는 기준 파일 경로 `output_file`이 증거 폴더 안이면 거부하고 경로를 받지 않으면 기록 폴더의 `baseline.json`에 쓴다 [3].
+`output_file`에 증거 폴더 밖 경로를 주면 서버 계정이 쓸 수 있는 어느 경로든 상위 폴더를 만들고 그 파일을 기준 JSON으로 덮어쓴다 [3][10].
+`baseline_create`의 도구 설명은 살아 있는 호스트를 감시하려면 증거 폴더를 `/`의 읽기 전용 마운트로 정하라고 안내한다 [11].
+이 구성에서도 도구는 증거 폴더 아래를 읽기만 한다 [1].
+다만 `output_file`은 마운트 밖의 경로도 받으므로 서버가 감시하는 호스트에서 실행되면 그 호스트의 파일을 기준 JSON으로 덮어쓸 수 있다 [3][11].
+이 쓰기는 기준 JSON을 남기는 기능이고 격리·차단·프로세스 종료·설정 변경 같은 조치를 하는 도구는 없다 [1].
+그래서 조치 전후 상태, 변경 내역, 되돌림을 남길 대상 시스템 조치가 없다.
+
+### 근거
+
+[1] `server.py`의 기본 도구 6개와 도구 모듈 14개의 등록이다: [`src/findevil/server.py:154-353`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L154-L353).
+
+```python
+from findevil.tools import (  # noqa: E402
+    ai_signatures,  # noqa: F401
+    autonomy,  # noqa: F401
+    fim,  # noqa: F401
+    linux_auth,  # noqa: F401
+    linux_containers,  # noqa: F401
+    linux_journal,  # noqa: F401
+    linux_memory,  # noqa: F401
+    linux_packages,  # noqa: F401
+    linux_persistence,  # noqa: F401
+    linux_shell_history,  # noqa: F401
+    linux_timeline,  # noqa: F401
+    linux_web,  # noqa: F401
+    self_correction,  # noqa: F401
+    threat_intel,  # noqa: F401
+)
+```
+
+[`src/findevil/server.py:362-377`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L362-L377)
+
+[2] 증거 폴더 안인지 확인하는 함수다.
+
+```python
+def _validate_evidence_path(path_str: str) -> Path:
+    """Ensure the requested path is inside the evidence directory.
+
+    Uses Path.relative_to() rather than a string-prefix check. A naive
+    startswith() would accept ``/tmp/X/evidence-malicious/...`` as being
+    "inside" ``/tmp/X/evidence`` because the string literally begins
+    with the prefix. Tests in tests/security/test_path_validation.py
+    hold this invariant in place.
+    """
+    requested = Path(path_str).resolve()
+    evidence_resolved = EVIDENCE_DIR.resolve()
+    try:
+        requested.relative_to(evidence_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Access denied: {path_str} is outside the evidence directory ({EVIDENCE_DIR})"
+        ) from exc
+    return requested
+```
+
+[`src/findevil/server.py:63-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L63-L80)
+
+[3] 기준 파일을 쓸 위치가 증거 폴더 안이면 거부한다.
+
+```python
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:281-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L281-L295)
+
+[4] `baseline_diff`는 기준 파일 경로를 대조하지 않는다.
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586)
+
+[5] `build_timeline`은 `fs_subpath`를 대조하지 않고 이어 붙인다.
+
+```python
+    try:
+        validated = _validate_evidence_path(evidence_root)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.is_dir():
+        return f"Not a directory: {evidence_root}"
+
+    fs_root = validated / fs_subpath
+    events: list[TimelineEvent] = []
+```
+
+[`src/findevil/tools/linux_timeline.py:566-574`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L566-L574)
+
+[6] 운영체제 명령은 `file`·`stat`·`md5sum`·`sha256sum`·`strings`·`ls`·`grep`·`xxd`다: [`src/findevil/server.py:171-172`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L171-L172), [`src/findevil/server.py:200-201`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L200-L201), [`src/findevil/server.py:234-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L234-L237), [`src/findevil/server.py:272-272`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L272-L272), [`src/findevil/server.py:305-308`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L305-L308), [`src/findevil/server.py:347-350`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L347-L350).
+
+[7] Volatility 3은 증거 폴더 안의 메모리 덤프 하나를 입력으로 받는다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+```
+
+[`src/findevil/tools/linux_memory.py:160-163`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L163)
+
+[8] 호출 기록 파일을 연다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+```
+
+[`src/findevil/server.py:42-45`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L45)
+
+[9] `get_audit_trail`이 호출마다 한 줄을 남기는 파일이다.
+
+```python
+    try:
+        with (LOGS_DIR / "get_audit_trail_invocations.jsonl").open("a") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "filter_tool": filter_tool,
+                        "filter_since": filter_since,
+                        "limit": limit,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+```
+
+[`src/findevil/tools/self_correction.py:598-612`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L598-L612)
+
+[10] 기준 파일의 상위 폴더를 만들고 내용을 쓴다.
+
+```python
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+```
+
+[`src/findevil/tools/fim.py:336-338`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L336-L338)
+
+[11] `baseline_create`의 인자 설명이다.
+
+```python
+    Args:
+        root_path: Filesystem root to snapshot (must be inside
+            FINDEVIL_EVIDENCE_DIR — for live-host monitoring, point
+            FINDEVIL_EVIDENCE_DIR at a read-only mount of `/`)
+        output_file: Where to write the baseline JSON. Defaults to
+            `<FINDEVIL_LOGS_DIR>/baseline.json`.
+```
+
+[`src/findevil/tools/fim.py:311-316`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L311-L316)

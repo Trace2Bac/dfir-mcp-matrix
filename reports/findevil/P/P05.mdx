@@ -1,0 +1,209 @@
+---
+cell: P05
+details:
+- id: P05.01
+- id: P05.02
+---
+
+# P05 사건 자료 정리
+
+### P05.01 모델 도구로 삭제·초기화
+
+**구현.** 파일을 지우는 MCP 도구는 없고 사건 자료를 바꿔 쓸 수 있는 도구는 `baseline_create` 하나다 [1].
+`baseline_create`는 인자 `output_file`로 받은 경로에 기준선 JSON을 쓰고 그 파일이 있으면 내용을 새 기준선으로 바꾼다 [1].
+`output_file` 경로는 실제 경로로 변환한 뒤 증거 폴더 안이면 거부하고 그 밖이면 어디든 받는다 [2].
+그래서 모델이 `output_file`에 기록 폴더의 `audit.json`을 주면 그때까지의 호출 기록이 기준선 JSON으로 바뀐다 [1][2].
+서버의 기록 처리기는 서버 모듈을 불러올 때 연 파일 끝에 다음 항목을 이어 쓰므로 그 뒤의 호출 기록은 기준선 JSON 뒤에 남는다 [3].
+`assess_coverage`와 `get_audit_trail`은 JSON으로 읽히지 않는 줄을 건너뛰므로 바뀐 앞부분의 호출은 수행 기록에서 빠진다 [4].
+`output_file` 없이 다시 부르면 기록 폴더의 `baseline.json`을 새 기준선으로 바꾼다 [2].
+증거 폴더 안의 원본은 이 경로 검사로 대상에서 빠지지만 대상을 서버가 만든 기록 폴더로 한정하지는 않아 P05.05에는 연결하지 않는다 [2].
+`baseline_create`의 호출 기록 항목에는 쓴 경로와 항목 수가 남고 기존 파일을 바꿨다는 사실은 남지 않아 P05.07에는 연결하지 않는다 [5].
+서버가 종료나 작업 완료 때 사건 자료를 스스로 지우는 코드는 없다.
+
+### P05.02 사용자 명령으로 삭제·초기화
+
+**구현.** 사용자 CLI `scripts/capture_example_run.py`는 실행할 때 기록 폴더의 `audit.json`을 지운다 [6].
+기록 폴더 인자 `--logs-dir`의 기본값은 저장소의 `logs/`이고 저장소 루트에서 실행한 서버의 기본 기록 폴더와 같다 [7][8].
+이 CLI는 예시 시나리오의 도구 함수를 직접 불러 새 `audit.json`을 만들고 그 파일을 `--output` 경로로 복사한다 [9].
+지우기 전에 앞 호출 기록을 옮기거나 복사하지 않고 지운 사실도 남기지 않는다 [6].
+
+### 근거
+
+[1] `baseline_create`는 정한 경로에 기준선을 쓴다.
+
+```python
+    try:
+        out_path = _resolve_output_path(output_file)
+    except ValueError as e:
+        # Refuses output paths inside the evidence directory; surface a
+        # readable error rather than letting the exception bubble.
+        return f"Error: {e}"
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:328-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L328-L340)
+
+[2] 출력 경로는 증거 폴더 안만 거부한다.
+
+```python
+def _resolve_output_path(output_file: str) -> Path:
+    """Pick the baseline output path. Default is LOGS_DIR/baseline.json.
+
+    Late import of `server` is intentional — tests monkeypatch
+    `server.LOGS_DIR` and we want to see the current value, not a
+    captured-at-import-time copy.
+
+    Security: refuses output paths inside EVIDENCE_DIR. Without this,
+    a user (or prompt-injected tool arg) could tell baseline_create to
+    write its JSON output over an evidence file, violating the
+    "no-write-to-evidence" architectural guarantee.
+    """
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:267-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L267-L295)
+
+[3] 호출 기록 처리기를 서버 모듈을 불러올 때 만든다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+```
+
+[`src/findevil/server.py:42-45`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L45)
+
+[4] 두 도구는 JSON으로 읽히지 않는 줄을 건너뛴다.
+
+```python
+def _audited_tool_calls() -> list[dict]:
+    """Return every audit.json entry as a dict (best-effort, never raises)."""
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return []
+    try:
+        raw = audit_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+```
+
+[`src/findevil/tools/autonomy.py:58-76`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L58-L76)
+
+```python
+    entries = []
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw)
+            entries.append(obj)
+        except json.JSONDecodeError:
+            continue
+```
+
+[`src/findevil/tools/self_correction.py:623-631`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L623-L631)
+
+[5] `baseline_create`의 호출 기록 항목이다.
+
+```python
+    _audit(
+        "baseline_create",
+        {"root_path": root_path, "output_file": str(out_path)},
+        f"{len(entries)} entries written to {out_path.name}",
+    )
+```
+
+[`src/findevil/tools/fim.py:394-398`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L394-L398)
+
+[6] 사용자 CLI가 기록 폴더의 `audit.json`을 지운다.
+
+```python
+def _setup_env(scenario_dir: Path, logs_dir: Path) -> None:
+    """Point the findevil server at the scenario's evidence and a temp log dir."""
+    os.environ["FINDEVIL_EVIDENCE_DIR"] = str(scenario_dir.parent.resolve())
+    os.environ["FINDEVIL_LOGS_DIR"] = str(logs_dir.resolve())
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe any pre-existing audit.json so the captured trace is just this run.
+    audit_path = logs_dir / "audit.json"
+    if audit_path.exists():
+        audit_path.unlink()
+```
+
+[`scripts/capture_example_run.py:38-46`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L38-L46)
+
+[7] `--logs-dir`의 기본값이다.
+
+```python
+    parser.add_argument(
+        "--logs-dir",
+        type=Path,
+        default=REPO_ROOT / "logs",
+        help="Where the server should write its working audit.json before "
+             "we copy it to --output. Default: ./logs",
+    )
+```
+
+[`scripts/capture_example_run.py:185-191`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L185-L191)
+
+[8] 서버의 기본 기록 폴더다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+[`src/findevil/server.py:27-29`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L29)
+
+[9] 새 호출 기록을 만들어 `--output`으로 복사한다.
+
+```python
+    _setup_env(scenario_dir, args.logs_dir)
+    _RUNNERS[args.scenario](scenario_dir)
+
+    audit_path = args.logs_dir / "audit.json"
+    if not audit_path.is_file():
+        sys.stderr.write(
+            f"Server did not produce {audit_path}. "
+            "Was findevil installed (pip install -e .)?\n"
+        )
+        return 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(audit_path, output)
+```
+
+[`scripts/capture_example_run.py:214-226`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L214-L226)

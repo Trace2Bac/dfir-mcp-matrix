@@ -1,0 +1,224 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 증거 파일을 직접 읽는 경로와 `baseline_create`의 출력 경로에 적용된다 [1][2].
+서버 코드는 증거 파일을 `read_text`·`read_bytes`로 읽거나 `open("rb")`로 연다 [1].
+서버 코드가 쓰기 모드로 여는 파일은 호출 기록 `audit.json`, `get_audit_trail`의 호출 수를 적는 `get_audit_trail_invocations.jsonl`, `baseline_create`의 출력 파일 셋이다 [3][4][2].
+45개 도구 가운데 쓸 경로를 인자로 받는 도구는 `baseline_create` 하나다 [2].
+`baseline_create`는 `output_file`을 실제 경로로 변환한 뒤 증거 폴더 안이면 쓰지 않고 오류를 돌려준다 [2].
+`_resolve_output_path`의 설명 문자열과 `baseline_create`의 주석은 이 검사가 기준 파일로 증거를 덮어쓰지 못하게 하려는 것이라고 적는다 [2].
+
+호출 기록 두 파일은 `FINDEVIL_LOGS_DIR` 아래에 쓰고 이 경로에는 원본 쓰기를 막는 장치가 없다 [5].
+서버는 시작할 때 `FINDEVIL_LOGS_DIR` 폴더를 만들고 이 폴더가 증거 폴더와 겹치는지 확인하지 않는다 [5].
+
+**한계.** `output_file`이 비어 있으면 `_resolve_output_path`는 증거 폴더와 겹치는지 보지 않고 `FINDEVIL_LOGS_DIR`의 `baseline.json`을 돌려준다 [2].
+그래서 `FINDEVIL_LOGS_DIR`이 증거 폴더 안을 가리키면 기본 출력이 증거 폴더 안에 쓰이고 같은 이름의 파일이 있으면 덮어쓴다 [2][5].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 운영체제 명령을 실행하는 기본 도구 6개와 Volatility 3를 실행하는 메모리 도구 7개에 적용된다 [6][7].
+기본 도구는 `file_info`(`file`·`stat`), `hash_file`(`md5sum`·`sha256sum`), `strings_extract`(`strings`), `list_evidence`(`ls`), `log_search`(`grep`), `hexdump`(`xxd`)다 [6].
+`_run_tool`은 인자 목록을 셸 없이 `subprocess.run`으로 실행한다 [8].
+서버는 명령과 옵션을 정해 두고 증거 경로를 마지막 인자로 넣으며 출력 파일을 지정하는 인자는 넘기지 않는다 [6].
+모델은 `strings`의 최소 길이와 인코딩, `grep`의 패턴과 앞뒤 줄 수, `xxd`의 시작 위치와 길이만 정한다 [6].
+이 경로에서 원본을 지키는 것은 이 명령들이 증거를 읽기만 한다는 동작뿐이다.
+
+메모리 도구는 `_run_vol_plugin`으로 `vol -q -f <덤프> -r json <플러그인>`을 실행한다 [7].
+도구가 부르는 플러그인은 `banners.Banners`, `linux.pslist`, `linux.sockstat.Sockstat`(없으면 `linux.netstat`), `linux.lsmod`, `linux.check_modules`, `linux.bash`, `linux.malware.malfind.Malfind`(없으면 `linux.malfind`)이고 플러그인 이름 뒤에 다른 인자를 넘기지 않는다 [9].
+Volatility 3 2.28.0의 `FileLayer`는 증거 파일을 늘 `rb` 모드로 연다 [10].
+Volatility는 심볼 캐시를 증거 옆이 아니라 자기 캐시 폴더에 쓴다 [11].
+
+증거 폴더를 읽기 전용으로 마운트하거나 컨테이너에 읽기 전용으로 연결하는 실행 경로는 저장소에 없다.
+`.mcp.json`은 venv의 파이썬으로 `python -m findevil`을 실행하는 설정뿐이다 [12].
+`baseline_create`의 인자 설명은 살아 있는 호스트를 감시할 때 `FINDEVIL_EVIDENCE_DIR`을 `/`의 읽기 전용 마운트로 가리키라고 적기만 한다 [13].
+
+**한계.** 운영체제 명령 8개(`file`·`stat`·`md5sum`·`sha256sum`·`strings`·`ls`·`grep`·`xxd`)가 증거를 읽기 모드로 여는지는 서버 머리가 이 명령의 버전 기준을 정하지 않아 소스로 확인하지 못했고 실제 보호 미확인이다 [6].
+
+### 근거
+
+[1] 서버 코드가 증거를 읽는 곳이다: [`src/findevil/tools/linux_auth.py:163`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L163), [`src/findevil/tools/linux_persistence.py:139-146`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L139-L146), [`src/findevil/tools/linux_web.py:379-383`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L379-L383), [`src/findevil/tools/fim.py:156-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L156-L168), [`src/findevil/tools/linux_packages.py:457-478`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L457-L478).
+
+[2] `baseline_create`의 출력 경로 검사와 쓰기다.
+
+```python
+def _resolve_output_path(output_file: str) -> Path:
+    """Pick the baseline output path. Default is LOGS_DIR/baseline.json.
+
+    Late import of `server` is intentional — tests monkeypatch
+    `server.LOGS_DIR` and we want to see the current value, not a
+    captured-at-import-time copy.
+
+    Security: refuses output paths inside EVIDENCE_DIR. Without this,
+    a user (or prompt-injected tool arg) could tell baseline_create to
+    write its JSON output over an evidence file, violating the
+    "no-write-to-evidence" architectural guarantee.
+    """
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:267-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L267-L295)
+
+```python
+    try:
+        out_path = _resolve_output_path(output_file)
+    except ValueError as e:
+        # Refuses output paths inside the evidence directory; surface a
+        # readable error rather than letting the exception bubble.
+        return f"Error: {e}"
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:328-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L328-L340)
+
+[3] 호출 기록 `audit.json`을 여는 처리기다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+```
+
+[`src/findevil/server.py:42-45`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L45)
+
+[4] `get_audit_trail`이 덧붙이기 모드로 여는 파일이다.
+
+```python
+    try:
+        with (LOGS_DIR / "get_audit_trail_invocations.jsonl").open("a") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "filter_tool": filter_tool,
+                        "filter_since": filter_since,
+                        "limit": limit,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+```
+
+[`src/findevil/tools/self_correction.py:598-612`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L598-L612)
+
+[5] 기록 폴더는 시작할 때 만든다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+[`src/findevil/server.py:27-29`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L29)
+
+[6] 기본 도구가 실행하는 명령과 인자다: [`src/findevil/server.py:171-172`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L171-L172), [`src/findevil/server.py:200-201`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L200-L201), [`src/findevil/server.py:231-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L231-L237), [`src/findevil/server.py:272`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L272), [`src/findevil/server.py:305-308`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L305-L308), [`src/findevil/server.py:345-350`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L345-L350).
+
+[7] Volatility 실행 인자를 만드는 부분이다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_VOL_TIMEOUT_S,
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:160-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L168)
+
+[8] `_run_tool`은 인자 목록으로 명령을 실행한다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+[9] 메모리 도구가 플러그인을 부르는 곳이다: [`src/findevil/tools/linux_memory.py:232`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L232), [`src/findevil/tools/linux_memory.py:428`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L428), [`src/findevil/tools/linux_memory.py:492-494`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L492-L494), [`src/findevil/tools/linux_memory.py:569-570`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L569-L570), [`src/findevil/tools/linux_memory.py:645`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L645), [`src/findevil/tools/linux_memory.py:706-708`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L706-L708), [`src/findevil/tools/linux_memory.py:944-952`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L944-L952).
+
+[10] Volatility 3 2.28.0의 `FileLayer`가 파일을 여는 모드다: [`volatility3/framework/layers/physical.py:119-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/physical.py#L119-L125).
+
+[11] Volatility 3 2.28.0의 캐시 폴더와 그 아래 심볼 폴더다: [`volatility3/framework/constants/__init__.py:28-38`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L38), [`volatility3/framework/constants/__init__.py:46-51`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L46-L51).
+
+[12] 저장소의 MCP 연결 설정이다.
+
+```json
+{
+  "mcpServers": {
+    "findevil": {
+      "type": "stdio",
+      "command": "./.venv/bin/python",
+      "args": ["-m", "findevil"]
+    }
+  }
+}
+```
+
+[`.mcp.json:1-9`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/.mcp.json#L1-L9)
+
+[13] `baseline_create`의 인자 설명이다.
+
+```python
+    Args:
+        root_path: Filesystem root to snapshot (must be inside
+            FINDEVIL_EVIDENCE_DIR — for live-host monitoring, point
+            FINDEVIL_EVIDENCE_DIR at a read-only mount of `/`)
+        output_file: Where to write the baseline JSON. Defaults to
+            `<FINDEVIL_LOGS_DIR>/baseline.json`.
+```
+
+[`src/findevil/tools/fim.py:311-316`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L311-L316)

@@ -1,0 +1,171 @@
+---
+cell: D09
+details:
+- id: D09.01
+- id: D09.04
+---
+
+# D09 파생물 저장 실패 처리
+
+### D09.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 `baseline_create`가 기준선 파일을 쓰는 경로에 적용된다 [1].
+서버는 목적지의 상위 폴더 만들기와 파일 쓰기를 한 `try` 블록에 두고 `OSError`·`PermissionError`가 나면 `Error writing baseline:`으로 시작하는 실패 문구를 응답으로 돌려준다 [1].
+이때 기준선 경로와 항목 수를 담은 성공 응답은 나가지 않는다 [1].
+호출 기록 항목은 쓰기가 끝난 뒤에 남기므로 쓰기가 실패한 호출은 호출 기록에 남지 않는다 [1][2].
+저장한 파일을 다시 읽어 확인하거나 완료 표시를 남기는 코드는 없어 D09.03에는 연결하지 않는다 [1].
+
+**한계.** 서버는 `write_text`로 목적지를 바로 쓰고 실패했을 때 쓰다 만 파일을 지우지 않는다 [1].
+쓰기 도중 실패하면 앞부분만 쓴 파일이 그 경로에 남는다 [1].
+CPython 3.12.3의 `write_text`는 파일을 `w` 모드로 열어 기존 내용을 먼저 지운다 [3].
+그래서 파일을 연 뒤에 쓰기가 실패하면 그 경로에 있던 앞 기준선도 남지 않는다 [1][3].
+`baseline_diff`는 그 파일을 JSON으로 읽지 못하면 `Error reading baseline:` 문구를 돌려준다 [4].
+
+### D09.04 알림 없이 계속
+
+**구현.** 이 방식은 `baseline_create`가 기준선 항목을 만드는 경로에 적용된다 [5].
+`_hash_file`은 파일을 읽다 `OSError`·`PermissionError`가 나면 빈 문자열을 돌려주고 `_stat_entry`는 그때 항목을 만들지 않는다 [6].
+`stat`이 실패해도 `_stat_entry`는 항목을 만들지 않는다 [6].
+`_build_baseline`은 만들지 못한 항목을 건너뛰고 나머지 항목만으로 기준선을 만든다 [5].
+`baseline_create` 응답에는 남긴 항목 수만 실리고 건너뛴 파일과 그 수는 실리지 않는다 [7].
+그래서 고른 파일 가운데 읽지 못한 파일이 빠진 기준선이 성공 응답과 함께 저장된다 [5][7].
+`baseline_diff`는 현재 상태도 같은 함수로 만들므로 비교할 때 읽지 못한 파일이 기준선에 있으면 그 파일을 삭제된 파일로 보고한다 [8].
+
+### 근거
+
+[1] `baseline_create`가 기준선 파일을 쓰고 호출 기록을 남기는 부분이다.
+
+```python
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:334-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L334-L340)
+
+```python
+    _audit(
+        "baseline_create",
+        {"root_path": root_path, "output_file": str(out_path)},
+        f"{len(entries)} entries written to {out_path.name}",
+    )
+    return "\n".join(lines)
+```
+
+[`src/findevil/tools/fim.py:394-399`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L394-L399)
+
+[2] 호출 기록 항목은 `_audit`가 쓴다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)
+
+[3] CPython 3.12.3 `Path.write_text`는 `w` 모드로 연다: [`Lib/pathlib.py:1039-1048`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/pathlib.py#L1039-L1048).
+
+[4] `baseline_diff`가 기준선 파일을 읽는 부분이다.
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586)
+
+[5] 항목을 만들지 못한 파일을 건너뛴다.
+
+```python
+def _build_baseline(root: Path) -> dict:
+    entries: list[FileEntry] = []
+    for path, severity in _expand_tracked_paths(root):
+        entry = _stat_entry(root, path, severity)
+        if entry is not None:
+            entries.append(entry)
+```
+
+[`src/findevil/tools/fim.py:249-254`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L249-L254)
+
+[6] 읽기나 `stat`이 실패하면 항목을 만들지 않는다.
+
+```python
+def _hash_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute SHA256 streaming. Returns empty string on permission error."""
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except (OSError, PermissionError):
+        return ""
+    return h.hexdigest()
+
+
+def _stat_entry(root: Path, path: Path, severity: str) -> FileEntry | None:
+    """Build a FileEntry from a real file. Returns None if unreadable."""
+    try:
+        st = path.stat()
+    except (OSError, PermissionError):
+        return None
+    sha = _hash_file(path)
+    if not sha:
+        return None
+```
+
+[`src/findevil/tools/fim.py:156-179`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L156-L179)
+
+[7] `baseline_create` 응답에 싣는 값이다: [`src/findevil/tools/fim.py:342-399`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L342-L399).
+
+[8] 기준선에만 있는 경로를 삭제로 분류한다.
+
+```python
+    base_map = {e["path"]: e for e in baseline_entries}
+    curr_map = {e["path"]: e for e in current_entries}
+
+    added_paths = set(curr_map) - set(base_map)
+    removed_paths = set(base_map) - set(curr_map)
+    common_paths = set(base_map) & set(curr_map)
+```
+
+[`src/findevil/tools/fim.py:411-416`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L411-L416)
+
+```python
+    removed = [
+        DiffEntry(
+            kind="removed",
+            path=p,
+            severity=base_map[p].get("severity", "info"),
+            details=[
+                f"File present in baseline but missing now",
+                f"Baseline SHA256: {base_map[p]['sha256']}",
+                f"Baseline size: {base_map[p]['size']} bytes",
+            ],
+        )
+        for p in sorted(removed_paths)
+    ]
+```
+
+[`src/findevil/tools/fim.py:434-446`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L434-L446)

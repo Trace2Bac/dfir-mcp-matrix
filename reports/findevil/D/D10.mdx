@@ -1,0 +1,91 @@
+---
+cell: D10
+details:
+- id: not_implemented
+---
+
+# D10 산출물 식별·재생성 처리
+
+### 미구현
+
+**판단.** 서버가 만드는 파생물 파일은 `baseline_create`의 기준선 파일이고 그 이름은 실행이나 입력마다 달라지지 않는다 [1].
+`output_file`을 주지 않으면 어느 `root_path`로 부르든 목적지는 기록 폴더의 `baseline.json` 하나다 [1].
+서버는 목적지에 파일이 있는지 보지 않고 `write_text`로 그대로 덮어쓰며 응답에도 앞 파일을 덮어썼다는 사실을 싣지 않는다 [2][3].
+덮어쓸지 고르는 인자나 앞 기준선을 다른 이름으로 남기는 코드는 없다 [2].
+기준선 파일 안의 `created_at`과 `root_path`는 지금 파일이 언제 어느 폴더로 만들어졌는지만 가리키고 앞 파일은 남지 않는다 [4].
+모델이 호출마다 다른 `output_file`을 주면 기준선 파일을 나눠 둘 수 있지만 그 이름은 호출 인자로 정해진다 [1].
+
+사용자 CLI `scripts/investigate.py`는 반복 기록을 증거 이름 폴더 아래 `iteration-NN.json`과 `summary.json`으로 쓰고 같은 증거를 다시 조사하면 같은 이름의 파일을 덮어쓴다 [5].
+이 파일은 사용자 CLI가 만드는 것이라 서버 구현으로 세지 않는다.
+
+### 근거
+
+[1] 목적지를 정하는 함수다.
+
+```python
+def _resolve_output_path(output_file: str) -> Path:
+    """Pick the baseline output path. Default is LOGS_DIR/baseline.json.
+
+    Late import of `server` is intentional — tests monkeypatch
+    `server.LOGS_DIR` and we want to see the current value, not a
+    captured-at-import-time copy.
+
+    Security: refuses output paths inside EVIDENCE_DIR. Without this,
+    a user (or prompt-injected tool arg) could tell baseline_create to
+    write its JSON output over an evidence file, violating the
+    "no-write-to-evidence" architectural guarantee.
+    """
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:267-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L267-L295)
+
+[2] 기준선 파일을 쓰는 부분이다.
+
+```python
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:334-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L334-L340)
+
+[3] `baseline_create` 응답에 싣는 값이다: [`src/findevil/tools/fim.py:342-399`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L342-L399).
+
+[4] 기준선 파일의 `_metadata`다.
+
+```python
+    return {
+        "_metadata": {
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "root_path": str(root),
+            "tool_version": "findevil-fim-1",
+            "entry_count": len(entries),
+        },
+        "entries": [asdict(e) for e in entries],
+    }
+```
+
+[`src/findevil/tools/fim.py:256-264`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L256-L264)
+
+[5] 사용자 CLI가 반복 기록을 쓰는 위치와 이름이다: [`scripts/investigate.py:49`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L49), [`scripts/investigate.py:165-167`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L165-L167), [`scripts/investigate.py:192-203`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L192-L203), [`scripts/investigate.py:222-229`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L222-L229).

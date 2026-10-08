@@ -1,0 +1,169 @@
+---
+cell: D01
+details:
+- id: D01.01
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 파일 무결성 기준선을 만드는 `baseline_create`와, 응답 앞부분을 호출 기록에 넣는 `file_info`·`hash_file`·`log_search`에 적용된다 [1][2].
+`baseline_create`는 증거 폴더 안 `root_path` 아래에서 정해 둔 계정·SSH·cron·systemd·PAM 등의 파일을 골라 파일마다 SHA-256·크기·권한·소유자·수정 시각·심각도를 담은 항목을 만든다 [3].
+서버 코드는 이 항목 목록에 생성 시각·`root_path`·형식 표시 `findevil-fim-1`·항목 수를 담은 `_metadata`를 붙여 JSON 파일 하나로 쓴다 [3][1].
+목적지는 `output_file`이 비면 `FINDEVIL_LOGS_DIR`(기본값 `./logs`) 아래 `baseline.json`이고 값을 주면 그 경로다 [4].
+서버는 이 파일을 호출 뒤에 지우지 않고 `baseline_diff`가 `baseline_file` 인자로 다시 읽어 현재 상태와 비교한다 [5].
+보관 기간·용량·대상을 정하는 설정이나 코드는 없다.
+
+호출 기록 파일 `audit.json`의 항목마다 `result_summary`가 있고 서버는 그 값을 500자에서 자른다 [6].
+`file_info`와 `hash_file`은 `file`·`stat` 또는 `md5sum`·`sha256sum`의 출력을 이어 붙인 응답 전체를 `result_summary`로 넘긴다 [2].
+`log_search`는 `grep` 출력으로 만든 응답의 앞 200자를 넘긴다 [2].
+그래서 이 세 도구에서는 분석 도구 출력의 앞부분이 호출 기록 파일에 남는다 [2][6].
+다른 도구는 건수나 판정 요약 문장만 호출 기록에 넘기고 출력은 응답으로만 돌려준다.
+분석 도구의 원래 출력과 가공본을 함께 남기는 도구는 없어 D01.04에는 연결하지 않는다.
+DB나 객체 저장소에 출력을 넣는 코드도 없어 D01.03에도 연결하지 않는다.
+
+사용자 CLI `scripts/investigate.py`는 반복마다 `assess_coverage` 응답 전체와 `claude` 실행 정보를 `logs/progress/<증거 이름>/iteration-NN.json`에 쓴다 [7].
+이 파일은 사용자 CLI가 만드는 것이라 서버 구현으로 세지 않는다.
+
+**한계.** 호출 기록에 남는 출력은 앞부분뿐이다 [6][2].
+`file_info`·`hash_file` 응답이 500자를, `log_search` 응답이 200자를 넘으면 그 뒤는 남지 않는다 [6][2].
+`baseline_create`는 읽지 못한 파일을 항목에서 빼므로 기준선 파일에 고른 파일이 모두 남지 않을 수 있다 [8].
+
+### 근거
+
+[1] `baseline_create`가 기준선을 만들고 파일로 쓴다.
+
+```python
+    try:
+        validated = _validate_evidence_path(root_path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.is_dir():
+        return f"Not a directory: {root_path}"
+
+    try:
+        out_path = _resolve_output_path(output_file)
+    except ValueError as e:
+        # Refuses output paths inside the evidence directory; surface a
+        # readable error rather than letting the exception bubble.
+        return f"Error: {e}"
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:321-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L321-L340)
+
+[2] 세 도구가 `_audit`에 넘기는 값이다: [`src/findevil/server.py:170-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L170-L176), [`src/findevil/server.py:200-205`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L200-L205), [`src/findevil/server.py:316-319`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L316-L319).
+
+[3] 기준선의 항목과 `_metadata`를 만드는 코드다: [`src/findevil/tools/fim.py:131-264`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L131-L264).
+
+[4] 목적지를 정하는 함수다.
+
+```python
+def _resolve_output_path(output_file: str) -> Path:
+    """Pick the baseline output path. Default is LOGS_DIR/baseline.json.
+
+    Late import of `server` is intentional — tests monkeypatch
+    `server.LOGS_DIR` and we want to see the current value, not a
+    captured-at-import-time copy.
+
+    Security: refuses output paths inside EVIDENCE_DIR. Without this,
+    a user (or prompt-injected tool arg) could tell baseline_create to
+    write its JSON output over an evidence file, violating the
+    "no-write-to-evidence" architectural guarantee.
+    """
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:267-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L267-L295)
+
+[5] `baseline_diff`가 기준선 파일을 읽는다.
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586)
+
+[6] `_audit`는 `result_summary`를 500자에서 자른다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)
+
+[7] 사용자 CLI가 반복 기록을 쓴다: [`scripts/investigate.py:49`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L49), [`scripts/investigate.py:165-167`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L165-L167), [`scripts/investigate.py:192-203`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L192-L203).
+
+[8] 읽지 못한 파일은 해시가 빈 문자열이 되고 항목이 만들어지지 않는다.
+
+```python
+def _hash_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute SHA256 streaming. Returns empty string on permission error."""
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except (OSError, PermissionError):
+        return ""
+    return h.hexdigest()
+```
+
+[`src/findevil/tools/fim.py:156-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L156-L168)
+
+```python
+def _stat_entry(root: Path, path: Path, severity: str) -> FileEntry | None:
+    """Build a FileEntry from a real file. Returns None if unreadable."""
+    try:
+        st = path.stat()
+    except (OSError, PermissionError):
+        return None
+    sha = _hash_file(path)
+    if not sha:
+        return None
+```
+
+[`src/findevil/tools/fim.py:171-179`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L171-L179)

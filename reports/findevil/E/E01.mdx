@@ -1,0 +1,203 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 환경변수 `FINDEVIL_EVIDENCE_DIR`이 가리키는 증거 폴더 아래의 파일과 폴더를 경로 인자로 받아 읽지만 증거를 식별하는 목록이나 등록 정보를 남기지 않는다 [1].
+증거를 등록하는 MCP 도구는 없다.
+도구는 받은 경로를 실제 경로로 변환해 증거 폴더 안에 있는지만 확인하고 그 경로가 어느 증거인지는 확인하지 않는다 [2].
+
+증거 목록에 가까운 응답을 내는 도구는 둘이다.
+`list_evidence`는 증거 폴더나 그 아래 폴더에 `ls -lahR`을 실행한 출력을 300줄까지 돌려주고 저장하지 않는다 [3].
+`assess_coverage`는 호출마다 증거 폴더를 훑어 auth 로그·journal·메모리 이미지 같은 아티팩트 종류별로 경로를 최대 10개씩 모은다 [4].
+응답 표에는 종류마다 앞의 경로 3개가 실린다 [5].
+이 목록은 호출마다 새로 만들고 저장하지 않으며 항목은 아티팩트 종류로 묶일 뿐 증거 항목마다 식별자나 등록 정보가 없다 [4].
+
+호출 기록 `audit.json`의 항목에는 시각, 도구 이름, 인자, 결과 글의 앞 500자가 남는다 [6].
+경로 인자가 호출 기록에 남는 것은 등록 정보가 아니다.
+
+`baseline_create`는 증거 폴더 안의 파일시스템 루트를 받아 정해 둔 경로 목록의 파일마다 SHA-256·크기·권한·소유자·수정 시각을 JSON 파일에 쓴다 [7].
+이 파일은 `baseline_diff`가 비교하는 기준이고 계정·SSH·cron·systemd 설정 같은 정해 둔 파일만 담는다 [7].
+`output_file`을 주지 않으면 늘 같은 `baseline.json`에 덮어쓴다 [8].
+그래서 이 파일도 증거 등록 목록으로 세지 않았다.
+
+사용자 CLI `scripts/investigate.py`의 `--watch`는 증거 폴더 맨 위 항목의 이름을 CLI 프로세스 메모리의 집합 `seen`에 두고 새 이름이 생기면 그 항목의 조사를 시작한다 [9].
+이 집합은 서버가 읽지 않고 CLI가 끝나면 사라진다 [9].
+
+### 근거
+
+[1] 증거 폴더와 기록 폴더를 환경변수로 정한다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+[`src/findevil/server.py:27-29`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L29)
+
+[2] 경로 검사는 증거 폴더 안인지만 본다.
+
+```python
+def _validate_evidence_path(path_str: str) -> Path:
+    """Ensure the requested path is inside the evidence directory.
+
+    Uses Path.relative_to() rather than a string-prefix check. A naive
+    startswith() would accept ``/tmp/X/evidence-malicious/...`` as being
+    "inside" ``/tmp/X/evidence`` because the string literally begins
+    with the prefix. Tests in tests/security/test_path_validation.py
+    hold this invariant in place.
+    """
+    requested = Path(path_str).resolve()
+    evidence_resolved = EVIDENCE_DIR.resolve()
+    try:
+        requested.relative_to(evidence_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Access denied: {path_str} is outside the evidence directory ({EVIDENCE_DIR})"
+        ) from exc
+    return requested
+```
+
+[`src/findevil/server.py:63-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L63-L80)
+
+[3] `list_evidence`는 `ls -lahR` 출력을 돌려준다.
+
+```python
+@mcp.tool()
+def list_evidence(subdir: str = "") -> str:
+    """List files and directories in the evidence directory.
+
+    Use this as your starting point to discover what evidence is available for analysis.
+
+    Args:
+        subdir: Subdirectory within /evidence to list (default: root of evidence dir)
+    """
+    target = EVIDENCE_DIR / subdir if subdir else EVIDENCE_DIR
+    try:
+        validated = _validate_evidence_path(str(target))
+    except ValueError as e:
+        return f"Error: {e}"
+
+    if not validated.exists():
+        return f"Directory not found: {target}"
+    if not validated.is_dir():
+        return f"Not a directory: {target}"
+
+    output = _run_tool(["ls", "-lahR", str(validated)])
+
+    lines = output.splitlines()
+    if len(lines) > 300:
+        output = "\n".join(lines[:300]) + f"\n\n[TRUNCATED: {len(lines)} total lines]"
+
+    _audit("list_evidence", {"subdir": subdir}, f"{len(lines)} lines")
+    return output
+```
+
+[`src/findevil/server.py:252-279`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L252-L279)
+
+[4] `assess_coverage`가 증거 폴더를 훑어 종류별 경로를 모으는 함수다: [`src/findevil/tools/autonomy.py:212-249`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L212-L249).
+
+[5] 응답 표에 종류마다 경로 3개를 싣는다.
+
+```python
+    # 1. Artifact coverage
+    for label, _kind, tools, action in _ARTIFACT_CHECKS:
+        if label not in inventory:
+            continue
+        covered = bool(tools & called)
+        mark = "✅ examined" if covered else "❌ NOT examined"
+        locs = ", ".join(f"`{h}`" for h in inventory[label][:3])
+        table.append(f"| {label} | {locs} | {mark} |")
+        if not covered:
+            gaps.append(f"**{label}** present ({locs}) but never examined → {action}")
+```
+
+[`src/findevil/tools/autonomy.py:295-304`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L295-L304)
+
+[6] 호출 기록 항목의 내용이다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)
+
+[7] `baseline_create`가 기준 파일에 쓰는 내용이다.
+
+```python
+def _build_baseline(root: Path) -> dict:
+    entries: list[FileEntry] = []
+    for path, severity in _expand_tracked_paths(root):
+        entry = _stat_entry(root, path, severity)
+        if entry is not None:
+            entries.append(entry)
+
+    return {
+        "_metadata": {
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "root_path": str(root),
+            "tool_version": "findevil-fim-1",
+            "entry_count": len(entries),
+        },
+        "entries": [asdict(e) for e in entries],
+    }
+```
+
+[`src/findevil/tools/fim.py:249-264`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L249-L264)
+
+[8] `output_file`이 없으면 기록 폴더의 `baseline.json`을 쓴다.
+
+```python
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+```
+
+[`src/findevil/tools/fim.py:279-282`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L279-L282)
+
+[9] `--watch`가 새 항목을 찾는 부분이다.
+
+```python
+def watch(args) -> int:
+    """Poll EVIDENCE_DIR; investigate each new top-level entry once it appears."""
+    print(
+        f"👁  watching {EVIDENCE_DIR} for new evidence "
+        f"(poll {args.poll_interval}s). Ctrl-C to stop."
+    )
+    seen: set[str] = {p.name for p in EVIDENCE_DIR.iterdir()} if EVIDENCE_DIR.is_dir() else set()
+    print(f"   ignoring {len(seen)} pre-existing entr(y/ies).")
+    while True:
+        try:
+            if EVIDENCE_DIR.is_dir():
+                for p in sorted(EVIDENCE_DIR.iterdir()):
+                    if p.name in seen or p.name.startswith("."):
+                        continue
+                    seen.add(p.name)
+                    print(f"\n🆕 new evidence detected: {p.name}")
+                    investigate(
+                        str(p),
+                        max_iterations=args.max_iterations,
+                        model=args.model,
+                        claude_bin=args.claude_bin,
+                        max_turns=args.max_turns,
+                        permission_mode=args.permission_mode,
+                        dry_run=args.dry_run,
+                    )
+```
+
+[`scripts/investigate.py:237-261`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L237-L261)

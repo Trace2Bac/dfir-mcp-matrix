@@ -1,0 +1,161 @@
+---
+cell: D03
+details:
+- id: not_implemented
+---
+
+# D03 파생물 무결성 검증
+
+### 미구현
+
+**판단.** 서버가 남기는 파생물은 `baseline_create`의 기준선 파일이고 서버는 그 파일의 해시를 계산하지도 대조하지도 않는다 [1].
+기준선 파일 안의 SHA-256은 증거 폴더에서 고른 파일의 해시이고 기준선 파일 자체의 해시가 아니다 [2].
+`baseline_diff`는 `baseline_file`을 JSON으로 읽어 그 안의 항목을 현재 증거 상태와 비교한다 [3].
+읽어 온 기준선 파일이 만들 때와 같은지는 확인하지 않는다 [3].
+해시 도구 `hash_file`은 증거 폴더 안 경로만 받고 `baseline_create`는 `output_file`로 증거 폴더 안을 주면 거부한다 [4][5].
+그래서 `output_file`로 정한 기준선 파일은 `hash_file`로 해시할 수 없다 [4][5].
+`output_file`을 비우면 서버는 증거 폴더와 겹치는지 보지 않고 `FINDEVIL_LOGS_DIR`의 `baseline.json`에 쓴다 [6].
+이 경우 사용자가 기록 폴더를 증거 폴더 안에 두었을 때만 기준선 파일을 `hash_file`로 해시할 수 있다 [4][6].
+호출 기록 파일에 남는 응답 앞부분에도 해시를 붙이지 않는다 [7].
+
+### 근거
+
+[1] `baseline_create`가 기준선을 쓰는 부분이다.
+
+```python
+    baseline = _build_baseline(validated)
+
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:334-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L334-L340)
+
+[2] 기준선 항목의 해시는 고른 파일의 내용을 해시한 값이다.
+
+```python
+def _hash_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute SHA256 streaming. Returns empty string on permission error."""
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except (OSError, PermissionError):
+        return ""
+    return h.hexdigest()
+```
+
+[`src/findevil/tools/fim.py:156-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L156-L168)
+
+[3] `baseline_diff`가 기준선 파일을 읽는 부분이다.
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+
+    baseline_entries = baseline.get("entries", [])
+    baseline_meta = baseline.get("_metadata", {})
+
+    current = _build_baseline(validated_root)
+    current_entries = current["entries"]
+```
+
+[`src/findevil/tools/fim.py:577-592`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L592)
+
+[4] `hash_file`은 경로를 `_validate_evidence_path`로 검사하고 그 함수는 증거 폴더 밖 경로를 거부한다.
+
+```python
+def _validate_evidence_path(path_str: str) -> Path:
+    """Ensure the requested path is inside the evidence directory.
+
+    Uses Path.relative_to() rather than a string-prefix check. A naive
+    startswith() would accept ``/tmp/X/evidence-malicious/...`` as being
+    "inside" ``/tmp/X/evidence`` because the string literally begins
+    with the prefix. Tests in tests/security/test_path_validation.py
+    hold this invariant in place.
+    """
+    requested = Path(path_str).resolve()
+    evidence_resolved = EVIDENCE_DIR.resolve()
+    try:
+        requested.relative_to(evidence_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Access denied: {path_str} is outside the evidence directory ({EVIDENCE_DIR})"
+        ) from exc
+    return requested
+```
+
+[`src/findevil/server.py:63-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L63-L80)
+
+```python
+    try:
+        validated = _validate_evidence_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.exists():
+        return f"File not found: {path}"
+```
+
+[`src/findevil/server.py:193-198`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L193-L198)
+
+[5] 기준선 목적지가 증거 폴더 안이면 거부한다.
+
+```python
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:283-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L283-L295)
+
+[6] `output_file`을 비우면 기록 폴더의 `baseline.json`을 바로 돌려준다.
+
+```python
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+```
+
+[`src/findevil/tools/fim.py:279-282`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L279-L282)
+
+[7] 호출 기록 항목의 필드다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)

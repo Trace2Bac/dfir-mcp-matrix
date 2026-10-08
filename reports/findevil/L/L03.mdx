@@ -1,0 +1,127 @@
+---
+cell: L03
+details:
+- id: L03.03
+- id: L03.04
+---
+
+# L03 기록 실패 처리
+
+### L03.03 경고 후 계속
+
+**구현.** 이 방식은 `audit.json`에 항목을 쓰는 44개 도구에 적용된다 [1].
+`_audit`은 Python 표준 `logging`의 `FileHandler`로 항목을 쓰고 서버는 처리기의 오류 처리를 바꾸지 않는다 [1].
+도구 본문은 결과를 다 만든 뒤 `_audit`을 부르고 그 다음 결과를 돌려준다 [2].
+CPython 3.12.3의 `StreamHandler.emit`은 항목을 쓰거나 비우다 난 예외를 처리기의 `handleError`로 넘긴다 [3].
+`handleError`는 모듈 값 `raiseExceptions`가 기본값인 참이면 표준 오류에 `--- Logging error ---`와 예외, 쓰려던 항목 문자열을 출력하고 예외를 호출한 쪽으로 넘기지 않는다 [4].
+그래서 기록 쓰기가 실패해도 `_audit`은 정상으로 끝나고 도구 결과는 그대로 돌아간다 [5].
+응답에는 기록 실패를 알리는 내용이 없고 실패 사실은 서버의 표준 오류에만 남는다 [5].
+표준 오류는 stdio MCP 메시지가 오가는 표준 출력과 다른 통로다 [6].
+
+서버는 모듈을 불러올 때 기록 폴더를 만들고 `audit.json`을 연다 [1][7].
+이 두 단계에서 난 예외는 처리하지 않아 서버가 시작되지 않는다 [1][7].
+
+### L03.04 알림 없이 계속
+
+**구현.** 이 방식은 `get_audit_trail`이 호출마다 쓰는 `get_audit_trail_invocations.jsonl`에 적용된다 [8].
+파일을 열거나 쓰다 `OSError`가 나면 아무것도 하지 않고 `audit.json` 읽기를 이어 간다 [8].
+응답에도 서버 로그에도 이 실패를 남기지 않는다 [8].
+
+### 근거
+
+[1] 기록은 `logging.FileHandler`로 쓰고 서버는 처리기를 바꾸지 않는다.
+
+```python
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:35-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L35-L56)
+
+[2] 도구 본문은 `_audit`을 부른 뒤 결과를 돌려준다.
+
+```python
+    md5 = _run_tool(["md5sum", str(validated)])
+    sha256 = _run_tool(["sha256sum", str(validated)])
+
+    result = f"## MD5\n{md5}\n## SHA256\n{sha256}"
+    _audit("hash_file", {"path": path}, result)
+    return result
+```
+
+[`src/findevil/server.py:200-205`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L200-L205)
+
+[3] CPython 3.12.3 `StreamHandler.emit`은 쓰기 예외를 `handleError`로 넘긴다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1148-L1168).
+`pyproject.toml`은 Python 3.11 이상만 정하고 README는 `python3.12-venv`로 가상환경을 만들게 하므로 Python 3.12의 소스로 확인했다.
+
+[4] `handleError`는 `raiseExceptions`가 참이면 표준 오류에 오류와 항목을 출력하고 예외를 다시 올리지 않는다: [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1066-L1112), [`Lib/logging/__init__.py:65`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L65).
+
+[5] (실행 확인) `audit.json`을 `/dev/full`에 연결한 기록 폴더로 `hash_file`을 부르면 해시 결과가 그대로 돌아오고 표준 오류에 `--- Logging error ---`와 쓰려던 항목이 출력되었다.
+
+[6] `.mcp.json`은 서버를 stdio로 실행한다.
+
+```json
+{
+  "mcpServers": {
+    "findevil": {
+      "type": "stdio",
+      "command": "./.venv/bin/python",
+      "args": ["-m", "findevil"]
+    }
+  }
+}
+```
+
+[`.mcp.json:1-9`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/.mcp.json#L1-L9)
+
+[7] 기록 폴더는 모듈을 불러올 때 만든다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+[`src/findevil/server.py:27-29`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L29)
+
+[8] `get_audit_trail`의 별도 파일 쓰기는 `OSError`를 처리하고 아무것도 남기지 않는다.
+
+```python
+    try:
+        with (LOGS_DIR / "get_audit_trail_invocations.jsonl").open("a") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "filter_tool": filter_tool,
+                        "filter_since": filter_since,
+                        "limit": limit,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+```
+
+[`src/findevil/tools/self_correction.py:598-612`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L598-L612)

@@ -1,0 +1,425 @@
+---
+cell: P03
+details:
+- id: P03.01
+- id: P03.03
+- id: P03.04
+---
+
+# P03 조사 진척 판단
+
+### P03.01 기준 작업 목록 대조
+
+**구현.** `assess_coverage`는 자료 종류 11개마다 그 종류를 다룰 도구 묶음을 `_ARTIFACT_CHECKS`에 정해 둔다 [1].
+예를 들어 인증 로그에는 `auth_summary` 등 인증 도구 5개를, 메모리 이미지에는 `analyze_memory_summary` 등 메모리 도구 6개를 둔다 [1].
+서버는 호출 기록 `audit.json`의 모든 줄을 읽어 기록된 도구 이름 집합을 만든다 [2].
+증거 폴더에 있는 자료 종류마다 그 묶음의 도구가 하나라도 이 집합에 있으면 `examined`, 없으면 `NOT examined`로 표에 싣는다 [3].
+`NOT examined`인 종류는 실행할 작업 문구와 함께 남은 작업으로 응답에 싣는다 [3].
+
+**한계.** 도구 묶음의 도구 하나만 호출 기록에 있으면 그 종류 전체를 `examined`로 본다 [1][3].
+그래서 셸 기록 파일 목록만 내는 `find_shell_histories`를 한 번 부르면 셸 기록을 하나도 분석하지 않아도 셸 기록이 `examined`가 된다 [1][4].
+웹 서버 접근 로그는 접근 로그를 읽지 않는 `find_webshells`로, 패키지 로그는 로그를 읽지 않는 `verify_package_integrity`로도 `examined`가 된다 [1].
+대조는 도구 이름으로만 하고 호출 인자의 경로는 보지 않는다 [2][3].
+같은 종류의 파일이 여러 폴더에 있어도 한 파일에 도구를 실행하면 나머지 파일도 `examined`로 센다 [3][5].
+호출 기록 파일은 서버를 다시 시작하거나 다른 증거를 조사해도 이어 쓰므로 앞선 조사의 호출도 이번 조사의 수행으로 센다 [2][6].
+메모리 도구는 Volatility 3 실행이 실패하거나 심볼이 없어 분석하지 못해도 호출 기록을 남기므로 메모리 이미지가 `examined`가 된다 [7].
+`analyze_journal`처럼 읽은 사건이 없다는 응답으로 끝난 호출도 기록되므로 그 자료 종류는 `examined`가 된다 [8].
+서버가 호출 기록 파일에 쓰지 못해도 도구는 정상 응답을 돌려주고 이 사실을 알리지 않는다 [9][10].
+그래서 실제로 실행한 도구가 호출 기록에 없어 그 자료 종류가 `NOT examined`로 남을 수 있다 [9][3].
+목록 함수는 경로를 200,000개까지만 모아 그 뒤 경로의 자료 종류는 대조하지 않는다 [5].
+
+### P03.03 단계 상태·완료 조건 대조
+
+**구현.** `assess_coverage`는 남은 작업이 없으면 `COVERAGE CLEAN`을, 있으면 남은 작업 수와 함께 `GAP(S) REMAIN`을 판정으로 싣는다 [11].
+첫째 완료 조건은 증거 폴더에 있는 자료 종류가 모두 `examined`인 것이다 [3].
+둘째 조건은 `findings_json`에 공개 IPv4나 MD5·SHA-1·SHA-256 해시가 있으면 `bulk_ioc_lookup` 호출이 기록에 있는 것이다 [12].
+셋째 조건은 `findings_json`에서 `confidence`가 `confirmed`인 항목 수가 기록된 `verify_finding` 호출 수보다 많지 않은 것이다 [12].
+`findings_json`이 JSON으로 읽히지 않으면 IOC와 검증 조건을 보지 못했다는 남은 작업을 더한다 [13].
+서버 지침은 `COVERAGE CLEAN`이 나올 때까지 조사를 되풀이하라고 적는다 [14].
+서버는 이 판정으로 다른 도구 호출을 막지 않는다.
+
+사용자 CLI `scripts/investigate.py`는 `claude -p` 실행이 끝날 때마다 `findings_json` 없이 `assess_coverage`를 직접 부르고 그 실행 동안 `finalize_report`의 `ACCEPTED`가 기록됐는지 본다 [15].
+둘 다 채우면 반복을 멈추고 아니면 `--max-iterations`(기본 5)까지 되풀이한다 [15].
+
+**한계.** 검증 조건은 CONFIRMED 항목 수와 호출 기록 전체의 `verify_finding` 호출 수만 비교하고 어느 호출이 어느 항목을 검증했는지 보지 않는다 [12].
+`verify_finding`이 `CONTRADICTED`나 `INSUFFICIENT_EVIDENCE`를 돌려준 호출과 앞선 조사의 호출도 이 수에 포함된다 [12][16].
+`finalize_report`가 안에서 실행한 재확인은 `verify_finding` 호출로 기록되지 않아 이 수에 포함되지 않는다 [17].
+IOC 조건은 `bulk_ioc_lookup`이 한 번이라도 기록에 있으면 채워지고 그 IOC를 조회했는지는 보지 않는다 [12].
+도메인과 URL은 IOC 조건에서 보지 않는다 [12].
+`findings_json`을 주지 않으면 자료 종류 조건만 보고 `COVERAGE CLEAN`을 싣는다 [11].
+
+### P03.04 미조사 범위·생략 사유 보고
+
+**구현.** `assess_coverage`는 증거 폴더에 있지만 어느 도구도 다루지 않은 자료 종류를 남은 작업으로 응답에 싣는다 [3].
+항목마다 자료 종류 이름, 증거 폴더 기준 경로 3개까지, 실행할 작업 문구를 적는다 [3].
+`findings_json`을 읽지 못하면 JSON 오류 문구와 함께 IOC와 검증 조건을 확인하지 않았다는 사실을 남은 작업으로 싣는다 [13].
+자료 종류 11개 가운데 어느 것에도 속하지 않는 파일은 대조하지 않고 응답에도 오르지 않는다 [1][18].
+모델이 진행 기록을 적는 도구는 없고 `assess_coverage`의 호출 기록에도 `findings_json`을 받았는지만 남아 P03.05에는 연결하지 않는다 [19].
+
+**한계.** 도구 이름만 대조하므로 같은 종류의 다른 파일에 도구를 실행했으면 다루지 않은 파일이 있어도 응답에 오르지 않는다 [3][5].
+`find_shell_histories`처럼 기록 내용을 읽지 않는 도구 하나로도 그 종류가 남은 작업에서 빠진다 [1][4].
+목록 함수는 경로를 200,000개까지만 모으므로 그 뒤 경로에 있는 자료 종류는 다루지 않은 범위로도 응답에 오르지 않는다 [5].
+
+### 근거
+
+[1] 자료 종류마다 도구 묶음과 작업 문구를 정한 표다: [`src/findevil/tools/autonomy.py:99-180`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L99-L180).
+
+[2] 호출 기록 전체를 읽어 도구 이름 집합을 만든다.
+
+```python
+def _audited_tool_calls() -> list[dict]:
+    """Return every audit.json entry as a dict (best-effort, never raises)."""
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return []
+    try:
+        raw = audit_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _called_tool_names(entries: list[dict]) -> set[str]:
+    return {e.get("tool", "") for e in entries}
+```
+
+[`src/findevil/tools/autonomy.py:58-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L58-L80)
+
+[3] 자료 종류마다 도구 묶음과 도구 이름 집합을 맞춘다.
+
+```python
+    # 1. Artifact coverage
+    for label, _kind, tools, action in _ARTIFACT_CHECKS:
+        if label not in inventory:
+            continue
+        covered = bool(tools & called)
+        mark = "✅ examined" if covered else "❌ NOT examined"
+        locs = ", ".join(f"`{h}`" for h in inventory[label][:3])
+        table.append(f"| {label} | {locs} | {mark} |")
+        if not covered:
+            gaps.append(f"**{label}** present ({locs}) but never examined → {action}")
+```
+
+[`src/findevil/tools/autonomy.py:295-304`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L295-L304)
+
+[4] `find_shell_histories`는 파일 경로, 소유자, 크기만 모은다.
+
+```python
+    candidates: list[Path] = []
+    for name in _HISTORY_NAMES:
+        candidates.append(validated / "root" / name)
+        candidates.extend((validated / "home").glob(f"*/{name}"))
+
+    rows = []
+    for p in candidates:
+        if not p.exists():
+            continue
+        size = p.stat().st_size
+        owner = _infer_owner(p, validated)
+        hint = _size_hint(size, p.name)
+        rows.append((str(p.relative_to(validated)), owner, size, hint))
+```
+
+[`src/findevil/tools/linux_shell_history.py:224-236`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_shell_history.py#L224-L236)
+
+[5] 경로를 200,000개까지 모으고 종류마다 경로를 나눈다.
+
+```python
+    all_paths: list[Path] = []
+    try:
+        for p in EVIDENCE_DIR.rglob("*"):
+            all_paths.append(p)
+            if len(all_paths) > 200_000:  # runaway guard on enormous images
+                break
+    except OSError:
+        pass
+
+    for label, kind, _tools, _action in _ARTIFACT_CHECKS:
+        hits: list[str] = []
+        if kind == "fsroot":
+            for p in all_paths:
+                if _is_fs_root(p):
+                    try:
+                        hits.append(str(p.relative_to(EVIDENCE_DIR)))
+                    except ValueError:
+                        hits.append(str(p))
+        else:
+            for p in all_paths:
+                if p.is_file() and _match_artifact(p, kind):
+                    try:
+                        hits.append(str(p.relative_to(EVIDENCE_DIR)))
+                    except ValueError:
+                        hits.append(str(p))
+        if hits:
+            present[label] = sorted(set(hits))[:10]
+    return present
+```
+
+[`src/findevil/tools/autonomy.py:222-249`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L222-L249)
+
+[6] 호출 기록 파일은 서버 모듈을 불러올 때 정한 한 파일이다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Logging — every tool call is recorded for the audit trail
+# ---------------------------------------------------------------------------
+
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+```
+
+[`src/findevil/server.py:27-45`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L45)
+
+[7] 메모리 도구는 심볼이 없거나 실행이 실패해도 호출 기록을 남긴다.
+
+```python
+    res = _run_vol_plugin(dump, "linux.pslist")
+    if res.no_symbols:
+        banner, _ = _identify_kernel(dump)
+        out = _format_no_symbols_block(banner)
+        _audit("analyze_memory_processes", {"path": memory_dump_path}, "no symbols")
+        return out
+    if res.rc != 0:
+        _audit("analyze_memory_processes", {"path": memory_dump_path}, f"rc={res.rc}")
+        return (
+            f"# Memory processes — `{memory_dump_path}`\n\n"
+            f"vol failed (rc={res.rc}):\n```\n{res.stderr[:500]}\n```"
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:428-439`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L428-L439)
+
+[8] `analyze_journal`은 사건이 없어도 호출 기록을 남긴다.
+
+```python
+    if not entries:
+        result = f"No parseable journal entries in `{path}` (expected JSONL from `journalctl -o json`)."
+        _audit("analyze_journal", {"path": path}, "0 entries")
+        return result
+```
+
+[`src/findevil/tools/linux_journal.py:221-224`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L221-L224)
+
+[9] 호출 기록은 서버 모듈을 불러올 때 만든 `logging.FileHandler`로 쓴다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:42-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L56)
+
+[10] CPython 3.12.3의 처리기는 쓰기 예외를 `handleError`로 넘기고 호출한 쪽으로 다시 올리지 않는다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1148-L1168), [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1066-L1112).
+
+[11] 판정 문구다.
+
+```python
+    if gaps:
+        out.append(f"## ⚠ Coverage gaps ({len(gaps)})")
+        out.append("")
+        for g in gaps:
+            out.append(f"- {g}")
+        out.append("")
+        out.append(
+            f"**Verdict: {len(gaps)} GAP(S) REMAIN — keep investigating, "
+            "then re-run assess_coverage.**"
+        )
+    else:
+        out.append(
+            "**Verdict: COVERAGE CLEAN** — every artifact class present in "
+            "evidence has been examined"
+            + (
+                ", all flagged IOCs were pivoted, and every CONFIRMED claim has a "
+                "verification on record. Proceed to finalize_report."
+                if findings_json.strip()
+                else ". Supply findings_json to also check IOC-pivot and "
+                "verification coverage, then proceed to finalize_report."
+            )
+        )
+```
+
+[`src/findevil/tools/autonomy.py:364-385`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L364-L385)
+
+[12] IOC 조건과 검증 조건이다.
+
+```python
+        if parsed is not None:
+            items = parsed if isinstance(parsed, list) else [parsed]
+            confirmed_count = sum(
+                1
+                for c in items
+                if isinstance(c, dict)
+                and str(c.get("confidence", "")).lower() == "confirmed"
+            )
+            iocs = extract_iocs_raw(findings_json)
+            flagged = iocs["ipv4_public"] + iocs["md5"] + iocs["sha1"] + iocs["sha256"]
+            if flagged and "bulk_ioc_lookup" not in called:
+                sample = ", ".join(f"`{x}`" for x in flagged[:5])
+                gaps.append(
+                    f"{len(flagged)} public IOC(s) in findings ({sample}) but "
+                    "bulk_ioc_lookup was never run → pivot: run bulk_ioc_lookup "
+                    "and search each across the other evidence"
+                )
+            verify_calls = sum(1 for e in entries if e.get("tool") == "verify_finding")
+            if confirmed_count > verify_calls:
+                gaps.append(
+                    f"{confirmed_count} CONFIRMED claim(s) but only {verify_calls} "
+                    "verify_finding call(s) recorded → independently verify each "
+                    "CONFIRMED claim before finalizing"
+                )
+```
+
+[`src/findevil/tools/autonomy.py:321-344`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L321-L344)
+
+[13] `findings_json`을 읽지 못한 경우다.
+
+```python
+    if findings_json.strip():
+        try:
+            parsed = json.loads(findings_json)
+        except json.JSONDecodeError as e:
+            parsed = None
+            gaps.append(
+                f"could not parse findings_json ({e}) — IOC-pivot and "
+                "verification gaps were not checked"
+            )
+```
+
+[`src/findevil/tools/autonomy.py:312-320`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L312-L320)
+
+[14] 서버 지침의 되풀이 안내다.
+
+```python
+        "3. ASSESS — call assess_coverage (pass your findings so far as "
+        "findings_json). It reports gaps grounded in the audit trail: "
+        "unexamined artifacts, un-pivoted IOCs, unverified CONFIRMED claims. "
+        "If it reports gaps, return to step 2 and close them. Repeat until it "
+        "returns COVERAGE CLEAN.\n"
+```
+
+[`src/findevil/server.py:129-133`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L129-L133)
+
+[15] 사용자 CLI의 종료 판단과 반복 횟수다: [`scripts/investigate.py:72-76`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L72-L76), [`scripts/investigate.py:187-214`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L187-L214), [`scripts/investigate.py:273-276`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L273-L276).
+
+[16] `verify_finding`은 판정과 관계없이 호출을 기록한다.
+
+```python
+    verifier = _VERIFIER_MAP[claim_type]
+    verdict, reasons = verifier(params_obj)
+
+    lines = [
+        f"# Verification — claim: `{claim_type}`",
+        "",
+        f"- **Verdict:** {verdict}",
+        "- **Evidence:**",
+        *[f"  - {r}" for r in reasons],
+    ]
+    out = "\n".join(lines)
+    _audit("verify_finding", {"claim_type": claim_type, "params": params_obj}, verdict)
+    return out
+```
+
+[`src/findevil/tools/self_correction.py:390-402`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L390-L402)
+
+[17] `finalize_report`는 재확인 함수를 직접 부른다.
+
+```python
+        # CONFIRMED claims must survive an independent re-check.
+        if c.type in _VALID_CLAIM_TYPES:
+            verdict, reasons = _VERIFIER_MAP[c.type](c.data)
+            if verdict == "SUPPORTED":
+                why = reasons[0] if reasons else "verified"
+                verified_lines.append(
+                    f"- [CONFIRMED ✓ verified] `{c.id}` — {statement}  \n  ↳ {why}"
+                )
+            else:
+                rejections.append(
+                    f"`{c.id}` ('{c.type}') is CONFIRMED but verify_finding returned "
+                    f"**{verdict}**: {reasons[0] if reasons else 'no support'}. "
+                    "Re-investigate, or downgrade confidence to 'inference'/'uncertain'."
+                )
+```
+
+[`src/findevil/tools/autonomy.py:475-488`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L475-L488)
+
+[18] 자료 종류를 정하는 함수다.
+
+```python
+def _match_artifact(path: Path, kind: str) -> bool:
+    name = path.name.lower()
+    parent = path.parent.name.lower()
+    full = str(path).lower()
+    if kind == "auth":
+        return name in {"auth.log", "secure"} or name.startswith("auth.log")
+    if kind == "journal":
+        return name.endswith(".journal") or "journal" in name
+    if kind == "weblog":
+        return name.startswith("access.log") or parent in {"nginx", "apache2", "httpd"}
+    if kind == "authkeys":
+        return name == "authorized_keys"
+    if kind == "sshdconfig":
+        return name == "sshd_config"
+    if kind == "sudoers":
+        return name == "sudoers" or parent == "sudoers.d"
+    if kind == "history":
+        return name in {".bash_history", "bash_history", ".zsh_history", "zsh_history"}
+    if kind == "pkglog":
+        return name == "dpkg.log" or full.endswith("apt/history.log")
+    if kind == "container":
+        return name in {"daemon.json", "config.v2.json", "hostconfig.json"} or (
+            "docker" in full or "containerd" in full
+        )
+    if kind == "memory":
+        return name.endswith((".lime", ".mem", ".raw", ".vmem", ".dump", ".lime.raw"))
+    return False
+```
+
+[`src/findevil/tools/autonomy.py:183-209`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L183-L209)
+
+[19] `assess_coverage`의 호출 기록 항목이다.
+
+```python
+    result = "\n".join(out)
+    _audit(
+        "assess_coverage",
+        {"findings_supplied": bool(findings_json.strip())},
+        f"{len(gaps)} gaps; {len(called - {''})} tools used",
+    )
+```
+
+[`src/findevil/tools/autonomy.py:387-392`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L387-L392)

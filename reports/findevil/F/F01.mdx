@@ -1,0 +1,205 @@
+---
+cell: F01
+details:
+- id: F01.02
+- id: F01.03
+---
+
+# F01 판단 지침
+
+### F01.02 결론 서술 방식 안내
+
+**구현.** 이 방식은 서버 지침(`instructions`)과 `finalize_report`의 도구 설명에 있다 [1][2].
+서버 지침은 확정한 발견사항과 추론을 늘 구분하고 추측보다 "가용 증거로 판단할 수 없다"를 택하라고 적는다 [1].
+같은 지침은 `finalize_report`를 통과한 주장만 보고서에 CONFIRMED로 적을 수 있다고 적는다 [1].
+같은 지침은 거부된 주장을 다시 조사해 뒷받침하거나 확신도를 `inference`·`uncertain`으로 낮추라고 적는다 [1].
+`finalize_report` 설명은 주장마다 `confidence`를 `confirmed`·`inference`·`uncertain` 가운데 하나로 적으라고 안내한다 [2].
+같은 설명은 기계로 검증하지 못하는 유형의 확정 주장에 `file:line` 꼴의 인용 `evidence`를 적으라고 안내한다 [2].
+
+서버 지침은 조사 순서와 증거를 바꾸지 말라는 규칙을 적지만 부재가 무죄를 뜻하지 않는다는 원칙처럼 증거를 해석하는 원칙은 적지 않는다 [1].
+그래서 F01.01에는 연결하지 않는다.
+저장소의 `CLAUDE.md`도 같은 서술 방식을 적지만 이 파일은 Claude Code가 읽는 클라이언트 구성이다 [3].
+
+### F01.03 발견사항·결론의 단서·확인 권고
+
+**구현.** 이 방식은 `assess_coverage`의 응답과 `finalize_report`의 거부 응답에 있다 [4][5].
+`assess_coverage`는 모델이 `findings_json`으로 넘긴 발견사항 글에서 공인 IPv4와 MD5·SHA1·SHA256 해시를 뽑는다 [4].
+뽑은 값이 있는데 호출 기록에 `bulk_ioc_lookup` 호출이 없으면 IOC 수와 앞 5개를 적고 `bulk_ioc_lookup`으로 조회한 뒤 다른 증거에서 찾으라는 항목을 싣는다 [4].
+`confidence`가 `confirmed`인 항목 수가 호출 기록의 `verify_finding` 호출 수보다 많으면 확정 주장마다 `verify_finding`으로 따로 확인하라는 항목을 싣는다 [4].
+`finalize_report`의 거부 응답은 검증을 통과하지 못한 확정 주장마다 유형, 검증 판정, 첫 이유를 적고 다시 조사하거나 확신도를 낮추라고 적는다 [5].
+인용 없이 검증 유형이 아닌 확정 주장에는 인용을 더하거나 확신도를 낮추라고 적는다 [5].
+
+**한계.** `assess_coverage`는 확정 주장 수와 호출 기록 전체의 `verify_finding` 호출 수만 비교하고 어느 주장을 확인했는지 보지 않는다 [4].
+서버는 호출 기록 파일 `audit.json`을 서버를 다시 시작해도 이어 쓰므로 앞선 조사의 `verify_finding` 호출도 이 수에 포함된다 [6].
+`bulk_ioc_lookup`이 호출 기록에 한 번이라도 있으면 그 호출이 어떤 글을 조회했는지와 관계없이 IOC 조회 권고를 싣지 않는다 [4][7].
+
+### 근거
+
+[1] 서버 지침이다.
+
+```python
+    instructions=(
+        "You are an autonomous incident response analyst examining forensic "
+        "evidence from a SANS SIFT Workstation. Work the case end to end on "
+        "your own — do not wait for step-by-step instructions. Run this loop "
+        "until it terminates:\n"
+        "\n"
+        "1. ORIENT — call list_evidence to inventory what is available.\n"
+        "2. INVESTIGATE — form a hypothesis and run the relevant typed tools. "
+        "Treat every finding as a lead: when a tool surfaces an IOC (IP, user, "
+        "hash, path, domain), PIVOT before moving on — run extract_iocs / "
+        "bulk_ioc_lookup on it and search it across the other evidence.\n"
+        "3. ASSESS — call assess_coverage (pass your findings so far as "
+        "findings_json). It reports gaps grounded in the audit trail: "
+        "unexamined artifacts, un-pivoted IOCs, unverified CONFIRMED claims. "
+        "If it reports gaps, return to step 2 and close them. Repeat until it "
+        "returns COVERAGE CLEAN.\n"
+        "4. FINALIZE — assemble your findings as structured claims and call "
+        "finalize_report. It is the ONLY way to emit conclusions and it will "
+        "REJECT any CONFIRMED claim that fails independent verification or "
+        "contradicts another. When rejected, re-investigate to support the "
+        "claim OR downgrade its confidence to 'inference'/'uncertain', then "
+        "call finalize_report again. Only a claim that survives finalize_report "
+        "may be stated as CONFIRMED in your report.\n"
+        "\n"
+        "Rules: never modify evidence. Always distinguish confirmed findings "
+        "from inferences. Prefer 'cannot determine from available evidence' "
+        "over speculation. You are not done until assess_coverage is clean and "
+        "finalize_report has ACCEPTED your claims."
+    ),
+```
+
+[`src/findevil/server.py:118-146`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L118-L146)
+
+[2] `finalize_report` 설명의 주장 형식 안내다.
+
+```python
+    Each claim object:
+      - `id`         : short identifier (e.g. "c1")
+      - `type`       : a verifiable claim type (then its fields are
+                       re-checked) or any free-form label
+      - `confidence` : "confirmed" | "inference" | "uncertain"  (required)
+      - `statement`  : human-readable finding (for the report body)
+      - `evidence`   : citation (file:line) — REQUIRED for a CONFIRMED
+                       claim whose `type` is not machine-verifiable
+
+    For a CONFIRMED claim of a verifiable `type`, include that type's
+    fields at the top level so the gate can re-check it:
+      - `brute_force_from_ip`                 : log_path, ip, min_attempts
+      - `successful_login_after_brute_force`  : log_path, ip, user?
+      - `user_created`                        : log_path, name
+      - `package_installed`                   : fs_root, name
+      - `webshell_upload_chain`               : log_path, ip?, path?
+      - `file_modified_in_window`             : path, since_iso, until_iso
+      - `persistence_mechanism_exists`        : fs_root, category
+      - `sudo_command_executed`               : log_path, command_regex, user?
+```
+
+[`src/findevil/tools/autonomy.py:421-439`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L421-L439)
+
+[3] 클라이언트가 읽는 `CLAUDE.md`의 조사 지침이다.
+
+```markdown
+4. **Finalize** — assemble findings as structured claims and call
+   `finalize_report`. It is the ONLY sanctioned way to emit conclusions
+   and it will **reject** any CONFIRMED claim that fails independent
+   verification or contradicts another. When rejected, re-investigate to
+   support the claim OR downgrade its confidence to `inference` /
+   `uncertain`, then call `finalize_report` again. Only a claim that
+   survives the gate may be stated as CONFIRMED in the report.
+
+Prefer "cannot determine from available evidence" over speculation. You
+are not done until `assess_coverage` is clean and `finalize_report` has
+ACCEPTED your claims. For unattended runs, `scripts/investigate.py`
+drives this same loop headlessly with a hard `--max-iterations` cap.
+```
+
+[`CLAUDE.md:61-72`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/CLAUDE.md#L61-L72)
+
+[4] `assess_coverage`가 발견사항 글로 IOC 조회 공백과 검증 공백을 정한다.
+
+```python
+            confirmed_count = sum(
+                1
+                for c in items
+                if isinstance(c, dict)
+                and str(c.get("confidence", "")).lower() == "confirmed"
+            )
+            iocs = extract_iocs_raw(findings_json)
+            flagged = iocs["ipv4_public"] + iocs["md5"] + iocs["sha1"] + iocs["sha256"]
+            if flagged and "bulk_ioc_lookup" not in called:
+                sample = ", ".join(f"`{x}`" for x in flagged[:5])
+                gaps.append(
+                    f"{len(flagged)} public IOC(s) in findings ({sample}) but "
+                    "bulk_ioc_lookup was never run → pivot: run bulk_ioc_lookup "
+                    "and search each across the other evidence"
+                )
+            verify_calls = sum(1 for e in entries if e.get("tool") == "verify_finding")
+            if confirmed_count > verify_calls:
+                gaps.append(
+                    f"{confirmed_count} CONFIRMED claim(s) but only {verify_calls} "
+                    "verify_finding call(s) recorded → independently verify each "
+                    "CONFIRMED claim before finalizing"
+                )
+```
+
+[`src/findevil/tools/autonomy.py:323-344`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L323-L344)
+
+[5] `finalize_report`가 확정 주장마다 검증하고 거부 사유와 다음 조치를 적는다.
+
+```python
+        if c.type in _VALID_CLAIM_TYPES:
+            verdict, reasons = _VERIFIER_MAP[c.type](c.data)
+            if verdict == "SUPPORTED":
+                why = reasons[0] if reasons else "verified"
+                verified_lines.append(
+                    f"- [CONFIRMED ✓ verified] `{c.id}` — {statement}  \n  ↳ {why}"
+                )
+            else:
+                rejections.append(
+                    f"`{c.id}` ('{c.type}') is CONFIRMED but verify_finding returned "
+                    f"**{verdict}**: {reasons[0] if reasons else 'no support'}. "
+                    "Re-investigate, or downgrade confidence to 'inference'/'uncertain'."
+                )
+        else:
+            citation = str(c.data.get("evidence", "")).strip()
+            if citation:
+                verified_lines.append(
+                    f"- [CONFIRMED · cited] `{c.id}` — {statement}  \n  ↳ evidence: {citation}"
+                )
+            else:
+                rejections.append(
+                    f"`{c.id}` ('{c.type}') is CONFIRMED but its type is not "
+                    "machine-verifiable and no `evidence` citation was given. "
+                    "Add an evidence citation, or downgrade confidence."
+                )
+```
+
+[`src/findevil/tools/autonomy.py:476-500`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L476-L500)
+
+[6] 호출 기록은 `FileHandler`로 `audit.json`에 이어 쓴다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+```
+
+[`src/findevil/server.py:42-45`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L45)
+
+[7] 조사 여부는 호출 기록 전체 항목의 도구 이름 집합으로 정한다.
+
+```python
+def _called_tool_names(entries: list[dict]) -> set[str]:
+    return {e.get("tool", "") for e in entries}
+```
+
+[`src/findevil/tools/autonomy.py:79-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L79-L80)
+
+```python
+    entries = _audited_tool_calls()
+    called = _called_tool_names(entries)
+```
+
+[`src/findevil/tools/autonomy.py:288-289`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L288-L289)

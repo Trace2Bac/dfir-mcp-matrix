@@ -1,0 +1,164 @@
+---
+cell: T05
+details:
+- id: T05.01
+- id: T05.02
+---
+
+# T05 분석 도구 검증
+
+### T05.01 저장소·의존성 고정
+
+**구현.** 이 방식은 `extract_iocs`·`bulk_ioc_lookup`이 조회하는 IOC 파일에 적용된다 [1].
+IOC 파일 `src/findevil/data/threat_intel.json`은 저장소에 들어 있고 서버는 모듈 위치 기준의 정해진 경로로 이 파일을 읽으므로 기준 커밋이 그 내용을 정한다 [1].
+`pyproject.toml`은 이 파일을 패키지에 함께 넣도록 적는다 [2].
+파일의 `_metadata`는 갱신 날짜를 2026-04-19로, 출처를 저장소 공격 시나리오의 모의 자료와 공개된 악성코드 표본으로 적는다 [3].
+서버는 이 `_metadata`를 읽거나 응답에 싣지 않는다 [4].
+정상 커널 모듈, 정상 PAM 모듈, 알려진 악성 패키지 이름 같은 판단 목록은 서버 코드에 상수로 적혀 있어 역시 기준 커밋이 내용을 정한다 [5].
+
+그 밖의 도구는 저장소가 버전을 고정하지 않는다.
+`pyproject.toml`의 의존성은 `mcp[cli]>=1.0.0` 하나이고 이 MCP SDK는 증거를 해석하지 않는 서버 실행용 라이브러리라 이 방식으로 세지 않는다 [2].
+메모리 도구가 실행하는 Volatility 3은 의존성에 없다 [2].
+문서는 findevil 가상 환경에 `pip install volatility3`로 버전 없이 설치했다고 적는다 [6].
+Volatility가 쓰는 Linux 커널 심볼(ISF)도 서버가 정하지 않는다.
+문서는 공개 묶음을 받거나 `dwarf2json`으로 만든 심볼을 Volatility 캐시 폴더에 두라고 안내한다 [7].
+`file`, `stat`, `strings`, `grep`, `xxd`, `md5sum`, `sha256sum`, `ls`는 운영체제에 설치된 것을 그대로 실행한다 [8].
+도구나 참조 자료를 쓰기 직전에 해시나 서명을 기대값과 대조하는 코드는 없다.
+
+### T05.02 설정·호출 인자로 지정
+
+**구현.** 이 방식은 메모리 도구가 실행하는 Volatility 3 실행 파일에 적용된다.
+서버는 모듈을 불러올 때 환경변수 `FINDEVIL_VOL`이 가리키는 파일이 있으면 그 파일을 `vol`로 쓴다 [9].
+값이 없으면 `PATH`의 `vol`이나 `vol.py`, 서버를 실행한 Python 폴더의 `vol`이나 `vol.py` 순서로 찾고 모두 없으면 `vol`이라는 이름을 그대로 쓴다 [9].
+서버는 고른 실행 파일의 버전을 읽지 않는다 [9][10].
+심볼 폴더를 정하는 설정이나 인자는 없고 서버는 `vol`에 심볼 경로를 넘기지 않는다 [11].
+
+**한계.** `FINDEVIL_VOL`이 가리키는 경로가 파일이 아니면 서버는 알리지 않고 `PATH`에서 찾은 `vol`을 쓴다 [9].
+값을 주지 않으면 `PATH`의 `vol`이 서버 가상 환경의 `vol`보다 앞서므로 가상 환경에 설치한 것과 다른 버전이 실행될 수 있다 [9].
+
+### 근거
+
+[1] IOC 파일의 위치와 읽는 함수다.
+
+```python
+_DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "threat_intel.json"
+
+
+@lru_cache(maxsize=1)
+def _load_cache() -> dict[str, Any]:
+    """Load the bundled IOC cache once."""
+    try:
+        return json.loads(_DATA_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        # Fail closed — an unusable cache is still usable (all lookups miss)
+        return {"_error": str(e), "ips": {}, "hashes": {}, "domains": {}}
+```
+
+[`src/findevil/tools/threat_intel.py:46-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L46-L56)
+
+[2] 의존성과 패키지에 함께 넣는 파일이다.
+
+```toml
+dependencies = [
+    "mcp[cli]>=1.0.0",
+]
+```
+
+[`pyproject.toml:12-14`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/pyproject.toml#L12-L14)
+
+```toml
+[tool.hatch.build.targets.wheel.force-include]
+"src/findevil/data/threat_intel.json" = "findevil/data/threat_intel.json"
+```
+
+[`pyproject.toml:27-28`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/pyproject.toml#L27-L28)
+
+[3] IOC 파일의 `_metadata`다.
+
+```json
+  "_metadata": {
+    "description": "Bundled IOC cache for offline threat-intel lookups by the findevil MCP server. Shipped with the tool so analysis works without internet. For production use, merge with a live feed from abuse.ch / FireHOL / MalwareBazaar.",
+    "last_updated": "2026-04-19",
+    "sources": [
+      "simulated (this repo's attack scenarios)",
+      "publicly-documented malware samples"
+    ]
+  },
+```
+
+[`src/findevil/data/threat_intel.json:2-9`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/data/threat_intel.json#L2-L9)
+
+[4] 조회 함수는 `ips`·`domains`·`hashes` 항목만 읽는다: [`src/findevil/tools/threat_intel.py:164-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L164-L176), [`src/findevil/tools/threat_intel.py:179-207`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L179-L207), [`src/findevil/tools/threat_intel.py:210-223`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L210-L223).
+
+[5] 서버 코드의 판단 목록이다: [`src/findevil/tools/linux_persistence.py:688-700`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L688-L700), [`src/findevil/tools/linux_persistence.py:782-796`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L782-L796), [`src/findevil/tools/linux_packages.py:51-90`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L51-L90).
+
+[6] 문서가 적은 Volatility 설치 방법이다: [`docs/accuracy-report.md:1094-1098`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/docs/accuracy-report.md#L1094-L1098).
+
+[7] 문서가 안내하는 심볼 준비 방법이다: [`docs/memory-forensics.md:88-98`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/docs/memory-forensics.md#L88-L98).
+
+[8] 실행 파일 이름만 적어 실행한다: [`src/findevil/server.py:171-172`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L171-L172), [`src/findevil/server.py:234-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L234-L237), [`src/findevil/server.py:305-308`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L305-L308).
+
+[9] Volatility 실행 파일을 고르는 함수다.
+
+```python
+def _resolve_vol_bin() -> str:
+    """Find the Volatility 3 entrypoint.
+
+    Order of preference:
+      1. FINDEVIL_VOL env var (explicit override)
+      2. `vol` / `vol.py` on $PATH
+      3. The findevil venv's own bin/ (so installs into the project venv work
+         even when the venv is not activated by the calling shell)
+      4. Fall back to "vol" so the no-such-binary error message is clean
+    """
+    override = os.environ.get("FINDEVIL_VOL")
+    if override and Path(override).is_file():
+        return override
+    for name in ("vol", "vol.py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    # Note: do NOT call .resolve() here — venv pythons are typically
+    # symlinks to the system interpreter, and resolving that symlink
+    # leaks back to the system bin dir where `vol` likely isn't.
+    venv_bin = Path(sys.executable).parent
+    for name in ("vol", "vol.py"):
+        cand = venv_bin / name
+        if cand.is_file():
+            return str(cand)
+    return "vol"
+
+
+_VOL_BIN = _resolve_vol_bin()
+```
+
+[`src/findevil/tools/linux_memory.py:66-94`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L66-L94)
+
+[10] 실행 전 확인은 반환 코드만 본다.
+
+```python
+def _vol_available() -> bool:
+    if not _VOL_BIN:
+        return False
+    try:
+        proc = subprocess.run(
+            [_VOL_BIN, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+```
+
+[`src/findevil/tools/linux_memory.py:120-130`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L120-L130)
+
+[11] Volatility 인자 배열에 심볼 경로가 없다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+```
+
+[`src/findevil/tools/linux_memory.py:160-163`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L163)

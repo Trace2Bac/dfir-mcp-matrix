@@ -1,0 +1,732 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.11
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `server.py`의 기본 도구 6개 `file_info`·`hash_file`·`strings_extract`·`list_evidence`·`log_search`·`hexdump`에 적용된다 [1].
+이 도구들은 공통 실행기 `_run_tool`로 운영체제 명령을 실행하고 표준 출력 문자열을 응답에 싣는다 [2].
+명령이 0이 아닌 종료 코드로 끝나면 `_run_tool`은 표준 출력 뒤에 `[STDERR]:`와 표준 오류를 이어 붙인다 [2].
+`file_info`는 `file -b`와 `stat`의 출력을, `hash_file`은 `md5sum`과 `sha256sum`의 출력을 제목 줄 아래에 바꾸지 않고 싣는다 [3].
+`strings_extract`·`list_evidence`·`log_search`는 명령 출력을 그대로 싣고 줄 상한을 넘을 때만 앞부분을 남긴다 [1].
+`hexdump`는 `xxd` 출력을 그대로 싣고 줄 상한 없이 읽을 바이트 수만 줄인다 [4].
+메모리 도구는 Volatility가 실패하면 표준 오류의 앞 400~500자를 코드 블록에 담아 그대로 싣는다 [5].
+
+모든 도구 함수는 반환형을 `str`로 선언하고 Markdown 글 하나를 돌려준다 [1].
+MCP Python SDK 1.27.2의 FastMCP는 반환형이 `str`인 함수에 `result` 필드 하나짜리 출력 schema를 만든다 [6].
+그래서 응답은 그 글을 담은 글 블록 하나와, 같은 글을 `result`에 담은 `structuredContent`로 나간다 [6].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 Volatility 3를 실행하는 메모리 도구 7개와, 증거 파일을 서버 안 파서로 읽는 도구에 적용된다.
+`_run_vol_plugin`은 Volatility를 JSON 렌더러 `-r json`으로 실행하고 표준 출력을 JSON 목록으로 읽어 `dict` 행만 남긴다 [7].
+JSON 앞에 다른 글이 붙어 읽기에 실패하면 정규식으로 목록 부분을 다시 찾는다 [7].
+`analyze_memory_processes`는 행에서 PID·PPID·프로세스 이름만 골라 표에 싣는다 [8].
+`analyze_memory_network`는 주소·포트·프로토콜·상태·프로세스 이름을 골라 표에 싣고 inet 소켓이 아닌 행은 판정에서 뺀다 [9].
+열 이름이 Volatility 버전마다 달라 두 도구는 여러 열 이름을 차례로 찾는다 [8][9].
+`analyze_memory_malfind`는 PID·프로세스·시작 주소·끝 주소·보호 속성을 골라 싣는다 [10].
+Volatility 3 2.28.0의 `linux.malware.malfind.Malfind`가 내는 `Path`·`Hexdump`·`Disasm` 열은 응답에 싣지 않는다 [10][11].
+
+증거 파일을 읽는 도구는 정규식이나 JSON으로 줄을 필드로 나눈다.
+`parse_auth_line`은 syslog 줄을 시각·호스트·서비스·PID·메시지로 나누고 sshd·sudo·useradd 같은 사건마다 사용자·IP·명령 같은 필드를 뽑는다 [12].
+`parse_journal`은 `journalctl -o json` 줄에서 시각·unit·식별자·우선순위·메시지·UID·PID를 고른다 [13].
+`parse_access_log`는 Combined Log Format 줄을 IP·시각·메서드·경로·상태·크기·referer·User-Agent로 나눈다 [14].
+apt·dpkg·yum·pip 기록은 시각·동작·패키지 이름·버전으로 나눈다 [15].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 서버가 파싱한 결과를 Markdown 표와 건수로 바꾸는 도구에 적용된다.
+공통 함수 `emit_table`은 행 목록을 Markdown 표로 바꾸면서 칸 값의 `|`·백틱·줄바꿈을 바꿔 쓴다 [16].
+`auth_summary`는 사건 종류마다 건수를 세고 실패한 로그인이 많은 IP 5개를 싣는다 [17].
+`auth_failed_logins`는 실패 사건을 IP로 묶어 시도 수, 대상 사용자 수, 인증 방법별 건수, 처음과 마지막 줄 번호를 싣는다 [18].
+`analyze_journal`·`analyze_nginx_access`·`analyze_package_logs`도 사건 종류, IP, 공격 표지, 패키지 동작마다 건수를 센다 [19].
+`build_timeline`은 여러 기록의 사건을 시각·출처·행위자·동작·내용·위치 칸으로 맞춰 한 표로 합치고 시각 차례로 정렬한다 [20].
+메모리 도구는 Volatility의 JSON 행을 Markdown 표와 건수로 바꾼다 [8][9].
+
+일부 도구의 응답 제목은 도구가 읽은 입력 경로를 적고 메모리 도구의 일부 줄은 값을 만든 플러그인 이름을 적는다 [8][21].
+그러나 응답이 서버가 가공한 결과라는 표시는 없어 R01.05에는 연결하지 않는다 [17][21].
+
+**한계.** 파서가 형식에 맞지 않는 줄을 버리면 건수에 넣지 않고 버린 줄 수도 알리지 않는다.
+`parse_auth_log`는 syslog 형식이 아닌 줄을 건너뛰고 `auth_summary`의 `Total events`는 읽힌 줄만 센다 [12][17].
+`parse_access_log`는 형식이 맞지 않는 줄을, `parse_journal`은 JSON으로 읽히지 않는 줄을 같은 방식으로 건너뛴다 [13][14].
+
+`auth_failed_logins`와 `auth_summary`는 sshd의 `Invalid user` 줄과 `Failed password` 줄을 모두 실패 사건으로 센다 [12][17][18].
+sshd는 없는 계정으로 비밀번호 로그인을 시도하면 한 시도에 이 두 줄을 남긴다 [22].
+그래서 없는 계정에 대한 시도는 응답의 시도 수 `Attempts`와 `Failed logins`에서 두 번씩 세어진다 [17][18][22].
+`analyze_journal`의 `Failed auth attempts`와 `build_timeline`의 `login_failed` 사건도 두 줄을 따로 세어 같은 시도가 두 번 들어간다 [23].
+
+`analyze_container_artifacts`는 `etc/kubernetes`를 하위 폴더까지 훑은 뒤 `etc/kubernetes/manifests`를 다시 훑는다 [24].
+그래서 `manifests` 아래 파일은 두 번 검사되어 같은 발견사항이 두 번 실리고 `Findings` 수가 늘어난다 [24].
+
+### R01.11 응답 항목 선별
+
+**구현.** 이 방식은 `find_persistence`의 응답과 `build_timeline`의 사건 목록에 적용된다 [25][26].
+`find_persistence`의 검사기는 의심 근거가 없는 지속성 파일도 심각도 `info`인 항목으로 만든다 [27].
+응답을 만드는 `_format_findings`는 상세 목록에서 `info` 항목을 빼고 `high`·`medium` 항목이 하나도 없을 때만 `info` 항목 앞 10개의 경로를 싣는다 [25].
+`build_timeline`은 journal 사건 가운데 식별자가 `sshd`·`sudo`·`useradd`·`kernel`·`systemd`인 것만 넣는다 [26].
+auth.log 사건은 로그인 성공·실패, sudo, 계정 추가만 넣고 계정 삭제와 그룹 추가는 넣지 않는다 [28].
+access log 사건은 시각을 ISO 8601로 바꾸지 못하면 빼고 bash 기록 항목은 `HISTTIMEFORMAT` 시각이 없으면 뺀다 [29].
+`parse_dpkg_log`는 `status`·`trigproc`·`configure` 줄을 빼고 `install`·`remove`·`upgrade` 줄만 사건으로 만들어 `analyze_package_logs`와 `build_timeline`에 넘긴다 [30].
+뺀 항목의 뜻은 바뀌지 않는다.
+
+`find_persistence` 응답의 요약 줄은 `info`를 포함한 심각도별 건수를 싣는다 [25].
+`build_timeline` 응답에는 뺀 사건의 수와 고른 규칙이 없다 [20][26].
+`analyze_package_logs` 응답의 `Total events parsed`도 뺀 `dpkg` 줄을 세지 않는다 [30].
+
+### 근거
+
+[1] 기본 도구 6개는 `_run_tool`의 출력을 응답에 싣는다: [`src/findevil/server.py:154-353`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L154-L353).
+
+[2] `_run_tool`은 표준 출력을 돌려주고 종료 코드가 0이 아니면 표준 오류를 이어 붙인다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+[3] `file_info`와 `hash_file`의 응답 조립이다.
+
+```python
+    file_output = _run_tool(["file", "-b", str(validated)])
+    stat_output = _run_tool(["stat", str(validated)])
+
+    result = f"## File Type\n{file_output}\n## Stat\n{stat_output}"
+    _audit("file_info", {"path": path}, result)
+    return result
+```
+
+[`src/findevil/server.py:171-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L171-L176)
+
+[4] `hexdump`는 길이를 줄인 뒤 `xxd` 출력을 그대로 돌려준다.
+
+```python
+    length = min(length, 4096)
+
+    output = _run_tool(
+        ["xxd", "-s", str(offset), "-l", str(length), str(validated)],
+        timeout=30,
+    )
+
+    _audit("hexdump", {"path": path, "offset": offset, "length": length}, f"{length} bytes")
+    return output
+```
+
+[`src/findevil/server.py:345-353`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L345-L353)
+
+[5] Volatility 실패 시 표준 오류를 싣는 곳: [`src/findevil/tools/linux_memory.py:434-439`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L434-L439), [`src/findevil/tools/linux_memory.py:576-589`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L576-L589), [`src/findevil/tools/linux_memory.py:651-654`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L651-L654), [`src/findevil/tools/linux_memory.py:714-717`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L714-L717).
+
+[6] MCP Python SDK 1.27.2는 반환 주석을 평가하고 `str` 반환형을 `result` 필드로 감싼 출력 schema를 만들며 글 블록과 구조화 결과를 함께 돌려준다: [`fastmcp/utilities/func_metadata.py:222`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L222), [`fastmcp/utilities/func_metadata.py:391-393`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L391-L393), [`fastmcp/utilities/func_metadata.py:120-132`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L120-L132), [`fastmcp/utilities/func_metadata.py:541`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L541), [`lowlevel/server.py:573-577`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L573-L577).
+
+[7] Volatility를 JSON 렌더러로 실행하고 `dict` 행만 남긴다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+```
+
+[`src/findevil/tools/linux_memory.py:160-163`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L163)
+
+```python
+    rows: list[dict] = []
+    if json_output and proc.returncode == 0 and proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+            if isinstance(parsed, list):
+                rows = [r for r in parsed if isinstance(r, dict)]
+        except json.JSONDecodeError:
+            # vol3 occasionally emits warnings before the JSON; try recovery
+            m = re.search(r"^\s*(\[.*\])\s*$", proc.stdout, re.S | re.M)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1))
+                    if isinstance(parsed, list):
+                        rows = [r for r in parsed if isinstance(r, dict)]
+                except json.JSONDecodeError:
+                    pass
+```
+
+[`src/findevil/tools/linux_memory.py:182-197`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L182-L197)
+
+[8] 프로세스 행에서 PID·PPID·이름을 고르고 표로 싣는다.
+
+```python
+def _classify_processes(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Return (processes, anomalies)."""
+    procs = []
+    anomalies = []
+    seen_pids: set[int] = set()
+    for row in rows:
+        pid = row.get("PID") or row.get("Pid")
+        ppid = row.get("PPID") or row.get("Ppid")
+        comm = row.get("COMM") or row.get("Comm") or row.get("Process") or "?"
+        try:
+            pid_i = int(pid) if pid is not None else None
+            ppid_i = int(ppid) if ppid is not None else None
+        except (TypeError, ValueError):
+            pid_i = ppid_i = None
+        proc_obj = {"pid": pid_i, "ppid": ppid_i, "comm": str(comm)}
+        procs.append(proc_obj)
+        if pid_i is not None:
+            seen_pids.add(pid_i)
+        if isinstance(comm, str) and comm.lower() in _SUSPICIOUS_PROCESS_NAMES:
+            anomalies.append(f"PID {pid_i}: known-bad process name `{comm}`")
+
+    # Process whose parent is missing from the snapshot (orphaned by a parent kill)
+    for p in procs:
+        if p["ppid"] is not None and p["ppid"] != 0 and p["ppid"] not in seen_pids:
+            anomalies.append(
+                f"PID {p['pid']} (`{p['comm']}`) has PPID={p['ppid']} not present in snapshot"
+            )
+
+    return procs, anomalies
+```
+
+[`src/findevil/tools/linux_memory.py:257-285`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L257-L285)
+
+```python
+    procs, anomalies = _classify_processes(res.rows)
+    lines = [
+        f"# Memory processes — `{memory_dump_path}`",
+        "",
+        f"- **Total processes:** {len(procs)}",
+        f"- **Anomalies:** {len(anomalies)}",
+        "",
+    ]
+    if anomalies:
+        lines.append("## ⚠ Anomalies")
+        for a in anomalies:
+            lines.append(f"- {a}")
+        lines.append("")
+
+    lines.append("## Process list (first 60)")
+    lines.append("| PID | PPID | COMM |")
+    lines.append("|-----|------|------|")
+    for p in procs[:60]:
+        lines.append(f"| {p['pid']} | {p['ppid']} | `{p['comm']}` |")
+    if len(procs) > 60:
+        lines.append(f"\n*({len(procs) - 60} more processes truncated)*")
+```
+
+[`src/findevil/tools/linux_memory.py:441-461`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L441-L461)
+
+[9] 소켓 행에서 열을 고르고 표로 싣는다: [`src/findevil/tools/linux_memory.py:288-335`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L288-L335).
+
+```python
+    findings = _classify_network(res.rows)
+    lines = [
+        f"# Memory network state — `{memory_dump_path}`",
+        "",
+        f"- **Sockets observed:** {len(res.rows)}",
+        f"- **Flagged connections:** {len(findings)}",
+        "",
+    ]
+    if findings:
+        lines.append("## ⚠ Flagged")
+        for f in findings:
+            lines.append(f"- {f}")
+        lines.append("")
+
+    lines.append("## All sockets (first 50)")
+    lines.append("| Family | Proto | Local | Remote | State | Process |")
+    lines.append("|--------|-------|-------|--------|-------|---------|")
+    for row in res.rows[:50]:
+        family = row.get("Family", "?")
+        proto = row.get("Proto") or row.get("Protocol") or "?"
+        lip = row.get("Source Addr") or row.get("Local IP") or row.get("LocalAddr") or "-"
+        lp = row.get("Source Port") or row.get("Local Port") or row.get("LocalPort") or ""
+        rip = (row.get("Destination Addr") or row.get("Foreign IP")
+               or row.get("ForeignAddr") or row.get("Remote IP") or "-")
+        rp = (row.get("Destination Port") or row.get("Foreign Port")
+              or row.get("RemotePort") or row.get("Remote Port") or "")
+        st = row.get("State", "?")
+        proc = row.get("Process Name") or "-"
+        lines.append(f"| {family} | {proto} | {lip}:{lp} | {rip}:{rp} | {st} | `{proc}` |")
+```
+
+[`src/findevil/tools/linux_memory.py:507-535`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L507-L535)
+
+[10] malfind 행에서 고르는 열이다.
+
+```python
+    if res.rows:
+        lines.append("## ⚠ Findings")
+        for row in res.rows[:30]:
+            pid = row.get("PID") or row.get("Pid") or "?"
+            proc = row.get("Process") or "?"
+            start = row.get("Start Address") or row.get("Start") or "?"
+            end = row.get("End Address") or row.get("End") or "?"
+            prot = row.get("Protection") or row.get("Permissions") or "?"
+            note = row.get("Note") or row.get("Notes") or ""
+            lines.append(
+                f"- PID {pid} `{proc}` — region `{start}` → `{end}` "
+                f"prot=`{prot}` {note}"
+            )
+```
+
+[`src/findevil/tools/linux_memory.py:725-737`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L725-L737)
+
+[11] Volatility 3 2.28.0의 `linux.malware.malfind.Malfind` 열: [`volatility3/framework/plugins/linux/malware/malfind.py:139-150`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/linux/malware/malfind.py#L139-L150).
+
+[12] auth.log 줄 파서이며 syslog 형식이 아닌 줄은 `None`이 되어 빠진다.
+
+```python
+    if service.startswith("sshd"):
+        if sm := _SSHD_FAILED.search(message):
+            kind = "login_failed"
+            fields = sm.groupdict()
+        elif sm := _SSHD_ACCEPTED.search(message):
+            kind = "login_accepted"
+            fields = sm.groupdict()
+        elif sm := _SSHD_INVALID_USER.search(message):
+            kind = "invalid_user"
+            fields = sm.groupdict()
+```
+
+[`src/findevil/tools/linux_auth.py:104-113`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L104-L113)
+
+```python
+def parse_auth_log(content: str) -> list[AuthEvent]:
+    """Parse an entire auth.log file into structured events."""
+    events = []
+    for i, line in enumerate(content.splitlines(), start=1):
+        if not line.strip():
+            continue
+        ev = parse_auth_line(line, i)
+        if ev is not None:
+            events.append(ev)
+    return events
+```
+
+[`src/findevil/tools/linux_auth.py:143-152`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L143-L152)
+
+[13] journal JSONL 파서는 JSON으로 읽히지 않는 줄을 건너뛰고 필드를 고른다: [`src/findevil/tools/linux_journal.py:69-108`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L69-L108).
+
+[14] access log 파서는 정규식에 맞지 않는 줄을 건너뛴다.
+
+```python
+def parse_access_log(content: str) -> list[AccessLogEntry]:
+    entries: list[AccessLogEntry] = []
+    for lineno, raw in enumerate(content.splitlines(), 1):
+        if not raw.strip():
+            continue
+        m = _ACCESS_LOG_RE.match(raw)
+        if not m:
+            continue
+        try:
+            status = int(m.group("status"))
+        except ValueError:
+            status = 0
+        entries.append(
+            AccessLogEntry(
+                line_number=lineno,
+                ip=m.group("ip"),
+                time=m.group("time"),
+                method=m.group("method"),
+                path=m.group("path"),
+                status=status,
+                size=m.group("size"),
+                referer=m.group("referer"),
+                user_agent=m.group("ua"),
+                raw=raw,
+            )
+        )
+    return entries
+```
+
+[`src/findevil/tools/linux_web.py:64-90`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L64-L90)
+
+[15] 패키지 기록 파서: [`src/findevil/tools/linux_packages.py:107-154`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L107-L154), [`src/findevil/tools/linux_packages.py:165-190`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L165-L190), [`src/findevil/tools/linux_packages.py:213-239`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L213-L239), [`src/findevil/tools/linux_packages.py:252-275`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L252-L275).
+
+[16] `emit_table`은 칸 값을 바꿔 쓰고 행 수 상한을 적용한다.
+
+```python
+    return (
+        str(value)
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("\r\n", "<br>")
+        .replace("\n", "<br>")
+        .replace("\r", "<br>")
+    )
+```
+
+[`src/findevil/_table.py:23-30`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/_table.py#L23-L30)
+
+```python
+    visible = rows
+    hidden = 0
+    if top_n is not None and len(rows) > top_n:
+        visible = rows[:top_n]
+        hidden = len(rows) - top_n
+
+    for row in visible:
+        out.append("| " + " | ".join(_escape_cell(c) for c in row) + " |")
+
+    if hidden:
+        out.append(f"\n[{hidden} more rows hidden — pass top_n={len(rows)} to see more]")
+
+```
+
+[`src/findevil/_table.py:58-69`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/_table.py#L58-L69)
+
+[17] `auth_summary`의 건수 집계와 응답이다.
+
+```python
+    counts = Counter(e.kind for e in events)
+    failed_ips = Counter(
+        e.fields.get("ip", "?")
+        for e in events
+        if e.kind in ("login_failed", "invalid_user")
+    )
+    successful_ips = {
+        e.fields.get("ip") for e in events if e.kind == "login_accepted"
+    }
+
+    # Correlation: successful logins from IPs that also had failures
+    compromised_ips = [
+        ip for ip in successful_ips if ip and failed_ips.get(ip, 0) >= 5
+    ]
+
+    lines = [
+        f"# Auth Log Summary — `{validated.name}`",
+        "",
+        f"- **Total events:** {len(events)}",
+        f"- **Failed logins:** {counts.get('login_failed', 0) + counts.get('invalid_user', 0)}",
+        f"- **Successful logins:** {counts.get('login_accepted', 0)}",
+        f"- **Sudo commands:** {counts.get('sudo', 0)}",
+        f"- **User accounts added:** {counts.get('user_added', 0)}",
+        f"- **User accounts deleted:** {counts.get('user_deleted', 0)}",
+        f"- **Groups added:** {counts.get('group_added', 0)}",
+```
+
+[`src/findevil/tools/linux_auth.py:514-538`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L514-L538)
+
+[18] `auth_failed_logins`는 실패 사건을 IP로 묶어 센다.
+
+```python
+    failed = [e for e in events if e.kind in ("login_failed", "invalid_user")]
+
+    if not failed:
+        result = "No failed login attempts found in the log."
+        _audit("auth_failed_logins", {"path": path, "top_n": top_n}, "0 failed")
+        return result
+
+    # Group by source IP
+    by_ip: dict[str, list[AuthEvent]] = defaultdict(list)
+    for ev in failed:
+        ip = ev.fields.get("ip", "unknown")
+        by_ip[ip].append(ev)
+
+    # Rank by attempt count
+    ranked = sorted(by_ip.items(), key=lambda kv: len(kv[1]), reverse=True)[:top_n]
+```
+
+[`src/findevil/tools/linux_auth.py:192-206`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L192-L206)
+
+```python
+    for ip, ip_events in ranked:
+        users = Counter(e.fields.get("user", "?") for e in ip_events)
+        methods = Counter(e.fields.get("method", "?") for e in ip_events)
+        first_line = min(e.line_number for e in ip_events)
+        last_line = max(e.line_number for e in ip_events)
+
+        # Confidence scoring
+        attempt_count = len(ip_events)
+        distinct_users = len(users)
+        if attempt_count >= 50 or distinct_users >= 10:
+            confidence = "high"
+            verdict = "Brute force / user enumeration — high confidence"
+        elif attempt_count >= 10:
+            confidence = "medium"
+            verdict = "Suspicious — repeated failures from same source"
+        else:
+            confidence = "low"
+            verdict = "Possible typos or legitimate failures"
+
+        lines.append(f"## Source IP: `{ip}`")
+        lines.append(f"- **Attempts:** {attempt_count}")
+        lines.append(f"- **Distinct users targeted:** {distinct_users}")
+        lines.append(f"- **Top users:** {', '.join(f'{u} ({c})' for u, c in users.most_common(5))}")
+        lines.append(f"- **Methods:** {', '.join(f'{m} ({c})' for m, c in methods.items())}")
+        lines.append(f"- **First seen line:** {first_line}  |  **Last seen line:** {last_line}")
+```
+
+[`src/findevil/tools/linux_auth.py:213-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L213-L237)
+
+[19] 건수 집계: [`src/findevil/tools/linux_journal.py:258-270`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L258-L270), [`src/findevil/tools/linux_web.py:249-283`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L249-L283), [`src/findevil/tools/linux_packages.py:384-410`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L384-L410).
+
+[20] `build_timeline`의 표 조립이다.
+
+```python
+    events.sort(key=lambda e: (e.timestamp, e.source))
+
+    lines = [
+        f"# Unified timeline — `{evidence_root}`",
+        "",
+        f"- **Events:** {len(events)}",
+        f"- **Sources:** {', '.join(sorted({e.source for e in events}))}",
+        "",
+        "| Timestamp | Source | Actor | Action | Detail | Provenance |",
+        "|-----------|--------|-------|--------|--------|------------|",
+    ]
+    for e in events[:max_events]:
+        safe_detail = e.detail.replace("|", "\\|")[:200]
+        lines.append(
+            f"| {e.timestamp} | {e.source} | `{e.actor[:40]}` | {e.action} | {safe_detail} | {e.provenance} |"
+        )
+    if len(events) > max_events:
+        lines.append(f"\n... {len(events) - max_events} more events truncated ...")
+```
+
+[`src/findevil/tools/linux_timeline.py:631-648`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L631-L648)
+
+[21] 메모리 요약의 플러그인 이름 표시.
+
+```python
+    lines = [
+        f"# Memory triage — `{memory_dump_path}`",
+        "",
+        "## Kernel",
+        f"- Banner: `{banner[:200]}`" if banner else "- Banner: not detected",
+        "",
+        "## Headlines",
+        f"- Processes: {len(procs)} ({len(proc_anomalies)} anomalies)",
+        f"- Sockets: {len(netstat.rows)} ({len(net_findings)} flagged)",
+        f"- Loaded modules: {len(mod_diff['loaded_modules'])}",
+        f"- Hidden modules (lsmod-vs-check_modules): **{len(hidden)}**",
+        f"- Code-injection regions (malfind): **{inj_count}**",
+        "",
+    ]
+```
+
+[`src/findevil/tools/linux_memory.py:988-1001`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L988-L1001)
+
+[22] (예시 로그) 저장소의 시나리오 01 auth.log는 같은 sshd 프로세스·포트의 시도 하나를 `Invalid user`와 `Failed password for invalid user` 두 줄로 적는다.
+
+```text
+Apr 12 14:30:04 webserver-prod-01 sshd[22001]: Invalid user admin from 45.123.45.67 port 51112
+Apr 12 14:30:04 webserver-prod-01 sshd[22001]: Failed password for invalid user admin from 45.123.45.67 port 51112 ssh2
+Apr 12 14:30:07 webserver-prod-01 sshd[22002]: Invalid user administrator from 45.123.45.67 port 51114
+Apr 12 14:30:07 webserver-prod-01 sshd[22002]: Failed password for invalid user administrator from 45.123.45.67 port 51114 ssh2
+Apr 12 14:30:10 webserver-prod-01 sshd[22003]: Invalid user test from 45.123.45.67 port 51116
+Apr 12 14:30:10 webserver-prod-01 sshd[22003]: Failed password for invalid user test from 45.123.45.67 port 51116 ssh2
+```
+
+[`samples/attack-scenario-01/auth.log:26-31`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/samples/attack-scenario-01/auth.log#L26-L31)
+
+[23] journal과 시간표도 `invalid_user`와 `login_failed`를 같은 실패로 넣는다.
+
+```python
+        kind = _auth_event_kind(entry)
+        if kind:
+            kname, fields = kind
+            if kname in ("login_failed", "invalid_user"):
+                ip = fields.get("ip", "?")
+                failed_by_ip[ip].append(entry)
+```
+
+[`src/findevil/tools/linux_journal.py:236-241`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L236-L241)
+
+```python
+        elif e.kind in ("login_failed", "invalid_user"):
+            out.append(TimelineEvent(
+                ts, "auth.log",
+                actor=f"{e.fields.get('user', '?')}@{e.fields.get('ip', '?')}",
+                action="login_failed",
+                detail=f"method={e.fields.get('method', '?')}",
+                provenance=f"{path.name}:{e.line_number}",
+            ))
+```
+
+[`src/findevil/tools/linux_timeline.py:362-369`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L362-L369)
+
+[24] Kubernetes 매니페스트를 찾는 폴더 목록이다.
+
+```python
+    k8s_dirs = [
+        validated / "etc/kubernetes",
+        validated / "var/lib/kubelet/config",
+        validated / "etc/kubernetes/manifests",
+    ]
+    for kd in k8s_dirs:
+        if kd.is_dir():
+            for p in list(kd.rglob("*.yaml")) + list(kd.rglob("*.yml")):
+                if p.is_file():
+                    findings.extend(_scan_k8s_manifest(p, str(p.relative_to(validated))))
+```
+
+[`src/findevil/tools/linux_containers.py:373-382`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_containers.py#L373-L382)
+
+[25] `_format_findings`는 `info` 항목을 상세 목록에서 빼고 다른 심각도가 없을 때만 앞 10개를 싣는다.
+
+```python
+    # Counts
+    counts: dict[str, int] = {}
+    for f in sorted_findings:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+
+    lines = [
+        f"# Linux Persistence Scan — `{root}`",
+        "",
+        "## Summary",
+        "",
+        *[
+            f"- **{sev}**: {counts[sev]} finding(s)"
+            for sev in ["high", "medium", "low", "info"]
+            if sev in counts
+        ],
+        "",
+    ]
+```
+
+[`src/findevil/tools/linux_persistence.py:1374-1390`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1374-L1390)
+
+```python
+    current_sev = None
+    for f in sorted_findings:
+        # Skip info-only items in the detailed listing; keep the scan lean
+        if f.severity == "info":
+            continue
+        if f.severity != current_sev:
+            lines.append(f"## {_SEVERITY_ICON[f.severity]} {f.severity.upper()} findings")
+            lines.append("")
+            current_sev = f.severity
+        lines.append(f"### `{f.path}` — {f.summary}")
+        lines.append(f"- **Category:** {f.category}")
+        if f.reasons:
+            lines.append("- **Reasons:**")
+            for r in f.reasons:
+                lines.append(f"  - {r}")
+        if f.sample:
+            lines.append("")
+            lines.append("```")
+            lines.append(f.sample)
+            lines.append("```")
+        lines.append("")
+
+    # If only info findings exist, list the top 5 for context
+    info_items = [f for f in sorted_findings if f.severity == "info"]
+    if info_items and counts.get("high", 0) == 0 and counts.get("medium", 0) == 0:
+        lines.append("## Info — persistence files present but not flagged")
+        lines.append("")
+        for f in info_items[:10]:
+            lines.append(f"- `{f.path}` ({f.category})")
+
+```
+
+[`src/findevil/tools/linux_persistence.py:1392-1421`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1392-L1421)
+
+[26] journal 사건은 정해 둔 식별자만 넣는다.
+
+```python
+def _events_from_journal(path: Path) -> list[TimelineEvent]:
+    from findevil.tools.linux_journal import parse_journal
+    out: list[TimelineEvent] = []
+    content = path.read_text(errors="replace")
+    for e in parse_journal(content):
+        # Only pull the informative ones to keep the timeline lean
+        if e.identifier not in {"sshd", "sudo", "useradd", "kernel", "systemd"}:
+            continue
+        out.append(TimelineEvent(
+            e.timestamp, "journal",
+            actor=e.identifier,
+            action=e.identifier,
+            detail=e.message[:200],
+            provenance=f"{path.name}:{e.line_number}",
+        ))
+    return out
+```
+
+[`src/findevil/tools/linux_timeline.py:389-404`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L389-L404)
+
+[27] 의심 근거가 없는 cron 파일도 `info` 항목이 된다.
+
+```python
+    for p in cron_targets:
+        if not p.is_file():
+            continue
+        content = _read_safe(p)
+        reasons = _match_suspicious(content)
+        severity = "high" if reasons else "info"
+        summary = (
+            "Suspicious cron entry" if reasons else "Cron file present (not obviously malicious)"
+        )
+        findings.append(
+            PersistenceFinding(
+                category="cron",
+                severity=severity,
+                path=_rel(root, p),
+                summary=summary,
+                reasons=reasons,
+                sample=content[:500].rstrip(),
+            )
+        )
+    return findings
+```
+
+[`src/findevil/tools/linux_persistence.py:174-193`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L174-L193)
+
+[28] auth.log 사건 가운데 넣는 종류다: [`src/findevil/tools/linux_timeline.py:348-386`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L348-L386).
+
+[29] 시간표가 시각이 없는 access log·bash 기록 사건을 뺀다.
+
+```python
+        ts_raw = e.time.split()[0] if e.time else ""
+        ts = _normalize_nginx_ts(ts_raw)
+        # Drop events whose timestamp couldn't be normalised. Two failure
+        # modes: empty time string (ts == "") and unparseable nginx format
+        # (`_normalize_nginx_ts` returns the raw input unchanged on regex
+        # non-match — detect that by comparing against the input).
+        if not ts or ts == ts_raw:
+            continue
+```
+
+[`src/findevil/tools/linux_timeline.py:459-466`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L459-L466)
+
+```python
+    for entry in parse_history(content):
+        if not entry.timestamp:
+            continue  # skip entries without HISTTIMEFORMAT timestamps
+```
+
+[`src/findevil/tools/linux_timeline.py:489-491`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L489-L491)
+
+[30] `parse_dpkg_log`는 세 동작의 줄만 사건으로 만든다.
+
+```python
+        action = m.group("action")
+        if action not in ("install", "remove", "upgrade"):
+            # status/trigproc/configure lines are very high-volume; skip
+            continue
+```
+
+[`src/findevil/tools/linux_packages.py:171-174`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L171-L174)

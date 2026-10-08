@@ -1,0 +1,113 @@
+---
+cell: F03
+details:
+- id: not_applicable
+---
+
+# F03 서버 안 모델 입력 구성
+
+### 비적용
+
+**판단.** findevil 서버는 처리 중에 모델을 부르지 않는다.
+`pyproject.toml`이 정한 서버 의존성은 MCP SDK `mcp[cli]` 하나다 [1].
+서버 모듈이 가져오는 것은 표준 라이브러리, FastMCP, 서버 자신의 모듈뿐이고 모델 API 클라이언트나 HTTP 클라이언트는 없다 [2].
+서버 코드에는 FastMCP `Context`를 쓰는 곳이 없어 MCP sampling으로 클라이언트 모델에게 생성을 요청하는 호출도 없다 [2].
+서버가 외부 프로그램을 실행하는 곳은 운영체제 명령을 실행하는 `_run_tool`과 Volatility를 실행하는 `_run_vol_plugin` 두 곳이다 [3].
+`ai_signatures.py`에 적힌 `api.anthropic.com` 같은 모델 API 주소는 증거에서 찾는 정규식이다 [4].
+모델은 같은 저장소의 `scripts/investigate.py`가 `claude -p`로 실행하는 클라이언트에서 쓰이고 그 호출은 서버가 도구를 처리하는 중의 호출이 아니다 [5].
+
+### 근거
+
+[1] 서버 패키지의 의존성이다.
+
+```toml
+dependencies = [
+    "mcp[cli]>=1.0.0",
+]
+```
+
+[`pyproject.toml:12-14`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/pyproject.toml#L12-L14)
+
+[2] 서버 모듈의 가져오기 문이다: [`src/findevil/server.py:14-21`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L14-L21), [`src/findevil/tools/autonomy.py:39-51`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L39-L51), [`src/findevil/tools/self_correction.py:37-47`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L37-L47).
+
+[3] 외부 프로그램 실행 지점이다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_VOL_TIMEOUT_S,
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:160-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L168)
+
+[4] 모델 API 주소는 증거 검사 정규식에만 있다.
+
+```python
+_LLM_HOST_RE = re.compile(
+    r"\b(?:api\.anthropic\.com|api\.openai\.com|api\.deepseek\.com|"
+    r"api\.mistral\.ai|api\.together\.xyz|claude\.ai|"
+    r"generativelanguage\.googleapis\.com)\b",
+    re.I,
+)
+
+```
+
+[`src/findevil/tools/ai_signatures.py:42-48`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/ai_signatures.py#L42-L48)
+
+[5] `scripts/investigate.py`가 `claude -p`를 실행한다.
+
+```python
+    cmd = [
+        claude_bin,
+        "-p",
+        prompt,
+        "--permission-mode",
+        permission_mode,
+        "--output-format",
+        "json",
+        "--max-turns",
+        str(max_turns),
+        "--model",
+        model,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+```
+
+[`scripts/investigate.py:119-138`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L119-L138)

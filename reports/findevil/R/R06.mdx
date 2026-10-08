@@ -1,0 +1,114 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 값을 응답과 호출 기록에 싣고 그 가운데 비밀 값을 가리거나 빼는 처리를 두지 않는다.
+서버 코드에는 값을 가리는 함수가 없다 [1].
+
+응답에서는 기본 도구가 증거 파일의 내용을 명령 출력 그대로 싣는다 [2].
+`strings_extract`·`hexdump`·`log_search`는 모델이 고른 파일의 문자열, 바이트, 일치 줄을 그대로 돌려준다 [2].
+`find_ai_signatures`는 `ANTHROPIC_API_KEY`·`OPENAI_API_KEY` 같은 API 키 할당을 찾으면 그 파일의 앞 400자를 표본으로 싣는다 [3].
+그래서 찾아낸 키 값이 표본에 들어 있으면 그대로 모델에게 간다 [3].
+`find_persistence`는 의심 파일의 앞 400~500자를 표본으로 싣고 `/etc/passwd` 계정 항목은 그 줄을 그대로 싣는다 [4].
+`analyze_systemd_unit`은 unit 파일 내용을 1,500자까지 싣고 `auth_sudo_commands`·`analyze_bash_history`·`analyze_memory_bash_history`는 명령 줄을 그대로 싣는다 [5].
+`find_persistence`의 계정 검사 `scan_users`는 `/etc/shadow`의 비밀번호 칸을 읽지만 비어 있는지만 판정하고 해시 값은 응답에 싣지 않는다 [6].
+
+호출 기록에서는 `_audit`이 도구 인자와 결과 요약 앞 500자를 `audit.json`에 남긴다 [7].
+`log_search`는 결과 글 앞 200자를, `verify_finding`은 모델이 넘긴 인자 객체 전체를 기록한다 [8].
+`get_audit_trail`은 이 기록의 인자와 요약을 200자까지 다시 응답에 싣는다 [9].
+
+### 근거
+
+[1] 서버 코드에 값 가림 처리가 없다: [`src/findevil`](https://github.com/marlyocat/findevil/tree/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil)에서 `redact`·`sanitiz`를 찾으면 일치가 없고 `mask`는 PAM 모듈 이름 `pam_umask.so`에만 나온다.
+
+[2] 기본 도구는 명령 출력을 그대로 싣는다: [`src/findevil/server.py:212-245`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L212-L245), [`src/findevil/server.py:286-319`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L286-L319), [`src/findevil/server.py:326-353`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L326-L353).
+
+[3] API 키 할당을 찾으면 파일 앞 400자를 표본으로 싣는다.
+
+```python
+    if keys:
+        findings.append(
+            AISignatureFinding(
+                severity="high",
+                category="api_key",
+                path=_rel(root, path),
+                summary=f"LLM API key declaration ({len(keys)} match(es))",
+                reasons=[
+                    "API key environment variable assignment present —"
+                    " unusual on a host that doesn't legitimately use LLM tooling",
+                ],
+                sample=content[:400].rstrip(),
+            )
+        )
+```
+
+[`src/findevil/tools/ai_signatures.py:172-185`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/ai_signatures.py#L172-L185)
+
+[4] 지속성 검사 표본: [`src/findevil/tools/linux_persistence.py:190`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L190), [`src/findevil/tools/linux_persistence.py:424-434`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L424-L434), [`src/findevil/tools/linux_persistence.py:1407-1411`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1407-L1411).
+
+[5] 내용과 명령 줄을 그대로 싣는 곳: [`src/findevil/tools/linux_persistence.py:1543-1549`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1543-L1549), [`src/findevil/tools/linux_auth.py:386-394`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L386-L394), [`src/findevil/tools/linux_shell_history.py:329-336`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_shell_history.py#L329-L336), [`src/findevil/tools/linux_memory.py:665-671`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L665-L671).
+
+[6] `/etc/shadow`의 비밀번호 칸은 빈 값인지만 본다.
+
+```python
+        # Empty or blank password in shadow
+        if username in shadow_map:
+            pw = shadow_map[username]
+            if pw == "" or pw == "::":
+                reasons.append(f"account '{username}' has EMPTY password in shadow")
+            elif pw == "*" or pw == "!":
+                pass  # locked, fine
+            # else: hashed password, fine
+```
+
+[`src/findevil/tools/linux_persistence.py:415-422`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L415-L422)
+
+[7] 호출 기록 항목의 내용이다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)
+
+[8] 결과 앞부분과 인자 전체를 기록하는 곳.
+
+```python
+    _audit("log_search", {"path": path, "pattern": pattern}, result[:200])
+```
+
+[`src/findevil/server.py:318-318`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L318-L318)
+
+```python
+    _audit("verify_finding", {"claim_type": claim_type, "params": params_obj}, verdict)
+```
+
+[`src/findevil/tools/self_correction.py:401-401`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L401-L401)
+
+[9] 기록을 다시 응답에 싣는다.
+
+```python
+        for e in entries:
+            ts = e.get("timestamp", "?")
+            tool = e.get("tool", "?")
+            params = json.dumps(e.get("params", {}))[:200]
+            summary = e.get("result_summary", "")[:200]
+            out.append(f"- **{ts}** `{tool}` — params: {params}")
+            out.append(f"  result: {summary}")
+```
+
+[`src/findevil/tools/self_correction.py:660-666`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L660-L666)

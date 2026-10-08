@@ -1,0 +1,397 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.04
+- id: T07.05
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 검사는 Volatility 3을 실행하는 메모리 도구 7개에 적용된다 [1].
+서버는 플러그인을 실행할 때마다 `_vol_available`로 `vol --help`를 시간 제한 10초로 시험 실행한다 [1][2].
+시험 실행이 실행 파일을 찾지 못하거나 시간 제한을 넘기거나 0이 아닌 종료 코드로 끝나면 플러그인을 실행하지 않는다 [1][2].
+
+참조 자료인 커널 심볼은 서버가 실행 전에 확인하지 않는다 [1].
+심볼을 찾는 일은 Volatility가 하고 서버는 실행이 실패한 뒤 표준 오류의 문구로 심볼 부재를 알아본다 [3].
+
+참조 자료인 IOC 파일 `data/threat_intel.json`도 서버가 조회 전에 확인하지 않는다 [4].
+`_load_cache`는 이 파일을 읽지 못하면 빈 조회 표에 오류를 담은 `_error` 키를 더한 `dict`를 돌려준다 [4].
+그러면 `bulk_ioc_lookup`은 모든 IOC를 `not in cache`로 싣고 `_error`의 내용은 응답에도 호출 기록에도 싣지 않는다 [5].
+
+`file_info`·`hash_file`·`strings_extract`·`list_evidence`·`log_search`·`hexdump`가 쓰는 운영체제 명령은 `_run_tool`이 확인 없이 실행한다 [6].
+명령이 없으면 `subprocess.run`이 낸 예외를 서버가 처리하지 않고 MCP Python SDK 1.27.2의 FastMCP가 이 예외를 `Error executing tool <도구>: ` 뒤에 붙여 `isError` 응답으로 돌려준다 [6][7].
+실행 확인에서 `file`이 없는 `PATH`로 `file_info`를 부르면 `[Errno 2] No such file or directory: 'file'` 문구의 오류 응답이 왔다 [8].
+
+**한계.** `vol --help`가 10초 안에 끝나지 않거나 0이 아닌 종료 코드로 끝나도 서버는 실행 파일이 없을 때와 같은 결과를 만든다 [2].
+그래서 이 경우에도 응답은 Volatility가 설치되지 않았다고 적는다 [1].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 처리는 메모리 도구 7개에 적용된다 [1].
+`vol`이 없으면 서버는 다른 도구로 바꾸지 않고 종료 코드 127과 ``volatility3 (`vol`) not installed on PATH`` 문구를 실패 결과로 만든다 [1].
+`analyze_memory_processes` 같은 도구는 이 문구를 `vol failed (rc=127)` 줄과 함께 응답에 싣는다 [9][8].
+
+커널 심볼이 없어 실행이 실패하면 서버는 `## ⚠ Kernel symbols required` 머리와 함께 심볼 파일을 둘 폴더와 `dwarf2json`으로 만드는 방법을 응답에 싣는다 [3][10].
+이때 서버는 `banners.Banners`를 한 번 더 실행해 커널 배너를 얻으면 배너도 함께 싣는다 [10][11].
+실행 확인에서 Volatility 3 2.28.0과 심볼 없는 덤프로 `analyze_memory_processes`와 `analyze_memory_network`를 부르면 이 안내가 실렸다 [12].
+
+**한계.** `analyze_memory_summary`는 `vol`이 없을 때 이 사실을 응답에 싣지 않는다 [13].
+플러그인 실패가 심볼 부재로 분류되지 않으면 이 도구는 실패한 플러그인의 결과를 빈 목록으로 다룬다 [13].
+실행 확인에서 `vol`이 없는 환경으로 이 도구를 부르면 프로세스 0개, 숨은 모듈 0개와 함께 `No strong memory-resident compromise indicators` 판정이 실렸다 [8].
+
+### T07.04 알림 없는 대체 실행
+
+**구현.** 이 대체는 `analyze_memory_network`·`analyze_memory_malfind`·`analyze_memory_summary`의 플러그인 실행과 메모리 도구 7개의 실행 파일 선택에 적용된다 [14][15][16].
+서버는 소켓 목록을 `linux.sockstat.Sockstat`으로 먼저 실행하고 실패 출력에 `invalid choice`가 있으면 `linux.netstat`으로 다시 실행한다 [14].
+코드 주입 영역은 `linux.malware.malfind.Malfind`를 먼저 실행하고 같은 조건에서 `linux.malfind`로 다시 실행한다 [15].
+응답과 호출 기록은 어느 플러그인으로 결과를 얻었는지 싣지 않는다 [14][17].
+`analyze_memory_network`의 도구 설명은 `linux.netstat`을 감싼다고 적는다 [18].
+
+환경변수 `FINDEVIL_VOL`이 가리키는 경로가 파일이 아니면 서버는 알리지 않고 `PATH`나 가상 환경 폴더의 `vol`을 쓴다 [16].
+사용자가 정한 실행 파일을 쓰지 못했다는 사실은 응답에도 호출 기록에도 남지 않는다 [16][17].
+
+기준으로 삼은 Volatility 3 2.28.0은 `linux.sockstat.Sockstat`과 `linux.malware.malfind.Malfind`를 모두 두므로 이 버전에서는 대체 플러그인이 실행되지 않는다 [12].
+
+### T07.05 실행 환경별 경로 분기
+
+**구현.** 서버는 모듈을 불러올 때 `_resolve_vol_bin`으로 `vol` 실행 파일을 한 번 정하고 이후 모든 메모리 도구가 그 값을 쓴다 [16].
+환경변수 `FINDEVIL_VOL`이 가리키는 파일이 있으면 그것을 쓴다 [16].
+없으면 `PATH`에서 `vol`, `vol.py` 차례로 찾고 그다음 서버를 실행한 Python과 같은 폴더에서 같은 이름을 찾는다 [16].
+모두 없으면 `vol`이라는 이름을 그대로 쓴다 [16].
+실행 확인에서 `PATH`에 `vol`이 없는 환경으로 서버를 실행하면 가상 환경 폴더의 `vol`이 쓰였다 [12].
+고른 실행 파일의 경로는 응답에도 호출 기록에도 남지 않는다 [17][19].
+
+### 근거
+
+[1] 플러그인을 실행하기 전의 가용성 검사와 부재 결과다.
+
+```python
+def _run_vol_plugin(
+    dump_path: Path, plugin: str, *extra_args: str, json_output: bool = True
+) -> VolResult:
+    """Run one Volatility 3 plugin against a memory dump.
+
+    Returns a VolResult that distinguishes plugin success, plugin failure,
+    and the specific 'no kernel symbols' failure (which the agent should
+    surface clearly to the operator rather than treat as 'memory clean').
+    """
+    if not _vol_available():
+        return VolResult(
+            plugin=plugin, rc=127,
+            stdout="", stderr="volatility3 (`vol`) not installed on PATH",
+            rows=[], no_symbols=False,
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:144-158`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L144-L158)
+
+[2] `vol --help` 시험 실행이다.
+
+```python
+def _vol_available() -> bool:
+    if not _VOL_BIN:
+        return False
+    try:
+        proc = subprocess.run(
+            [_VOL_BIN, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+```
+
+[`src/findevil/tools/linux_memory.py:120-130`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L120-L130)
+
+[3] 표준 오류의 문구로 심볼 부재를 알아본다.
+
+```python
+def _looks_like_no_symbols(stderr: str) -> bool:
+    """Recognise the 'no kernel symbols' family of vol3 error messages."""
+    s = stderr.lower()
+    return (
+        "could not find a suitable kernel symbol" in s
+        or "unable to validate the plugin requirements" in s
+        or "no available symbol table" in s
+        or "symbols requirement" in s
+    )
+```
+
+[`src/findevil/tools/linux_memory.py:133-141`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L133-L141)
+
+[4] IOC 파일을 읽지 못하면 오류를 담은 빈 조회 표를 돌려준다.
+
+```python
+@lru_cache(maxsize=1)
+def _load_cache() -> dict[str, Any]:
+    """Load the bundled IOC cache once."""
+    try:
+        return json.loads(_DATA_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        # Fail closed — an unusable cache is still usable (all lookups miss)
+        return {"_error": str(e), "ips": {}, "hashes": {}, "domains": {}}
+```
+
+[`src/findevil/tools/threat_intel.py:49-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L49-L56)
+
+[5] 조회 표에 없는 IP는 `not in cache`로 싣는다.
+
+```python
+def _lookup_ip(ip: str) -> IOCVerdict:
+    cache = _load_cache()
+    entry = (cache.get("ips") or {}).get(ip)
+    if not entry:
+        return IOCVerdict(False, "unknown", [], "n/a", "-", "not in local IOC cache")
+```
+
+[`src/findevil/tools/threat_intel.py:164-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L164-L168)
+
+```python
+        for ip in iocs["ipv4_public"]:
+            v = _lookup_ip(ip)
+            if v.known:
+                known_count += 1
+                lines.append(
+                    f"- ⚠ `{ip}` — **{v.category}** "
+                    f"(tags: {', '.join(v.tags) or '-'}, confidence: {v.confidence}, "
+                    f"source: {v.source})"
+                )
+            else:
+                lines.append(f"- `{ip}` — not in cache")
+```
+
+[`src/findevil/tools/threat_intel.py:293-303`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L293-L303)
+
+[6] 운영체제 명령 실행이다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+[7] MCP Python SDK 1.27.2의 FastMCP가 도구 함수의 예외를 바꾸는 곳이다: [`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/tools/base.py#L116-L117), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[8] (실행 확인) `vol`이 없는 환경에서 무작위 4KiB 파일로 `analyze_memory_processes`를 부르면 `isError`가 거짓인 응답에 `vol failed (rc=127):`과 ``volatility3 (`vol`) not installed on PATH``가 실린다.
+같은 파일로 `analyze_memory_summary`를 부르면 `Banner: not detected`, `Processes: 0 (0 anomalies)`와 `No strong memory-resident compromise indicators` 판정이 실린다.
+`PATH`를 없는 폴더로 정하고 `file_info`를 부르면 `isError`가 참인 응답에 `Error executing tool file_info: [Errno 2] No such file or directory: 'file'`이 실린다.
+
+[9] 플러그인이 실패한 결과를 응답으로 만든다.
+
+```python
+    res = _run_vol_plugin(dump, "linux.pslist")
+    if res.no_symbols:
+        banner, _ = _identify_kernel(dump)
+        out = _format_no_symbols_block(banner)
+        _audit("analyze_memory_processes", {"path": memory_dump_path}, "no symbols")
+        return out
+    if res.rc != 0:
+        _audit("analyze_memory_processes", {"path": memory_dump_path}, f"rc={res.rc}")
+        return (
+            f"# Memory processes — `{memory_dump_path}`\n\n"
+            f"vol failed (rc={res.rc}):\n```\n{res.stderr[:500]}\n```"
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:428-439`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L428-L439)
+
+[10] 심볼 부재 안내다.
+
+```python
+def _format_no_symbols_block(banner: str) -> str:
+    parts = [
+        "## ⚠ Kernel symbols required",
+        "",
+        _VOL_NO_SYMBOLS_HINT,
+        "",
+    ]
+    if banner:
+        parts.append(f"**Kernel banner detected:** `{banner[:200]}`")
+    return "\n".join(parts)
+```
+
+[`src/findevil/tools/linux_memory.py:392-401`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L392-L401)
+
+[11] 커널 배너를 얻는 실행이다.
+
+```python
+def _identify_kernel(dump: Path) -> tuple[str, list[str]]:
+    """Run banners.Banners and return (best_banner, all_banners).
+
+    The kernel banner determines which symbol table Volatility needs.
+    Returning the banner gives the agent something to act on if symbols
+    are missing.
+    """
+    res = _run_vol_plugin(dump, "banners.Banners", json_output=True)
+    banners: list[str] = []
+    for row in res.rows:
+        b = row.get("Banner") or row.get("banner")
+        if isinstance(b, str) and b.strip():
+            banners.append(b.strip())
+    # Prefer the longest Linux banner (kernel header banner is usually verbose)
+    linux_banners = [b for b in banners if "Linux version" in b]
+    best = max(linux_banners, key=len) if linux_banners else (banners[0] if banners else "")
+    return best, banners
+```
+
+[`src/findevil/tools/linux_memory.py:225-241`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L225-L241)
+
+[12] (실행 확인) 가상 환경에 Volatility 3 2.28.0을 설치하고 `PATH`에 `vol`이 없는 환경으로 서버를 실행했다.
+무작위 4KiB 파일로 `analyze_memory_processes`와 `analyze_memory_network`를 부르면 두 응답 모두 `## ⚠ Kernel symbols required`와 심볼 설치 안내를 싣는다.
+그 `vol --help`의 플러그인 목록에는 `linux.sockstat.Sockstat`과 `linux.malware.malfind.Malfind`가 있다.
+
+[13] `analyze_memory_summary`는 실패한 플러그인의 결과를 빈 목록으로 두고 판정을 만든다: [`src/findevil/tools/linux_memory.py:943-975`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L943-L975).
+
+```python
+    lines.append("## Triage verdict")
+    if hidden or inj_count > 0:
+        lines.append(
+            f"🚨 **LIKELY MEMORY-RESIDENT COMPROMISE** — {'; '.join(verdict_strong_signals)}. "
+            "Drill into `analyze_memory_modules` and `analyze_memory_malfind` for full detail. "
+            "Cross-reference with `find_persistence` to see whether the rootkit also planted "
+            "disk-side persistence (often it does — e.g., `/etc/modules` or "
+            "`/lib/modules/*/extra/*.ko`)."
+        )
+    elif proc_anomalies or net_findings:
+        lines.append(
+            f"⚠ Moderate signals: {'; '.join(verdict_strong_signals)}. "
+            "Not conclusive on its own — correlate with disk findings."
+        )
+    else:
+        lines.append(
+            "No strong memory-resident compromise indicators. The dump is internally "
+            "consistent (lsmod ↔ check_modules align, no malfind hits, no orphan-parent "
+            "processes). A clean memory verdict does not rule out disk-side persistence; "
+            "run `find_persistence` separately."
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:1021-1041`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L1021-L1041)
+
+[14] 소켓 플러그인의 대체 실행이다.
+
+```python
+    # Vol3 v2.28 renamed linux.netstat -> linux.sockstat.Sockstat. Try
+    # the new name first; fall back to the old name for older Vol3 builds.
+    res = _run_vol_plugin(dump, "linux.sockstat.Sockstat")
+    if res.rc != 0 and "invalid choice" in res.stderr.lower():
+        res = _run_vol_plugin(dump, "linux.netstat")
+```
+
+[`src/findevil/tools/linux_memory.py:490-494`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L490-L494)
+
+[15] 코드 주입 플러그인의 대체 실행이다.
+
+```python
+    # Vol3 v2.28 deprecated linux.malfind in favour of linux.malware.malfind.Malfind.
+    # Try the new name first; fall back to the old for older Vol3 builds.
+    res = _run_vol_plugin(dump, "linux.malware.malfind.Malfind")
+    if res.rc != 0 and "invalid choice" in res.stderr.lower():
+        res = _run_vol_plugin(dump, "linux.malfind")
+```
+
+[`src/findevil/tools/linux_memory.py:704-708`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L704-L708)
+
+[16] `vol` 실행 파일을 정하는 순서다.
+
+```python
+def _resolve_vol_bin() -> str:
+    """Find the Volatility 3 entrypoint.
+
+    Order of preference:
+      1. FINDEVIL_VOL env var (explicit override)
+      2. `vol` / `vol.py` on $PATH
+      3. The findevil venv's own bin/ (so installs into the project venv work
+         even when the venv is not activated by the calling shell)
+      4. Fall back to "vol" so the no-such-binary error message is clean
+    """
+    override = os.environ.get("FINDEVIL_VOL")
+    if override and Path(override).is_file():
+        return override
+    for name in ("vol", "vol.py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    # Note: do NOT call .resolve() here — venv pythons are typically
+    # symlinks to the system interpreter, and resolving that symlink
+    # leaks back to the system bin dir where `vol` likely isn't.
+    venv_bin = Path(sys.executable).parent
+    for name in ("vol", "vol.py"):
+        cand = venv_bin / name
+        if cand.is_file():
+            return str(cand)
+    return "vol"
+
+
+_VOL_BIN = _resolve_vol_bin()
+```
+
+[`src/findevil/tools/linux_memory.py:66-94`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L66-L94)
+
+[17] 메모리 도구의 호출 기록은 덤프 경로와 결과 요약만 남긴다.
+
+```python
+    _audit(
+        "analyze_memory_network", {"path": memory_dump_path},
+        f"{len(res.rows)} sockets, {len(findings)} flagged",
+    )
+    return "\n".join(lines)
+```
+
+[`src/findevil/tools/linux_memory.py:537-541`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L537-L541)
+
+[18] `analyze_memory_network`의 도구 설명이다.
+
+```python
+@mcp.tool()
+def analyze_memory_network(memory_dump_path: str) -> str:
+    """List network connections recovered from a Linux memory dump.
+
+    Wraps `linux.netstat`. Surfaces every TCP/UDP/UNIX socket the kernel
+    knew about at capture time. Flags listeners on common reverse-shell
+    handler ports (4444, 4445, 1337, 31337, 8888, 9001, 6666, 13337)
+    and outbound connections to non-RFC1918 destinations, since live
+    network state is often the only place to see a rootkit's C2.
+
+```
+
+[`src/findevil/tools/linux_memory.py:470-479`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L470-L479)
+
+[19] 플러그인 실행 인자를 만드는 곳이며 실행 파일 경로는 이 인자 배열에만 있다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_VOL_TIMEOUT_S,
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:160-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L168)

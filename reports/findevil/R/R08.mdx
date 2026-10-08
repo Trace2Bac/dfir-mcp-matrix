@@ -1,0 +1,272 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 auth 도구, `analyze_nginx_access`, 메모리 도구, 명령 출력을 싣는 기본 도구에 적용된다 [1].
+`auth_successful_logins`·`auth_sudo_commands`·`auth_user_events`는 syslog 줄의 `Apr 15 14:23:05` 꼴 시각 문자열을 바꾸지 않고 싣는다 [1][2].
+`analyze_nginx_access`는 웹셸 업로드 사슬의 업로드 시각을 access log의 시각 문자열 그대로 싣는다 [3].
+`analyze_memory_bash_history`는 Volatility 행의 `CommandTime` 값을 그대로 싣는다 [4].
+`file_info`와 `list_evidence`는 `stat`과 `ls -lahR`이 출력한 시각을 그대로 싣는다 [5].
+
+다른 도구는 시각을 바꿔 싣고 원래 값을 함께 싣지 않는다.
+`analyze_journal`은 `__REALTIME_TIMESTAMP`의 마이크로초 정수를, `analyze_bash_history`는 `#<epoch>` 줄을 ISO 8601 문자열로 바꿔 싣는다 [6][7].
+`build_timeline`은 모든 출처의 시각을 ISO 8601 문자열로 바꾼 값만 표에 싣고 원래 값 대신 기록 파일 이름과 줄 번호를 싣는다 [8].
+`analyze_package_logs`는 apt·dpkg·pip 시각을 `_normalize_ts`로 바꾼 값만 표에 싣고 바꾸지 못한 yum 시각은 원래 문자열 그대로 싣는다 [9][10].
+그래서 R08.02에는 연결하지 않는다.
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 서버가 epoch 값이나 파일 시각에서 만든 시각은 UTC 오프셋 `+00:00`을 붙인 ISO 8601 문자열이다 [11].
+`stat_file`·`find_recent_changes`·`find_timestamp_anomalies`는 파일의 mtime·ctime·atime을 UTC 시간대를 붙인 `datetime`으로 바꿔 `isoformat()`으로 싣는다 [11].
+`analyze_journal`과 `analyze_bash_history`가 바꾼 시각도 UTC 오프셋을 붙여 싣는다 [6][7].
+FIM 기준의 파일 시각과 만든 시각, `verify_finding`이 판정 근거에 싣는 mtime도 같은 방식이다 [12].
+`build_timeline`도 출처마다 바꾼 시각을 이 꼴로 싣는다 [8].
+
+**한계.** `build_timeline`은 syslog 시각에 원래 없던 UTC 오프셋을 붙이고 access log 시각의 원래 오프셋은 버린다 [13][14].
+syslog 시각에는 연도와 시간대가 없는데 `_normalize_syslog_ts`는 인자 `fallback_year`(기본값 2026)를 연도로 넣고 UTC로 정한다 [13].
+`_normalize_nginx_ts`는 access log 시각 뒤의 오프셋(`+0000` 등)을 읽지 않고 UTC로 정한다 [14].
+그래서 기록이 UTC가 아닌 시간대로 적혔으면 응답의 `+00:00` 시각은 실제 UTC 시각과 다르고 응답에는 연도나 시간대를 가정했다는 표시가 없다 [8][13][14].
+
+apt·dpkg·pip 시각은 `_normalize_ts`가 `YYYY-MM-DDTHH:MM:SS` 꼴로 바꾸고 시간대를 붙이지 않는다 [9].
+`build_timeline`은 이 값과 `+00:00`이 붙은 값을 한 표에 두고 문자열 차례로 정렬한다 [8][9].
+`analyze_package_logs`도 시각 문자열 차례로 정렬하므로 원래 꼴로 남은 yum 시각(`Apr 15 …`)은 실제 시각과 관계없이 ISO 꼴 시각 뒤에 놓인다 [10].
+
+`analyze_journal`은 `__REALTIME_TIMESTAMP`를 정수로 읽지 못하면 원래 값을 그대로 시각 칸에 싣고 바꾸지 못했다는 표시를 붙이지 않는다 [15].
+값이 없는 항목은 빈 시각으로 실린다 [15].
+
+### 근거
+
+[1] syslog 줄의 시각 문자열을 그대로 `timestamp`에 둔다.
+
+```python
+    return AuthEvent(
+        timestamp=m.group("timestamp"),
+        host=m.group("host"),
+        service=service,
+        pid=pid,
+        kind=kind,  # type: ignore[arg-type]
+        fields=fields,
+        raw=line,
+        line_number=line_number,
+    )
+```
+
+[`src/findevil/tools/linux_auth.py:131-140`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L131-L140)
+
+[2] 표에 그 시각을 싣는다: [`src/findevil/tools/linux_auth.py:296`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L296), [`src/findevil/tools/linux_auth.py:394`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L394), [`src/findevil/tools/linux_auth.py:466-469`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L466-L469).
+
+[3] 업로드 사슬의 시각은 access log의 `time` 값이다.
+
+```python
+                chains.append(
+                    {
+                        "upload_line": uploaded[key].line_number,
+                        "upload_time": uploaded[key].time,
+                        "upload_ip": uploaded[key].ip,
+                        "exec_line": e.line_number,
+                        "exec_time": e.time,
+                        "exec_ip": e.ip,
+                        "path": key,
+                        "query": e.path.split("?", 1)[1] if "?" in e.path else "",
+                    }
+```
+
+[`src/findevil/tools/linux_web.py:189-199`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L189-L199)
+
+```python
+            safe_q = (c["query"] or "")[:80].replace("|", "\\|")
+            lines.append(
+                f"| {c['upload_line']} | {c['upload_time']} | `{c['upload_ip']}` | "
+                f"{c['exec_line']} | `{c['exec_ip']}` | `{c['path']}` | `{safe_q}` |"
+            )
+```
+
+[`src/findevil/tools/linux_web.py:292-296`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L292-L296)
+
+[4] `CommandTime`을 그대로 싣는다.
+
+```python
+        for row in res.rows[:200]:
+            ts = row.get("CommandTime") or row.get("Time") or "-"
+            pid = row.get("PID") or row.get("Pid") or "-"
+            comm = row.get("Process") or row.get("Comm") or "-"
+            cmd = row.get("Command") or "-"
+            safe_cmd = str(cmd).replace("|", "\\|")[:200]
+            lines.append(f"| {ts} | {pid} | `{comm}` | `{safe_cmd}` |")
+```
+
+[`src/findevil/tools/linux_memory.py:665-671`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L665-L671)
+
+[5] `stat`과 `ls`의 출력을 싣는다.
+
+```python
+    file_output = _run_tool(["file", "-b", str(validated)])
+    stat_output = _run_tool(["stat", str(validated)])
+
+    result = f"## File Type\n{file_output}\n## Stat\n{stat_output}"
+    _audit("file_info", {"path": path}, result)
+    return result
+```
+
+[`src/findevil/server.py:171-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L171-L176)
+
+```python
+    output = _run_tool(["ls", "-lahR", str(validated)])
+
+    lines = output.splitlines()
+    if len(lines) > 300:
+        output = "\n".join(lines[:300]) + f"\n\n[TRUNCATED: {len(lines)} total lines]"
+
+    _audit("list_evidence", {"subdir": subdir}, f"{len(lines)} lines")
+    return output
+```
+
+[`src/findevil/server.py:272-279`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L272-L279)
+
+[6] journal 시각 변환이다.
+
+```python
+def _parse_timestamp(value: str) -> str:
+    """Convert journal's microsecond-since-epoch string to ISO 8601 UTC."""
+    try:
+        micros = int(value)
+        return datetime.fromtimestamp(micros / 1_000_000, tz=timezone.utc).isoformat()
+    except (ValueError, TypeError, OverflowError):
+        return value  # return raw on failure
+```
+
+[`src/findevil/tools/linux_journal.py:60-66`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L60-L66)
+
+[7] shell 기록의 epoch 줄을 바꾼다.
+
+```python
+        m = _TS_RE.match(raw.strip())
+        if m:
+            try:
+                pending_ts = datetime.fromtimestamp(
+                    int(m.group(1)), tz=timezone.utc
+                ).isoformat()
+            except (ValueError, OSError):
+                pending_ts = None
+            continue
+```
+
+[`src/findevil/tools/linux_shell_history.py:111-119`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_shell_history.py#L111-L119)
+
+[8] `build_timeline`은 바꾼 시각과 출처 위치만 싣고 문자열로 정렬한다.
+
+```python
+    events.sort(key=lambda e: (e.timestamp, e.source))
+
+    lines = [
+        f"# Unified timeline — `{evidence_root}`",
+        "",
+        f"- **Events:** {len(events)}",
+        f"- **Sources:** {', '.join(sorted({e.source for e in events}))}",
+        "",
+        "| Timestamp | Source | Actor | Action | Detail | Provenance |",
+        "|-----------|--------|-------|--------|--------|------------|",
+    ]
+    for e in events[:max_events]:
+        safe_detail = e.detail.replace("|", "\\|")[:200]
+        lines.append(
+            f"| {e.timestamp} | {e.source} | `{e.actor[:40]}` | {e.action} | {safe_detail} | {e.provenance} |"
+        )
+```
+
+[`src/findevil/tools/linux_timeline.py:631-646`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L631-L646)
+
+[9] 패키지 기록 시각은 시간대 없이 바꾼다.
+
+```python
+def _normalize_ts(raw: str) -> str:
+    """Best-effort convert to ISO 8601; return raw on failure."""
+    raw = raw.strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(raw, fmt).isoformat()
+        except ValueError:
+            continue
+    return raw
+```
+
+[`src/findevil/tools/linux_packages.py:299-311`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L299-L311)
+
+[10] yum 시각과 패키지 기록의 정렬·표: [`src/findevil/tools/linux_packages.py:265`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L265), [`src/findevil/tools/linux_packages.py:379-380`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L379-L380), [`src/findevil/tools/linux_packages.py:399-401`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L399-L401).
+
+[11] 파일 시각을 UTC로 바꾼다: [`src/findevil/tools/linux_timeline.py:125-128`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L125-L128), [`src/findevil/tools/linux_timeline.py:228`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L228), [`src/findevil/tools/linux_timeline.py:307-308`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L307-L308).
+
+[12] FIM과 `verify_finding`의 시각: [`src/findevil/tools/fim.py:188`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L188), [`src/findevil/tools/fim.py:258`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L258), [`src/findevil/tools/self_correction.py:267-270`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L267-L270).
+
+[13] syslog 시각에 가정한 연도와 UTC를 붙인다.
+
+```python
+def _normalize_syslog_ts(raw: str, fallback_year: int) -> str:
+    """Convert `Apr 12 14:30:04` -> ISO 8601 UTC. fallback_year required
+    because syslog lines don't carry a year."""
+    m = _SYSLOG_TS_RE.match(raw.strip())
+    if not m:
+        return raw
+    month, day, h, mn, s = m.groups()
+    try:
+        dt = datetime(
+            fallback_year, _MONTH_TO_NUM[month], int(day),
+            int(h), int(mn), int(s), tzinfo=timezone.utc,
+        )
+        return dt.isoformat()
+    except (KeyError, ValueError):
+        return raw
+```
+
+[`src/findevil/tools/linux_timeline.py:66-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L66-L80)
+
+[14] access log 시각의 오프셋을 읽지 않는다.
+
+```python
+_NGINX_TS_RE = re.compile(r"^(\d{2})/([A-Z][a-z]{2})/(\d{4}):(\d{2}):(\d{2}):(\d{2})")
+```
+
+[`src/findevil/tools/linux_timeline.py:63-63`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L63-L63)
+
+```python
+def _normalize_nginx_ts(raw: str) -> str:
+    m = _NGINX_TS_RE.match(raw)
+    if not m:
+        return raw
+    day, month, year, h, mn, s = m.groups()
+    try:
+        dt = datetime(
+            int(year), _MONTH_TO_NUM[month], int(day),
+            int(h), int(mn), int(s), tzinfo=timezone.utc,
+        )
+        return dt.isoformat()
+    except (KeyError, ValueError):
+        return raw
+```
+
+[`src/findevil/tools/linux_timeline.py:83-95`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L83-L95)
+
+[15] journal 시각 변환은 실패하면 원래 값을 돌려준다.
+
+```python
+def _parse_timestamp(value: str) -> str:
+    """Convert journal's microsecond-since-epoch string to ISO 8601 UTC."""
+    try:
+        micros = int(value)
+        return datetime.fromtimestamp(micros / 1_000_000, tz=timezone.utc).isoformat()
+    except (ValueError, TypeError, OverflowError):
+        return value  # return raw on failure
+```
+
+[`src/findevil/tools/linux_journal.py:60-66`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L60-L66)

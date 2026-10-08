@@ -1,0 +1,319 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 서버 프로세스 메모리에 두는 조사 상태는 위협 정보 캐시 하나다 [1].
+`_load_cache`는 처음 조회할 때 `data/threat_intel.json`을 읽고 `lru_cache`로 프로세스가 끝날 때까지 그 내용을 다시 쓴다 [1].
+파일을 읽지 못하면 오류 문구와 빈 조회 표 셋을 담은 `dict`를 같은 방식으로 남겨 프로세스가 끝날 때까지 모든 조회가 캐시에 없다고 답한다 [1].
+이 캐시에는 유효 시간이나 개수 한도가 없다 [1].
+열린 사건이나 작업 목록 같은 상태는 없고 `auth_summary` 같은 분석 도구는 호출마다 증거 파일을 다시 읽어 결과를 만든다 [2].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 서버는 도구 호출마다 시각, 도구 이름, 인자, 결과 요약 500자를 JSON 한 줄로 기록 폴더의 `audit.json`에 덧붙인다 [3].
+기록 처리기는 서버 모듈을 불러올 때 한 번 만들고 기존 파일에 이어 쓴다 [3].
+`get_audit_trail`은 자기 호출을 `audit.json` 대신 `get_audit_trail_invocations.jsonl`에 덧붙인다 [4].
+`baseline_create`는 기준선을 파일로 쓰고 `baseline_diff`는 받은 경로의 기준선 파일을 다시 읽는다 [5].
+`finalize_report`·`find_contradictions`·`assess_coverage`가 받은 발견사항과 claim의 본문은 파일에 쓰지 않고 `assess_coverage`의 호출 기록에는 `findings_json`을 받았는지만 남는다 [6].
+`verify_finding`은 claim 유형, 해석한 인자 객체, 판정을 호출 기록에 남긴다 [7].
+사용자 CLI `scripts/investigate.py`는 반복마다 남은 작업 보고서와 `claude` 실행 정보를 `logs/progress/<이름>/iteration-NN.json`에 쓴다 [8].
+
+**한계.** `audit.json`은 조사마다 나뉘지 않고 서버를 다시 시작하거나 다른 증거를 조사해도 같은 파일에 이어 쓴다 [3].
+서버가 호출 기록 파일에 쓰지 못해도 도구는 정상 응답을 돌려주고 이 사실을 알리지 않는다 [9][10].
+`baseline_create`는 증거 폴더 밖이면 어느 경로에도 기준선을 쓰므로 `output_file`로 `audit.json`을 주면 그때까지의 호출 기록이 기준선 JSON으로 바뀐다 [11].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** `assess_coverage`는 호출될 때마다 `audit.json` 전체를 다시 읽어 실행한 도구 이름과 `verify_finding` 호출 수를 정한다 [12].
+`get_audit_trail`도 호출마다 같은 파일을 다시 읽는다 [13].
+그래서 서버를 다시 시작해도 모델이 따로 복구하지 않고 앞 프로세스의 호출을 수행 기록으로 이어 쓴다 [12].
+`finalize_report`·`assess_coverage`에 넘긴 발견사항과 claim은 서버에 남지 않으므로 모델이 `findings_json`·`claims_json`으로 다시 보내야 한다 [6].
+
+**한계.** 다시 읽은 호출 기록은 조사를 구별하지 않아 앞선 다른 조사의 호출도 이번 조사의 수행으로 센다 [12][3].
+JSON으로 읽히지 않는 줄은 알림 없이 건너뛴다 [12].
+
+### 근거
+
+[1] 위협 정보 파일을 한 번 읽어 캐시에 둔다.
+
+```python
+_DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "threat_intel.json"
+
+
+@lru_cache(maxsize=1)
+def _load_cache() -> dict[str, Any]:
+    """Load the bundled IOC cache once."""
+    try:
+        return json.loads(_DATA_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        # Fail closed — an unusable cache is still usable (all lookups miss)
+        return {"_error": str(e), "ips": {}, "hashes": {}, "domains": {}}
+```
+
+[`src/findevil/tools/threat_intel.py:46-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L46-L56)
+
+[2] 인증 로그 도구는 호출마다 파일을 다시 읽는다.
+
+```python
+def _read_auth_log(path: str) -> tuple[Path, list[AuthEvent]]:
+    """Validate path, read file, parse events. Raises if path is unsafe."""
+    validated = _validate_evidence_path(path)
+    if not validated.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if not validated.is_file():
+        raise ValueError(f"Not a file: {path}")
+
+    content = validated.read_text(errors="replace")
+    return validated, parse_auth_log(content)
+```
+
+[`src/findevil/tools/linux_auth.py:155-164`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L155-L164)
+
+[3] 호출 기록 파일과 기록 함수다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Logging — every tool call is recorded for the audit trail
+# ---------------------------------------------------------------------------
+
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:27-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L56)
+
+[4] `get_audit_trail`의 호출은 따로 쓴다.
+
+```python
+    # Side-channel invocation counter — deliberately NOT in audit.json
+    # (that would recurse when get_audit_trail is itself invoked), but
+    # still needed by tests/harness/self_correction_audit.py to verify
+    # whether Claude actually called this tool.
+    try:
+        with (LOGS_DIR / "get_audit_trail_invocations.jsonl").open("a") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "filter_tool": filter_tool,
+                        "filter_since": filter_since,
+                        "limit": limit,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+```
+
+[`src/findevil/tools/self_correction.py:594-612`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L594-L612)
+
+[5] 기준선을 쓰고 다시 읽는다.
+
+```python
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+    except (OSError, PermissionError) as e:
+        return f"Error writing baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:336-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L336-L340)
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586)
+
+[6] `assess_coverage`의 호출 기록에는 `findings_json`을 받았는지만 남는다.
+
+```python
+    result = "\n".join(out)
+    _audit(
+        "assess_coverage",
+        {"findings_supplied": bool(findings_json.strip())},
+        f"{len(gaps)} gaps; {len(called - {''})} tools used",
+    )
+```
+
+[`src/findevil/tools/autonomy.py:387-392`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L387-L392)
+
+[7] `verify_finding`은 해석한 인자 객체와 판정을 호출 기록에 남긴다.
+
+```python
+    out = "\n".join(lines)
+    _audit("verify_finding", {"claim_type": claim_type, "params": params_obj}, verdict)
+    return out
+```
+
+[`src/findevil/tools/self_correction.py:400-402`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L400-L402)
+
+[8] 사용자 CLI의 반복 기록이다.
+
+```python
+        record = {
+            "iteration": i,
+            "timestamp": _now(),
+            "evidence": evidence,
+            "prompt": prompt,
+            "tool_calls_this_iteration": n_after - n_before,
+            "coverage_clean": clean,
+            "finalize_accepted": finalized,
+            "coverage_report": coverage_report,
+            "claude": {k: v for k, v in meta.items() if k != "result_text"},
+        }
+        (out_dir / f"iteration-{i:02d}.json").write_text(json.dumps(record, indent=2))
+```
+
+[`scripts/investigate.py:192-203`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L192-L203)
+
+[9] 호출 기록은 서버 모듈을 불러올 때 만든 `logging.FileHandler`로 쓴다.
+
+```python
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:42-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L42-L56)
+
+[10] CPython 3.12.3의 처리기는 쓰기 예외를 `handleError`로 넘기고 호출한 쪽으로 다시 올리지 않는다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1148-L1168), [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/logging/__init__.py#L1066-L1112).
+
+[11] 출력 경로는 증거 폴더 안만 거부하고 그 파일을 새 내용으로 쓴다.
+
+```python
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:281-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L281-L295)
+
+```python
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(baseline, indent=2))
+```
+
+[`src/findevil/tools/fim.py:336-338`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L336-L338)
+
+[12] 호출 기록 전체를 다시 읽는다.
+
+```python
+def _audited_tool_calls() -> list[dict]:
+    """Return every audit.json entry as a dict (best-effort, never raises)."""
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return []
+    try:
+        raw = audit_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _called_tool_names(entries: list[dict]) -> set[str]:
+    return {e.get("tool", "") for e in entries}
+```
+
+[`src/findevil/tools/autonomy.py:58-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L58-L80)
+
+[13] `get_audit_trail`이 호출 기록을 읽는다.
+
+```python
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return "No audit log exists yet (run another tool first)."
+
+    try:
+        lines = audit_path.read_text(errors="replace").splitlines()
+    except (OSError, PermissionError) as e:
+        return f"Cannot read audit log: {e}"
+
+    entries = []
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw)
+            entries.append(obj)
+        except json.JSONDecodeError:
+            continue
+```
+
+[`src/findevil/tools/self_correction.py:614-631`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L614-L631)

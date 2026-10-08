@@ -1,0 +1,520 @@
+---
+cell: T01
+details:
+- id: T01.01
+- id: T01.02
+- id: T01.04
+- id: T01.07
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 이 검사는 `strings_extract`, `hexdump`, `find_recent_changes`, `verify_finding`, `find_contradictions`, `finalize_report`의 일부 인자에 적용된다 [1].
+`strings_extract`는 `encoding`이 `s`·`l`·`b`·`S`·`B`·`L` 가운데 하나가 아니면 `strings`를 실행하지 않고 오류 문구를 돌려준다 [1].
+`hexdump`는 `length`가 4096보다 크면 4096으로 줄여 `xxd`에 넘긴다 [2].
+`find_recent_changes`는 `since_iso`·`until_iso`를 ISO 8601 시각으로 읽지 못하면 파일을 훑지 않고 오류 문구를 돌려준다 [3].
+`verify_finding`은 `params`를 JSON으로 읽지 못하면 검증하지 않고 오류 문구를 돌려준다 [4].
+`find_contradictions`와 `finalize_report`는 `claims_json`이 JSON 배열이 아니거나 항목이 객체가 아니거나 항목에 `type`이 없으면 거부한다 [5].
+`finalize_report`는 항목의 `confidence`가 `confirmed`·`inference`·`uncertain` 가운데 하나가 아니면 그 항목을 거부 사유로 적고 보고를 받아들이지 않는다 [6].
+`sudo_command_executed` 검증은 `command_regex`를 정규식으로 컴파일하지 못하면 `INSUFFICIENT_EVIDENCE`를 돌려준다 [7].
+`assess_coverage`는 `findings_json`을 JSON으로 읽지 못해도 거부하지 않고 그 사실을 공백 항목으로 적은 뒤 자료 종류 검사를 계속한다 [8].
+
+`verify_finding`은 `params`가 JSON으로 읽히는지만 보고 객체인지, 유형별 인자가 있는지는 검사하지 않는다 [4][9].
+`params`가 JSON 배열이면 검증 함수가 `.get`을 부를 때 `AttributeError`가 나서 호출이 오류로 끝난다 [9].
+`brute_force_from_ip` 검증은 `min_attempts`를 정수로 바꾸지 못하면 `ValueError`로 끝난다 [9].
+`persistence_mechanism_exists` 검증의 `category`는 도구 설명이 값 목록을 적지만 서버는 그 목록과 대조하지 않는다 [10].
+목록에 없는 값을 주면 그 분류의 발견사항이 없으므로 `CONTRADICTED`가 나온다 [10].
+`get_audit_trail`은 `filter_since`를 시각으로 읽지 않고 기록 항목의 시각 문자열과 문자열로 비교한다 [11].
+
+정수 인자 `min_length`, `context_lines`, `offset`과 `length`의 하한은 검사하지 않고 그대로 명령 인자에 넣는다 [12].
+출력 행 수를 정하는 상한 인자도 범위를 검사하지 않는다.
+
+**한계.** `build_timeline`은 `since_iso`·`until_iso`를 ISO 8601 시각으로 읽지 못하면 알리지 않고 파일 수정 시각 사건만 빼고 시간표를 돌려준다 [13].
+둘 가운데 하나만 준 경우에도 수정 시각 사건을 빼고 그 사실을 응답에 적지 않는다 [13].
+`get_audit_trail`의 `limit`에 0을 주면 목록을 `entries[-0:]`로 잘라 모든 항목을 싣는다 [11].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 검사는 경로 인자를 받는 도구에 적용된다.
+도구는 대조를 통과한 경로가 있는지 확인하고 없으면 외부 명령이나 파서를 부르지 않고 오류 문구를 돌려준다 [14].
+로그·설정 파일을 파싱하는 도구와 폴더를 훑는 도구는 파일인지 폴더인지도 확인한다 [15].
+`file_info`·`hash_file`·`strings_extract`·`log_search`·`hexdump`는 경로가 있는지만 확인하므로 폴더를 넘겨도 외부 명령을 실행한다 [16].
+`file_info`는 경로가 없으면 `file`과 `stat`을 실행하지 않고 `File not found`를 돌려준다 [14].
+메모리 도구는 덤프 경로가 파일이 아니면 Volatility를 실행하지 않는다 [17].
+`baseline_diff`는 `baseline_file`이 파일이 아니면 비교하지 않는다 [18].
+서버는 읽기 권한을 미리 확인하지 않는다.
+
+**한계.** 검증 함수 가운데 `package_installed`는 `fs_root`가 있는지 확인하지 않는다 [19].
+그 아래에 apt·dpkg 기록 파일이 없으면 입력이 없다는 판정 대신 설치 기록이 없다는 `CONTRADICTED`를 낸다 [19].
+`file_modified_in_window`도 파일이 없으면 `INSUFFICIENT_EVIDENCE`가 아니라 `CONTRADICTED`를 낸다 [20].
+
+### T01.04 실제 경로로 변환해 허용 폴더 대조
+
+**구현.** 이 방식은 도구가 받는 증거 경로 인자(`path`, `root_path`, `memory_dump_path`, `fs_root`, `evidence_root`, `list_evidence`의 `subdir`)와 `verify_finding`·`finalize_report`가 claim에서 읽는 `log_path`·`fs_root`·`path`에 적용된다 [21][22].
+`_validate_evidence_path`는 인자를 `Path.resolve()`로 실제 경로로 변환해 `..`와 심볼릭 링크를 해석한다 [21].
+그 뒤 `relative_to`로 `FINDEVIL_EVIDENCE_DIR`의 실제 경로 안에 있는지 대조하고 밖이면 `ValueError`로 거부한다 [21].
+문자열 접두어가 아니라 경로 구성 요소로 비교하므로 이름이 증거 폴더 이름으로 시작하는 이웃 폴더는 통과하지 못한다 [21].
+도구는 이 함수가 돌려준 변환한 경로로 외부 명령을 실행하거나 파일을 연다 [14].
+`list_evidence`는 `subdir`을 증거 폴더에 이어 붙인 뒤 같은 대조를 거친다 [23].
+`file_info` 같은 기본 도구는 증거 폴더 밖 경로를 받으면 `Error: Access denied`로 시작하는 문구를 돌려준다 [24].
+검증 함수는 claim의 경로가 증거 폴더 밖이면 `INSUFFICIENT_EVIDENCE` 판정을 낸다 [22].
+
+`baseline_diff`의 `baseline_file`은 이 대조를 거치지 않는다 [18].
+서버는 서버 계정이 읽을 수 있는 어느 경로의 JSON 파일이든 기준선으로 읽는다 [18][24].
+도구 설명도 기준선 파일은 증거 폴더 안에 있지 않아도 된다고 적는다 [18].
+
+**한계.** `build_timeline`은 `evidence_root`만 대조하고 `fs_subpath`는 대조하지 않은 채 대조한 경로에 이어 붙인다 [25].
+`fs_subpath`에 절대 경로나 `..`가 든 경로를 넣으면 증거 폴더 밖의 `var/log/apt/history.log`, `var/log/dpkg.log`, `root/.pip/pip.log`, `root/.bash_history`, `home/*/.bash_history`를 읽어 시간표에 싣는다 [26][24].
+`since_iso`와 `until_iso`를 함께 주면 그 폴더 아래 파일의 경로와 수정 시각도 싣는다 [26].
+
+경로 인자 아래의 파일을 훑는 도구는 하위 경로를 다시 대조하지 않고 심볼릭 링크를 따라 읽는다 [27].
+증거 안의 `etc/passwd`가 증거 폴더 밖 파일을 가리키는 링크이면 `find_persistence`는 그 파일의 줄을 응답에 싣는다 [24].
+`verify_package_integrity`는 증거 안 `.md5sums` 파일에 적힌 상대 경로를 루트에 이어 붙여 해시하므로 `..`가 든 줄이 있으면 루트 밖 파일을 해시한다 [28].
+
+### T01.07 고정 입력 경로 사용
+
+**구현.** 이 방식은 `assess_coverage`와 `get_audit_trail`에 적용된다 [29].
+`assess_coverage`는 경로 인자 없이 사용자가 `FINDEVIL_EVIDENCE_DIR`로 정한 증거 폴더 전체를 훑고 `FINDEVIL_LOGS_DIR`의 `audit.json`을 읽는다 [29].
+`get_audit_trail`도 경로 인자 없이 같은 `audit.json`을 읽는다 [30].
+
+### 근거
+
+[1] `encoding` 허용 값 검사다.
+
+```python
+    if encoding not in ("s", "l", "b", "S", "B", "L"):
+        return "Invalid encoding. Use: s (ASCII), l (UTF-16 LE), b (UTF-16 BE)"
+
+    output = _run_tool(
+        ["strings", f"-n{min_length}", f"-e{encoding}", str(validated)],
+        timeout=60,
+    )
+```
+
+[`src/findevil/server.py:231-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L231-L237)
+
+[2] `length` 상한을 정한다.
+
+```python
+    length = min(length, 4096)
+
+    output = _run_tool(
+        ["xxd", "-s", str(offset), "-l", str(length), str(validated)],
+        timeout=30,
+    )
+```
+
+[`src/findevil/server.py:345-350`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L345-L350)
+
+[3] 시각 인자를 읽지 못하면 오류 문구를 돌려준다.
+
+```python
+    try:
+        since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+        until_dt = datetime.fromisoformat(until_iso.replace("Z", "+00:00"))
+    except ValueError as e:
+        return f"Invalid ISO timestamp: {e}"
+```
+
+[`src/findevil/tools/linux_timeline.py:195-199`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L195-L199)
+
+[4] `claim_type`과 `params`를 검사한다.
+
+```python
+    if claim_type not in _VALID_CLAIM_TYPES:
+        return (
+            f"INVALID claim_type `{claim_type}`. Supported types: "
+            + ", ".join(sorted(_VALID_CLAIM_TYPES))
+        )
+    try:
+        params_obj = json.loads(params) if isinstance(params, str) else params
+    except json.JSONDecodeError as e:
+        return f"INVALID params JSON: {e}"
+```
+
+[`src/findevil/tools/self_correction.py:380-388`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L380-L388)
+
+[5] `claims_json`의 구조를 검사한다.
+
+```python
+def _parse_claims(json_str: str) -> tuple[list[Claim] | None, str | None]:
+    try:
+        raw = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        return None, f"invalid JSON: {e}"
+    if not isinstance(raw, list):
+        return None, "expected JSON array of claim objects"
+    claims: list[Claim] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"claim {i}: not an object"
+        if "type" not in item:
+            return None, f"claim {i}: missing 'type'"
+        claims.append(
+            Claim(id=str(item.get("id", f"c{i}")), type=item["type"], data=item)
+        )
+    return claims, None
+```
+
+[`src/findevil/tools/self_correction.py:417-433`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L417-L433)
+
+[6] `confidence` 값을 검사한다.
+
+```python
+    for c in claims:
+        conf = str(c.data.get("confidence", "")).lower()
+        statement = str(c.data.get("statement", c.data.get("type", c.id)))
+        if conf not in _VALID_CONFIDENCE:
+            rejections.append(
+                f"`{c.id}`: missing/invalid `confidence` "
+                f"(got {c.data.get('confidence')!r}; must be confirmed|inference|uncertain)"
+            )
+            continue
+```
+
+[`src/findevil/tools/autonomy.py:460-468`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L460-L468)
+
+[7] `command_regex`를 컴파일한다.
+
+```python
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return "INSUFFICIENT_EVIDENCE", [f"invalid regex: {e}"]
+```
+
+[`src/findevil/tools/self_correction.py:315-318`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L315-L318)
+
+[8] `findings_json`을 읽지 못한 사실을 공백 항목으로 적는다.
+
+```python
+    if findings_json.strip():
+        try:
+            parsed = json.loads(findings_json)
+        except json.JSONDecodeError as e:
+            parsed = None
+            gaps.append(
+                f"could not parse findings_json ({e}) — IOC-pivot and "
+                "verification gaps were not checked"
+            )
+```
+
+[`src/findevil/tools/autonomy.py:312-320`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L312-L320)
+
+[9] 검증 함수는 `params`를 `dict`로 보고 값을 꺼낸다.
+
+```python
+def _verify_brute_force(params: dict[str, Any]) -> tuple[str, list[str]]:
+    """Confirm: IP X produced >= N failed login attempts in file Y."""
+    from findevil.tools.linux_auth import parse_auth_log
+
+    log_path = params.get("log_path", "")
+    ip = params.get("ip", "")
+    min_attempts = int(params.get("min_attempts", 10))
+```
+
+[`src/findevil/tools/self_correction.py:76-82`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L76-L82)
+
+[10] `category` 값 목록은 도구 설명에만 있고 검증 함수는 받은 값으로 거른다.
+
+```python
+    - `persistence_mechanism_exists` — params: {fs_root, category}
+      (category ∈ cron|systemd|ssh|user|shell|library|init|pam|kernel_module|ssh_config|sudoers)
+```
+
+[`src/findevil/tools/self_correction.py:369-370`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L369-L370)
+
+```python
+def _verify_persistence_mechanism_exists(params: dict[str, Any]) -> tuple[str, list[str]]:
+    from findevil.tools.linux_persistence import scan_all
+
+    fs_root = params.get("fs_root", "")
+    category = params.get("category", "")  # e.g. "systemd", "cron", "pam"
+
+    try:
+        validated = _validate_evidence_path(fs_root)
+    except ValueError as e:
+        return "INSUFFICIENT_EVIDENCE", [str(e)]
+
+    findings = scan_all(validated)
+    matching = [f for f in findings if f.category == category and f.severity == "high"]
+    if matching:
+        return "SUPPORTED", [
+            f"{len(matching)} high-severity {category} finding(s)",
+            *[f"  `{f.path}` — {f.summary}" for f in matching[:5]],
+        ]
+    return "CONTRADICTED", [
+        f"no high-severity {category} persistence in {fs_root}"
+    ]
+```
+
+[`src/findevil/tools/self_correction.py:276-296`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L276-L296)
+
+[11] `filter_since`와 `limit`을 처리하는 곳이다.
+
+```python
+    if filter_tool:
+        entries = [e for e in entries if e.get("tool") == filter_tool]
+    if filter_since:
+        entries = [e for e in entries if e.get("timestamp", "") >= filter_since]
+
+    total = len(entries)
+    entries = entries[-limit:]  # most recent first
+```
+
+[`src/findevil/tools/self_correction.py:633-639`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L633-L639)
+
+[12] 정수 인자를 그대로 명령 인자에 넣는다: [`src/findevil/server.py:234-237`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L234-L237), [`src/findevil/server.py:305-308`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L305-L308), [`src/findevil/server.py:347-350`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L347-L350).
+
+[13] 시각을 읽지 못하면 수정 시각 사건만 빼고 나머지 사건으로 응답을 만든다.
+
+```python
+    # Filesystem mtime events (only if window given — otherwise flood risk)
+    if since_iso and until_iso and fs_root.is_dir():
+        try:
+            since_ts = datetime.fromisoformat(
+                since_iso.replace("Z", "+00:00")
+            ).timestamp()
+            until_ts = datetime.fromisoformat(
+                until_iso.replace("Z", "+00:00")
+            ).timestamp()
+            events.extend(_events_from_filesystem(fs_root, since_ts, until_ts))
+        except ValueError:
+            pass
+```
+
+[`src/findevil/tools/linux_timeline.py:613-624`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L613-L624)
+
+[14] 대조와 존재 확인 뒤에 외부 명령을 실행한다.
+
+```python
+    try:
+        validated = _validate_evidence_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.exists():
+        return f"File not found: {path}"
+
+    file_output = _run_tool(["file", "-b", str(validated)])
+```
+
+[`src/findevil/server.py:164-171`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L164-L171)
+
+[15] 파일인지 폴더인지 확인하는 예: [`src/findevil/tools/linux_auth.py:157-161`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L157-L161), [`src/findevil/tools/linux_persistence.py:1455-1458`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1455-L1458), [`src/findevil/tools/linux_timeline.py:192-193`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L192-L193).
+
+[16] 기본 도구는 경로가 있는지만 확인한다: [`src/findevil/server.py:197-198`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L197-L198), [`src/findevil/server.py:228-229`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L228-L229), [`src/findevil/server.py:302-303`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L302-L303), [`src/findevil/server.py:342-343`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L342-L343).
+
+[17] 메모리 덤프 경로를 대조하고 파일인지 확인한다.
+
+```python
+def _validate_dump(memory_dump_path: str) -> tuple[Path | None, str | None]:
+    """Validate the dump path is inside the evidence directory and exists."""
+    try:
+        validated = _validate_evidence_path(memory_dump_path)
+    except ValueError as e:
+        return None, f"Error: {e}"
+    if not validated.is_file():
+        return None, f"Memory dump file not found: {memory_dump_path}"
+    return validated, None
+```
+
+[`src/findevil/tools/linux_memory.py:209-217`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L209-L217)
+
+[18] `baseline_file`은 대조 없이 파일인지만 확인하고 읽는다.
+
+```python
+    Args:
+        root_path: Filesystem root to inspect (must be inside
+            FINDEVIL_EVIDENCE_DIR)
+        baseline_file: Path to a baseline JSON produced by
+            `baseline_create` (does NOT need to be inside evidence —
+            baselines are analyst artifacts, not evidence)
+
+    Returns:
+        Markdown diff report grouped by severity, with a triage
+        verdict at the top.
+    """
+    try:
+        validated_root = _validate_evidence_path(root_path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated_root.is_dir():
+        return f"Not a directory: {root_path}"
+
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:559-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L559-L586)
+
+[19] `package_installed` 검증 함수다.
+
+```python
+def _verify_package_installed(params: dict[str, Any]) -> tuple[str, list[str]]:
+    from findevil.tools.linux_packages import parse_apt_history, parse_dpkg_log
+
+    fs_root = params.get("fs_root", "")
+    name = params.get("name", "")
+
+    try:
+        validated = _validate_evidence_path(fs_root)
+    except ValueError as e:
+        return "INSUFFICIENT_EVIDENCE", [str(e)]
+
+    seen: list[str] = []
+    apt = validated / "var/log/apt/history.log"
+    if apt.is_file():
+        for e in parse_apt_history(apt.read_text(errors="replace")):
+            if e.name == name and e.action == "install":
+                seen.append(f"apt history installs `{name}={e.version}` at line {e.source_line}")
+
+    dpkg = validated / "var/log/dpkg.log"
+    if dpkg.is_file():
+        for e in parse_dpkg_log(dpkg.read_text(errors="replace")):
+            if e.name == name and e.action == "install":
+                seen.append(f"dpkg log installs `{name}={e.version}` at line {e.source_line}")
+
+    if seen:
+        return "SUPPORTED", seen
+    return "CONTRADICTED", [f"no apt/dpkg install event for `{name}` found"]
+```
+
+[`src/findevil/tools/self_correction.py:185-211`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L185-L211)
+
+[20] `file_modified_in_window`는 파일이 없으면 `CONTRADICTED`를 낸다.
+
+```python
+    try:
+        validated = _validate_evidence_path(path)
+    except ValueError as e:
+        return "INSUFFICIENT_EVIDENCE", [str(e)]
+
+    if not validated.is_file():
+        return "CONTRADICTED", ["file does not exist at that path"]
+```
+
+[`src/findevil/tools/self_correction.py:253-259`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L253-L259)
+
+[21] 경로 대조 함수다.
+
+```python
+def _validate_evidence_path(path_str: str) -> Path:
+    """Ensure the requested path is inside the evidence directory.
+
+    Uses Path.relative_to() rather than a string-prefix check. A naive
+    startswith() would accept ``/tmp/X/evidence-malicious/...`` as being
+    "inside" ``/tmp/X/evidence`` because the string literally begins
+    with the prefix. Tests in tests/security/test_path_validation.py
+    hold this invariant in place.
+    """
+    requested = Path(path_str).resolve()
+    evidence_resolved = EVIDENCE_DIR.resolve()
+    try:
+        requested.relative_to(evidence_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Access denied: {path_str} is outside the evidence directory ({EVIDENCE_DIR})"
+        ) from exc
+    return requested
+```
+
+[`src/findevil/server.py:63-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L63-L80)
+
+[22] claim의 경로 값도 같은 함수로 대조한다: [`src/findevil/tools/self_correction.py:84-87`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L84-L87), [`src/findevil/tools/self_correction.py:191-194`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L191-L194), [`src/findevil/tools/self_correction.py:253-256`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L253-L256), [`src/findevil/tools/autonomy.py:476-477`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L476-L477).
+
+[23] `subdir`을 이어 붙인 뒤 대조한다.
+
+```python
+    target = EVIDENCE_DIR / subdir if subdir else EVIDENCE_DIR
+    try:
+        validated = _validate_evidence_path(str(target))
+    except ValueError as e:
+        return f"Error: {e}"
+```
+
+[`src/findevil/server.py:261-265`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L261-L265)
+
+[24] (실행 확인) 증거 폴더 밖 경로를 `file_info`에 넘기면 `Error: Access denied`로 시작하는 문구가 돌아온다.
+`build_timeline`에 `fs_subpath`로 증거 폴더 밖의 절대 경로와 `../../outside`를 넘기면 두 경우 모두 그 폴더의 `root/.bash_history` 명령이 시간표에 실린다.
+증거 안 `fs/etc/passwd`를 증거 폴더 밖 파일로 가리키는 심볼릭 링크로 두고 `find_persistence`를 부르면 밖 파일의 UID 0 계정 줄이 발견사항으로 실린다.
+`baseline_diff`에 증거 폴더 밖의 기준선 JSON을 넘기면 비교 결과가 돌아온다.
+
+[25] `evidence_root`만 대조하고 `fs_subpath`를 이어 붙인다.
+
+```python
+    try:
+        validated = _validate_evidence_path(evidence_root)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.is_dir():
+        return f"Not a directory: {evidence_root}"
+
+    fs_root = validated / fs_subpath
+    events: list[TimelineEvent] = []
+```
+
+[`src/findevil/tools/linux_timeline.py:566-574`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L566-L574)
+
+[26] `fs_root` 아래에서 읽는 파일과 수정 시각을 훑는 범위다: [`src/findevil/tools/linux_timeline.py:588-624`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L588-L624).
+
+[27] 하위 파일을 대조 없이 연다.
+
+```python
+def _read_safe(path: Path, max_bytes: int = 65536) -> str:
+    """Read a file with size cap and error tolerance."""
+    try:
+        with path.open("rb") as f:
+            data = f.read(max_bytes)
+        return data.decode(errors="replace")
+    except (OSError, PermissionError) as e:
+        return f"[unreadable: {e}]"
+```
+
+[`src/findevil/tools/linux_persistence.py:139-146`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L139-L146)
+
+[28] `.md5sums`의 경로를 루트에 이어 붙인다.
+
+```python
+    for md5sums_file in sorted(info_dir.glob("*.md5sums")):
+        package = md5sums_file.stem.split(":", 1)[0]  # strip arch suffix `:amd64`
+        try:
+            content = md5sums_file.read_text(errors="replace")
+        except (OSError, PermissionError):
+            continue
+        packages_checked += 1
+        for expected_md5, rel in _parse_dpkg_md5sums(content):
+            target = validated / rel
+            if not target.is_file():
+                missing.append((package, rel))
+                continue
+            files_checked += 1
+```
+
+[`src/findevil/tools/linux_packages.py:554-566`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L554-L566)
+
+[29] 설정한 폴더와 호출 기록 파일을 읽는다: [`src/findevil/tools/autonomy.py:58-66`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L58-L66), [`src/findevil/tools/autonomy.py:212-229`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L212-L229), [`src/findevil/tools/autonomy.py:288-290`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L288-L290).
+
+[30] 호출 기록 파일을 읽는다.
+
+```python
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return "No audit log exists yet (run another tool first)."
+
+    try:
+        lines = audit_path.read_text(errors="replace").splitlines()
+    except (OSError, PermissionError) as e:
+        return f"Cannot read audit log: {e}"
+```
+
+[`src/findevil/tools/self_correction.py:614-621`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L614-L621)

@@ -1,0 +1,206 @@
+---
+cell: T04
+details:
+- id: T04.01
+- id: T04.02
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 라이브러리 호출
+
+**구현.** 외부 명령을 실행하지 않는 도구 32개는 서버 프로세스 안의 Python 코드로 증거 파일을 읽고 분석한다.
+인증 로그, systemd journal 내보내기, 셸 기록, 웹 접근 로그, 패키지 관리자 로그는 서버 코드의 정규식 파서가 줄 단위로 읽는다 [1].
+지속성 흔적, 컨테이너 설정, 웹셸, LLM 사용 흔적은 서버 코드가 정한 경로의 파일을 열어 정규식으로 검사한다 [2].
+`verify_package_integrity`와 `baseline_create`·`baseline_diff`는 `hashlib`으로 파일을 해시한다 [3].
+`stat_file`·`find_recent_changes`·`find_timestamp_anomalies`는 Python의 `stat`으로 파일 시각을 읽는다 [4].
+`extract_iocs`·`bulk_ioc_lookup`은 정규식과 저장소의 IOC 파일로 서버 안에서 조회한다 [5].
+`verify_finding`·`find_contradictions`·`assess_coverage`·`finalize_report`·`get_audit_trail`도 서버 안의 함수로 동작한다 [6].
+이 분석은 서버와 같은 프로세스, 권한, 메모리에서 실행된다.
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 이 방식은 `file_info`, `hash_file`, `strings_extract`, `list_evidence`, `log_search`, `hexdump`와 메모리 도구 7개에 적용된다 [7].
+앞의 6개 도구는 실행기 `_run_tool`을 거쳐 `file`, `stat`, `md5sum`, `sha256sum`, `strings`, `ls`, `grep`, `xxd`를 실행한다 [7].
+`_run_tool`은 `subprocess.run`에 인자 목록을 넘기고 셸을 거치지 않으며 표준 출력과 표준 오류를 받는다 [7].
+메모리 도구는 `_run_vol_plugin`이 같은 방식으로 Volatility 3의 `vol`을 실행한다 [8].
+그 실행 전에 `vol --help`도 같은 방식으로 실행한다 [9].
+자식 프로세스는 서버와 같은 계정, 파일, 네트워크 권한으로 실행된다.
+작업 폴더(`cwd`)와 표준 입력을 따로 정하지 않으므로 자식 프로세스는 서버의 작업 폴더에서 실행되고 서버의 표준 입력을 물려받는다 [7][8].
+서버 코드에는 `shell=True`나 `os.system`으로 명령을 실행하는 곳이 없다 [7][8].
+
+**한계.** 환경변수 `FINDEVIL_FAULT_RATE`가 0보다 크면 `_run_tool`은 그 확률로 자식 프로세스를 실행하지 않고 시간 제한으로 끝난 것처럼 꾸민 문구를 돌려준다 [10].
+이 문구는 시험용으로 주입한 실패라고 밝힌다 [10].
+`_run_vol_plugin`에는 이 분기가 없다 [8].
+
+### 근거
+
+[1] 서버 코드의 줄 단위 파서다: [`src/findevil/tools/linux_auth.py:89-152`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_auth.py#L89-L152), [`src/findevil/tools/linux_journal.py:69-108`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_journal.py#L69-L108), [`src/findevil/tools/linux_shell_history.py:103-123`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_shell_history.py#L103-L123), [`src/findevil/tools/linux_web.py:64-90`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L64-L90), [`src/findevil/tools/linux_packages.py:107-190`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L107-L190).
+
+[2] 정한 경로의 파일을 열어 검사한다: [`src/findevil/tools/linux_persistence.py:1337-1355`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_persistence.py#L1337-L1355), [`src/findevil/tools/linux_containers.py:354-382`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_containers.py#L354-L382), [`src/findevil/tools/linux_web.py:426-466`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_web.py#L426-L466), [`src/findevil/tools/ai_signatures.py:473-480`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/ai_signatures.py#L473-L480).
+
+[3] 서버 안에서 해시한다.
+
+```python
+def _hash_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute SHA256 streaming. Returns empty string on permission error."""
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except (OSError, PermissionError):
+        return ""
+    return h.hexdigest()
+```
+
+[`src/findevil/tools/fim.py:156-168`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L156-L168)
+
+```python
+def _md5_of(path: Path, max_bytes: int = 1024 * 1024 * 1024) -> str | None:
+    """Compute MD5 of a file. Returns None on read failure.
+
+    `max_bytes` caps how much of the file is hashed — defaults to 1 GiB,
+    which is more than enough for any package binary or config we'd
+    encounter under /var/lib/dpkg/info-tracked paths.
+    """
+    try:
+        h = hashlib.md5()  # noqa: S324 — dpkg recorded MD5; we must compare in MD5
+        total = 0
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                h.update(chunk)
+                total += len(chunk)
+                if total >= max_bytes:
+                    break
+        return h.hexdigest()
+    except (OSError, PermissionError):
+        return None
+```
+
+[`src/findevil/tools/linux_packages.py:457-478`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_packages.py#L457-L478)
+
+[4] Python의 `stat`으로 파일 시각을 읽는다: [`src/findevil/tools/linux_timeline.py:125-128`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L125-L128), [`src/findevil/tools/linux_timeline.py:205-211`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L205-L211), [`src/findevil/tools/linux_timeline.py:280-292`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L280-L292).
+
+[5] 저장소의 IOC 파일을 읽어 조회한다.
+
+```python
+_DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "threat_intel.json"
+
+
+@lru_cache(maxsize=1)
+def _load_cache() -> dict[str, Any]:
+    """Load the bundled IOC cache once."""
+    try:
+        return json.loads(_DATA_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        # Fail closed — an unusable cache is still usable (all lookups miss)
+        return {"_error": str(e), "ips": {}, "hashes": {}, "domains": {}}
+```
+
+[`src/findevil/tools/threat_intel.py:46-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L46-L56)
+
+[6] 서버 안의 함수로 동작하는 도구다: [`src/findevil/tools/self_correction.py:352-402`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L352-L402), [`src/findevil/tools/self_correction.py:514-563`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L514-L563), [`src/findevil/tools/autonomy.py:257-393`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L257-L393), [`src/findevil/tools/autonomy.py:403-540`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L403-L540), [`src/findevil/tools/self_correction.py:571-673`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L571-L673).
+
+[7] 공통 실행기다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+[8] Volatility 실행 부분이다.
+
+```python
+    cmd = [_VOL_BIN, "-q", "-f", str(dump_path)]
+    if json_output:
+        cmd += ["-r", "json"]
+    cmd += [plugin, *extra_args]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_VOL_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return VolResult(
+            plugin=plugin, rc=124,
+            stdout="", stderr=f"vol {plugin} timed out after {_VOL_TIMEOUT_S}s",
+            rows=[], no_symbols=False,
+        )
+    except OSError as e:
+        return VolResult(
+            plugin=plugin, rc=126,
+            stdout="", stderr=f"vol invocation failed: {e}",
+            rows=[], no_symbols=False,
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:160-180`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L160-L180)
+
+[9] 실행 전에 `vol --help`를 실행한다.
+
+```python
+def _vol_available() -> bool:
+    if not _VOL_BIN:
+        return False
+    try:
+        proc = subprocess.run(
+            [_VOL_BIN, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+```
+
+[`src/findevil/tools/linux_memory.py:120-130`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L120-L130)
+
+[10] 실패 주입 분기다.
+
+```python
+_FAULT_RATE = float(os.environ.get("FINDEVIL_FAULT_RATE", "0"))
+_fault_rng = None
+if _FAULT_RATE > 0:
+    import random as _random
+    _fault_rng = _random.Random(int(os.environ.get("FINDEVIL_FAULT_SEED", "1")))
+
+
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+```
+
+[`src/findevil/server.py:83-99`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L83-L99)

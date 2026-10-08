@@ -1,0 +1,381 @@
+---
+cell: L01
+details:
+- id: L01.08
+- id: L01.10
+---
+
+# L01 기록 방식
+
+### L01.08 도구별 기록 호출
+
+**구현.** 이 방식은 서버의 MCP 도구 45개 모두에 적용된다.
+44개 도구는 본문에서 결과를 다 만든 뒤 `server.py`의 기록 함수 `_audit`을 불러 항목 하나를 쓴다 [1][2].
+`_audit`은 `findevil.audit` 로거로 JSON 한 줄을 `FINDEVIL_LOGS_DIR`의 `audit.json`에 덧붙인다 [1].
+서버는 모듈을 불러올 때 이 폴더를 만들고 `server.py`가 두 번 불려도 로거에 파일 핸들러를 한 번만 붙인다 [1][3].
+도구를 등록하는 FastMCP `@mcp.tool()`은 기록하지 않으므로 기록을 남길지와 언제 남길지는 도구 본문이 정한다 [2].
+외부 명령을 실행하는 공통 함수 `_run_tool`과 Volatility를 실행하는 `_run_vol_plugin`도 기록하지 않는다 [4][5].
+그래서 `file_info`처럼 한 호출이 외부 명령을 여러 번 실행해도 항목은 하나다 [2].
+
+`get_audit_trail`은 `_audit`을 부르지 않는다 [6].
+대신 본문이 같은 폴더의 `get_audit_trail_invocations.jsonl`에 시각과 세 인자를 한 줄 덧붙인다 [6].
+그래서 `get_audit_trail` 호출은 `audit.json`에 남지 않는다 [6].
+
+**한계.** 도구 본문은 결과를 다 만든 뒤 마지막에 `_audit`을 부르므로 그 앞에서 돌아가는 반환 지점은 기록을 남기지 않는다 [2][7].
+증거 폴더 밖 경로의 거부와 없는 파일의 오류는 거의 모든 도구에서 이 반환 지점에 해당한다 [2].
+`strings_extract`의 인코딩 거부, `find_recent_changes`의 시각 형식 오류, `verify_finding`의 유형·JSON 오류도 같다 [7].
+`finalize_report`가 입력 형식 오류나 빈 주장 목록으로 거부하는 호출과 `baseline_create`가 출력 경로를 거부하거나 파일을 쓰지 못한 호출도 같다 [7].
+Volatility 도구 7개는 덤프 경로를 확인하지 못하면 기록 없이 돌아간다 [7].
+`baseline_diff`가 기준 파일을 찾거나 읽지 못한 호출, `find_contradictions`가 입력 형식으로 거부한 호출, `correlate_memory_and_disk`가 `fs_root`를 거부한 호출도 기록을 남기지 않는다 [8].
+
+도구 본문에서 예외가 나면 대신 기록하는 공통 처리가 없다 [2].
+`_run_tool`은 `subprocess.run`의 시간 제한 초과나 실행 파일이 없을 때의 예외를 처리하지 않는다 [4].
+그래서 이런 호출은 FastMCP가 오류 결과를 돌려주고 항목은 남지 않는다 [4].
+`_run_tool`은 명령 출력을 `text=True`로 받으므로 출력에 UTF-8로 읽히지 않는 바이트가 있을 때의 `UnicodeDecodeError`도 같은 경우다 [4][9].
+`verify_finding`의 `params`에 JSON 배열을 주면 `AttributeError`로 호출이 오류로 끝나고 `audit.json`에 항목이 남지 않는다 [10].
+`logs/README.md`는 `audit.json`이 모든 도구 호출을 자동으로 기록한다고 적지만 위 호출들은 기록되지 않는다 [11].
+
+`_audit`은 도구 함수 안에서 부르는 보통 함수여서 MCP 호출이 아닌 실행도 같은 파일에 항목을 남긴다 [12][13].
+사용자 CLI `scripts/investigate.py`는 반복마다 `assess_coverage` 함수를 프로세스 안에서 직접 불러 `audit.json`에 `assess_coverage` 항목을 더한다 [12].
+사용자 CLI `scripts/capture_example_run.py`도 LLM 없이 도구 함수를 직접 불러 같은 기록 함수로 항목을 쓴다 [13].
+이 항목들은 MCP 호출에서 나온 항목과 구별하는 필드 없이 같은 파일에 섞인다 [1].
+
+### L01.10 클라이언트의 MCP 호출 기록
+
+**구현.** 이 방식은 사용자가 조사를 마친 뒤 사용자 CLI `scripts/extract_token_usage.py`를 실행할 때만 적용된다 [14].
+이 스크립트는 Claude Code가 남긴 세션 대화 기록 JSONL에서 이름이 `mcp__findevil__`로 시작하는 `tool_use` 블록마다 도구 이름, 인자, `tool_use_id`를 꺼낸다 [14].
+도구를 부른 응답 차례마다 시각, 세션, 요청 ID, 모델, 호출 목록, 토큰 사용량을 `FINDEVIL_LOGS_DIR`의 `token_usage.jsonl`에 한 줄씩 쓴다 [15][16].
+이 파일은 서버의 `audit.json`과 별도이고 두 기록에 공통 ID는 없다 [11][1].
+`logs/README.md`는 두 기록을 시각으로 맞춰 보라고 적는다 [11].
+도구 결과와 오류 여부는 이 기록에 없다 [14].
+
+`scripts/investigate.py`가 반복마다 쓰는 `iteration-NN.json`은 그 반복 동안 늘어난 `audit.json` 항목 수만 담아 개별 MCP 도구 호출을 식별하지 않는다 [12].
+이 수에는 CLI가 반복을 마친 뒤 직접 부른 `assess_coverage`의 항목 1건도 들어간다 [12].
+저장소의 `.mcp.json`은 서버 실행 방법만 정하고 훅을 두지 않는다 [17].
+
+**한계.** 세션이나 대화 기록 파일을 지정하지 않으면 스크립트는 findevil 도구 호출이 가장 많은 대화 기록 하나만 읽는다 [18].
+대화 기록 폴더는 현재 폴더 경로의 `/`를 `-`로 바꿔 찾는다 [18].
+스크립트는 실행할 때마다 `token_usage.jsonl`을 새로 써서 앞선 실행의 내용을 남기지 않는다 [16].
+
+### 근거
+
+[1] `_audit`은 `findevil.audit` 로거로 네 필드를 JSON 한 줄로 쓰고 핸들러는 한 번만 붙인다.
+
+```python
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:35-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L35-L56)
+
+[2] 도구 본문은 경로 검사와 실행을 마친 뒤 마지막에 `_audit`을 부른다.
+
+```python
+@mcp.tool()
+def file_info(path: str) -> str:
+    """Get file type and metadata for a file inside the evidence directory.
+
+    Use this as a first step to understand what kind of artifact you're looking at.
+    Returns file type identification (magic bytes) and filesystem metadata.
+
+    Args:
+        path: Path to the file inside /evidence (e.g., /evidence/case01/suspicious.exe)
+    """
+    try:
+        validated = _validate_evidence_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.exists():
+        return f"File not found: {path}"
+
+    file_output = _run_tool(["file", "-b", str(validated)])
+    stat_output = _run_tool(["stat", str(validated)])
+
+    result = f"## File Type\n{file_output}\n## Stat\n{stat_output}"
+    _audit("file_info", {"path": path}, result)
+    return result
+```
+
+[`src/findevil/server.py:154-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L154-L176)
+
+[3] 서버는 모듈을 불러올 때 기록 폴더를 만든다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+[`src/findevil/server.py:27-29`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L29)
+
+[4] 외부 명령 공통 실행 함수는 기록하지 않고 실행 예외도 처리하지 않는다.
+
+```python
+def _run_tool(cmd: list[str], timeout: int = 120) -> str:
+    """Run a SIFT tool as a subprocess, capture output, never modify evidence."""
+    # Fault injection: only active when FINDEVIL_FAULT_RATE > 0. Lets
+    # tests/harness/fault_injection_test.py exercise graceful degradation.
+    if _fault_rng is not None and _fault_rng.random() < _FAULT_RATE:
+        return (
+            f"[STDERR]: simulated fault — {cmd[0]} exited 124 (timeout). "
+            "FINDEVIL_FAULT_RATE is set; this is a test harness injection, "
+            "not a real tool failure."
+        )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:90-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L90-L109)
+
+[5] Volatility 실행 함수는 실행 결과만 돌려주고 기록하지 않는다: [`src/findevil/tools/linux_memory.py:144-206`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L144-L206).
+
+[6] `get_audit_trail`은 별도 파일에 호출을 남기고 `_audit`을 부르지 않는다.
+
+```python
+    # Side-channel invocation counter — deliberately NOT in audit.json
+    # (that would recurse when get_audit_trail is itself invoked), but
+    # still needed by tests/harness/self_correction_audit.py to verify
+    # whether Claude actually called this tool.
+    try:
+        with (LOGS_DIR / "get_audit_trail_invocations.jsonl").open("a") as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "filter_tool": filter_tool,
+                        "filter_since": filter_since,
+                        "limit": limit,
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+```
+
+[`src/findevil/tools/self_correction.py:594-612`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L594-L612)
+
+```python
+    # NOTE: we intentionally DO NOT _audit() this call — recursing into the
+    # audit log every time the agent inspects it would bloat the log and
+    # could confuse downstream reasoning.
+    return "\n".join(out)
+```
+
+[`src/findevil/tools/self_correction.py:670-673`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L670-L673)
+
+[7] `_audit` 앞에서 돌아가는 반환 지점이다: [`src/findevil/server.py:231-232`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L231-L232), [`src/findevil/tools/linux_timeline.py:195-199`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_timeline.py#L195-L199), [`src/findevil/tools/self_correction.py:380-388`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L380-L388), [`src/findevil/tools/autonomy.py:448-452`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L448-L452), [`src/findevil/tools/fim.py:328-340`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L328-L340), [`src/findevil/tools/linux_memory.py:425-427`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L425-L427).
+
+[8] 기록 앞에서 돌아가는 다른 반환 지점: [`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586), [`src/findevil/tools/self_correction.py:539-541`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L539-L541), [`src/findevil/tools/linux_memory.py:783-788`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L783-L788).
+
+[9] (실행 확인) CPython 3.12.3의 `subprocess`는 `text=True`이면 `errors`를 지정하지 않은 `io.TextIOWrapper`로 출력을 디코딩한다: [`Lib/subprocess.py:1015-1019`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/subprocess.py#L1015-L1019), [`Lib/subprocess.py:2151-2157`](https://github.com/python/cpython/blob/f6650f9ad73359051f3e558c2431a109bc016664/Lib/subprocess.py#L2151-L2157).
+
+WSL Ubuntu의 Python 3.14.4에서 `0xff`가 든 파일을 `cat`으로 출력하게 하고 `text=True`로 받으면 `UnicodeDecodeError`가 났다.
+
+[10] (실행 확인) `verify_finding`에 `{"claim_type": "user_created", "params": "[]"}`를 주면 FastMCP가 `'list' object has no attribute 'get'` 오류를 돌려주고 `audit.json`에 항목이 생기지 않았다.
+
+[11] `logs/README.md`는 `audit.json`을 모든 도구 호출의 기록으로, `token_usage.jsonl`을 대화 기록에서 뽑은 별도 기록으로 적는다.
+
+```markdown
+| `audit.json` | MCP server (mechanical) | every tool call, automatically via `_audit()` in `src/findevil/server.py` | ISO-8601 `timestamp`, `tool`, `params`, `result_summary` — one line per tool execution |
+| `token_usage.jsonl` | Claude Code agent | `scripts/extract_token_usage.py` (post-hoc, from the session transcript) | per assistant turn: `timestamp`, `model`, findevil `tools` invoked (+ params + `tool_use_id`), and the turn's `usage` (input / output / cache-read / cache-creation / totals) |
+```
+
+[`logs/README.md:13-14`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/logs/README.md#L13-L14)
+
+[12] `scripts/investigate.py`는 `assess_coverage`를 직접 부르고 반복 기록에는 항목 수의 차이만 쓴다.
+
+```python
+def _coverage_state(findings_json: str = "") -> tuple[bool, str]:
+    """Run assess_coverage in-process; return (is_clean, full_report)."""
+    fn = getattr(assess_coverage, "fn", assess_coverage)  # unwrap FastMCP tool
+    report = fn(findings_json)
+    return ("COVERAGE CLEAN" in report), report
+```
+
+[`scripts/investigate.py:72-76`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L72-L76)
+
+```python
+        clean, coverage_report = _coverage_state()
+        finalized = _finalize_accepted_since(n_before)
+        n_after = len(_read_audit())
+        prior_gaps = coverage_report if not clean else None
+
+        record = {
+            "iteration": i,
+            "timestamp": _now(),
+            "evidence": evidence,
+            "prompt": prompt,
+            "tool_calls_this_iteration": n_after - n_before,
+            "coverage_clean": clean,
+            "finalize_accepted": finalized,
+            "coverage_report": coverage_report,
+```
+
+[`scripts/investigate.py:187-200`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L187-L200)
+
+[13] `scripts/capture_example_run.py`는 서버와 같은 기록 폴더를 정한 뒤 도구 함수를 직접 부른다.
+
+```python
+def _setup_env(scenario_dir: Path, logs_dir: Path) -> None:
+    """Point the findevil server at the scenario's evidence and a temp log dir."""
+    os.environ["FINDEVIL_EVIDENCE_DIR"] = str(scenario_dir.parent.resolve())
+    os.environ["FINDEVIL_LOGS_DIR"] = str(logs_dir.resolve())
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe any pre-existing audit.json so the captured trace is just this run.
+    audit_path = logs_dir / "audit.json"
+    if audit_path.exists():
+        audit_path.unlink()
+```
+
+[`scripts/capture_example_run.py:38-46`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L38-L46)
+
+[14] 대화 기록에서 findevil 도구 호출의 이름·인자·`tool_use_id`만 꺼낸다.
+
+```python
+def _findevil_calls(line_obj: dict) -> list[dict]:
+    """Return the findevil tool_use blocks in an assistant message, if any."""
+    msg = line_obj.get("message")
+    if not isinstance(msg, dict):
+        return []
+    calls = []
+    for block in msg.get("content") or []:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and str(block.get("name", "")).startswith(TOOL_PREFIX)
+        ):
+            calls.append(
+                {
+                    "name": block["name"][len(TOOL_PREFIX) :],
+                    "params": block.get("input", {}),
+                    "tool_use_id": block.get("id"),
+                }
+            )
+    return calls
+```
+
+[`scripts/extract_token_usage.py:58-77`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/extract_token_usage.py#L58-L77)
+
+[15] 응답 차례마다 기록 하나를 만든다.
+
+```python
+    records = []
+    with path.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") != "assistant":
+                continue
+            calls = _findevil_calls(obj)
+            if not calls:
+                continue
+            records.append(
+                {
+                    "timestamp": obj.get("timestamp"),
+                    "session": obj.get("sessionId"),
+                    "request_id": obj.get("requestId"),
+                    "model": _model(obj),
+                    "tools": calls,
+                    "tool_count": len(calls),
+                    "usage": _usage(obj),
+                }
+            )
+    return records
+```
+
+[`scripts/extract_token_usage.py:109-135`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/extract_token_usage.py#L109-L135)
+
+[16] 기록 파일은 `w` 모드로 새로 쓴다.
+
+```python
+def write_outputs(records: list[dict], logs_dir: Path) -> dict:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = logs_dir / "token_usage.jsonl"
+    with jsonl_path.open("w") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+```
+
+[`scripts/extract_token_usage.py:169-174`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/extract_token_usage.py#L169-L174)
+
+[17] `.mcp.json`은 서버 실행 명령만 정한다.
+
+```json
+{
+  "mcpServers": {
+    "findevil": {
+      "type": "stdio",
+      "command": "./.venv/bin/python",
+      "args": ["-m", "findevil"]
+    }
+  }
+}
+```
+
+[`.mcp.json:1-9`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/.mcp.json#L1-L9)
+
+[18] 대화 기록 폴더를 정하고 지정이 없으면 호출이 가장 많은 대화 기록 하나를 고른다.
+
+```python
+def _default_project_dir() -> Path:
+    """Claude Code slugifies the cwd by replacing each '/' with '-'."""
+    cwd = Path.cwd().resolve()
+    slug = str(cwd).replace("/", "-")
+    return Path.home() / ".claude" / "projects" / slug
+```
+
+[`scripts/extract_token_usage.py:51-55`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/extract_token_usage.py#L51-L55)
+
+```python
+    if args.all:
+        return all_t
+    # Default: the single transcript with the most findevil tool calls
+    # (i.e. the real investigation session, not a chat about the project).
+    best, best_n = None, -1
+    for t in all_t:
+        n = sum(r["tool_count"] for r in process_transcript(t))
+        if n > best_n:
+            best, best_n = t, n
+    if best_n <= 0:
+        sys.exit(
+            "No findevil tool calls found in any transcript under "
+            f"{project_dir}. Run an investigation first, or pass --session."
+        )
+    return [best]
+```
+
+[`scripts/extract_token_usage.py:152-166`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/extract_token_usage.py#L152-L166)

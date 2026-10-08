@@ -1,0 +1,122 @@
+---
+cell: F04
+details:
+- id: not_implemented
+---
+
+# F04 발견사항·결론 기록 관리
+
+### 미구현
+
+**판단.** 서버에는 발견사항과 결론을 받는 도구가 있지만 받은 내용을 서버에 남기지 않는다.
+`finalize_report`와 `find_contradictions`는 주장 `list`를 JSON 글로 받고 `assess_coverage`는 발견사항 JSON을 선택 인자로 받는다 [1][2][3].
+`finalize_report`는 받은 주장을 검사해 받아들인 주장의 목록이나 거부 사유를 응답으로 돌려준다 [1].
+`finalize_report`의 호출 기록에는 주장 수와 거부·모순 건수만 남는다 [1].
+`find_contradictions`의 호출 기록에는 주장 수와 모순 건수만, `assess_coverage`의 호출 기록에는 발견사항을 넘겼는지만 남는다 [2][3].
+`verify_finding`의 호출 기록에는 주장 유형, 검증 인자, 판정이 남는다 [4].
+이것은 검증 호출의 기록이고 이 도구는 주장 문장, 확신도, 인용을 받지 않는다 [4].
+서버에는 발견사항, 결론, 가설을 저장하거나 다시 읽는 도구가 없고 발견사항을 모아 두는 파일이나 DB도 없다.
+서버 지침은 모델에게 발견사항을 구조화한 주장으로 모아 `finalize_report`에 넘기라고 안내하므로 발견사항은 클라이언트 모델의 문맥에 남는다 [5].
+
+### 근거
+
+[1] `finalize_report`는 주장 수와 거부·모순 건수만 호출 기록에 남긴다.
+
+```python
+    blocked = bool(rejections or contradictions)
+    _audit(
+        "finalize_report",
+        {"claim_count": len(claims)},
+        ("REJECTED: " if blocked else "ACCEPTED: ")
+        + f"{len(rejections)} rejected, {len(contradictions)} contradictions",
+    )
+```
+
+[`src/findevil/tools/autonomy.py:502-508`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L502-L508)
+
+[2] `find_contradictions`의 호출 기록이다.
+
+```python
+    claims, err = _parse_claims(claims_json)
+    if err:
+        return f"INVALID input: {err}"
+
+    issues = _find_contradiction_patterns(claims)
+
+    lines = [
+        f"# Contradiction check — {len(claims)} claim(s) inspected",
+        "",
+    ]
+    if issues:
+        lines.append(f"⚠ **{len(issues)} contradiction(s) found:**")
+        lines.append("")
+        for i in issues:
+            lines.append(f"- {i}")
+    else:
+        lines.append("No contradictions detected among the supplied claims.")
+
+    out = "\n".join(lines)
+    _audit(
+        "find_contradictions",
+        {"claim_count": len(claims)},
+        f"{len(issues)} contradictions",
+    )
+```
+
+[`src/findevil/tools/self_correction.py:539-562`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L539-L562)
+
+[3] `assess_coverage`의 호출 기록이다.
+
+```python
+    _audit(
+        "assess_coverage",
+        {"findings_supplied": bool(findings_json.strip())},
+        f"{len(gaps)} gaps; {len(called - {''})} tools used",
+    )
+```
+
+[`src/findevil/tools/autonomy.py:388-392`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L388-L392)
+
+[4] `verify_finding`의 입력과 호출 기록이다.
+
+```python
+    if claim_type not in _VALID_CLAIM_TYPES:
+        return (
+            f"INVALID claim_type `{claim_type}`. Supported types: "
+            + ", ".join(sorted(_VALID_CLAIM_TYPES))
+        )
+    try:
+        params_obj = json.loads(params) if isinstance(params, str) else params
+    except json.JSONDecodeError as e:
+        return f"INVALID params JSON: {e}"
+
+    verifier = _VERIFIER_MAP[claim_type]
+    verdict, reasons = verifier(params_obj)
+
+    lines = [
+        f"# Verification — claim: `{claim_type}`",
+        "",
+        f"- **Verdict:** {verdict}",
+        "- **Evidence:**",
+        *[f"  - {r}" for r in reasons],
+    ]
+    out = "\n".join(lines)
+    _audit("verify_finding", {"claim_type": claim_type, "params": params_obj}, verdict)
+    return out
+```
+
+[`src/findevil/tools/self_correction.py:380-402`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L380-L402)
+
+[5] 서버 지침의 마무리 단계다.
+
+```python
+        "4. FINALIZE — assemble your findings as structured claims and call "
+        "finalize_report. It is the ONLY way to emit conclusions and it will "
+        "REJECT any CONFIRMED claim that fails independent verification or "
+        "contradicts another. When rejected, re-investigate to support the "
+        "claim OR downgrade its confidence to 'inference'/'uncertain', then "
+        "call finalize_report again. Only a claim that survives finalize_report "
+        "may be stated as CONFIRMED in your report.\n"
+```
+
+[`src/findevil/server.py:134-140`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L134-L140)

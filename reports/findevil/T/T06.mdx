@@ -1,0 +1,153 @@
+---
+cell: T06
+details:
+- id: not_implemented
+---
+
+# T06 실행 환경정보 표시
+
+### 미구현
+
+**판단.** 서버는 운영체제 명령과 Volatility 3으로 결과를 내지만 응답, 호출 기록, 파생물 어디에도 그 도구의 버전을 싣지 않는다.
+호출 기록 항목은 시각, 도구 이름, 인자, 결과 요약 네 필드뿐이다 [1].
+운영체제 명령을 실행하는 `_run_tool`은 표준 출력을 그대로 돌려주고 종료 코드가 0이 아닐 때만 표준 오류를 덧붙인다 [2].
+Volatility 도구는 실행이 실패하면 `vol`의 표준 오류 앞부분을 응답 본문에 싣는다 [3].
+이 글에 Volatility가 쓴 버전 줄이 있더라도 서버가 읽지 않고 본문째 넘긴다 [3].
+
+참조 자료의 식별값도 결과에 싣지 않는다.
+IOC 목록 `threat_intel.json`의 `_metadata`에는 갱신 날짜 `last_updated`가 있지만 `bulk_ioc_lookup`의 응답은 항목마다 출처 `source`만 싣는다 [4][5].
+`baseline_create`가 쓰는 기준 파일의 `_metadata`에는 서버 코드에 정해 둔 상수 `tool_version`(`findevil-fim-1`)이 있다 [6].
+이 상수는 서버의 FIM 코드가 정한 값이고 외부 도구나 참조 자료의 버전이 아니다 [6].
+`baseline_create`와 `baseline_diff`의 응답은 이 값을 싣지 않는다 [7].
+
+서버 자신의 버전도 싣지 않는다.
+서버는 FastMCP를 이름과 서버 지침만 주어 만들고 MCP Python SDK 1.27.2는 버전이 없으면 초기화 응답 `serverInfo.version`에 `mcp` 패키지의 버전을 넣는다 [8][9].
+그래서 `serverInfo.version`은 `pyproject.toml`의 서버 버전 0.1.0이 아니라 `1.27.2`다 [10][11].
+
+서버는 모델을 부르지 않는다.
+
+### 근거
+
+[1] 호출 기록 항목의 필드다.
+
+```python
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:48-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L48-L56)
+
+[2] 운영체제 명령의 출력 처리다.
+
+```python
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0:
+        output += f"\n[STDERR]: {result.stderr}"
+    return output
+```
+
+[`src/findevil/server.py:100-109`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L100-L109)
+
+[3] Volatility 실행이 실패하면 표준 오류 앞 500자를 응답에 싣는다.
+
+```python
+    if res.rc != 0:
+        _audit("analyze_memory_processes", {"path": memory_dump_path}, f"rc={res.rc}")
+        return (
+            f"# Memory processes — `{memory_dump_path}`\n\n"
+            f"vol failed (rc={res.rc}):\n```\n{res.stderr[:500]}\n```"
+        )
+```
+
+[`src/findevil/tools/linux_memory.py:434-439`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L434-L439)
+
+[4] IOC 목록의 머리 정보다.
+
+```json
+  "_metadata": {
+    "description": "Bundled IOC cache for offline threat-intel lookups by the findevil MCP server. Shipped with the tool so analysis works without internet. For production use, merge with a live feed from abuse.ch / FireHOL / MalwareBazaar.",
+    "last_updated": "2026-04-19",
+    "sources": [
+      "simulated (this repo's attack scenarios)",
+      "publicly-documented malware samples"
+    ]
+  },
+```
+
+[`src/findevil/data/threat_intel.json:2-9`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/data/threat_intel.json#L2-L9)
+
+[5] `bulk_ioc_lookup`이 IP 항목마다 싣는 값이다.
+
+```python
+        for ip in iocs["ipv4_public"]:
+            v = _lookup_ip(ip)
+            if v.known:
+                known_count += 1
+                lines.append(
+                    f"- ⚠ `{ip}` — **{v.category}** "
+                    f"(tags: {', '.join(v.tags) or '-'}, confidence: {v.confidence}, "
+                    f"source: {v.source})"
+                )
+            else:
+                lines.append(f"- `{ip}` — not in cache")
+```
+
+[`src/findevil/tools/threat_intel.py:293-303`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/threat_intel.py#L293-L303)
+
+[6] 기준 파일의 머리 정보다.
+
+```python
+    return {
+        "_metadata": {
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "root_path": str(root),
+            "tool_version": "findevil-fim-1",
+            "entry_count": len(entries),
+        },
+        "entries": [asdict(e) for e in entries],
+    }
+```
+
+[`src/findevil/tools/fim.py:256-264`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L256-L264)
+
+[7] `baseline_create`의 응답([`src/findevil/tools/fim.py:347-392`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L347-L392))과 `baseline_diff`의 응답 머리는 `tool_version`을 싣지 않는다.
+
+@발췌 src/findevil/tools/fim.py:493-504
+
+[8] 서버는 이름과 서버 지침만 준다.
+
+```python
+mcp = FastMCP(
+    "findevil",
+    instructions=(
+        "You are an autonomous incident response analyst examining forensic "
+```
+
+[`src/findevil/server.py:116-119`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L116-L119)
+
+[9] MCP Python SDK 1.27.2의 FastMCP는 하위 서버에 버전을 넘기지 않고([`src/mcp/server/fastmcp/server.py:205-213`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/server.py#L205-L213)) 하위 서버는 버전이 없으면 `mcp` 패키지 버전을 쓴다([`src/mcp/server/lowlevel/server.py:171-183`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L171-L183)).
+
+[10] 서버 패키지의 버전이다.
+
+```toml
+[project]
+name = "findevil"
+version = "0.1.0"
+```
+
+[`pyproject.toml:5-7`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/pyproject.toml#L5-L7)
+
+[11] (실행 확인) 초기화 응답의 `serverInfo`는 `name='findevil'`, `version='1.27.2'`다.

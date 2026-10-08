@@ -1,0 +1,227 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 서버에는 도구 인자 밖의 조건으로 호출을 막거나 미루는 코드가 없다.
+도구 함수는 경로 대조와 인자 검사를 마치면 바로 외부 명령을 실행하거나 파일을 분석한다 [1].
+서버 지침은 `list_evidence`로 시작해 `assess_coverage`가 `COVERAGE CLEAN`을 돌려줄 때까지 조사하고 `finalize_report`로 마치라고 안내하지만 이 순서를 확인하는 코드는 없다 [2].
+`finalize_report`는 앞선 `assess_coverage`의 결과나 호출 기록을 보지 않고 받은 claim을 그 자리에서 다시 확인한다 [3].
+`assess_coverage`는 남은 작업을 응답에 적기만 하고 다른 도구의 호출을 막지 않는다 [4].
+`baseline_diff`는 `baseline_create`를 앞서 불렀는지 보지 않고 모델이 넘긴 기준선 파일이 있는지만 확인한다 [5].
+`verify_finding`의 설명은 다른 도구가 발견사항을 낸 뒤에 부르라고 적지만 서버는 앞선 호출이 있었는지 보지 않고 바로 증거를 다시 읽는다 [6].
+`scripts/investigate.py`는 claude CLI의 승인 확인을 기본으로 켜 두지만 이 승인은 클라이언트가 하고 서버는 승인 기록을 받거나 대조하지 않는다 [7].
+서버는 `mcp.run()`을 기본 전송 방식인 stdio로 실행하므로 원격 MCP 연결을 받지 않는다 [8].
+메모리 도구가 실행 전에 `vol --help`를 실행해 보는 것은 도구가 있는지 보는 확인이고 실행 자원의 상태를 보지 않는다 [9].
+
+동시 실행 수를 정하는 장치도 없다.
+도구 함수가 모두 동기 함수라서 MCP Python SDK 1.27.2의 FastMCP는 이벤트 루프에서 함수를 await 없이 바로 부른다 [10].
+한 호출이 끝날 때까지 같은 이벤트 루프의 다른 요청은 처리되지 않으므로 도구 호출은 하나씩 차례로 실행된다 [10].
+이는 서버가 정한 제한이 아니라 SDK가 동기 함수를 부르는 방식에서 생기는 동작이라 T03.12에 연결하지 않는다.
+
+### 근거
+
+[1] 도구 함수는 검사 뒤 바로 실행한다.
+
+```python
+    try:
+        validated = _validate_evidence_path(path)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not validated.exists():
+        return f"File not found: {path}"
+
+    file_output = _run_tool(["file", "-b", str(validated)])
+    stat_output = _run_tool(["stat", str(validated)])
+
+    result = f"## File Type\n{file_output}\n## Stat\n{stat_output}"
+    _audit("file_info", {"path": path}, result)
+    return result
+```
+
+[`src/findevil/server.py:164-176`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L164-L176)
+
+[2] 서버 지침이 순서를 안내한다.
+
+```python
+    instructions=(
+        "You are an autonomous incident response analyst examining forensic "
+        "evidence from a SANS SIFT Workstation. Work the case end to end on "
+        "your own — do not wait for step-by-step instructions. Run this loop "
+        "until it terminates:\n"
+        "\n"
+        "1. ORIENT — call list_evidence to inventory what is available.\n"
+        "2. INVESTIGATE — form a hypothesis and run the relevant typed tools. "
+        "Treat every finding as a lead: when a tool surfaces an IOC (IP, user, "
+        "hash, path, domain), PIVOT before moving on — run extract_iocs / "
+        "bulk_ioc_lookup on it and search it across the other evidence.\n"
+        "3. ASSESS — call assess_coverage (pass your findings so far as "
+        "findings_json). It reports gaps grounded in the audit trail: "
+        "unexamined artifacts, un-pivoted IOCs, unverified CONFIRMED claims. "
+        "If it reports gaps, return to step 2 and close them. Repeat until it "
+        "returns COVERAGE CLEAN.\n"
+        "4. FINALIZE — assemble your findings as structured claims and call "
+        "finalize_report. It is the ONLY way to emit conclusions and it will "
+        "REJECT any CONFIRMED claim that fails independent verification or "
+        "contradicts another. When rejected, re-investigate to support the "
+        "claim OR downgrade its confidence to 'inference'/'uncertain', then "
+        "call finalize_report again. Only a claim that survives finalize_report "
+        "may be stated as CONFIRMED in your report.\n"
+        "\n"
+        "Rules: never modify evidence. Always distinguish confirmed findings "
+        "from inferences. Prefer 'cannot determine from available evidence' "
+        "over speculation. You are not done until assess_coverage is clean and "
+        "finalize_report has ACCEPTED your claims."
+```
+
+[`src/findevil/server.py:118-145`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L118-L145)
+
+[3] `finalize_report`는 받은 claim을 바로 확인한다.
+
+```python
+    claims, err = _parse_claims(claims_json)
+    if err:
+        return f"❌ REJECTED — invalid input: {err}"
+    if not claims:
+        return "❌ REJECTED — no claims supplied. Submit at least one finding."
+
+    rejections: list[str] = []
+    verified_lines: list[str] = []
+
+    # Cross-claim contradiction check (reuses the six-pattern detector).
+    contradictions = _find_contradiction_patterns(claims)
+
+    for c in claims:
+```
+
+[`src/findevil/tools/autonomy.py:448-460`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L448-L460)
+
+[4] `assess_coverage`는 남은 작업을 응답에 적는다.
+
+```python
+    if gaps:
+        out.append(f"## ⚠ Coverage gaps ({len(gaps)})")
+        out.append("")
+        for g in gaps:
+            out.append(f"- {g}")
+        out.append("")
+        out.append(
+            f"**Verdict: {len(gaps)} GAP(S) REMAIN — keep investigating, "
+            "then re-run assess_coverage.**"
+        )
+    else:
+        out.append(
+            "**Verdict: COVERAGE CLEAN** — every artifact class present in "
+            "evidence has been examined"
+            + (
+                ", all flagged IOCs were pivoted, and every CONFIRMED claim has a "
+                "verification on record. Proceed to finalize_report."
+                if findings_json.strip()
+                else ". Supply findings_json to also check IOC-pivot and "
+                "verification coverage, then proceed to finalize_report."
+            )
+        )
+```
+
+[`src/findevil/tools/autonomy.py:364-385`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L364-L385)
+
+[5] 기준선 파일은 인자로 받아 있는지만 본다.
+
+```python
+    baseline_path = Path(baseline_file)
+    if not baseline_path.is_absolute():
+        baseline_path = (Path.cwd() / baseline_path).resolve()
+    if not baseline_path.is_file():
+        return f"Baseline file not found: {baseline_path}"
+
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except (OSError, PermissionError, json.JSONDecodeError) as e:
+        return f"Error reading baseline: {e}"
+```
+
+[`src/findevil/tools/fim.py:577-586`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L577-L586)
+
+[6] `verify_finding`의 설명과 처리 함수 첫머리다.
+
+```python
+def verify_finding(claim_type: str, params: str) -> str:
+    """Independently re-check a specific claim against raw evidence.
+
+    Call this AFTER a finding has been produced by another tool, to
+    confirm the claim holds up under a fresh read of the underlying
+    evidence. Returns SUPPORTED / CONTRADICTED / INSUFFICIENT_EVIDENCE
+    plus the raw facts that justify the verdict.
+```
+
+[`src/findevil/tools/self_correction.py:353-359`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L353-L359)
+
+```python
+    if claim_type not in _VALID_CLAIM_TYPES:
+        return (
+            f"INVALID claim_type `{claim_type}`. Supported types: "
+            + ", ".join(sorted(_VALID_CLAIM_TYPES))
+        )
+    try:
+        params_obj = json.loads(params) if isinstance(params, str) else params
+    except json.JSONDecodeError as e:
+        return f"INVALID params JSON: {e}"
+
+    verifier = _VERIFIER_MAP[claim_type]
+    verdict, reasons = verifier(params_obj)
+```
+
+[`src/findevil/tools/self_correction.py:380-391`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L380-L391)
+
+[7] 클라이언트 권한 모드 인자다.
+
+```python
+    ap.add_argument(
+        "--permission-mode",
+        default="default",
+        help="claude CLI permission mode. Default keeps approval prompts. Fully "
+        "unattended runs need an allow-list or, on a disposable VM only, "
+        "'bypassPermissions' (must be set explicitly).",
+    )
+```
+
+[`scripts/investigate.py:292-298`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L292-L298)
+
+[8] 서버 진입점과 MCP Python SDK 1.27.2의 기본 전송 방식이다.
+
+```python
+from findevil.server import mcp
+
+if __name__ == "__main__":
+    mcp.run()
+```
+
+[`src/findevil/__main__.py:11-14`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/__main__.py#L11-L14)
+
+FastMCP `run`의 `transport` 기본값은 `stdio`다([`src/mcp/server/fastmcp/server.py:279-296`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/server.py#L279-L296)).
+
+[9] Volatility가 있는지 보는 확인이다.
+
+```python
+def _vol_available() -> bool:
+    if not _VOL_BIN:
+        return False
+    try:
+        proc = subprocess.run(
+            [_VOL_BIN, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+```
+
+[`src/findevil/tools/linux_memory.py:120-130`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L120-L130)
+
+[10] MCP Python SDK 1.27.2는 동기 도구 함수를 await 없이 바로 부르고([`src/mcp/server/fastmcp/utilities/func_metadata.py:93-96`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/fastmcp/utilities/func_metadata.py#L93-L96)) 받은 메시지마다 같은 이벤트 루프의 작업으로 처리한다([`src/mcp/server/lowlevel/server.py:673-683`](https://github.com/modelcontextprotocol/python-sdk/blob/62137874ff26dd74d2fea80ff528a7fd9ca7a5e7/src/mcp/server/lowlevel/server.py#L673-L683)).
+findevil의 도구 함수는 모두 `def`로 정의되어 있고 `async def`는 없다: [`src/findevil/server.py:154-155`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L154-L155), [`src/findevil/tools/autonomy.py:257-258`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L257-L258), [`src/findevil/tools/linux_memory.py:918-919`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/linux_memory.py#L918-L919).

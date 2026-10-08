@@ -1,0 +1,105 @@
+---
+cell: P04
+details:
+- id: not_implemented
+---
+
+# P04 조사 단위 관리
+
+### 미구현
+
+**판단.** 서버에는 사건 ID나 세션 ID가 없다.
+서버가 읽는 증거 폴더와 쓰는 기록 폴더는 서버 모듈을 불러올 때 환경변수 `FINDEVIL_EVIDENCE_DIR`·`FINDEVIL_LOGS_DIR`로 하나씩 정해진다 [1].
+호출 기록은 기록 폴더의 `audit.json` 하나에 모든 호출을 덧붙이고 항목에는 시각, 도구 이름, 인자, 결과 요약만 남는다 [1].
+도구는 증거 폴더 안의 경로를 인자로 받아 그 폴더 안에 있는지만 확인하고 경로가 어느 조사에 속하는지 구별하지 않는다 [2].
+`baseline_create`는 `output_file`을 주지 않으면 기준선을 늘 기록 폴더의 `baseline.json`에 쓴다 [3].
+README는 예시 시나리오 폴더를 `evidence/` 아래에 복사해 조사하게 하므로 여러 조사의 증거가 한 증거 폴더 아래 하위 폴더로 놓인다 [4].
+사용자가 실행마다 `FINDEVIL_LOGS_DIR`를 다르게 주면 기록 파일을 나눌 수 있지만 서버가 그 단위를 식별하지는 않는다 [1].
+사용자 CLI `scripts/investigate.py`는 증거 경로의 마지막 이름으로 `logs/progress/<이름>/`에 반복 기록을 나누어 쓰지만 서버의 호출 기록은 나누지 않는다 [5].
+
+### 근거
+
+[1] 증거 폴더와 기록 폴더를 정하고 호출 기록을 한 파일에 쓴다.
+
+```python
+EVIDENCE_DIR = Path(os.environ.get("FINDEVIL_EVIDENCE_DIR", "./evidence")).resolve()
+LOGS_DIR = Path(os.environ.get("FINDEVIL_LOGS_DIR", "./logs")).resolve()
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Logging — every tool call is recorded for the audit trail
+# ---------------------------------------------------------------------------
+
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:27-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L27-L56)
+
+[2] 경로가 증거 폴더 안에 있는지만 확인한다.
+
+```python
+def _validate_evidence_path(path_str: str) -> Path:
+    """Ensure the requested path is inside the evidence directory.
+
+    Uses Path.relative_to() rather than a string-prefix check. A naive
+    startswith() would accept ``/tmp/X/evidence-malicious/...`` as being
+    "inside" ``/tmp/X/evidence`` because the string literally begins
+    with the prefix. Tests in tests/security/test_path_validation.py
+    hold this invariant in place.
+    """
+    requested = Path(path_str).resolve()
+    evidence_resolved = EVIDENCE_DIR.resolve()
+    try:
+        requested.relative_to(evidence_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Access denied: {path_str} is outside the evidence directory ({EVIDENCE_DIR})"
+        ) from exc
+    return requested
+```
+
+[`src/findevil/server.py:63-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L63-L80)
+
+[3] 기준선의 기본 경로다.
+
+```python
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+```
+
+[`src/findevil/tools/fim.py:279-282`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L279-L282)
+
+[4] README의 증거 배치 안내다: [`README.md:120-124`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/README.md#L120-L124).
+
+[5] 사용자 CLI가 증거 이름으로 반복 기록 폴더를 정한다.
+
+```python
+    name = Path(evidence).name or "evidence"
+    out_dir = PROGRESS_DIR / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`scripts/investigate.py:165-167`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/investigate.py#L165-L167)

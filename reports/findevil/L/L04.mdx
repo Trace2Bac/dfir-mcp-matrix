@@ -1,0 +1,196 @@
+---
+cell: L04
+details:
+- id: not_implemented
+---
+
+# L04 기록 위변조 방지
+
+### 미구현
+
+**판단.** 호출 기록 `audit.json`의 항목은 `timestamp`·`tool`·`params`·`result_summary`뿐이고 앞 항목과 잇는 해시도, 서명도, 일련번호도 없다 [1].
+서버는 `logging.FileHandler`의 기본 모드로 파일을 덧붙여 쓸 뿐 파일 권한이나 추가 전용 속성을 정하지 않는다 [1].
+`get_audit_trail`은 이 파일을 줄마다 JSON으로 읽고 해석하지 못한 줄은 건너뛰며 건너뛴 줄 수를 응답에 적지 않는다 [2].
+`assess_coverage`도 같은 방식으로 읽은 항목의 도구 이름으로 살펴본 아티팩트와 `verify_finding` 호출 수를 정한다 [3][4].
+그래서 파일에 덧붙이거나 지운 줄은 출처를 묻지 않고 이 두 도구의 결과에 반영된다.
+JSON으로 해석되지만 객체가 아닌 줄(숫자 하나 등)은 건너뛰지 않고 항목 목록에 넣는다 [5].
+이런 줄이 하나라도 있으면 두 도구는 항목에서 `get`을 부르다 `AttributeError`로 끝나 오류 결과를 돌려준다 [5].
+기록을 다시 계산해 대조하는 도구나 명령도 없다.
+그래서 기록의 수정, 삭제, 순서 변경을 막거나 알아보는 장치가 없다.
+
+모델 도구 `baseline_create`의 `output_file`이나 사용자 CLI `scripts/capture_example_run.py`로 호출 기록 파일을 통째로 바꾸거나 지워도 이를 알아보는 장치가 없다 [6][7][8].
+
+### 근거
+
+[1] 항목의 네 필드와 기록 파일 처리기다.
+
+```python
+audit_logger = logging.getLogger("findevil.audit")
+audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False  # don't bubble to root logger
+
+# Guard: server.py runs both as __main__ and as findevil.server (re-imported
+# by tool modules). Without this check, the handler is registered twice and
+# every audit entry gets written twice.
+if not audit_logger.handlers:
+    _handler = logging.FileHandler(LOGS_DIR / "audit.json")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    audit_logger.addHandler(_handler)
+
+
+def _audit(tool: str, params: dict, result_summary: str) -> None:
+    """Write a structured audit log entry for every tool invocation."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "params": params,
+        "result_summary": result_summary[:500],
+    }
+    audit_logger.info(json.dumps(entry))
+```
+
+[`src/findevil/server.py:35-56`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/server.py#L35-L56)
+
+[2] `get_audit_trail`은 해석하지 못한 줄을 건너뛴다.
+
+```python
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return "No audit log exists yet (run another tool first)."
+
+    try:
+        lines = audit_path.read_text(errors="replace").splitlines()
+    except (OSError, PermissionError) as e:
+        return f"Cannot read audit log: {e}"
+
+    entries = []
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw)
+            entries.append(obj)
+        except json.JSONDecodeError:
+            continue
+```
+
+[`src/findevil/tools/self_correction.py:614-631`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L614-L631)
+
+[3] `assess_coverage`가 읽는 기록도 해석하지 못한 줄을 건너뛴다.
+
+```python
+def _audited_tool_calls() -> list[dict]:
+    """Return every audit.json entry as a dict (best-effort, never raises)."""
+    audit_path = LOGS_DIR / "audit.json"
+    if not audit_path.is_file():
+        return []
+    try:
+        raw = audit_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+```
+
+[`src/findevil/tools/autonomy.py:58-76`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L58-L76)
+
+[4] 기록에 남은 도구 이름과 `verify_finding` 항목 수로 빈 곳을 정한다.
+
+```python
+    entries = _audited_tool_calls()
+    called = _called_tool_names(entries)
+    inventory = _inventory_evidence()
+
+    gaps: list[str] = []
+    table: list[str] = []
+
+    # 1. Artifact coverage
+    for label, _kind, tools, action in _ARTIFACT_CHECKS:
+        if label not in inventory:
+            continue
+        covered = bool(tools & called)
+        mark = "✅ examined" if covered else "❌ NOT examined"
+        locs = ", ".join(f"`{h}`" for h in inventory[label][:3])
+        table.append(f"| {label} | {locs} | {mark} |")
+        if not covered:
+            gaps.append(f"**{label}** present ({locs}) but never examined → {action}")
+```
+
+[`src/findevil/tools/autonomy.py:288-304`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L288-L304)
+
+```python
+            verify_calls = sum(1 for e in entries if e.get("tool") == "verify_finding")
+            if confirmed_count > verify_calls:
+                gaps.append(
+                    f"{confirmed_count} CONFIRMED claim(s) but only {verify_calls} "
+                    "verify_finding call(s) recorded → independently verify each "
+                    "CONFIRMED claim before finalizing"
+                )
+```
+
+[`src/findevil/tools/autonomy.py:338-344`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L338-L344)
+
+[5] 두 도구는 해석한 값이 객체인지 보지 않고 `get`을 부른다: [`src/findevil/tools/self_correction.py:623-636`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L623-L636), [`src/findevil/tools/self_correction.py:653`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/self_correction.py#L653), [`src/findevil/tools/autonomy.py:67-80`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/autonomy.py#L67-L80).
+
+[6] 출력 경로는 증거 폴더 안이면 거부하고 그 밖이면 그대로 쓴다.
+
+```python
+    from findevil import server
+
+    if not output_file:
+        return server.LOGS_DIR / "baseline.json"
+    p = Path(output_file)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    resolved = p.resolve()
+    evidence_resolved = server.EVIDENCE_DIR.resolve()
+    try:
+        resolved.relative_to(evidence_resolved)
+    except ValueError:
+        return resolved  # not inside evidence — allowed
+    raise ValueError(
+        f"baseline output path {output_file} resolves inside the evidence "
+        f"directory ({server.EVIDENCE_DIR}); refusing to write over evidence."
+    )
+```
+
+[`src/findevil/tools/fim.py:279-295`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/src/findevil/tools/fim.py#L279-L295)
+
+[7] (실행 확인) `list_evidence`를 부른 뒤 `baseline_create`에 `output_file`로 기록 폴더의 `audit.json`을 주자 파일이 기준 JSON으로 바뀌었다.
+그 뒤 `get_audit_trail`과 `assess_coverage`는 덮어쓴 뒤에 쓴 `list_evidence` 항목 하나만 셌다.
+
+[8] `capture_example_run.py`는 기록 폴더의 기본값을 저장소의 `logs`로 두고 그 안의 `audit.json`을 지운다.
+
+```python
+def _setup_env(scenario_dir: Path, logs_dir: Path) -> None:
+    """Point the findevil server at the scenario's evidence and a temp log dir."""
+    os.environ["FINDEVIL_EVIDENCE_DIR"] = str(scenario_dir.parent.resolve())
+    os.environ["FINDEVIL_LOGS_DIR"] = str(logs_dir.resolve())
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe any pre-existing audit.json so the captured trace is just this run.
+    audit_path = logs_dir / "audit.json"
+    if audit_path.exists():
+        audit_path.unlink()
+```
+
+[`scripts/capture_example_run.py:38-46`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L38-L46)
+
+```python
+    parser.add_argument(
+        "--logs-dir",
+        type=Path,
+        default=REPO_ROOT / "logs",
+        help="Where the server should write its working audit.json before "
+             "we copy it to --output. Default: ./logs",
+    )
+```
+
+[`scripts/capture_example_run.py:185-191`](https://github.com/marlyocat/findevil/blob/d1a8d25d9c8c05bd66881506cb1f12314ee7c5e1/scripts/capture_example_run.py#L185-L191)
