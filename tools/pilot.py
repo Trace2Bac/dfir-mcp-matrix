@@ -101,7 +101,7 @@ def load_matrix():
 
 AXES, CELL_LIST, CONFIG = load_matrix()
 CELLS = {c.get("id"): c for c in CELL_LIST}
-# 구현 사례가 아직 없는 상세 후보(matrix/candidates.yaml, 결정 0043·0047). {셀ID: [후보, …]}. 후보에는 번호가 없다
+# 구현 사례가 아직 없는 상세 후보(matrix/candidates.yaml). {셀ID: [후보, …]}. 후보에는 번호가 없다
 _CAND_PATH = os.path.join(MATRIX, "candidates.yaml")
 CANDIDATES = (load_yaml(_CAND_PATH) or {}) if os.path.exists(_CAND_PATH) else {}
 ORDER = list(CONFIG["pilot_cells"])
@@ -337,7 +337,7 @@ def validate():
             for d in c.get("details") or []:
                 if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다
                     warns.append("%s: %s에 include가 아직 없다" % (f, d.get("id")))
-                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과 차이점은 boundary에 쓴다(결정 0044)
+                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과 차이점은 boundary에 쓴다
                 other = sorted({x for x in OTHER_REF.findall(str(d.get("exclude") or ""))
                                 if x != c["id"]})
                 if other:
@@ -400,8 +400,6 @@ def validate():
                 errs.append("%s: 원고에는 unknown(미확인)을 쓰지 않는다. 조사하지 않은 셀은 파일을 두지 않는다" % where)
             for d in det:
                 iid = str(d.get("id"))
-                if "exception" in d:
-                    errs.append("%s: %s에 exception을 쓰지 않는다(예외 표시는 없앴다, 결정 0033). 방식이 적용되지 않는 경로는 본문 **%s.**에 쓴다" % (where, iid, TERMS["limit"]))
                 if iid in SPECIAL:
                     pass
                 elif not detail_name(iid) or not iid.startswith(cid + "."):
@@ -435,7 +433,7 @@ def validate():
                 warns.append("%s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 셀의 boundary에 쓴다" % (where, ", ".join(other)))
             seen_names.add(nm)
     if behind:
-        notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 정의는 그 버전의 결정 기록에 있다"
+        notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 셀은 matrix/cells/의 git 이력에서 찾는다"
                      % (CONFIG["version"], " ".join(behind)))
     return errs, warns, notes
 
