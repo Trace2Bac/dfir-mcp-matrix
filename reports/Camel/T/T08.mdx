@@ -63,15 +63,20 @@ SSH 명령 채널을 닫았을 때 원격 프로세스가 실제로 끝나는지
 **한계.** 같은 작업 흐름에서 명령 행·SID 조회가 실패하면 빈 목록으로 바꾸고 결과 문구에 적지 않는다 [24].
 프로세스 실행 파일 덤프와 덤프 YARA 검사가 실패해도 빈 목록으로 바꾸고 VAD YARA 검사가 실패하면 그 항목을 비워 요청하지 않은 경우와 구별되지 않는다 [26].
 
-### T08.06 라이브러리 예외를 실패로 구별
+### T08.06 프로세스 안 분석 예외를 실패로 구별
 
 **구현.** `Execute`는 엔진 실행 중 난 예외를 처리해 `IsError = true`인 응답으로 돌려주고 호출 기록에 `failed` 단계를 남긴다 [27].
 스크립트의 JavaScript 오류와 거부된 promise는 `JavaScript error:`로, 그 밖의 예외는 `Error executing script:`로 앞에 붙여 구별한다 [27].
 없는 툴킷·작업 흐름이나 메서드를 부른 오류는 호출 기록에 `hallucination` 사건으로도 남긴다 [27].
+이 처리는 모든 예외를 받으므로 툴킷·작업 흐름의 파싱·판정 코드와 `AnomalyDetectionToolkit`의 계산 코드가 처리하지 않은 예외도 오류 응답이 된다 [27].
 툴킷이 도구 출력을 JSON으로 바꾸다 난 예외는 툴킷에서 처리하지 않으므로 `Execute`의 이 처리로 올라간다 [28].
 스크립트가 `exit`를 부르면 그 예외는 오류가 아닌 일반 출력으로 돌려준다 [29].
 
 **한계.** `WindowsAnalysisToolkit.SqliteQueryAsync`는 모든 예외를 처리해 빈 배열을 돌려주므로 JSON 변환 실패가 결과 없음과 구별되지 않는다 [21].
+`LinuxAnalysisToolkit.JournalAsync`와 `PacketAnalysisToolkit.SuricataAsync`는 JSON으로 읽지 못한 줄을 예외 처리로 건너뛰고 건너뛴 줄 수를 결과에 남기지 않는다 [30][31].
+작업 XML을 항목으로 바꾸는 코드는 XML을 읽지 못하면 파일 경로만 든 `ScheduledTaskEntry`를 돌려주므로 XML이 빈 작업과 구별되지 않는다 [32].
+`LolbasReference.Parse`가 예외로 `null`을 돌려주면 실행 흔적·지속성 작업 흐름은 LOLBin 검사를 건너뛰고 결과 문구에 그 사실을 적지 않는다 [33].
+`WindowsAnalysisWorkflow`는 사건의 `Payload` JSON을 읽다 예외가 나면 그때까지 읽은 필드만 쓰고 그 사건을 실패로 표시하지 않는다 [34].
 
 ### 근거
 
@@ -579,6 +584,14 @@ SSH 명령 채널을 닫았을 때 원격 프로세스가 실제로 끝나는지
 [27] 엔진 예외를 오류 응답으로 바꾼다.
 
 ```csharp
+        catch (Exception ex)
+        {
+            AuditExecution("failed", success: false, durationMs: auditSw.ElapsedMilliseconds);
+```
+
+[`src/Camel.Server/MCPServer.cs:354-356`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L354-L356)
+
+```csharp
             var jsex = ex as Jint.Runtime.JavaScriptException
                        ?? ex.InnerException as Jint.Runtime.JavaScriptException;
             var jsErrorText = jsex?.Message
@@ -641,3 +654,161 @@ SSH 명령 채널을 닫았을 때 원격 프로세스가 실제로 끝나는지
 ```
 
 [`src/Camel.Server/MCPServer.cs:349-353`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Server/MCPServer.cs#L349-L353)
+
+[30] 저널 줄을 JSON으로 읽지 못하면 그 줄을 건너뛴다.
+
+```csharp
+        var entries = new List<JournalEntry>();
+        foreach (var line in Lines(o))
+        {
+            if (!line.StartsWith('{')) continue;
+            JournalEntry? e = TryParseJournalLine(line);
+            if (e is not null) entries.Add(e);
+        }
+        return entries.ToArray();
+```
+
+[`src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs:259-266`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs#L259-L266)
+
+```csharp
+    private static JournalEntry? TryParseJournalLine(string line)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            string? s(string k) => root.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            int? i(string k) => int.TryParse(s(k), out var n) ? n : null;
+
+            DateTime? ts = null;
+            if (long.TryParse(s("__REALTIME_TIMESTAMP"), out var us))
+                ts = DateTimeOffset.FromUnixTimeMilliseconds(us / 1000).UtcDateTime;
+
+            return new JournalEntry
+            {
+                Timestamp = ts,
+                Unit = s("_SYSTEMD_UNIT"),
+                Identifier = s("SYSLOG_IDENTIFIER") ?? s("_COMM"),
+                Pid = i("_PID"),
+                Uid = i("_UID"),
+                Priority = i("PRIORITY"),
+                Hostname = s("_HOSTNAME"),
+                Message = JournalMessage(root),
+            };
+        }
+        catch (JsonException) { return null; }
+```
+
+[`src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs:572-597`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/LinuxAnalysis/LinuxAnalysisToolkit.cs#L572-L597)
+
+[31] Suricata 경보 줄을 JSON으로 읽지 못하면 그 줄을 건너뛴다.
+
+```csharp
+        var alerts = new List<SuricataAlert>();
+        foreach (var line in Lines(r.Output))
+        {
+            if (TryParseAlert(line) is { } a) alerts.Add(a);
+        }
+        return alerts.ToArray();
+```
+
+[`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:375-380`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L375-L380)
+
+```csharp
+    private static SuricataAlert? TryParseAlert(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("alert", out var alert)) return null;
+            string? s(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            int i(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+            JsonElement? http = root.TryGetProperty("http", out var h) ? h : null;
+            return new SuricataAlert
+            {
+                Timestamp = DateTime.TryParse(s(root, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var t) ? t : null,
+                SrcIp = s(root, "src_ip"), SrcPort = i(root, "src_port"),
+                DestIp = s(root, "dest_ip"), DestPort = i(root, "dest_port"),
+                Proto = s(root, "proto"), AppProto = s(root, "app_proto"),
+                SignatureId = i(alert, "signature_id"), Signature = s(alert, "signature") ?? "",
+                Category = s(alert, "category"), Severity = i(alert, "severity"),
+                HttpHost = http is { } hh ? s(hh, "hostname") : null,
+                HttpUrl = http is { } hu ? s(hu, "url") : null,
+            };
+        }
+        catch (JsonException) { return null; }
+```
+
+[`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:383-405`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L383-L405)
+
+[32] 읽지 못한 작업 XML은 파일 경로만 든 항목이 되고 빈 XML도 같은 항목이 된다.
+
+```csharp
+        if (file.Length == 0) return null;
+        if (xml.Length == 0) return new ScheduledTaskEntry { TaskFile = file };
+
+        XDocument doc;
+        try { doc = XDocument.Parse(xml); }
+        catch { return new ScheduledTaskEntry { TaskFile = file }; } // keep it enumerated even if unparseable
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs:153-158`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs#L153-L158)
+
+[33] LOLBAS 목록을 읽지 못하면 `null`을 돌려주고 작업 흐름은 그때 검사를 건너뛴다.
+
+```csharp
+    public static LolbasReference? Parse(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var dict = new Dictionary<string, string[]>();
+            foreach (var entry in doc.RootElement.EnumerateArray())
+            {
+                if (!entry.TryGetProperty("Name", out var nameEl) || Norm(nameEl.GetString() ?? "") is not { Length: > 0 } name)
+                    continue;
+                var paths = new List<string>();
+                if (entry.TryGetProperty("Full_Path", out var fp) && fp.ValueKind == JsonValueKind.Array)
+                    foreach (var pe in fp.EnumerateArray())
+                        if (pe.TryGetProperty("Path", out var pathEl) && pathEl.GetString() is { Length: > 0 } pv)
+                            paths.Add(NormPath(pv));
+                dict[name] = paths.Distinct().ToArray();
+            }
+            return dict.Count > 0 ? new LolbasReference(dict) : null;
+        }
+        catch { return null; }
+    }
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs:211-231`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisModels.cs#L211-L231)
+
+```csharp
+        // LOLBAS index for living-off-the-land detection (null-tolerant: scoring skips LOLBin checks if absent).
+        var lolbas = await WindowsAnalysis.LoadLolbasAsync();
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:1222-1223`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L1222-L1223)
+
+[34] 사건 필드를 읽다 예외가 나면 그때까지 읽은 필드만 돌려준다.
+
+```csharp
+    private static Dictionary<string, string> ParseEventData(string? payload)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(payload)) return map;
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            if (doc.RootElement.TryGetProperty("EventData", out var ed) && ed.TryGetProperty("Data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+                foreach (var item in data.EnumerateArray())
+                    if (item.TryGetProperty("@Name", out var n) && n.GetString() is { } name)
+                        map[name] = item.TryGetProperty("#text", out var v) ? v.GetString() ?? "" : "";
+        }
+        catch { /* malformed payload — return what we have */ }
+        return map;
+    }
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:785-800`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L785-L800)

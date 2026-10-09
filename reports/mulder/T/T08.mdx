@@ -92,16 +92,27 @@ Hayabusa 도구는 출력 파일을 미리 만들어 두므로 파일이 있는�
 `run_volatility`는 플러그인 오류·시간 초과 결과도 이 경로로 돌려주므로 그 작업은 `completed`가 된다 [36].
 `get_completed_results`가 작업마다 돌려주는 `status`는 작업 기록에 없는 키를 읽어 늘 `unknown`이다 [37].
 
-### T08.06 라이브러리 예외를 실패로 구별
+### T08.06 프로세스 안 분석 예외를 실패로 구별
 
 **구현.** `run_volatility_batch`는 Volatility 3를 서버 프로세스 안에서 라이브러리로 부르고 플러그인마다 라이브러리가 낸 예외를 처리한다 [38].
 예외가 나면 그 플러그인의 `status`를 `error`, `error_type`을 `exception`으로 정하고 다음 플러그인을 실행한다 [38].
 `netscan`이 지원되지 않는다는 예외면 `connscan`·`sockscan`으로 다시 실행하고 그것도 실패하면 `error_type`을 `plugin_unsupported`로 정한다 [38].
+`run_optical_listing`과 `extract_optical_file`은 서버 자체 코드로 광학 디스크의 UDF·ISO 9660 구조를 읽고 이 코드가 낸 `OpticalError`·`OSError`를 처리해 호출을 오류로 끝낸다 [39].
+`run_pcap_analysis`는 분석 방식마다 예외를 처리해 그 방식의 `status`를 `error`로 정하고 다음 방식을 실행한다 [40].
+이 방식 가운데 `beaconing`은 tshark가 낸 시각과 목적지를 서버 코드로 모아 접속 간격을 계산한다 [41].
+`analyze_disk_pcaps`는 PCAP 파일마다 분석 중 난 예외를 처리해 그 파일을 사유와 함께 `pcaps_failed`에 넣고 다음 파일을 분석한다 [42].
+`carve_sqlite_from_raw`는 이미지에서 SQLite 머리글을 찾아 잘라 내는 서버 코드가 `OSError`를 내면 `error_type`을 `io_error`로 정한 오류를 돌려준다 [43].
+`query_sqlite_from_image`는 `sqlite3`가 질의 중 낸 예외를 처리해 호출을 오류로 끝낸다 [44].
 
-**한계.** python-evtx로 EVTX를 읽는 `_parse_evtx_file`은 파일을 읽다 예외가 나면 서버 로그에 경고만 남기고 빈 글을 돌려준다 [39].
-레코드 하나를 읽다 예외가 나면 debug 로그만 남기고 그 레코드를 건너뛴다 [39].
-폴더를 파싱하는 경로는 빈 글이 나온 파일을 표시 없이 결과에서 뺀다 [40].
-`index_evtx_file`은 파싱 실패와 `event_ids`에 맞는 이벤트가 없는 경우를 같은 `No events parsed` 오류로 돌려준다 [41].
+**한계.** python-evtx로 EVTX를 읽는 `_parse_evtx_file`은 파일을 읽다 예외가 나면 서버 로그에 경고만 남기고 빈 글을 돌려준다 [45].
+레코드 하나를 읽다 예외가 나면 debug 로그만 남기고 그 레코드를 건너뛴다 [45].
+폴더를 파싱하는 경로는 빈 글이 나온 파일을 표시 없이 결과에서 뺀다 [46].
+`index_evtx_file`은 파싱 실패와 `event_ids`에 맞는 이벤트가 없는 경우를 같은 `No events parsed` 오류로 돌려준다 [47].
+UDF 파서는 파일 항목의 위치를 풀다 예외가 나면 그 항목을 크기 0, 빈 시각으로 목록에 넣고 실패 표시를 붙이지 않는다 [48].
+그 항목이 폴더이면 그 아래 항목은 읽지 않는다 [48].
+기록 세션 하나를 읽다 `OpticalError`가 나면 debug 로그만 남기고 그 세션을 목록에서 뺀다 [49].
+`parse_browser_history`와 `parse_plist`는 `sqlite3`·`plistlib`가 낸 예외를 debug 로그로만 남기고 그 파일을 건너뛴다 [50].
+모든 파일에서 예외가 나면 읽을 파일이 없을 때와 같은 `no_results`를 돌려준다 [50].
 
 ### 근거
 
@@ -1134,7 +1145,168 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
 [`src/mulder/server/tools/extract/volatility.py:714-741`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/volatility.py#L714-L741)
 
-[39] python-evtx 파서는 레코드 예외를 건너뛰고 파일 예외에서 빈 글을 돌려준다.
+[39] 광학 디스크 파서가 낸 예외를 오류 응답으로 바꾼다.
+
+```python
+    try:
+        with raw_image(image_path) as raw:
+            listing = list_optical(raw)
+    except (OpticalError, OSError) as exc:
+        return error_response(
+            tc_id,
+            "run_optical_listing",
+            params,
+            f"Not a readable optical disc image: {exc}",
+            error_type="not_optical_media",
+            suggestion="For hard disk and USB images use run_mmls / run_fls instead.",
+        )
+```
+
+[`src/mulder/server/tools/extract/optical.py:82-93`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/optical.py#L82-L93)
+
+```python
+            dest = dest_dir / entry.path.strip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            written = extract_optical(raw, entry, dest)
+    except (OpticalError, OSError) as exc:
+        return error_response(
+            tc_id,
+            "extract_optical_file",
+            params,
+            f"Could not extract {file_path!r}: {exc}",
+            error_type="extraction_failed",
+        )
+```
+
+[`src/mulder/server/tools/extract/optical.py:146-156`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/optical.py#L146-L156)
+
+[40] 분석 방식마다 예외를 처리해 오류 항목으로 둔다.
+
+```python
+    for m in modes_to_run:
+        try:
+            source_name, output = _run_pcap_mode(
+                m, pcap_path, max_packets, ssl_keylog_path, display_filter
+            )
+        except Exception as exc:
+            logger.exception("PCAP mode '%s' failed unexpectedly", m)
+            results.append(
+                {
+                    "source_name": f"pcap.{m}",
+                    "status": "error",
+                    "mode": m,
+                    "error_message": str(exc)[:300],
+                }
+            )
+            continue
+```
+
+[`src/mulder/server/tools/extract/pcap.py:825-840`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/pcap.py#L825-L840)
+
+[41] tshark 출력에서 목적지별 시각을 모아 접속 간격을 계산한다.
+
+```python
+    dest_times: dict[str, list[float]] = {}
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            epoch = float(parts[0])
+        except (ValueError, IndexError):
+            continue
+        dst_ip = parts[1]
+        dst_port = parts[2] or parts[3] if len(parts) > 3 else parts[2]
+        if not dst_ip or not dst_port:
+            continue
+        key = f"{dst_ip}:{dst_port}"
+        dest_times.setdefault(key, []).append(epoch)
+
+    results: list[str] = ["BEACONING ANALYSIS", "=" * 50, ""]
+    flagged = 0
+    for dest, times in sorted(dest_times.items(), key=lambda x: len(x[1]), reverse=True):
+        if len(times) < 5:
+            continue
+        times.sort()
+        intervals = [times[i + 1] - times[i] for i in range(len(times) - 1)]
+        mean_interval = sum(intervals) / len(intervals)
+        if mean_interval < 0.1:
+            continue
+        variance = sum((x - mean_interval) ** 2 for x in intervals) / len(intervals)
+        stddev = math.sqrt(variance)
+        cov = stddev / mean_interval if mean_interval > 0 else 999
+```
+
+[`src/mulder/server/tools/extract/pcap.py:390-418`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/pcap.py#L390-L418)
+
+[42] PCAP 파일마다 예외를 처리해 실패 목록에 넣는다.
+
+```python
+            try:
+                analysis = _analyze_single_pcap(
+                    pcap_path=dest,
+                    filename=rel_path,
+                    case_id=case_id,
+                    run_ids=run_ids,
+                    extract_credentials=extract_credentials,
+                    image_path=image_path,
+                )
+                pcaps_analyzed.append(analysis)
+
+                if extract_credentials and analysis.get("credentials"):
+                    all_credentials.extend(analysis["credentials"])
+            except Exception as exc:
+                logger.exception("Failed to analyze PCAP %s", rel_path)
+                pcaps_failed.append(
+                    {
+                        "filename": rel_path,
+                        "reason": str(exc)[:200],
+                    }
+                )
+```
+
+[`src/mulder/server/tools/extract/disk_pcap.py:444-464`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/disk_pcap.py#L444-L464)
+
+[43] SQLite 카빙 중 난 `OSError`를 `io_error` 오류로 돌려준다.
+
+```python
+    except OSError as exc:
+        elapsed = (time.monotonic() - t0) * 1000
+        return error_response(
+            tc_id,
+            "carve_sqlite_from_raw",
+            params,
+            f"I/O error reading image: {exc}",
+            elapsed,
+            error_type="io_error",
+        )
+```
+
+[`src/mulder/server/tools/phone.py:167-176`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/phone.py#L167-L176)
+
+[44] 질의 중 난 `sqlite3` 예외를 오류 응답으로 바꾼다.
+
+```python
+        try:
+            conn = sqlite3.connect(readonly_sqlite_uri(db_path), uri=True)
+            conn.execute("PRAGMA trusted_schema=OFF")
+            conn.set_authorizer(_readonly_authorizer)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(query).fetchall()
+            conn.close()
+        except sqlite3.Error as exc:
+            logger.error("SQLite query failed on inode %d: %s", inode, exc)
+            elapsed = (time.monotonic() - t0) * 1000
+            return {
+                "tool_call_id": tc_id,
+                "status": "error",
+                "error_message": "SQLite query failed",
+            }
+```
+
+[`src/mulder/server/tools/artifacts.py:389-403`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L389-L403)
+
+[45] python-evtx 파서는 레코드 예외를 건너뛰고 파일 예외에서 빈 글을 돌려준다.
 
 ```python
     try:
@@ -1159,7 +1331,7 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
 [`src/mulder/extractors/disk.py:51-68`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/disk.py#L51-L68)
 
-[40] 폴더 파싱 경로는 글이 있는 파일만 결과에 넣는다.
+[46] 폴더 파싱 경로는 글이 있는 파일만 결과에 넣는다.
 
 ```python
     results: list[object] = []
@@ -1173,7 +1345,7 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
 [`src/mulder/server/tools/extract/evtx.py:263-269`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L263-L269)
 
-[41] `index_evtx_file`은 글이 비면 사유를 가리지 않고 같은 오류를 돌려준다.
+[47] `index_evtx_file`은 글이 비면 사유를 가리지 않고 같은 오류를 돌려준다.
 
 ```python
     id_filter = set(event_ids) if event_ids else None
@@ -1198,3 +1370,83 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 ```
 
 [`src/mulder/server/tools/extract/evtx.py:583-601`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/extract/evtx.py#L583-L601)
+
+[48] 위치를 풀지 못한 항목은 `read_fe`가 `None`을 돌려주고 목록에는 크기·시각 없이 들어간다.
+
+```python
+    def read_fe(self, part_ref: int, lb: int) -> _FileEntry | None:
+        """Parse a (Extended) File Entry into type, size, times and extents."""
+        try:
+            sec = self.physical(part_ref, lb)
+        except (OpticalError, KeyError):
+            return None
+```
+
+[`src/mulder/extractors/optical.py:307-312`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/optical.py#L307-L312)
+
+```python
+            child = self.read_fe(child_ref, child_lb) if _u32(icb, 0) else None
+            is_dir = bool(chars & _FID_DIRECTORY)
+            out.append(
+                OpticalEntry(
+                    path=path,
+                    is_dir=is_dir,
+                    size=child.size if child and not is_dir else 0,
+                    mtime=child.mtime if child else "",
+                    ctime=child.ctime if child else "",
+                    deleted=bool(chars & _FID_DELETED),
+                    generation=generation,
+                    extents=list(child.extents) if child else [],
+                    location=f"{child_ref}:{child_lb}",
+                )
+            )
+            if is_dir and child is not None:
+                self._walk_dir(child_ref, child_lb, path, generation, out, seen)
+```
+
+[`src/mulder/extractors/optical.py:432-448`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/optical.py#L432-L448)
+
+[49] 읽지 못한 기록 세션은 debug 로그만 남기고 뺀다.
+
+```python
+            icb, table, prev = vat
+            if icb in seen_icbs:
+                break
+            seen_icbs.add(icb)
+            udf.vat = table
+            try:
+                generations.append(udf.walk(-len(generations)))
+            except OpticalError:
+                logger.debug("UDF VAT generation at sector %d unreadable", icb, exc_info=True)
+            vat = udf.find_vat(prev) if prev is not None else None
+```
+
+[`src/mulder/extractors/optical.py:460-469`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/extractors/optical.py#L460-L469)
+
+[50] 브라우저 DB와 plist 파싱 예외를 건너뛰고 결과가 없으면 `no_results`를 둔다.
+
+```python
+                except (sqlite3.Error, OSError) as exc:
+                    logger.debug("Browser DB parse error for %r: %s", rel_path, exc)
+
+    combined = "\n\n".join(all_results) if all_results else ""
+    if combined:
+        summary = extract_and_index(combined, "browser.history", image_path, "browser_parser")
+    else:
+        summary = {"status": "no_results", "message": "No browser history databases found"}
+```
+
+[`src/mulder/server/tools/artifacts.py:238-245`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L238-L245)
+
+```python
+            except Exception as exc:
+                logger.debug("Plist parse error for %r: %s", rel_path, exc)
+
+    combined = "\n\n".join(all_results) if all_results else ""
+    if combined:
+        summary = extract_and_index(combined, "plist.parsed", image_path, "plist_parser")
+    else:
+        summary = {"status": "no_results", "message": "No matching plist files found"}
+```
+
+[`src/mulder/server/tools/artifacts.py:313-320`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/server/tools/artifacts.py#L313-L320)
