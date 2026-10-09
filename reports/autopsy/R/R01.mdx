@@ -1,0 +1,510 @@
+---
+cell: R01
+details:
+- id: R01.02
+- id: R01.03
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 Java HTTP 서버의 도구 가운데 `get_server_status`를 뺀 17개에 적용된다 [1].
+`get_server_status`는 Sleuth Kit 객체를 쓰지 않고 서버 이름, 실행 상태, 케이스 열림 여부를 담은 `Map`을 직접 만든다 [2].
+도구는 Sleuth Kit Java 바인딩이 돌려주는 객체(`AbstractFile`, `BlackboardArtifact`, `TimelineEvent`, `OsAccount` 등)에서 필드를 골라 `Map`과 `List`를 만들고 Jackson이 이를 JSON으로 바꾼다 [1].
+`query_files`는 파일 객체마다 식별 정보, 크기, 시각 4개, 유형·플래그, 알려진 파일 상태, MIME 유형, 해시 3개, 소유자, 메타데이터 주소, 파일 속성을 고른다 [3].
+`query_data_artifacts`·`query_analysis_results`는 아티팩트 ID, 출처 객체 ID, 유형, 데이터 소스 ID, 속성 목록을 고르고 분석 결과에는 점수의 `significance`·`priority`를 덧붙인다 [4].
+`get_object_children`은 객체의 종류에 따라 다른 필드 묶음을 고른다 [5].
+`get_data_source_tree`는 `dataSourceId`가 데이터 소스 하나와 일치하면 그 항목 하나를 객체로 돌려주고 그 밖에는 목록을 돌려준다 [6].
+STDIO 래퍼는 Java 응답의 `result`를 바꾸지 않고 `JSON.stringify(result, null, 2)`로 글 하나를 만들어 돌려준다 [7].
+
+**한계.** 파일의 `path`는 `getUniquePath()`가 실패하면 `parentPath`와 이름을 이은 값으로 바뀌고 응답에는 바뀐 값이라는 표시가 없다 [3].
+`buildFileItem`은 파일 속성 조회가 실패하면 `attributes`를 빈 목록으로 싣는다 [3].
+이 값은 속성이 없는 파일의 값과 같다 [3].
+`buildDataSourceItem`은 이미지의 해시와 획득 정보 조회가 실패하면 그 필드를 `null`로 싣는다 [8].
+이 값은 값이 저장되지 않은 경우의 값과 같다 [8].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 서버는 값의 형식을 바꾸고 일부 도구에서 건수를 계산한다.
+`get_file_content`·`get_report_content`는 읽은 바이트를 UTF-8로 해석해 글로 바꾸고 해석할 수 없는 바이트는 대체 문자로 바꾼다 [9].
+아티팩트 속성 값은 값 유형에 따라 문자열, 정수, 실수로 바꾸고 `DATETIME` 값은 ISO 8601 문자열로 바꾼다 [10].
+`JSON` 값 유형의 속성은 해석하지 않고 저장된 JSON 글을 문자열 값으로 싣는다 [10].
+`get_case_summary`는 데이터 소스 수, `tsk_files` 표의 모든 행 수, `blackboard_artifacts` 표의 모든 행 수를 센다 [11][12].
+`tsk_files`의 행에는 파일 시스템의 파일과 폴더 밖에 카빙한 파일, 파생물, 미할당 블록, 가상 폴더, 슬랙 같은 종류가 함께 들어 있다 [13].
+`summarize_timeline`은 Sleuth Kit `TimelineManager.countEventsByType`이 범주별로 센 값을 싣고 그 합 `totalEvents`를 더한다 [14].
+`get_communications_accounts`는 계정마다 그 계정의 전체 관계 출처 수를 필터 없이 세어 `relationshipCount`로 싣는다 [15].
+`get_account_relationships`는 대상 계정과 관련 계정이 함께 나온 출처 수를 관련 계정마다 `relationshipCount`로 싣고 그 합을 `totalRelationships`로 싣는다 [15].
+`get_object_children`은 자식 수 `childCount`를 싣는다 [5].
+`list_reports`·`get_report_content`의 `contentType`은 보고서 경로의 확장자로 정한 값이고 `.html`·`.htm`·`.xhtml`이면 `text/html`, 나머지는 `text/plain`이다 [16].
+
+**한계.** `get_case_summary`는 아티팩트 수를 세는 질의에서 `SQLException`이 나면 `totalArtifacts`를 0으로 두고 오류를 알리지 않는다 [11].
+`contentType`은 파일 내용을 보지 않으므로 HTML이 아닌 이진 보고서도 `text/plain`으로 표시된다 [16].
+`attrValueAsObject`와 `fileAttrValueAsObject`는 `BYTE`처럼 처리하지 않는 값 유형의 속성 값을 `null`로 싣는다 [17].
+이 값은 값이 저장되지 않은 속성의 값과 구별되지 않는다 [17].
+`totalArtifacts`는 검사자가 거부(`REJECTED`)한 아티팩트까지 센다 [11].
+`query_data_artifacts`·`query_analysis_results`는 거부한 아티팩트를 돌려주지 않으므로 두 도구로 모은 수와 `totalArtifacts`가 어긋날 수 있다 [18].
+`get_file_content`의 설명은 해석할 수 없는 바이트를 `?`로 바꾼다고 적는다 [19].
+코드는 `CodingErrorAction.REPLACE`를 쓰고 대체 문자열을 따로 정하지 않으므로 그 바이트는 기본 대체 문자열 U+FFFD로 바뀐다 [9][20].
+
+`summarize_timeline`의 건수는 응답에 실린 `endTime`과 같은 초의 사건을 빼고 센다 [21][22].
+도구 설명은 `endTime`을 포함하는 범위라고 적지만 Sleuth Kit `countEventsByType`은 `time < endTime` 조건으로 센다 [23][22].
+`endTime`을 생략하면 끝이 케이스의 가장 늦은 사건 시각이 되어 그 시각의 사건이 빠진다 [21][22].
+날짜만 준 `endTime`은 그 날 23:59:59 UTC로 바뀌므로 23:59:59의 사건이 빠진다 [23][24].
+`query_timeline`은 끝 시각에 1초를 더해 조회하므로 같은 `endTime`으로 두 도구가 다루는 범위가 다르다 [25].
+
+### R01.06 응답 항목 선별
+
+**구현.** `get_data_source_tree`는 정해 둔 규칙으로 이미지 수준의 파일 시스템 목록을 고른다 [26].
+이미지에 볼륨 시스템이 있으면 이미지 수준의 `fileSystems`를 빈 목록으로 두고 각 볼륨 아래에 그 볼륨의 파일 시스템을 싣는다 [26].
+Sleuth Kit `Image.getFileSystems()`가 데이터 소스의 파일 시스템을 모두 돌려주므로 이 규칙은 같은 파일 시스템이 두 번 실리는 것을 막는다 [27].
+
+서버가 부르는 Sleuth Kit 질의가 정한 규칙으로 빠지는 항목도 있다.
+`query_data_artifacts`·`query_analysis_results`가 부르는 `getDataArtifactsWhere`·`getAnalysisResultsWhere`는 검토 상태가 `REJECTED`인 아티팩트를 빼는 조건을 늘 붙인다 [28].
+`get_object_children`이 파일 객체의 자식을 얻는 `getChildren`도 아티팩트를 같은 질의로 읽으므로 거부한 아티팩트는 자식 목록과 `childCount`에서 빠진다 [29].
+`get_hosts`와 `get_os_accounts`가 부르는 `getAllHosts`·`getOsAccounts`는 상태가 `ACTIVE`인 호스트와 계정만 돌려준다 [30].
+`get_communications_accounts`가 부르는 `getAccountDeviceInstancesWithRelationships`는 관계가 하나 이상 있는 계정만 돌려준다 [31].
+`get_account_relationships`는 같은 계정이 여러 장치에 있어도 처음 일치한 계정·장치 하나만 대상으로 삼는다 [32].
+
+**한계.** 볼륨 아래 파일 시스템은 Sleuth Kit `Volume.getFileSystems()`가 돌려주는 볼륨의 바로 아래 자식만 싣는다 [33].
+Sleuth Kit은 풀(`Pool`)을 부모 객체 아래 별도 객체로 둔다 [34].
+그래서 볼륨 시스템이 있는 이미지에서 볼륨 아래 풀을 거쳐 놓인 파일 시스템은 트리에 실리지 않고 응답에도 뺐다는 표시가 없다 [26][33].
+풀이 있는 이미지로 실행해 확인하지는 않았다.
+Sleuth Kit 질의가 빼거나 서버가 처음 하나만 고른 항목에도 응답에는 뺐다는 표시가 없다 [28][29][30][31][32].
+
+### 근거
+
+[1] `TskQueryService`는 Sleuth Kit 호출 결과를 `Map`·`List`로 돌려주고 Jackson이 직렬화한다.
+
+```text
+/**
+ * All TSK Java API calls live here. Nothing else touches SleuthkitCase directly.
+ * Accepts strongly-typed or JSON-parsed parameters; returns plain Map/List results
+ * that Jackson can serialize directly into the MCP JSON-RPC response.
+ */
+class TskQueryService {
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:40-45`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L40-L45)
+
+```text
+    private String buildSuccess(JsonNode id, Object result) throws Exception {
+        ObjectNode response = mapper.createObjectNode();
+        response.put("jsonrpc", "2.0");
+        response.set("id", id);
+        response.set("result", mapper.valueToTree(result));
+        return mapper.writeValueAsString(response);
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:172-178`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L172-L178)
+
+[2] `get_server_status`의 응답은 처리기가 직접 만든다.
+
+```text
+    private Map<String, Object> buildServerStatus() {
+        TskQueryService qs = queryService;
+        boolean caseOpen = qs != null;
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("server", "autopsy-mcp");
+        status.put("status", "running");
+        status.put("caseOpen", caseOpen);
+        if (caseOpen) {
+            status.put("caseName", qs.getCaseName());
+        }
+        return status;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:151-162`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L151-L162)
+
+[3] `buildFileItem`이 파일 필드를 고르고 실패하면 대체 값을 싣는다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:505-575`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L505-L575).
+
+[4] 아티팩트 항목의 필드와 분석 결과 점수.
+
+```text
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("objectId",     artifact.getId());
+            item.put("sourceFileId", artifact.getObjectID());
+            item.put("artifactType", artifact.getArtifactTypeName());
+            item.put("dataSourceId", artifact.getDataSourceObjectID());
+
+            if (isAnalysis) {
+                Score score = ((AnalysisResult) artifact).getScore();
+                item.put("score", Map.of(
+                    "significance", score.getSignificance().getName(),
+                    "priority",     score.getPriority().getName()
+                ));
+            }
+
+            List<Map<String, Object>> attrList = new ArrayList<>();
+            for (BlackboardAttribute attr : attrs) {
+                Map<String, Object> attrMap = new LinkedHashMap<>();
+                attrMap.put("type",  attr.getAttributeType().getTypeName());
+                attrMap.put("value", attrValueAsObject(attr));
+                attrList.add(attrMap);
+            }
+            item.put("attributes", attrList);
+            result.add(item);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:656-678`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L656-L678)
+
+[5] `get_object_children`은 객체 종류마다 다른 필드를 싣고 자식 수를 센다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1196-1300`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1196-L1300).
+
+[6] `get_data_source_tree`는 ID 하나와 일치하면 항목 하나만 돌려준다.
+
+```text
+        // If a specific ID was requested, unwrap the single result
+        if (filterDsId >= 0 && result.size() == 1) {
+            return result.get(0);
+        }
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:788-792`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L788-L792)
+
+[7] 래퍼는 Java 응답의 `result`를 글 하나로 바꾼다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+        return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+        };
+    } catch (err) {
+        log("ERROR", `tools/call ${toolName} failed: ${err.message}`);
+        return {
+            content: [{ type: "text", text: `Autopsy is not reachable: ${err.message}` }],
+            isError: true
+        };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-334`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L334)
+
+[8] 이미지 해시와 획득 정보 조회가 실패하면 `null`을 싣는다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            item.put("imageType", image.getType().name());
+            item.put("sectorSize", image.getSsize());
+            item.put("paths", List.of(image.getPaths()));
+            try { item.put("md5", image.getMd5()); }
+            catch (TskCoreException ex) { item.put("md5", null); }
+            try { item.put("sha1", image.getSha1()); }
+            catch (TskCoreException ex) { item.put("sha1", null); }
+            try { item.put("sha256", image.getSha256()); }
+            catch (TskCoreException ex) { item.put("sha256", null); }
+            try { item.put("acquisitionDetails", image.getAcquisitionDetails()); }
+            catch (TskCoreException ex) { item.put("acquisitionDetails", null); }
+            try { item.put("acquisitionToolName", image.getAcquisitionToolName()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolName", null); }
+            try { item.put("acquisitionToolVersion", image.getAcquisitionToolVersion()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolVersion", null); }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:745-762`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L745-L762)
+
+[9] 읽은 바이트를 UTF-8 대체 모드로 해석한다.
+
+```text
+        // Decode as UTF-8, replacing undecodable bytes with '?'
+        // REPLACE mode should never throw, but decode() declares CharacterCodingException.
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        CharBuffer chars;
+        try {
+            chars = decoder.decode(ByteBuffer.wrap(buf));
+        } catch (java.nio.charset.CharacterCodingException ex) {
+            // Cannot happen with REPLACE policy; fall back to lossy Latin-1 conversion
+            chars = CharBuffer.wrap(new String(buf, StandardCharsets.ISO_8859_1));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:955-966`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L955-L966)
+
+[10] 속성 값을 값 유형에 따라 바꾼다.
+
+```text
+    private static Object attrValueAsObject(BlackboardAttribute attr) {
+        switch (attr.getValueType()) {
+            case STRING:
+            case JSON:
+                return attr.getValueString();
+            case DATETIME:
+                return epochToIso(attr.getValueLong());
+            case INTEGER:
+                return attr.getValueInt();
+            case LONG:
+                return attr.getValueLong();
+            case DOUBLE:
+                return attr.getValueDouble();
+            default:
+                return null;
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1568-1584`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1568-L1584)
+
+[11] `get_case_summary`의 건수와 `SQLException` 처리.
+
+```text
+    Map<String, Object> getCaseSummary() throws TskCoreException {
+        long totalFiles = skCase.countFilesWhere("1=1");
+
+        final long[] artifactCount = {0};
+        skCase.getCaseDbAccessManager().select(
+            "COUNT(*) AS cnt FROM blackboard_artifacts",
+            rs -> {
+                try {
+                    if (rs.next()) {
+                        artifactCount[0] = rs.getLong("cnt");
+                    }
+                } catch (java.sql.SQLException ex) {
+                    // leave count at 0
+                }
+            });
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("caseName", caseName);
+        summary.put("dataSources", skCase.getDataSources().size());
+        summary.put("totalFiles", totalFiles);
+        summary.put("totalArtifacts", artifactCount[0]);
+        return summary;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:344-366`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L344-L366)
+
+[12] Sleuth Kit 4.15.0의 `countFilesWhere`는 `tsk_files`에서 조건에 맞는 행을 센다: [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:9445-9460`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L9445-L9460).
+
+[13] Sleuth Kit 4.15.0의 `tsk_files` 행 종류다: [`bindings/java/src/org/sleuthkit/datamodel/TskData.java:692-704`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TskData.java#L692-L704).
+
+[14] `summarize_timeline`은 범주별 건수를 싣고 합을 더한다.
+
+```text
+        Map<TimelineEventType, Long> counts = tm.countEventsByType(
+                startEpoch, endEpoch, filter, TimelineEventType.HierarchyLevel.CATEGORY);
+
+        long total = 0;
+        Map<String, Long> byCategory = new LinkedHashMap<>();
+        for (Map.Entry<TimelineEventType, Long> entry : counts.entrySet()) {
+            byCategory.put(entry.getKey().getDisplayName(), entry.getValue());
+            total += entry.getValue();
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("startTime",   epochToIso(startEpoch));
+        result.put("endTime",     epochToIso(endEpoch));
+        result.put("totalEvents", total);
+        result.put("byCategory",  byCategory);
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1029-1044`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1029-L1044)
+
+[15] 관계 출처 수를 센다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1115-1121`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1115-L1121), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1164-1177`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1164-L1177), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1182`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1182).
+
+[16] 보고서 유형은 경로의 확장자로 정한다.
+
+```text
+    private static String guessReportTypeByExtension(String path) {
+        String p = path.toLowerCase();
+        if (p.endsWith(".html") || p.endsWith(".htm") || p.endsWith(".xhtml")) {
+            return "text/html";
+        }
+        return "text/plain";
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1501-1507`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1501-L1507)
+
+[17] 두 변환 함수는 처리하지 않는 값 유형을 `default`에서 `null`로 바꾼다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1581-1582`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1581-L1582).
+
+```text
+    private static Object fileAttrValueAsObject(Attribute attr) {
+        BlackboardAttribute.TSK_BLACKBOARD_ATTRIBUTE_VALUE_TYPE valueType =
+                attr.getAttributeType().getValueType();
+        switch (valueType) {
+            case STRING:
+            case JSON:
+                return attr.getValueString();
+            case DATETIME:
+                return epochToIso(attr.getValueLong());
+            case INTEGER:
+                return attr.getValueInt();
+            case LONG:
+                return attr.getValueLong();
+            case DOUBLE:
+                return attr.getValueDouble();
+            default:
+                return null;
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1590-1608`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1590-L1608)
+
+[18] Sleuth Kit 4.15.0의 아티팩트 질의는 거부한 아티팩트를 뺀다: [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1197-1200`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1197-L1200), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1511-1514`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1511-L1514).
+
+[19] `get_file_content`의 도구 설명.
+
+```text
+                "Read the text content of a file by its object ID. Returns UTF-8 text with " +
+                "undecodable bytes replaced by '?'. " +
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:280-281`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L280-L281)
+
+[20] Java SE 21 API 문서는 `CharsetDecoder`의 처음 대체 문자열을 U+FFFD 한 글자로 적는다: [`CharsetDecoder`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/charset/CharsetDecoder.html).
+
+[21] `summarize_timeline`의 범위와 응답.
+
+```text
+    Map<String, Object> summarizeTimeline(JsonNode args) throws TskCoreException {
+        TimelineManager tm = skCase.getTimelineManager();
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        TimelineFilter.RootFilter filter = buildTimelineFilter(args);
+
+        Map<TimelineEventType, Long> counts = tm.countEventsByType(
+                startEpoch, endEpoch, filter, TimelineEventType.HierarchyLevel.CATEGORY);
+
+        long total = 0;
+        Map<String, Long> byCategory = new LinkedHashMap<>();
+        for (Map.Entry<TimelineEventType, Long> entry : counts.entrySet()) {
+            byCategory.put(entry.getKey().getDisplayName(), entry.getValue());
+            total += entry.getValue();
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("startTime",   epochToIso(startEpoch));
+        result.put("endTime",     epochToIso(endEpoch));
+        result.put("totalEvents", total);
+        result.put("byCategory",  byCategory);
+        return result;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1022-1045`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1022-L1045)
+
+[22] Sleuth Kit 4.15.0의 `countEventsByType`은 시작과 끝이 같을 때만 끝에 1을 더하고 `time < 끝` 조건으로 센다: [`bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java:1173-1180`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java#L1173-L1180).
+
+[23] 도구 설명은 두 시각을 포함하는 범위라고 적는다.
+
+```text
+                    "startTime",    param("string",  "ISO 8601 start of time range (inclusive)"),
+                    "endTime",      param("string",  "ISO 8601 end of time range (inclusive)"),
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:254-255`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L254-L255)
+
+[24] 날짜만 준 시각의 처리.
+
+```text
+    private static long parseTimeArg(JsonNode args, String field, Long fallback) {
+        String s = textOrNull(args, field);
+        if (s == null) {
+            return fallback != null ? fallback : 0L;
+        }
+        // Accept date-only strings (e.g. "2012-03-02").
+        // End-boundary fields (endTime, *Before) expand to 23:59:59 so the full
+        // day is included; start-boundary fields expand to 00:00:00 (midnight UTC).
+        if (s.length() == 10) {
+            boolean isEndBoundary = "endTime".equals(field) || field.endsWith("Before");
+            s = s + (isEndBoundary ? "T23:59:59Z" : "T00:00:00Z");
+        }
+        return Instant.parse(s).getEpochSecond();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1438-1451`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1438-L1451)
+
+[25] `query_timeline`은 끝 시각에 1초를 더한 구간으로 조회한다.
+
+```text
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        Interval interval = new Interval(startEpoch * 1000L, (endEpoch + 1) * 1000L, DateTimeZone.UTC);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:990-993`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L990-L993)
+
+[26] 볼륨 시스템이 있으면 이미지 수준 파일 시스템 목록을 비우고 볼륨 바로 아래 파일 시스템만 싣는다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            List<Map<String, Object>> vsNodes = new ArrayList<>();
+
+            for (VolumeSystem vs : image.getVolumeSystems()) {
+                vsNodes.add(buildVolumeSystemNode(vs));
+            }
+
+            // Images may also have file systems directly (no volume system layer)
+            List<Map<String, Object>> directFsNodes = new ArrayList<>();
+            for (FileSystem fs : image.getFileSystems()) {
+                directFsNodes.add(buildFileSystemNode(fs));
+            }
+
+            node.put("volumeSystems", vsNodes);
+            // Only include fileSystems at the image level when there is no volume system.
+            // When volume systems exist, file systems are already nested inside their volumes.
+            node.put("fileSystems", vsNodes.isEmpty() ? directFsNodes : Collections.emptyList());
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:798-815`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L798-L815)
+
+```text
+        List<Map<String, Object>> fsNodes = new ArrayList<>();
+        for (FileSystem fs : vol.getFileSystems()) {
+            fsNodes.add(buildFileSystemNode(fs));
+        }
+        node.put("fileSystems", fsNodes);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:852-856`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L852-L856)
+
+[27] Sleuth Kit 4.15.0의 `Image.getFileSystems()`는 데이터 소스 ID로 `tsk_fs_info` 전체를 조회한다: [`bindings/java/src/org/sleuthkit/datamodel/Image.java:263-267`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Image.java#L263-L267), [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:10051-10053`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L10051-L10053).
+
+[28] Sleuth Kit 4.15.0의 데이터 아티팩트와 분석 결과 질의는 거부한 아티팩트를 빼는 조건을 붙인다: [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1197-1200`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1197-L1200), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1511-1514`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1511-L1514), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1423-1426`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1423-L1426), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1658-1661`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1658-L1661).
+
+[29] Sleuth Kit 4.15.0의 `getChildren`은 자식 아티팩트를 같은 분석 결과·데이터 아티팩트 질의로 읽는다: [`bindings/java/src/org/sleuthkit/datamodel/AbstractContent.java:191-199`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractContent.java#L191-L199), [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:5978-5984`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L5978-L5984), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1267-1269`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1267-L1269), [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:1281-1288`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L1281-L1288).
+
+[30] Sleuth Kit 4.15.0의 호스트와 OS 계정 질의는 `ACTIVE` 상태만 고른다: [`bindings/java/src/org/sleuthkit/datamodel/HostManager.java:407-408`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/HostManager.java#L407-L408), [`bindings/java/src/org/sleuthkit/datamodel/OsAccountManager.java:1256-1258`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/OsAccountManager.java#L1256-L1258).
+
+[31] Sleuth Kit 4.15.0의 `getAccountDeviceInstancesWithRelationships`는 관계가 하나 이상 있는 계정만 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/CommunicationsManager.java:644-659`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/CommunicationsManager.java#L644-L659).
+
+[32] `get_account_relationships`는 처음 일치한 계정·장치에서 찾기를 멈춘다.
+
+```text
+        for (AccountDeviceInstance adi : cm.getAccountDeviceInstancesWithRelationships(filter)) {
+            Account account = adi.getAccount();
+            if (account.getTypeSpecificID().equalsIgnoreCase(accountId)
+                    && account.getAccountType().getTypeName().equalsIgnoreCase(accountTypeStr)) {
+                targetAdi = adi;
+                break;
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1146-1153`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1146-L1153)
+
+[33] Sleuth Kit 4.15.0의 `Volume.getFileSystems()`는 볼륨의 바로 아래 자식 가운데 파일 시스템만 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/Volume.java:284-295`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Volume.java#L284-L295).
+
+[34] Sleuth Kit 4.15.0은 풀을 부모 객체 ID 아래 `POOL` 객체로 추가한다: [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:7423-7431`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L7423-L7431).

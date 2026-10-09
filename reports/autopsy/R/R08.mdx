@@ -1,0 +1,175 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `get_os_accounts`의 확장 속성 `extendedAttributes`에 적용된다 [1].
+서버는 확장 속성 값으로 Sleuth Kit `getDisplayString()`이 만든 글을 바꾸지 않고 그대로 싣는다 [1].
+이 메서드는 `DATETIME` 값을 `yyyy-MM-dd HH:mm:ss z` 꼴로 JVM 기본 시간대에 맞춰 바꾸고 0은 `0000-00-00 00:00:00`으로 바꾼다 [2].
+서버의 다른 시각 값은 이 경로를 거치지 않고 서버가 UTC ISO 8601로 바꾼다 [3].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 서버는 Sleuth Kit이 저장한 epoch 초 값을 `epochToIso`로 UTC 오프셋을 붙인 ISO 8601 문자열로 바꿔 싣는다 [3].
+`ZoneOffset.UTC`로 만든 문자열이므로 값 끝에 UTC 표기 `Z`가 붙고 정밀도는 초 단위다 [3].
+이 변환은 `query_files`·`get_object_children`의 파일 시각, 아티팩트와 파일 속성 `attributes`의 `DATETIME` 값, `query_timeline`의 사건 시각, `list_reports`의 만든 시각, `get_os_accounts`의 계정 생성 시각에 적용된다 [4][5][6][7][8].
+`query_data_sources`·`get_hosts`·`get_data_source_tree`는 밀리초로 저장된 데이터 소스 추가 시각을 1,000으로 나눠 같은 방식으로 바꾼다 [9][10].
+`summarize_timeline`은 집계에 쓴 시작·끝 시각을 같은 꼴로 싣는다 [11].
+원래의 epoch 값은 어느 응답에도 함께 싣지 않는다 [3][4].
+`query_data_sources`·`get_hosts`·`get_data_source_tree`는 데이터 소스에 설정된 시간대 `timezone`을 시각 값과 따로 싣는다 [9][10].
+
+**한계.** `epochToIso`는 0 이하의 값을 `null`로 바꾼다 [3].
+그래서 시각이 기록되지 않은 경우와 1970-01-01 00:00:00 UTC, 그 이전 시각이 응답에서 모두 `null`로 같다 [3].
+
+`get_os_accounts`의 확장 속성 시각은 이 변환을 거치지 않으므로 같은 응답 안에서 계정 생성 시각은 UTC ISO 8601이고 확장 속성의 시각은 Autopsy를 실행한 컴퓨터의 시간대 약어가 붙은 다른 꼴이다 [7][1][2].
+
+### 근거
+
+[1] 확장 속성 값은 `getDisplayString()`의 글이다.
+
+```text
+            // Extended attributes: home dir, login script, last login, etc.
+            List<Map<String, String>> extAttrs = new ArrayList<>();
+            for (OsAccount.OsAccountAttribute attr : account.getExtendedOsAccountAttributes()) {
+                Map<String, String> a = new LinkedHashMap<>();
+                a.put("type",  attr.getAttributeType().getTypeName());
+                a.put("value", attr.getDisplayString());
+                extAttrs.add(a);
+            }
+            item.put("extendedAttributes", extAttrs);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1066-1074`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1066-L1074)
+
+[2] Sleuth Kit 4.15.0의 `getDisplayString()`과 `epochToTime`: [`bindings/java/src/org/sleuthkit/datamodel/AbstractAttribute.java:222-224`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractAttribute.java#L222-L224), [`bindings/java/src/org/sleuthkit/datamodel/TimeUtilities.java:46-52`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimeUtilities.java#L46-L52).
+
+[3] `epochToIso`는 0 이하를 `null`로 두고 UTC ISO 8601 문자열을 만든다.
+
+```text
+    private static String epochToIso(long epochSeconds) {
+        if (epochSeconds <= 0) {
+            return null;
+        }
+        return Instant.ofEpochSecond(epochSeconds)
+                .atOffset(ZoneOffset.UTC)
+                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1513-1520`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1513-L1520)
+
+[4] 파일 시각 4개를 바꿔 싣는다.
+
+```text
+        // Timestamps (MACB)
+        item.put("modifiedTime", epochToIso(f.getMtime()));   // mtime
+        item.put("accessedTime", epochToIso(f.getAtime()));   // atime
+        item.put("changeTime",   epochToIso(f.getCtime()));   // ctime  (metadata change)
+        item.put("createdTime",  epochToIso(f.getCrtime()));  // crtime (birth/creation)
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:523-527`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L523-L527)
+
+[5] `DATETIME` 속성 값을 바꿔 싣는다.
+
+```text
+    private static Object attrValueAsObject(BlackboardAttribute attr) {
+        switch (attr.getValueType()) {
+            case STRING:
+            case JSON:
+                return attr.getValueString();
+            case DATETIME:
+                return epochToIso(attr.getValueLong());
+            case INTEGER:
+                return attr.getValueInt();
+            case LONG:
+                return attr.getValueLong();
+            case DOUBLE:
+                return attr.getValueDouble();
+            default:
+                return null;
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1568-1584`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1568-L1584)
+
+[6] 사건 시각과 보고서 만든 시각: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1005`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1005), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1314`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1314), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1260-1261`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1260-L1261).
+
+[7] 계정 생성 시각.
+
+```text
+            Long createdEpoch = account.getCreationTime().orElse(null);
+            item.put("creationTime", createdEpoch != null && createdEpoch > 0
+                    ? epochToIso(createdEpoch) : null);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1062-1064`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1062-L1064)
+
+[8] 파일 속성의 `DATETIME` 값도 `epochToIso`로 바꾼다.
+
+```text
+            case DATETIME:
+                return epochToIso(attr.getValueLong());
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1597-1598`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1597-L1598)
+
+[9] 데이터 소스의 시간대와 추가 시각.
+
+```text
+        if (ds instanceof DataSource) {
+            DataSource dataSource = (DataSource) ds;
+            item.put("timezone", dataSource.getTimeZone());
+            item.put("deviceId", dataSource.getDeviceId());
+            // added_date_time is always stored as Java milliseconds via new Date().getTime()
+            // (sole write site: SleuthkitCase.java INSERT_DATA_SOURCE_INFO) — divide by 1000 for epoch seconds
+            try {
+                Long addedMs = dataSource.getDateAdded();
+                item.put("addedDate", addedMs != null && addedMs > 0 ? epochToIso(addedMs / 1000) : null);
+            } catch (TskCoreException ex) {
+                item.put("addedDate", null);
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:731-743`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L731-L743)
+
+[10] 세 도구는 데이터 소스 항목을 같은 `buildDataSourceItem`으로 만든다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:700`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L700), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:715`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L715), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:796`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L796).
+
+[11] `summarize_timeline`의 범위와 응답.
+
+```text
+    Map<String, Object> summarizeTimeline(JsonNode args) throws TskCoreException {
+        TimelineManager tm = skCase.getTimelineManager();
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        TimelineFilter.RootFilter filter = buildTimelineFilter(args);
+
+        Map<TimelineEventType, Long> counts = tm.countEventsByType(
+                startEpoch, endEpoch, filter, TimelineEventType.HierarchyLevel.CATEGORY);
+
+        long total = 0;
+        Map<String, Long> byCategory = new LinkedHashMap<>();
+        for (Map.Entry<TimelineEventType, Long> entry : counts.entrySet()) {
+            byCategory.put(entry.getKey().getDisplayName(), entry.getValue());
+            total += entry.getValue();
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("startTime",   epochToIso(startEpoch));
+        result.put("endTime",     epochToIso(endEpoch));
+        result.put("totalEvents", total);
+        result.put("byCategory",  byCategory);
+        return result;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1022-1045`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1022-L1045)

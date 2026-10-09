@@ -1,0 +1,441 @@
+---
+cell: T08
+details:
+- id: T08.02
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 STDIO 래퍼가 Autopsy HTTP 서버에 보내는 모든 요청(`tools/list`, `tools/call`)에 적용된다 [1].
+래퍼는 요청마다 `AbortController`를 만들고 `CALL_TIMEOUT_MS`(30,000밀리초)가 지나면 요청을 끊는다 [1].
+끊긴 요청에서 나는 `AbortError`는 다른 연결 오류와 따로 처리해 `Autopsy MCP timed out after 30s (<메서드>)` 오류로 바꾸고 기록 파일에 남긴다 [1].
+`tools/call`에서는 이 오류가 `isError`가 참인 글 응답이 되고 `tools/list`에서는 대체 도구 하나만 담은 목록이 된다 [2][3].
+기준 커밋의 래퍼 소스를 Node.js 24.21.0으로 실행하면 응답이 75초 늦는 호출이 30초에 시간 초과 오류로 끝났다 [4].
+
+**한계.** 설치본 Autopsy 4.23.1의 `autopsy-mcp-stdio.exe`에서는 이 시간 제한이 적용되지 않았다 [5].
+같은 호출에서 실행 파일은 75초 동안 기다린 뒤 HTTP 서버의 응답을 성공 결과로 돌려주었다 [5].
+실행 파일을 만드는 `package` 스크립트는 pkg 대상을 Node.js 18로 정한다 [6].
+설치본 실행 파일은 실행할 때 fetch가 실험 기능이라는 경고를 출력했다 [5].
+실행 파일에서 시간 제한이 적용되지 않는 원인은 확인하지 못했다.
+실행 파일은 저장소에 없고 `.gitignore`가 그 폴더를 뺀다 [7].
+`build.xml`은 Windows에서 래퍼 소스 파일이 실행 파일보다 새로울 때만 실행 파일을 다시 만들고 `package.json`과 잠금 파일이 바뀐 것은 보지 않는다 [8].
+그래서 배포되는 실행 파일에 묶인 MCP TypeScript SDK와 Node.js 버전은 저장소의 잠금 파일과 다를 수 있다.
+
+래퍼는 `fetch`가 응답 헤더를 받으면 바로 타이머를 지우므로 시간 제한은 응답 헤더를 받기 전까지만 적용되고 본문을 읽는 `res.json()`에는 적용되지 않는다 [1].
+Java 쪽 처리기에는 시간 제한이나 취소 코드가 없어 래퍼가 요청을 끊어도 Autopsy 안의 질의는 끝날 때까지 계속 실행된다 [9].
+래퍼는 MCP 클라이언트가 보낸 취소 알림 `notifications/cancelled`를 받아도 진행 중인 HTTP 요청을 끊지 않는다 [10][11].
+MCP TypeScript SDK 1.27.1은 취소된 요청의 처리기에 취소 신호를 보내고 그 요청의 응답을 보내지 않지만 래퍼의 도구 호출 처리기는 그 신호를 `fetch`에 넘기지 않는다 [10][12].
+
+### T08.06 라이브러리 예외를 실패로 구별
+
+**구현.** 이 방식은 Java 쪽 요청 처리기 `McpProtocolHandler.handle`이 받는 모든 요청에 적용된다 [13].
+도구 대부분은 케이스 DB를 조회하지만 `get_file_content`는 Sleuth Kit의 `AbstractFile.read`로 이미지의 파일시스템을 해석해 파일 내용을 읽는다 [14][15].
+도구 처리 중 Sleuth Kit이 던진 `TskCoreException`이나 다른 예외는 처리기에서 처리되고 처리기는 `SEVERE` 수준으로 기록한 뒤 JSON-RPC 오류 코드 -32603과 예외 문구를 담은 오류 응답을 만든다 [13].
+`McpException`은 기록 없이 그 예외에 정한 코드로, JSON 해석 실패는 -32700으로 응답한다 [13].
+요청 본문을 읽다가 예외가 나거나 오류 응답을 만드는 데도 실패해 처리기 밖으로 예외가 나오면 `McpServer.handleMcpRequest`가 HTTP 500으로 응답한다 [16].
+이 응답은 오류 코드 -32603과 `Internal error`를 싣고 `data` 필드에 예외 문구를 싣는다 [16].
+래퍼는 HTTP 상태가 성공이 아니거나 응답에 `error`가 있으면 그 호출을 실패로 정하고 `isError`가 참인 글 응답을 돌려준다 [2][17].
+Sleuth Kit의 `getAbstractFileById`는 없는 ID에 `null`을 돌려주므로 `get_file_content`에 없는 객체 ID를 주면 `NullPointerException`이 나고 같은 -32603 오류가 된다 [18][14].
+이 오류의 문구는 JRE 15부터 기본으로 켜진 자세한 NPE 글이다 [19].
+`get_file_content`와 `get_report_content`는 읽은 바이트가 요청보다 적으면 배열을 줄여 `bytesRead`에 실제 수를 적고 실패로 다루지 않는다 [14][20].
+
+**한계.** 다음 경로에서는 라이브러리 예외나 읽기 실패가 호출 실패가 되지 않고 빈 값이나 기본값으로 응답에 실린다.
+
+- `query_data_artifacts`·`query_analysis_results`는 `artifactType`으로 유형을 찾다가 `TskCoreException`이 나면 그 유형의 결과가 없을 때와 같은 빈 목록을 돌려준다 [21].
+- 파일 항목은 고유 경로를 읽지 못하면 부모 경로와 이름을 이어 붙인 값으로, 확장 속성을 읽지 못하면 빈 목록으로 채운다 [22].
+- 디스크 이미지 데이터 소스는 해시와 획득 정보를 읽다가 예외가 나면 그 필드를 `null`로 채운다 [23].
+- `get_case_summary`는 아티팩트 수를 세다가 `SQLException`이 나면 `totalArtifacts`를 0으로 돌려준다 [24].
+- Sleuth Kit의 `Report.read`는 보고서 파일을 읽다가 `IOException`이 나면 기록만 남기고 그때까지 읽은 바이트 수를 돌려주고 경로가 폴더이면 0을 돌려준다 [25].
+- Sleuth Kit의 `FsContent.readInt`는 데이터 소스가 이미지 경로 없는 `Image`이면 읽지 않고 0을 돌려준다 [26].
+
+`get_file_content`는 `objectId`가 없을 때 `TskCoreException`을 직접 던지므로 이 입력 오류도 라이브러리 실패와 같은 -32603 오류가 된다 [14].
+
+### 근거
+
+[1] 래퍼가 HTTP 요청에 시간 제한을 두고 끊긴 요청을 시간 초과 오류로 바꾼다.
+
+```javascript
+async function callJava(method, params) {
+    const token = readToken(); // fresh read each call — handles case reopen
+    log("INFO", `-> ${method}`);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
+
+    let res;
+    try {
+        res = await fetch(`${MCP_BASE_URL}/mcp`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ jsonrpc: "2.0", id: "1", method, params }),
+            signal: controller.signal
+        });
+    } catch (err) {
+        clearTimeout(timer);
+        if (err.name === "AbortError") {
+            const msg = `Autopsy MCP timed out after ${CALL_TIMEOUT_MS / 1000}s (${method})`;
+            log("ERROR", msg);
+            throw new Error(msg);
+        }
+        throw err;
+    }
+    clearTimeout(timer);
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:237-264`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L237-L264)
+
+[2] `tools/call` 처리기는 실패를 `isError` 글 응답으로 바꾼다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+        return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+        };
+    } catch (err) {
+        log("ERROR", `tools/call ${toolName} failed: ${err.message}`);
+        return {
+            content: [{ type: "text", text: `Autopsy is not reachable: ${err.message}` }],
+            isError: true
+        };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-334`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L334)
+
+[3] `tools/list` 처리기는 실패하면 대체 도구만 돌려준다.
+
+```javascript
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+        const tools = await callJava("tools/list", {});
+        log("INFO", `tools/list returned ${tools.length} tools`);
+        return { tools };
+    } catch (err) {
+        log("ERROR", `tools/list failed — Autopsy not reachable: ${err.message}`);
+        return { tools: [UNAVAILABLE_TOOL] };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:302-311`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L302-L311)
+
+[4] (실행 확인) Node.js 24.21.0에서 기준 커밋의 `autopsy-mcp-stdio.js`를 잠금 파일의 MCP TypeScript SDK 1.27.1로 실행하고 응답을 75초 늦추는 HTTP 서버에 `tools/call`을 보내자 30.0초 뒤 `Autopsy is not reachable: Autopsy MCP timed out after 30s (tools/call)` 글과 `isError: true`가 돌아왔다.
+
+[5] (실행 확인) 설치본 Autopsy 4.23.1의 `bin/autopsy-mcp-stdio.exe`로 같은 호출을 보내자 33초 지연에서는 33.0초, 75초 지연에서는 75.0초 뒤 HTTP 서버의 결과가 `isError` 없이 글 응답으로 돌아왔다.
+실행 파일은 시작할 때 `ExperimentalWarning: The Fetch API is an experimental feature`를 표준 오류에 출력했다.
+
+[6] 실행 파일을 만드는 스크립트다.
+
+```json
+  "scripts": {
+    "bundle": "esbuild autopsy-mcp-stdio.js --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs",
+    "package": "npm run bundle && pkg dist/bundle.cjs --target node18-win-x64 --output dist/autopsy-mcp-stdio.exe --no-bytecode --public-packages \"*\" --public"
+  }
+```
+
+[`Tools/autopsy-mcp-stdio/package.json:13-16`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/package.json#L13-L16)
+
+[7] 래퍼의 `node_modules`와 실행 파일 폴더 `dist`는 저장소에서 빠진다.
+
+```text
+/Tools/autopsy-mcp-stdio/node_modules/
+/Tools/autopsy-mcp-stdio/dist/
+```
+
+[`.gitignore:113-114`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/.gitignore#L113-L114)
+
+[8] 실행 파일은 Windows에서 래퍼 소스 파일과 실행 파일의 시각만 비교해 다시 만든다.
+
+```text
+    <!-- Compile the MCP STDIO exe only on Windows and only when the JS source is newer than the existing exe.
+         The exe is excluded from git; it must be built locally before packaging a release.
+         If compilation fails, make sure Claude Desktop is closed — it locks the EXE. -->
+    <target name="compile-mcp-stdio" if="is.windows" description="Compile autopsy-mcp-stdio.exe if source has changed (Windows only)">
+        <uptodate property="mcp.stdio.uptodate"
+                  srcfile="${basedir}/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js"
+                  targetfile="${basedir}/Tools/autopsy-mcp-stdio/dist/autopsy-mcp-stdio.exe"/>
+        <antcall target="-compile-mcp-stdio-if-needed"/>
+    </target>
+```
+
+[`build.xml:93-101`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/build.xml#L93-L101)
+
+[9] Java 쪽 HTTP 처리기는 요청 본문을 처리기에 넘기고 끝날 때까지 기다린다: [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-126`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L126).
+
+[10] 래퍼의 도구 호출 처리기는 요청만 받아 HTTP 요청을 보낸다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-323`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L323)
+
+[11] (실행 확인) Node.js 24.21.0에서 기준 커밋의 `autopsy-mcp-stdio.js`에 응답이 5초 늦는 `tools/call`을 보내고 1초 뒤 그 요청의 `notifications/cancelled`를 보내자 흉내 낸 HTTP 서버는 그 요청을 받아 처리했지만 클라이언트에는 그 요청의 응답이 오지 않았고 그 사이 보낸 다른 `tools/call`은 응답을 받았다.
+
+[12] MCP TypeScript SDK 1.27.1은 취소 알림을 받으면 그 요청의 `AbortController`를 끊고 끊긴 요청의 결과를 보내지 않는다: [`src/shared/protocol.ts:550-557`](https://github.com/modelcontextprotocol/typescript-sdk/blob/4faa8c899c069a98f8a0c3f804ec1a50dc2bae64/src/shared/protocol.ts#L550-L557), [`src/shared/protocol.ts:780-786`](https://github.com/modelcontextprotocol/typescript-sdk/blob/4faa8c899c069a98f8a0c3f804ec1a50dc2bae64/src/shared/protocol.ts#L780-L786).
+
+[13] 요청 처리기의 예외 처리다.
+
+```text
+        JsonNode id = NullNode.getInstance();
+        try {
+            JsonNode request = mapper.readTree(requestJson);
+            String method = request.path("method").asText();
+            JsonNode params = request.path("params");
+            // Preserve the id as a JsonNode so its original type (number, string, null,
+            // or absent) is returned unchanged in the response, as the JSON-RPC spec requires.
+            id = request.has("id") ? request.get("id") : NullNode.getInstance();
+
+            Object result = switch (method) {
+                case "tools/list"   -> TOOLS_LIST_SERVICE.listTools();
+                case "tools/call"   -> dispatchToolCall(params);
+                case "initialize"   -> handleInitialize();
+                default             -> throw new McpException("Unknown method: " + method, McpException.ERR_METHOD_NOT_FOUND);
+            };
+            return buildSuccess(id, result);
+        } catch (JsonProcessingException ex) {
+            logger.log(Level.WARNING, "MCP request contained malformed JSON", ex);
+            return buildError(NullNode.getInstance(), ERR_PARSE_ERROR, "Parse error");
+        } catch (McpException ex) {
+            // Expected protocol-level errors (unknown method/tool, bad params, no case open)
+            // are client-visible in the response — no need to flood the Autopsy log.
+            return buildError(id, ex.getJsonRpcCode(), ex.getMessage());
+        } catch (Exception ex) {
+            logger.log(Level.SEVERE, "Unexpected error handling MCP request", ex);
+            return buildError(id, ERR_INTERNAL_ERROR, ex.getMessage());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:71-97`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L71-L97)
+
+[14] `get_file_content`의 읽기와 응답이다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:920-977`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L920-L977).
+
+```text
+    Map<String, Object> getFileContent(JsonNode args) throws TskCoreException {
+        long fileId  = args.path("objectId").asLong(-1);
+        if (fileId < 0) {
+            throw new TskCoreException("objectId is required");
+        }
+
+        long offset   = args.path("offset").asLong(0);
+        int  maxBytes = args.path("maxBytes").asInt(65536);
+
+        // Cap at 1 MB; default to 64 KB
+        if (maxBytes <= 0 || maxBytes > 1_048_576) {
+            maxBytes = 65536;
+        }
+
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:920-935`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L920-L935)
+
+```text
+        long available = fileSize - offset;
+        int  toRead    = (int) Math.min(maxBytes, available);
+        boolean truncated = available > maxBytes;
+
+        byte[] buf = new byte[toRead];
+        int bytesRead = file.read(buf, offset, toRead);
+        if (bytesRead < toRead) {
+            buf = java.util.Arrays.copyOf(buf, Math.max(bytesRead, 0));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:945-953`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L945-L953)
+
+[15] Sleuth Kit 4.15.0의 이미지 안 파일 읽기는 파일시스템 핸들로 파일을 열어 JNI `readFile`로 읽는다: [`FsContent.java:182-195`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L182-L195).
+
+[16] 처리기 밖으로 나온 예외는 HTTP 500 응답이 된다.
+
+```text
+    private void handleMcpRequest(Context ctx) {
+        try {
+            String requestBody = ctx.body();
+            String response = protocolHandler.handle(requestBody);
+            ctx.contentType("application/json").result(response);
+        } catch (Exception ex) {
+            logger.log(Level.SEVERE, "MCP protocol handler threw unexpectedly", ex);
+            String msg = ex.getMessage() != null ? ex.getMessage() : "Internal error";
+            Map<String, Object> errorDetail = new LinkedHashMap<>();
+            errorDetail.put("code",    McpProtocolHandler.ERR_INTERNAL_ERROR);
+            errorDetail.put("message", "Internal error");
+            errorDetail.put("data",    msg);
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("jsonrpc", "2.0");
+            envelope.put("error",   errorDetail);
+            envelope.put("id",      null);
+            String body;
+            try {
+                body = MAPPER.writeValueAsString(envelope);
+            } catch (Exception jsonEx) {
+                logger.log(Level.SEVERE, "Failed to serialize MCP error response", jsonEx);
+                body = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":" + McpProtocolHandler.ERR_INTERNAL_ERROR + ",\"message\":\"Internal error\"},\"id\":null}";
+            }
+            ctx.status(500).contentType("application/json").result(body);
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-146`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L146)
+
+[17] 래퍼는 HTTP 상태와 응답의 `error`를 보고 실패를 정한다.
+
+```javascript
+    if (!res.ok) {
+        const msg = `Autopsy HTTP error ${res.status}. Is Autopsy running with a case open?`;
+        log("ERROR", `<- ${method} HTTP ${res.status}`);
+        throw new Error(msg);
+    }
+    const data = await res.json();
+    if (data.error) {
+        log("ERROR", `<- ${method} MCP error: ${data.error.message}`);
+        throw new Error(`Autopsy MCP error: ${data.error.message}`);
+    }
+    log("INFO", `<- ${method} OK`);
+    return data.result;
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:266-278`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L266-L278)
+
+[18] Sleuth Kit 4.15.0의 `getAbstractFileById`는 파일이 없으면 `null`을 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:6399-6419`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L6399-L6419).
+
+[19] JDK 15부터 자세한 NPE 글 옵션 `ShowCodeDetailsInExceptionMessages`가 기본으로 켜졌다: [JEP 358](https://openjdk.org/jeps/358), [JDK-8233014](https://bugs.openjdk.org/browse/JDK-8233014).
+
+[20] `get_report_content`의 읽기다.
+
+```text
+        long available = fileSize - offset;
+        int  toRead    = (int) Math.min(maxBytes, available);
+        boolean truncated = available > maxBytes;
+
+        byte[] buf = new byte[toRead];
+        int bytesRead = report.read(buf, offset, toRead);
+        if (bytesRead < toRead) {
+            buf = java.util.Arrays.copyOf(buf, Math.max(bytesRead, 0));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1363-1371`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1363-L1371)
+
+[21] 유형 조회에서 예외가 나면 빈 목록을 돌려준다.
+
+```text
+        if (artifactTypeName != null) {
+            BlackboardArtifact.Type type;
+            try {
+                type = skCase.getBlackboard().getArtifactType(artifactTypeName);
+            } catch (TskCoreException ex) {
+                return Collections.emptyList(); // unknown type → no results
+            }
+            where.append(" AND artifacts.artifact_type_id = ").append(type.getTypeID());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:614-622`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L614-L622)
+
+[22] 파일 항목의 경로와 확장 속성 처리다.
+
+```text
+        try {
+            item.put("path", f.getUniquePath());
+        } catch (TskCoreException ex) {
+            item.put("path", f.getParentPath() + f.getName());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:511-515`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L511-L515)
+
+```text
+        // Extended file attributes (blackboard attributes attached to this file)
+        try {
+            List<Attribute> attrs = f.getAttributes();
+            if (!attrs.isEmpty()) {
+                List<Map<String, Object>> attrList = new ArrayList<>(attrs.size());
+                for (Attribute attr : attrs) {
+                    Map<String, Object> attrMap = new LinkedHashMap<>();
+                    attrMap.put("type", attr.getAttributeType().getTypeName());
+                    attrMap.put("value", fileAttrValueAsObject(attr));
+                    attrList.add(attrMap);
+                }
+                item.put("attributes", attrList);
+            } else {
+                item.put("attributes", Collections.emptyList());
+            }
+        } catch (TskCoreException ex) {
+            item.put("attributes", Collections.emptyList());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:555-572`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L555-L572)
+
+[23] 디스크 이미지의 해시와 획득 정보 처리다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            item.put("imageType", image.getType().name());
+            item.put("sectorSize", image.getSsize());
+            item.put("paths", List.of(image.getPaths()));
+            try { item.put("md5", image.getMd5()); }
+            catch (TskCoreException ex) { item.put("md5", null); }
+            try { item.put("sha1", image.getSha1()); }
+            catch (TskCoreException ex) { item.put("sha1", null); }
+            try { item.put("sha256", image.getSha256()); }
+            catch (TskCoreException ex) { item.put("sha256", null); }
+            try { item.put("acquisitionDetails", image.getAcquisitionDetails()); }
+            catch (TskCoreException ex) { item.put("acquisitionDetails", null); }
+            try { item.put("acquisitionToolName", image.getAcquisitionToolName()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolName", null); }
+            try { item.put("acquisitionToolVersion", image.getAcquisitionToolVersion()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolVersion", null); }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:745-762`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L745-L762)
+
+[24] 아티팩트 수 질의의 예외 처리다.
+
+```text
+        final long[] artifactCount = {0};
+        skCase.getCaseDbAccessManager().select(
+            "COUNT(*) AS cnt FROM blackboard_artifacts",
+            rs -> {
+                try {
+                    if (rs.next()) {
+                        artifactCount[0] = rs.getLong("cnt");
+                    }
+                } catch (java.sql.SQLException ex) {
+                    // leave count at 0
+                }
+            });
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:347-358`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L347-L358)
+
+[25] Sleuth Kit 4.15.0의 `Report.read`다: [`bindings/java/src/org/sleuthkit/datamodel/Report.java:127-151`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Report.java#L127-L151).
+
+[26] Sleuth Kit 4.15.0의 `FsContent.readInt`다: [`bindings/java/src/org/sleuthkit/datamodel/FsContent.java:182-195`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L182-L195).

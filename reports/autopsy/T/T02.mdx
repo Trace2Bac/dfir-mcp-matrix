@@ -1,0 +1,244 @@
+---
+cell: T02
+details:
+- id: T02.04
+---
+
+# T02 실행 허용 범위 제한
+
+### T02.04 고정 명령·템플릿
+
+**구현.** 이 방식은 Java HTTP 서버의 도구 호출 처리에 적용된다 [1].
+`dispatchToolCall`은 `get_server_status`를 먼저 처리하고 나머지 17개 이름을 `switch`로 처리한다 [1][2].
+케이스가 열려 있으면 목록에 없는 이름은 `Unknown tool` 오류 `-32601`로 거부된다 [1].
+케이스가 열려 있지 않으면 이름을 보기 전에 케이스가 없다는 오류 `-32603`을 돌려주므로 목록에 없는 이름도 같은 오류를 받는다 [3].
+`get_server_status`는 Sleuth Kit을 부르지 않고 서버 상태 값을 만든다 [2].
+나머지 17개 도구는 이름마다 부르는 Sleuth Kit API가 코드에 정해져 있다 [1].
+STDIO 래퍼는 도구 이름을 가리지 않고 넘기므로 이 거부는 Java 쪽에서 일어난다 [4].
+모델은 SQL이나 질의문을 보내지 못하고 정해 둔 인자의 값만 채운다.
+`query_files`는 인자마다 정해 둔 조건 틀(`LOWER(name) LIKE '%…%'`, `size >= …` 등)을 `AND`로 이어 WHERE 절을 만들고 `findAllFilesWhere`에 넘긴다 [5].
+Sleuth Kit 4.15.0의 `findAllFilesWhere`는 그 절을 `SELECT * FROM tsk_files WHERE ` 뒤에 붙여 실행한다 [6].
+문자열 값은 `escapeSql`로 작은따옴표를 두 번 써서 따옴표 안에 넣고 숫자 값은 Jackson이 `long`으로 바꾼 값을 넣는다 [5][7].
+정렬은 `orderBy`의 8개 값마다 정해 둔 `ORDER BY` 구문만 붙인다 [8].
+`query_data_artifacts`·`query_analysis_results`는 유형 ID와 데이터 소스 ID 조건만 만들어 `getDataArtifactsWhere`·`getAnalysisResultsWhere`에 넘기고 속성 조건은 받은 결과를 Java에서 걸러 적용한다 [9].
+타임라인 도구는 `TimelineFilter`의 데이터 소스·문자열 필터 객체를 만들어 `TimelineManager`에 넘긴다 [10].
+나머지 도구는 정해진 조회 메서드를 부르고 받은 값을 객체 ID·데이터 소스 ID로 조회하는 데 쓰거나 `tagName`·`accountType`·`accountId`처럼 조회 결과를 거르는 데 쓴다 [11].
+
+**한계.** `nameContains`·`pathContains`의 값과 `mimeType`의 앞부분은 `LIKE` 패턴에 그대로 들어가므로 값 안의 `%`·`_`가 와일드카드로 해석된다 [5].
+그래서 `nameContains`에 `%`를 주면 이름 조건이 모든 파일과 일치한다 [5].
+도구 설명은 이 인자를 부분 문자열 필터로 적는다 [12].
+`query_timeline`의 `textFilter`도 같다 [13][14].
+Sleuth Kit 4.15.0의 `TextFilter`는 값의 작은따옴표만 두 번 써서 `like '%…%'` 조건에 넣으므로 `%`·`_`가 와일드카드로 해석된다 [13].
+도구 설명은 `textFilter`를 사건 설명에 그 문자열이 들어 있는지 거르는 필터로 적는다 [14].
+`query_files`의 이름·경로 조건은 `LOWER`로 대소문자를 맞추지만 `TextFilter`의 `like` 조건은 대소문자를 맞추지 않는다 [5][13].
+SQLite의 `LIKE`는 ASCII 글자의 대소문자를 구별하지 않고 PostgreSQL의 `LIKE`는 구별하므로 같은 `textFilter` 값이 케이스 DB 종류에 따라 다른 사건을 고른다 [15].
+
+### 근거
+
+[1] 도구 이름마다 정해진 처리 메서드를 부르고 없는 이름은 거부한다.
+
+```text
+        Object toolResult = switch (toolName) {
+            case "query_files"                 -> qs.queryFiles(args);
+            case "query_data_artifacts"        -> qs.queryDataArtifacts(args);
+            case "query_analysis_results"      -> qs.queryAnalysisResults(args);
+            case "get_hosts"                   -> qs.getHosts();
+            case "query_data_sources"          -> qs.queryDataSources();
+            case "get_data_source_tree"        -> qs.getDataSourceTree(args);
+            case "get_case_summary"            -> qs.getCaseSummary();
+            case "get_file_content"            -> qs.getFileContent(args);
+            case "query_tags"                  -> qs.queryTags(args);
+            case "query_timeline"              -> qs.queryTimeline(args);
+            case "summarize_timeline"          -> qs.summarizeTimeline(args);
+            case "get_os_accounts"             -> qs.getOsAccounts();
+            case "get_communications_accounts" -> qs.getCommunicationsAccounts(args);
+            case "get_account_relationships"   -> qs.getAccountRelationships(args);
+            case "get_object_children"         -> qs.getObjectChildren(args);
+            case "list_reports"                -> qs.listReports();
+            case "get_report_content"          -> qs.getReportContent(args);
+            default -> throw new McpException("Unknown tool: " + toolName, McpException.ERR_METHOD_NOT_FOUND);
+        };
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:120-139`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L120-L139)
+
+[2] `get_server_status`는 `switch` 앞에서 처리되고 서버 상태 값을 만든다.
+
+```text
+        // Tools that work regardless of whether a case is open
+        if ("get_server_status".equals(toolName)) {
+            return buildServerStatus();
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:104-107`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L104-L107)
+
+```text
+    private Map<String, Object> buildServerStatus() {
+        TskQueryService qs = queryService;
+        boolean caseOpen = qs != null;
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("server", "autopsy-mcp");
+        status.put("status", "running");
+        status.put("caseOpen", caseOpen);
+        if (caseOpen) {
+            status.put("caseName", qs.getCaseName());
+        }
+        return status;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:151-162`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L151-L162)
+
+[3] 케이스가 없으면 도구 이름을 보기 전에 오류를 낸다.
+
+```text
+        TskQueryService qs = queryService;
+        if (qs == null) {
+            throw new McpException(
+                "No case is currently open in Autopsy. Open a case first to use MCP tools.",
+                McpException.ERR_INTERNAL_ERROR);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:113-118`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L113-L118)
+
+[4] (실행 확인) 설치본 `autopsy-mcp-stdio.exe`에 흉내 낸 HTTP 서버의 목록에 없는 도구 이름 `bad`·`h500`·`slow`로 `tools/call`을 보내면 래퍼는 그 이름을 그대로 HTTP 요청에 실었다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-323`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L323)
+
+[5] `query_files`가 조건 틀을 채워 WHERE 절을 만든다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:385-492`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L385-L492).
+
+[6] Sleuth Kit 4.15.0의 `findAllFilesWhere`는 받은 절을 질의 뒤에 붙인다: [`SleuthkitCase.java:9483-9500`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L9483-L9500).
+
+[7] 문자열 값은 작은따옴표만 두 번 쓴다.
+
+```text
+    private static String escapeSql(String value) {
+        return value.replace("'", "''");
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1509-1511`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1509-L1511)
+
+[8] `orderBy`는 정해 둔 구문으로만 바뀐다.
+
+```text
+        String orderBy = textOrNull(args, "orderBy");
+        String orderClause = switch (orderBy == null ? "" : orderBy.toLowerCase()) {
+            case "size_desc"     -> " ORDER BY size DESC";
+            case "size_asc"      -> " ORDER BY size ASC";
+            case "name_asc"      -> " ORDER BY name ASC";
+            case "name_desc"     -> " ORDER BY name DESC";
+            case "modified_desc" -> " ORDER BY mtime DESC";
+            case "modified_asc"  -> " ORDER BY mtime ASC";
+            case "created_desc"  -> " ORDER BY crtime DESC";
+            case "created_asc"   -> " ORDER BY crtime ASC";
+            default              -> "";
+        };
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:476-487`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L476-L487)
+
+[9] 아티팩트 질의는 유형 ID와 데이터 소스 ID로만 WHERE 절을 만든다.
+
+```text
+        // Build WHERE clause for the Blackboard query
+        StringBuilder where = new StringBuilder("1=1");
+        if (artifactTypeName != null) {
+            BlackboardArtifact.Type type;
+            try {
+                type = skCase.getBlackboard().getArtifactType(artifactTypeName);
+            } catch (TskCoreException ex) {
+                return Collections.emptyList(); // unknown type → no results
+            }
+            where.append(" AND artifacts.artifact_type_id = ").append(type.getTypeID());
+        }
+        if (dataSourceId >= 0) {
+            where.append(" AND artifacts.data_source_obj_id = ").append(dataSourceId);
+        }
+
+        // When no attribute post-filter is needed, push the limit into SQL so
+        // the database does not materialize the full result set.
+        if (attrTypeFilter == null && attrValueFilter == null) {
+            where.append(" LIMIT ").append(limit);
+        }
+
+        // Fetch from the correct sub-table
+        List<? extends BlackboardArtifact> artifacts = isAnalysis
+                ? skCase.getBlackboard().getAnalysisResultsWhere(where.toString())
+                : skCase.getBlackboard().getDataArtifactsWhere(where.toString());
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:612-636`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L612-L636)
+
+[10] 타임라인 도구는 필터 객체를 만들어 넘긴다.
+
+```text
+    private TimelineFilter.RootFilter buildTimelineFilter(JsonNode args) throws TskCoreException {
+        // DataSource filter (optional)
+        TimelineFilter.DataSourcesFilter dsFilter = null;
+        if (!args.path("dataSourceId").isMissingNode()) {
+            long dsId = args.path("dataSourceId").asLong();
+            dsFilter = new TimelineFilter.DataSourcesFilter();
+            dsFilter.addSubFilter(new TimelineFilter.DataSourceFilter("", dsId));
+        }
+
+        // Text/description filter (optional)
+        String text = textOrNull(args, "textFilter");
+        TimelineFilter.TextFilter textFilter = (text != null)
+                ? new TimelineFilter.TextFilter(text) : null;
+
+        // Include all event types
+        TimelineFilter.EventTypeFilter typeFilter =
+                new TimelineFilter.EventTypeFilter(TimelineEventType.ROOT_EVENT_TYPE);
+
+        return new TimelineFilter.RootFilter(
+                null,                        // knownFilesFilter  — null = include known files too
+                null,                        // tagsFilter
+                null,                        // hashSetHitsFilter
+                textFilter,
+                typeFilter,
+                dsFilter,
+                null,                        // fileTypesFilter
+                Collections.emptyList()
+        );
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1405-1433`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1405-L1433)
+
+[11] 인자 값을 조회나 결과 거르기에 쓰는 도구다: [`TskQueryService.java:776-786`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L776-L786), [`TskQueryService.java:878-886`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L878-L886), [`TskQueryService.java:1098-1107`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1098-L1107), [`TskQueryService.java:1131-1153`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1131-L1153).
+
+[12] `query_files`의 인자 설명이다.
+
+```text
+                    Map.entry("nameContains",   param("string",  "Filter by filename substring (case-insensitive)")),
+                    Map.entry("extension",      param("string",  "Filter by file extension without dot, e.g. exe, jpg, pdf (case-insensitive)")),
+                    Map.entry("mimeType",       param("string",  "Filter by MIME type e.g. image/jpeg or image/*")),
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:90-92`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L90-L92)
+
+[13] Sleuth Kit 4.15.0의 `TextFilter`가 만드는 조건이다: [`TimelineFilter.java:443-451`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimelineFilter.java#L443-L451).
+
+[14] `query_timeline`의 `textFilter` 설명이다.
+
+```text
+                    Map.entry("textFilter",   param("string",  "Filter events whose description contains this substring")),
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:243-243`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L243-L243)
+
+[15] SQLite 문서는 `LIKE`가 기본으로 ASCII 글자의 대소문자를 구별하지 않는다고 적고([SQLite `LIKE`](https://www.sqlite.org/lang_expr.html#the_like_glob_regexp_match_and_extract_operators)) PostgreSQL 문서는 `LIKE`가 대소문자를 구별하고 구별하지 않는 비교는 `ILIKE`라고 적는다([PostgreSQL 패턴 비교](https://www.postgresql.org/docs/current/functions-matching.html#FUNCTIONS-LIKE)).

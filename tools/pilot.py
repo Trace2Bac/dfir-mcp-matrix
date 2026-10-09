@@ -7,14 +7,14 @@
   python tools/pilot.py fill <서버>        원고의 `@발췌 경로:시작-끝` 줄을 기준 커밋 코드 블록과 링크로 바꾸고 백틱 `경로:줄`을 링크로 바꾼다
   python tools/pilot.py renumber <서버>    셀 파일마다 표지 번호를 본문에 처음 나온 차례로 다시 매기고 근거 항목을 그 차례로 옮긴다
   python tools/pilot.py new <서버> [--repo 소유자/이름 --commit 40자] [셀ID ... | all]
-                                         새 서버 원고의 틀을 만든다. 서버 머리가 없으면 --repo·--commit으로 만들고 config의 servers에 더한다.
+                                         새 서버 원고의 틀을 만든다. 서버 개요가 없으면 --repo·--commit으로 만들고 config의 servers에 더한다.
                                          셀을 주지 않으면 시범 셀을, all이면 모든 셀의 틀을 만든다. 이미 있는 파일은 건드리지 않는다
 
 원본:
   matrix/cells/<축>/index.mdx     축 하나의 차례·이름·설명
   matrix/cells/<축>/<ID>.mdx      셀 하나의 확인 사항·상세 정의
   matrix/config.yaml              화면에 보일 서버, 시범 셀
-  reports/<서버>/index.mdx        서버 원고의 머리(저장소·기준 커밋)
+  reports/<서버>/index.mdx        서버 개요(저장소·기준 커밋)
   reports/<서버>/<축>/<셀>.mdx    서버의 셀 하나. 머리말(front matter)에 어느 상세에 드는지, 본문에 구현·한계·근거
 형식은 matrix/README.md와 reports/README.mdx에 있다.
 """
@@ -575,7 +575,7 @@ matrix_version: "{version}"                          # 이 원고가 기준으�
 
 # {name} 원고
 
-셀 원고의 머리다. 셀마다 이 폴더 아래 축 폴더의 `<축>/<셀ID>.mdx`에 쓴다.
+이 파일은 서버 개요다. 셀마다 이 폴더 아래 축 폴더의 `<축>/<셀ID>.mdx`에 쓴다.
 셀과 상세 항목의 정의는 `matrix/cells/<축>/<셀ID>.mdx`를 따른다.
 상세 항목마다 **구현**을 쓰고 그 방식이 적용되지 않는 경로나 조건이 있으면 **한계**를 따로 쓴다.
 본문의 [번호]는 그 파일 끝 **근거**의 같은 번호를 가리킨다.

@@ -1,0 +1,218 @@
+---
+cell: F02
+details:
+- id: not_implemented
+---
+
+# F02 발견사항·결론 도출
+
+### 미구현
+
+**판단.** 서버의 18개 도구는 케이스 DB에 이미 있는 값을 조회해 옮기거나 모델이 준 조건으로 걸러 돌려줄 뿐 규칙으로 판정하거나 결과끼리 잇거나 점수를 계산하지 않는다.
+도구 처리는 `dispatchToolCall`이 `TskQueryService`의 조회 메서드로 나누어 보내는 것이 전부다 [1].
+
+판정처럼 보이는 값은 Autopsy 본체가 케이스 DB에 쓴 값을 그대로 옮긴 것이다.
+
+- `query_analysis_results`는 분석 결과마다 `AnalysisResult.getScore()`가 돌려준 `significance`와 `priority`의 enum 값을 `getName()` 문자열로 옮겨 싣는다 [2].
+- `query_files`의 `knownState`는 파일의 `known` 값을 이름으로 옮긴 것이고 인자 `knownState`는 그 값을 조건으로 거르는 데 쓰인다 [3][4].
+- `query_timeline`의 `tagged`와 `hashHit`은 Sleuth Kit `TimelineManager`가 사건 표의 `tagged`·`hash_hit` 열에서 읽은 값이다 [5][6].
+
+이 점수와 해시셋 일치·키워드 일치 같은 분석 결과는 ingest 모듈이 만든 결론이라고 `query_analysis_results`의 설명이 적는다 [7].
+
+서버는 판정이나 점수에 해당하는 계산을 하지 않고 건수만 센다.
+`get_case_summary`는 케이스의 파일 수와 아티팩트 수를 DB에서 센다 [8].
+`summarize_timeline`은 `TimelineManager.countEventsByType`이 돌려준 분류별 건수를 싣고 그 합을 `totalEvents`로 적는다 [9].
+`get_account_relationships`는 두 계정이 함께 나온 출처 수를 `relationshipCount`로 싣고 그 합을 `totalRelationships`로 적는다 [10].
+이 건수는 항목을 분류하거나 점수로 정렬하는 데 쓰이지 않는다 [9][10].
+`query_files`의 `orderBy`는 크기·이름·시각 열로 정렬할 뿐이다 [11].
+
+### 근거
+
+[1] 도구 이름을 조회 메서드로 나누어 보내는 처리다.
+
+```text
+        Object toolResult = switch (toolName) {
+            case "query_files"                 -> qs.queryFiles(args);
+            case "query_data_artifacts"        -> qs.queryDataArtifacts(args);
+            case "query_analysis_results"      -> qs.queryAnalysisResults(args);
+            case "get_hosts"                   -> qs.getHosts();
+            case "query_data_sources"          -> qs.queryDataSources();
+            case "get_data_source_tree"        -> qs.getDataSourceTree(args);
+            case "get_case_summary"            -> qs.getCaseSummary();
+            case "get_file_content"            -> qs.getFileContent(args);
+            case "query_tags"                  -> qs.queryTags(args);
+            case "query_timeline"              -> qs.queryTimeline(args);
+            case "summarize_timeline"          -> qs.summarizeTimeline(args);
+            case "get_os_accounts"             -> qs.getOsAccounts();
+            case "get_communications_accounts" -> qs.getCommunicationsAccounts(args);
+            case "get_account_relationships"   -> qs.getAccountRelationships(args);
+            case "get_object_children"         -> qs.getObjectChildren(args);
+            case "list_reports"                -> qs.listReports();
+            case "get_report_content"          -> qs.getReportContent(args);
+            default -> throw new McpException("Unknown tool: " + toolName, McpException.ERR_METHOD_NOT_FOUND);
+        };
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:120-139`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L120-L139)
+
+[2] 분석 결과의 점수를 옮겨 싣는다.
+
+```text
+            if (isAnalysis) {
+                Score score = ((AnalysisResult) artifact).getScore();
+                item.put("score", Map.of(
+                    "significance", score.getSignificance().getName(),
+                    "priority",     score.getPriority().getName()
+                ));
+            }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:662-668`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L662-L668)
+
+[3] 파일 항목의 `knownState`다.
+
+```text
+        // Classification
+        item.put("knownState", f.getKnown().name());          // UNKNOWN, KNOWN, BAD (NOTABLE)
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:537-538`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L537-L538)
+
+[4] 인자 `knownState`로 `known` 열을 거른다.
+
+```text
+        // --- known state ---
+        String knownStateStr = textOrNull(args, "knownState");
+        if (knownStateStr != null) {
+            TskData.FileKnown knownVal = parseKnownState(knownStateStr);
+            if (knownVal != null) {
+                conditions.add("known = " + knownVal.getFileKnownValue());
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:454-461`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L454-L461)
+
+[5] 타임라인 사건 항목의 `tagged`와 `hashHit`이다.
+
+```text
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("time",         epochToIso(e.getTime()));
+            item.put("eventType",    e.getEventType().getDisplayName());
+            item.put("description",  e.getDescription(TimelineLevelOfDetail.HIGH));
+            item.put("sourceFileId", e.getContentObjID());
+            item.put("artifactId",   e.getArtifactID().orElse(null));
+            item.put("dataSourceId", e.getDataSourceObjID());
+            item.put("tagged",       e.eventSourceIsTagged());
+            item.put("hashHit",      e.eventSourceHasHashHits());
+            result.add(item);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1004-1013`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1004-L1013)
+
+[6] Sleuth Kit 4.15.0 `TimelineManager.getEvents`는 사건 표의 `hash_hit`·`tagged` 열로 `TimelineEvent`를 만든다: [`bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java:1313-1345`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java#L1313-L1345).
+
+[7] `query_analysis_results` 설명의 첫머리다.
+
+```text
+            toolWithNote("query_analysis_results",
+                "Search for analysis results in the current case. Analysis results are conclusions " +
+                "drawn by ingest modules — hash hits, keyword hits, encryption detection, EXIF data, " +
+                "etc. Each result includes a score (significance + priority) indicating how notable " +
+                "the finding is. Significance values: NOTABLE, LIKELY_NOTABLE, LIKELY_NONE, NONE, UNKNOWN. " +
+                "Use artifactType to filter by type. Available types: " +
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:167-172`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L167-L172)
+
+[8] `get_case_summary`의 파일 수와 아티팩트 수다.
+
+```text
+    Map<String, Object> getCaseSummary() throws TskCoreException {
+        long totalFiles = skCase.countFilesWhere("1=1");
+
+        final long[] artifactCount = {0};
+        skCase.getCaseDbAccessManager().select(
+            "COUNT(*) AS cnt FROM blackboard_artifacts",
+            rs -> {
+                try {
+                    if (rs.next()) {
+                        artifactCount[0] = rs.getLong("cnt");
+                    }
+                } catch (java.sql.SQLException ex) {
+                    // leave count at 0
+                }
+            });
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("caseName", caseName);
+        summary.put("dataSources", skCase.getDataSources().size());
+        summary.put("totalFiles", totalFiles);
+        summary.put("totalArtifacts", artifactCount[0]);
+        return summary;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:344-365`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L344-L365)
+
+[9] `summarize_timeline`은 분류별 건수와 합을 싣는다.
+
+```text
+        Map<TimelineEventType, Long> counts = tm.countEventsByType(
+                startEpoch, endEpoch, filter, TimelineEventType.HierarchyLevel.CATEGORY);
+
+        long total = 0;
+        Map<String, Long> byCategory = new LinkedHashMap<>();
+        for (Map.Entry<TimelineEventType, Long> entry : counts.entrySet()) {
+            byCategory.put(entry.getKey().getDisplayName(), entry.getValue());
+            total += entry.getValue();
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("startTime",   epochToIso(startEpoch));
+        result.put("endTime",     epochToIso(endEpoch));
+        result.put("totalEvents", total);
+        result.put("byCategory",  byCategory);
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1029-1044`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1029-L1044)
+
+[10] `get_account_relationships`는 두 계정이 함께 나온 출처 수를 센다.
+
+```text
+        List<Map<String, Object>> relationships = new ArrayList<>();
+        long totalRelationships = 0;
+        for (AccountDeviceInstance relAdi : related) {
+            // Count only sources shared between targetAdi and relAdi (not relAdi's total)
+            long pairCount = cm.getRelationshipSources(targetAdi, relAdi, filter).size();
+            totalRelationships += pairCount;
+            Map<String, Object> item = new LinkedHashMap<>();
+            Account relAccount = relAdi.getAccount();
+            item.put("accountType",       relAccount.getAccountType().getDisplayName());
+            item.put("accountId",         relAccount.getTypeSpecificID());
+            item.put("deviceId",          relAdi.getDeviceId());
+            item.put("relationshipCount", pairCount);
+            relationships.add(item);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1164-1177`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1164-L1177)
+
+[11] `orderBy`가 고르는 정렬 열이다.
+
+```text
+        String orderBy = textOrNull(args, "orderBy");
+        String orderClause = switch (orderBy == null ? "" : orderBy.toLowerCase()) {
+            case "size_desc"     -> " ORDER BY size DESC";
+            case "size_asc"      -> " ORDER BY size ASC";
+            case "name_asc"      -> " ORDER BY name ASC";
+            case "name_desc"     -> " ORDER BY name DESC";
+            case "modified_desc" -> " ORDER BY mtime DESC";
+            case "modified_asc"  -> " ORDER BY mtime ASC";
+            case "created_desc"  -> " ORDER BY crtime DESC";
+            case "created_asc"   -> " ORDER BY crtime ASC";
+            default              -> "";
+        };
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:476-487`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L476-L487)

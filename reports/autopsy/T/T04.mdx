@@ -1,0 +1,170 @@
+---
+cell: T04
+details:
+- id: T04.01
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 라이브러리 호출
+
+**구현.** 이 방식은 `get_server_status`를 뺀 도구 17개에 적용된다 [1].
+도구의 처리는 Autopsy 프로세스 안의 Java HTTP 서버에서 Sleuth Kit Java 바인딩을 불러 수행한다 [1][2].
+`AutopsyMcpModule`은 NetBeans 모듈의 `@OnStart`로 Autopsy가 시작될 때 실행되고 Javalin HTTP 서버도 Autopsy JVM 안에서 열린다 [3][4].
+`TskQueryService`는 열린 케이스의 `SleuthkitCase`로 케이스 DB를 조회한다 [1][2].
+`get_file_content`가 부르는 Sleuth Kit 4.15.0의 `read`는 수집 저장소 파일이고 케이스에 내용 제공자가 등록되어 있으면 그 제공자의 스트림을 읽는다 [5].
+그 밖에 `read`는 로컬 경로가 있는 파일이면 `RandomAccessFile`을 읽기 모드 `"r"`로 열어 읽고 파일시스템 안의 파일이면 JNI 함수 `SleuthkitJNI.readFile`로 이미지에서 읽는다 [5][6].
+`get_report_content`가 부르는 `Report.read`는 보고서 파일을 `FileChannel`의 읽기 모드로 연다 [7].
+MCP 패키지와 STDIO 래퍼에는 외부 프로그램을 실행하는 코드가 없다 [8].
+그래서 도구 처리는 Autopsy 프로세스의 계정, 메모리, 파일 권한을 함께 쓴다.
+
+STDIO 래퍼는 MCP 클라이언트가 실행하는 별도 Node.js 프로세스이고 분석을 하지 않는다 [9].
+래퍼는 `tools/list`·`tools/call` 요청을 `http://127.0.0.1:<포트>/mcp`에 넘긴다 [9].
+`tools/list`는 받은 도구 목록을 그대로 돌려주고 `tools/call`은 받은 결과를 JSON 글로 바꿔 돌려준다 [10].
+
+### 근거
+
+[1] 모든 Sleuth Kit 호출은 `TskQueryService`에 모여 있다고 적는다.
+
+```text
+/**
+ * All TSK Java API calls live here. Nothing else touches SleuthkitCase directly.
+ * Accepts strongly-typed or JSON-parsed parameters; returns plain Map/List results
+ * that Jackson can serialize directly into the MCP JSON-RPC response.
+ */
+class TskQueryService {
+
+    private final SleuthkitCase skCase;
+    private final String caseName;
+
+    TskQueryService(SleuthkitCase skCase, String caseName) {
+        this.skCase = skCase;
+        this.caseName = caseName;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:40-53`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L40-L53)
+
+[2] 질의 서비스는 열린 케이스의 `SleuthkitCase`로 만들어진다.
+
+```text
+    public void updateCase(Case openedCase) {
+        protocolHandler.setQueryService(
+                new TskQueryService(openedCase.getSleuthkitCase(), openedCase.getDisplayName()));
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:72-75`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L72-L75)
+
+[3] 모듈은 Autopsy가 시작될 때 실행된다.
+
+```text
+@OnStart
+public class AutopsyMcpModule implements Runnable {
+
+    private static final Logger logger = Logger.getLogger(AutopsyMcpModule.class.getName());
+
+    private static AutopsyMcpModule instance;
+
+    private volatile McpServer mcpServer;
+    private volatile boolean caseListenerRegistered = false;
+
+    /**
+     * Returns the singleton instance created by the {@code @OnStart} machinery,
+     * or {@code null} if the module has not yet been initialized.
+     */
+    public static AutopsyMcpModule getInstance() {
+        return instance;
+    }
+
+    @Override
+    public void run() {
+        instance = this;
+        if (McpOptionsPanel.isMcpEnabled()) {
+            try {
+                startServer();
+            } catch (Exception ex) {
+                logger.log(Level.SEVERE, "Failed to start Autopsy MCP server", ex);
+            }
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java:38-66`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java#L38-L66)
+
+[4] HTTP 서버는 같은 프로세스 안에서 Javalin으로 열린다.
+
+```text
+    public void start() {
+        app = Javalin.create(config -> {
+            config.routes.apiBuilder(() -> {
+                // Auth filter — every request must have valid Bearer token
+                before(ctx -> {
+                    String auth = ctx.header("Authorization");
+                    if (auth == null || !auth.equals("Bearer " + authToken)) {
+                        ctx.status(401).result("Unauthorized");
+                        ctx.skipRemainingHandlers();
+                    }
+                });
+
+                // MCP endpoint
+                post("/mcp", this::handleMcpRequest);
+            });
+        });
+
+        int port = readOrCreateConfigPort();
+        app.start("127.0.0.1", port); // localhost only — never 0.0.0.0
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:86-104`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L86-L104)
+
+[5] Sleuth Kit 4.15.0의 `AbstractFile.read`와 로컬 파일 읽기다: [`AbstractFile.java:1131-1141`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L1131-L1141), [`AbstractFile.java:1171-1200`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L1171-L1200), [`AbstractFile.java:239`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L239).
+
+[6] Sleuth Kit 4.15.0의 `FsContent.readInt`는 JNI로 이미지에서 읽는다: [`FsContent.java:182-195`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L182-L195).
+
+[7] Sleuth Kit 4.15.0의 `Report.read`는 보고서 파일을 읽기 모드로 연다: [`Report.java:127-151`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Report.java#L127-L151).
+
+[8] 기준 커밋의 MCP 패키지와 래퍼에서 `git grep`으로 `ProcessBuilder`·`Runtime.getRuntime`·`.exec(`·`child_process`·`spawn`을 찾으면 나오는 곳이 없다: [`Core/src/org/sleuthkit/autopsy/mcp/`](https://github.com/sleuthkit/autopsy/tree/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp), [`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js).
+
+[9] 래퍼는 받은 요청을 HTTP로 넘긴다: [`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:237-278`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L237-L278), [`autopsy-mcp-stdio.js:302-334`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L302-L334).
+
+[10] 래퍼의 `tools/list`·`tools/call` 처리기다.
+
+```javascript
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+        const tools = await callJava("tools/list", {});
+        log("INFO", `tools/list returned ${tools.length} tools`);
+        return { tools };
+    } catch (err) {
+        log("ERROR", `tools/list failed — Autopsy not reachable: ${err.message}`);
+        return { tools: [UNAVAILABLE_TOOL] };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:302-311`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L302-L311)
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+        return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+        };
+    } catch (err) {
+        log("ERROR", `tools/call ${toolName} failed: ${err.message}`);
+        return {
+            content: [{ type: "text", text: `Autopsy is not reachable: ${err.message}` }],
+            isError: true
+        };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-334`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L334)

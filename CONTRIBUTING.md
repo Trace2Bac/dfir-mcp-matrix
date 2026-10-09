@@ -82,7 +82,7 @@ CI는 PR에서 돌지 않으므로 PR을 열기 전에 `validate`와 `check`를 
 - 정의를 바꾸지 않고 원고나 화면만 고친 경우도 사이트에 내려면 지금 버전 날짜에 번호를 붙인 태그를 올립니다.
 
 **바뀐 버전에 맞춰 원고를 다시 봅니다.**
-- 서버 머리(`reports/<서버>/index.mdx`)의 `matrix_version`은 그 서버의 원고가 기준으로 삼은 매트릭스 버전입니다.
+- 서버 개요(`reports/<서버>/index.mdx`)의 `matrix_version`은 그 서버의 원고가 기준으로 삼은 매트릭스 버전입니다.
 - 버전이 바뀌면 `validate`가 `matrix_version`이 그보다 이른 서버를 "다시 볼 서버"로 알려 줍니다. 그 사이에 바뀐 셀을 `matrix/cells/`의 git 이력에서 찾아 그 셀만 다시 보고 `matrix_version`을 지금 버전으로 바꿉니다.
 
 ## 작업별 순서

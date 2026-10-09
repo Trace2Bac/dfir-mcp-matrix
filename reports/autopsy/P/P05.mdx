@@ -1,0 +1,232 @@
+---
+cell: P05
+details:
+- id: P05.02
+- id: P05.03
+- id: P05.05
+---
+
+# P05 사건 자료 정리
+
+### P05.02 사용자 명령으로 삭제·초기화
+
+**구현.** 사용자가 Autopsy 옵션 창에서 MCP 서버를 끄면 서버는 메모리에 둔 조사 상태를 버린다 [1].
+서버가 메모리에 두는 조사 상태는 열린 케이스를 질의하는 객체(질의 서비스) `TskQueryService`이고 이 객체는 열린 케이스의 케이스 DB 객체와 표시 이름을 가진다 [2][3].
+옵션 창의 `store`는 사용 설정이 꺼지면 `disableServer`를 부른다 [1].
+`disableServer`는 서버 객체 `McpServer`를 비우고 `stop`을 불러 HTTP 서버를 멈추며 `stop`은 토큰 파일을 지운다 [4].
+질의 서비스는 그 서버 객체가 만든 프로토콜 처리기의 필드에 있으므로 서버 객체와 함께 버려진다 [3][5].
+이 동작은 케이스 DB, 케이스 폴더, 원본 이미지를 건드리지 않는다.
+서버를 꺼도 STDIO 래퍼의 `mcp-stdio.log`와 `mcp-stdio.log.1`은 지워지지 않는다 [6].
+
+### P05.03 자동 정리
+
+**구현.** 서버는 케이스가 닫힐 때 메모리의 질의 서비스를 스스로 비운다.
+Autopsy가 케이스를 닫으며 `CURRENT_CASE` 이벤트를 보내면 서버는 `clearCase`로 질의 서비스를 `null`로 바꾼다 [7][8].
+그 뒤 도구 호출은 닫힌 케이스를 질의하지 못하고 케이스가 열려 있지 않다는 오류를 받는다 [9].
+이 정리는 케이스 DB, 케이스 폴더, 원본 이미지를 건드리지 않는다.
+케이스 DB를 닫는 일은 Autopsy 본체의 케이스 닫기가 한다.
+
+STDIO 래퍼는 실패한 도구 호출의 도구 이름과 오류 문구를 호출 기록 `mcp-stdio.log`에 덧붙인다 [6].
+이 파일이 1MB를 넘으면 래퍼는 다음 줄을 쓰기 전에 파일 이름을 `mcp-stdio.log.1`로 바꾼다 [6].
+그때 이미 있던 `mcp-stdio.log.1`은 이름을 바꾼 파일로 대체되어 앞선 기록이 지워진다 [10].
+서버가 쓰는 파일은 토큰 파일, 포트 설정 파일, `mcp-stdio.log`, `mcp-stdio.log.1`이고 케이스 자료를 파일이나 DB에 쓰지 않는다 [11][6].
+케이스가 닫혀도 래퍼는 `mcp-stdio.log`와 `mcp-stdio.log.1`을 지우지 않는다 [6].
+
+**한계.** 진행 중인 호출은 비우기 전에 가져온 질의 서비스로 계속 질의한다 [9].
+
+### P05.05 원본 증거를 삭제 대상에서 제외
+
+**구현.** 이 방식은 옵션 창에서 서버를 끌 때, 케이스가 닫힐 때, 래퍼가 기록 파일 이름을 바꿀 때 지우는 대상에 적용된다 [1][7][6].
+지우는 대상은 메모리의 질의 서비스, 토큰 파일 `mcp-token`, 고정 이름의 기록 파일 `mcp-stdio.log.1`로 코드에 정해져 있다 [4][8][6].
+토큰 파일과 기록 파일은 `%LOCALAPPDATA%\autopsy\mcp` 아래의 정한 이름이다 [11][6].
+어느 정리도 모델이나 사용자가 준 경로를 대상으로 받지 않는다 [1][4][6].
+케이스 DB, 케이스 폴더, 원본 이미지는 지우는 대상에 없다.
+
+### 근거
+
+[1] 옵션 창에서 끄면 `disableServer`를 부른다.
+
+```text
+                } else {
+                    mod.disableServer();
+                }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpOptionsPanel.java:186-188`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpOptionsPanel.java#L186-L188)
+
+[2] 질의 서비스는 케이스 DB 객체와 케이스 이름을 가진다.
+
+```text
+    private final SleuthkitCase skCase;
+    private final String caseName;
+
+    TskQueryService(SleuthkitCase skCase, String caseName) {
+        this.skCase = skCase;
+        this.caseName = caseName;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:47-53`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L47-L53)
+
+[3] 프로토콜 처리기는 질의 서비스를 필드 하나에 두고 바꾸거나 비운다.
+
+```text
+    private volatile TskQueryService queryService; // null = no case open
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    McpProtocolHandler() { }
+
+    void setQueryService(TskQueryService qs) {
+        this.queryService = qs;
+    }
+
+    void clearQueryService() {
+        this.queryService = null;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:51-62`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L51-L62)
+
+[4] `disableServer`는 서버를 멈추고 `stop`은 토큰 파일을 지운다.
+
+```text
+    public synchronized void disableServer() {
+        McpServer server = mcpServer;
+        mcpServer = null;
+        if (server != null) {
+            server.stop();
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java:84-90`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java#L84-L90)
+
+```text
+    public void stop() {
+        if (app != null) {
+            app.stop();
+            app = null;
+        }
+        deleteTokenFile();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:113-119`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L113-L119)
+
+[5] 서버 객체는 생성될 때 프로토콜 처리기를 만들어 필드에 둔다.
+
+```text
+    private final String authToken;
+    private final McpProtocolHandler protocolHandler;
+    private Javalin app;
+
+    public McpServer() {
+        this.authToken = generateToken();
+        this.protocolHandler = new McpProtocolHandler();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:59-66`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L59-L66)
+
+[6] 래퍼는 `ERROR` 줄을 덧붙이고 1MB를 넘으면 이름을 바꾼다.
+
+```javascript
+const LOG_PATH = path.join(MCP_DIR, "mcp-stdio.log");
+const MAX_LOG_BYTES = 1 * 1024 * 1024; // 1 MB — rotate when exceeded
+
+function log(level, message) {
+    // Only ERROR level is persisted to disk. INFO/DEBUG calls are no-ops
+    // by design — they would be too noisy in production and are visible
+    // during development via a debugger or by temporarily removing this guard.
+    if (level !== "ERROR") return;
+    try {
+        // Rotate if the log has grown too large
+        try {
+            if (fs.statSync(LOG_PATH).size > MAX_LOG_BYTES) {
+                fs.renameSync(LOG_PATH, LOG_PATH + ".1");
+            }
+        } catch { /* file doesn't exist yet — that's fine */ }
+
+        const line = `${new Date().toISOString()} [${level}] ${message}\n`;
+        fs.appendFileSync(LOG_PATH, line, "utf8");
+    } catch { /* never let logging crash the process */ }
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:72-91`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L72-L91)
+
+[7] 케이스가 닫히는 이벤트에서 `clearCase`를 부른다.
+
+```text
+    private void onCaseEvent(PropertyChangeEvent evt) {
+        McpServer server = mcpServer;
+        if (server == null) {
+            return;
+        }
+        if (evt.getNewValue() != null) {
+            // Case opened — wire up the query service.
+            server.updateCase((Case) evt.getNewValue());
+        } else {
+            // Case closed — clear the query service; server keeps listening.
+            server.clearCase();
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java:115-127`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java#L115-L127)
+
+[8] `clearCase`는 질의 서비스를 비운다.
+
+```text
+    /**
+     * Called when a case is closed. Clears the query service so subsequent
+     * tool calls return a "no case open" error. The HTTP server keeps running
+     * and the token file remains valid so the STDIO wrapper stays connected.
+     */
+    public void clearCase() {
+        protocolHandler.clearQueryService();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:77-84`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L77-L84)
+
+[9] 도구 호출은 그때의 질의 서비스를 한 번 가져오고 없으면 오류를 낸다.
+
+```text
+        TskQueryService qs = queryService;
+        if (qs == null) {
+            throw new McpException(
+                "No case is currently open in Autopsy. Open a case first to use MCP tools.",
+                McpException.ERR_INTERNAL_ERROR);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:113-118`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L113-L118)
+
+[10] (실행 확인) `LOCALAPPDATA`로 지정한 임시 폴더에 1,100,000바이트가 넘는 `mcp-stdio.log`와 한 줄짜리 `mcp-stdio.log.1`을 두고 설치본 `autopsy-mcp-stdio.exe`에 실패하는 `tools/call`을 보냈다.
+호출 뒤 `mcp-stdio.log.1`은 앞의 큰 파일 내용으로 바뀌었고 원래 한 줄은 남지 않았다.
+
+[11] 서버가 파일을 두는 폴더와 토큰 파일을 쓰는 처리다.
+
+```text
+    private Path getMcpDir() {
+        String localAppData = System.getenv("LOCALAPPDATA");
+        if (localAppData != null && !localAppData.isEmpty()) {
+            return Path.of(localAppData, "autopsy", "mcp");
+        }
+        return Path.of(System.getProperty("user.home"), "AppData", "Local", "autopsy", "mcp");
+    }
+
+    private Path getTokenPath() {
+        return getMcpDir().resolve("mcp-token");
+    }
+
+    private void writeTokenFile() throws IOException {
+        Path tokenPath = getTokenPath();
+        Files.createDirectories(tokenPath.getParent());
+        Files.writeString(tokenPath, authToken);
+        tokenPath.toFile().deleteOnExit();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:196-213`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L196-L213)

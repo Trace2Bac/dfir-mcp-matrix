@@ -1,0 +1,190 @@
+---
+cell: T06
+details:
+- id: not_implemented
+---
+
+# T06 실행 환경정보 표시
+
+### 미구현
+
+**판단.** 서버는 Sleuth Kit Java 바인딩으로 케이스 DB를 조회하고 파일·보고서 내용을 읽어 결과를 만들지만 응답에 그 라이브러리나 결과를 만든 모듈의 버전을 싣지 않는다 [1].
+분석 결과 항목은 객체 ID, 원본 파일 ID, 아티팩트 유형, 데이터 소스 ID, 점수, 속성만 담는다 [2].
+결과를 케이스 DB에 쓴 ingest 모듈의 이름이나 버전은 이 항목에 없다 [2].
+`list_reports`는 보고서마다 보고서 모듈 이름 `sourceModule`을 싣지만 그 모듈의 버전은 싣지 않는다 [3].
+`query_data_sources`가 돌려주는 `acquisitionToolName`·`acquisitionToolVersion`은 디스크 이미지를 획득한 도구의 이름과 버전이고 케이스 DB에 저장된 값을 그대로 옮긴 것이다 [4].
+이 값은 서버가 결과를 내는 데 쓴 도구의 버전이 아니다.
+
+서버의 상태를 묻는 `get_server_status`도 서버 이름, 실행 상태, 케이스 열림 여부, 케이스 이름만 돌려주고 버전을 싣지 않는다 [5].
+STDIO 래퍼는 초기화 응답의 `serverInfo`에 이름 `autopsy`와 버전 `1.0.0`을 싣는다 [6].
+Java 쪽 `initialize` 처리도 `serverInfo`에 `1.0.0`을 적지만 MCP 클라이언트는 래퍼만 실행하므로 이 응답을 받지 않는다 [7].
+서버는 MCP 도구 호출을 기록하지 않고 래퍼의 `mcp-stdio.log`에는 오류 줄만 남는다 [8].
+서버는 파생물을 만들지 않고 모델을 부르지 않는다.
+
+### 근거
+
+[1] 질의 서비스는 `SleuthkitCase`만으로 결과를 만들고 쓰는 라이브러리는 [`Core/nbproject/project.properties:96`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/nbproject/project.properties#L96)이 참조하는 `sleuthkit-4.15.0.jar`다.
+
+```text
+/**
+ * All TSK Java API calls live here. Nothing else touches SleuthkitCase directly.
+ * Accepts strongly-typed or JSON-parsed parameters; returns plain Map/List results
+ * that Jackson can serialize directly into the MCP JSON-RPC response.
+ */
+class TskQueryService {
+
+    private final SleuthkitCase skCase;
+    private final String caseName;
+
+    TskQueryService(SleuthkitCase skCase, String caseName) {
+        this.skCase = skCase;
+        this.caseName = caseName;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:40-53`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L40-L53)
+
+[2] 아티팩트와 분석 결과 항목에 싣는 필드다.
+
+```text
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("objectId",     artifact.getId());
+            item.put("sourceFileId", artifact.getObjectID());
+            item.put("artifactType", artifact.getArtifactTypeName());
+            item.put("dataSourceId", artifact.getDataSourceObjectID());
+
+            if (isAnalysis) {
+                Score score = ((AnalysisResult) artifact).getScore();
+                item.put("score", Map.of(
+                    "significance", score.getSignificance().getName(),
+                    "priority",     score.getPriority().getName()
+                ));
+            }
+
+            List<Map<String, Object>> attrList = new ArrayList<>();
+            for (BlackboardAttribute attr : attrs) {
+                Map<String, Object> attrMap = new LinkedHashMap<>();
+                attrMap.put("type",  attr.getAttributeType().getTypeName());
+                attrMap.put("value", attrValueAsObject(attr));
+                attrList.add(attrMap);
+            }
+            item.put("attributes", attrList);
+            result.add(item);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:656-678`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L656-L678)
+
+[3] `list_reports`가 보고서마다 싣는 필드다.
+
+```text
+    List<Map<String, Object>> listReports() throws TskCoreException {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Report report : skCase.getAllReports()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("objectId",     report.getId());
+            item.put("reportName",   report.getReportName());
+            item.put("sourceModule", report.getSourceModuleName());
+            item.put("path",         report.getPath());
+            item.put("createdTime",  epochToIso(report.getCreatedTime()));
+            item.put("size",         report.getSize());
+            item.put("contentType",  guessReportTypeByExtension(report.getPath()));
+            result.add(item);
+        }
+        return result;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1306-1320`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1306-L1320)
+
+[4] 디스크 이미지 데이터 소스에 싣는 획득 정보다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            item.put("imageType", image.getType().name());
+            item.put("sectorSize", image.getSsize());
+            item.put("paths", List.of(image.getPaths()));
+            try { item.put("md5", image.getMd5()); }
+            catch (TskCoreException ex) { item.put("md5", null); }
+            try { item.put("sha1", image.getSha1()); }
+            catch (TskCoreException ex) { item.put("sha1", null); }
+            try { item.put("sha256", image.getSha256()); }
+            catch (TskCoreException ex) { item.put("sha256", null); }
+            try { item.put("acquisitionDetails", image.getAcquisitionDetails()); }
+            catch (TskCoreException ex) { item.put("acquisitionDetails", null); }
+            try { item.put("acquisitionToolName", image.getAcquisitionToolName()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolName", null); }
+            try { item.put("acquisitionToolVersion", image.getAcquisitionToolVersion()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolVersion", null); }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:745-762`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L745-L762)
+
+[5] `get_server_status`의 응답 필드다.
+
+```text
+    private Map<String, Object> buildServerStatus() {
+        TskQueryService qs = queryService;
+        boolean caseOpen = qs != null;
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("server", "autopsy-mcp");
+        status.put("status", "running");
+        status.put("caseOpen", caseOpen);
+        if (caseOpen) {
+            status.put("caseName", qs.getCaseName());
+        }
+        return status;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:151-162`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L151-L162)
+
+[6] 래퍼가 MCP 서버를 만들 때 준 이름과 버전이다.
+
+```javascript
+const server = new Server(
+    { name: "autopsy", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+);
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:284-287`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L284-L287)
+
+[7] Java 쪽 `initialize` 응답이다.
+
+```text
+    private Object handleInitialize() {
+        return Map.of(
+            "protocolVersion", "2024-11-05",
+            "serverInfo", Map.of("name", "autopsy-mcp", "version", "1.0.0"),
+            "capabilities", Map.of("tools", Map.of())
+        );
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:164-170`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L164-L170)
+
+[8] 래퍼의 기록 함수는 `ERROR` 줄만 파일에 남긴다.
+
+```javascript
+function log(level, message) {
+    // Only ERROR level is persisted to disk. INFO/DEBUG calls are no-ops
+    // by design — they would be too noisy in production and are visible
+    // during development via a debugger or by temporarily removing this guard.
+    if (level !== "ERROR") return;
+    try {
+        // Rotate if the log has grown too large
+        try {
+            if (fs.statSync(LOG_PATH).size > MAX_LOG_BYTES) {
+                fs.renameSync(LOG_PATH, LOG_PATH + ".1");
+            }
+        } catch { /* file doesn't exist yet — that's fine */ }
+
+        const line = `${new Date().toISOString()} [${level}] ${message}\n`;
+        fs.appendFileSync(LOG_PATH, line, "utf8");
+    } catch { /* never let logging crash the process */ }
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:75-91`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L75-L91)
