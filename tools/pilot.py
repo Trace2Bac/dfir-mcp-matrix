@@ -138,7 +138,13 @@ def reported_servers():
 # 셀 번호의 첫 글자는 축 폴더(matrix/cells/<축>/index.mdx)에서 읽는다. 축을 더해도 정규식을 고치지 않는다
 AXIS_CHARS = "".join(sorted({str(a["id"]) for a in AXES}))
 CELL_REF = re.compile(r"(?<![A-Za-z0-9_.`/])([" + AXIS_CHARS + r"]\d\d)(?:\.\d\d)?(?!\d)")
-OTHER_REF = re.compile(r"(?<![\w.])([" + AXIS_CHARS + r"]\d\d)(?:\.\d\d)?(?!\d)")
+# E01은 디스크 이미지 형식 이름이기도 하다("E01 이미지")
+CELL_OR_DETAIL_REF = re.compile(r"(?<![\w.])[" + AXIS_CHARS + r"]\d\d(?:\.\d\d)?(?!\d)(?! ?(?:이미지|형식|파일))")
+
+
+def criteria_refs(text):
+    """include·exclude 글에 든 셀·상세 번호. 작성 규칙 0006"""
+    return sorted(set(CELL_OR_DETAIL_REF.findall(str(text or ""))))
 MARK = re.compile(r"\[(\d+)\](?!\()")
 LEAD = re.compile(r"^\*\*([^*]+?)\.\*\*\s?")
 
@@ -337,11 +343,11 @@ def validate():
             for d in c.get("details") or []:
                 if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다
                     warns.append("%s: %s에 include가 아직 없다" % (f, d.get("id")))
-                # exclude에는 같은 셀의 상세만 쓴다. 다른 셀과 차이점은 boundary에 쓴다
-                other = sorted({x for x in OTHER_REF.findall(str(d.get("exclude") or ""))
-                                if x != c["id"]})
-                if other:
-                    warns.append("%s: %s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 boundary에 쓴다" % (f, d.get("id"), ", ".join(other)))
+                # include·exclude에는 사실만 쓰고 셀·상세 번호를 쓰지 않는다(작성 규칙 0006)
+                for k in ("include", "exclude"):
+                    refs = criteria_refs(d.get(k))
+                    if refs:
+                        warns.append("%s: %s의 %s가 %s를 가리킨다. 번호 대신 해당하는지만 사실로 쓴다(작성 규칙 0006)" % (f, d.get("id"), k, ", ".join(refs)))
             for k in ("not_implemented", "not_applicable"):
                 if not c.get(k):
                     errs.append("%s: 정의를 쓴 셀인데 %s가 없다" % (f, k))
@@ -428,9 +434,10 @@ def validate():
                 errs.append("%s가 셀 정의의 상세 이름과 같다. 셀로 옮겼으면 후보에서 지운다" % where)
             elif nm in seen_names:
                 errs.append("%s가 두 번 있다" % where)
-            other = sorted({x for x in OTHER_REF.findall(str(d.get("exclude") or "")) if x != cid})
-            if other:
-                warns.append("%s의 exclude가 다른 셀(%s)을 가리킨다. 다른 셀과 차이점은 셀의 boundary에 쓴다" % (where, ", ".join(other)))
+            for k in ("include", "exclude"):
+                refs = criteria_refs(d.get(k))
+                if refs:
+                    warns.append("%s의 %s가 %s를 가리킨다. 번호 대신 해당하는지만 사실로 쓴다(작성 규칙 0006)" % (where, k, ", ".join(refs)))
             seen_names.add(nm)
     if behind:
         notes.append("매트릭스 %s 기준으로 다시 볼 서버(원고 기준 버전): %s. 바뀐 셀은 matrix/cells/의 git 이력에서 찾는다"
