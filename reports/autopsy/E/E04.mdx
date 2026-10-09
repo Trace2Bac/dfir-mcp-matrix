@@ -1,0 +1,91 @@
+---
+cell: E04
+details:
+- id: not_applicable
+---
+
+# E04 분석 입력 준비
+
+### 비적용
+
+**판단.** MCP 도구는 이미지, 보관 파일, 수집물 같은 증거 입력을 받지 않고 Autopsy 본체가 케이스 DB에 등록한 객체를 ID로 조회하거나 읽는다 [1].
+이미지 안의 볼륨과 파일시스템을 해석해 파일 목록을 케이스 DB에 쓰는 일과 ingest 모듈이 파일을 꺼내 분석하는 일은 데이터 소스를 더할 때 Autopsy 본체가 한다.
+MCP 코드에는 작업 사본을 만들거나 보관 파일을 풀거나 이미지를 마운트하거나 부속 자료를 찾는 처리가 없다 [1].
+`get_file_content`는 모델이 `objectId`로 고른 파일의 범위를 Sleuth Kit의 `AbstractFile.read`로 읽는다 [2].
+읽은 바이트는 UTF-8 글자로 바꿔 응답의 `content`에 싣고 서버의 다른 분석 단계나 외부 도구의 입력으로 넘기지 않는다 [3].
+`get_data_source_tree`는 본체가 만든 이미지·볼륨 시스템·볼륨·파일시스템 구조를 조회해 돌려줄 뿐 파티션을 고르거나 파일시스템을 여는 단계가 아니다 [4].
+분할 이미지의 조각 경로는 본체가 등록한 `paths` 목록을 `query_data_sources`·`get_hosts`·`get_data_source_tree`가 그대로 싣는다 [5].
+
+### 근거
+
+[1] MCP 질의 서비스의 모든 처리는 케이스 DB 조회와 내용 읽기 호출이다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:340-1395`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L340-L1395).
+
+[2] 파일을 ID로 찾아 요청한 범위만 읽는다.
+
+```text
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+
+        if (offset < 0) {
+            offset = 0;
+        }
+        if (offset >= fileSize) {
+            return Map.of("objectId", fileId, "fileName", file.getName(), "fileSize", fileSize,
+                    "offset", offset, "bytesRead", 0, "truncated", false, "eof", true, "content", "");
+        }
+
+        long available = fileSize - offset;
+        int  toRead    = (int) Math.min(maxBytes, available);
+        boolean truncated = available > maxBytes;
+
+        byte[] buf = new byte[toRead];
+        int bytesRead = file.read(buf, offset, toRead);
+        if (bytesRead < toRead) {
+            buf = java.util.Arrays.copyOf(buf, Math.max(bytesRead, 0));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:934-953`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L934-L953)
+
+[3] 읽은 바이트를 UTF-8 글자로 바꿔 응답에 싣는다.
+
+```text
+        // Decode as UTF-8, replacing undecodable bytes with '?'
+        // REPLACE mode should never throw, but decode() declares CharacterCodingException.
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        CharBuffer chars;
+        try {
+            chars = decoder.decode(ByteBuffer.wrap(buf));
+        } catch (java.nio.charset.CharacterCodingException ex) {
+            // Cannot happen with REPLACE policy; fall back to lossy Latin-1 conversion
+            chars = CharBuffer.wrap(new String(buf, StandardCharsets.ISO_8859_1));
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("objectId",    fileId);
+        result.put("fileName",  file.getName());
+        result.put("fileSize",  fileSize);
+        result.put("offset",    offset);
+        result.put("bytesRead", buf.length);
+        result.put("truncated", truncated);
+        result.put("content",   chars.toString());
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:955-976`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L955-L976)
+
+[4] `get_data_source_tree`는 케이스 DB의 데이터 소스 구조를 조회한다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:776-872`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L776-L872).
+
+[5] 디스크 이미지의 경로 목록을 싣는다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            item.put("imageType", image.getType().name());
+            item.put("sectorSize", image.getSsize());
+            item.put("paths", List.of(image.getPaths()));
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:745-749`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L745-L749)

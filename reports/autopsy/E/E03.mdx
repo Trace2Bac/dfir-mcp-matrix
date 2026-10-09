@@ -1,0 +1,139 @@
+---
+cell: E03
+details:
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 원본 증거의 내용을 읽는 `get_file_content`에 적용된다 [1].
+`get_file_content`는 `objectId`로 Sleuth Kit의 `AbstractFile`을 찾아 `read`로 요청한 범위를 읽는다 [1].
+MCP 코드는 증거 이미지나 파일을 직접 열지 않고 케이스 DB에 쓰는 호출도 두지 않는다 [2].
+이 경로에서 원본을 지키는 것은 Sleuth Kit 4.15.0 라이브러리가 원본을 읽기 모드로 연다는 동작뿐이다.
+
+`AbstractFile.read`는 파일의 종류에 따라 세 경로로 나뉜다 [3].
+수집 저장소에 있는 파일은 등록된 내용 제공자로 읽는다 [3].
+로컬 경로가 정해진 파일은 `readLocal`로 읽는다 [3].
+그 밖의 파일은 하위 클래스의 `readInt`로 읽는다 [3].
+로컬 파일 데이터 소스의 파일은 `readLocal`이 `RandomAccessFile`을 `"r"` 모드로 열어 읽는다 [4].
+파일시스템 안의 파일은 `FsContent.readInt`가 파일시스템 핸들에서 연 파일 핸들로 JNI `readFile`을 부른다 [5].
+
+이미지 파일을 데이터 소스로 더하는 일은 Autopsy 본체가 한다.
+이미지 핸들은 `Image.getImageHandle`이 처음 필요할 때 `SleuthkitJNI.openImage`로 연다 [6].
+그래서 본체가 아직 열지 않은 이미지는 MCP 호출 중에 이 라이브러리가 열 수 있다 [6].
+JNI는 `tsk_img_open_utf8`에 형식 자동 판별을 맡겨 이미지를 연다 [7].
+raw 이미지는 Windows에서 `CreateFile`을 `FILE_READ_DATA` 권한으로, 다른 운영체제에서 `open`을 `O_RDONLY`로 연다 [8].
+E01은 `LIBEWF_OPEN_READ`, VMDK는 `LIBVMDK_OPEN_READ`, VHD는 `LIBVHDI_OPEN_READ`, AFF는 `O_RDONLY`로 연다 [9].
+논리 이미지 폴더 안의 파일은 `CreateFileW`를 `FILE_READ_DATA` 권한으로 열어 읽는다 [10].
+
+나머지 MCP 도구는 원본 증거에 닿지 않는다.
+이 도구들은 케이스 DB를 조회한다 [2].
+`get_report_content`는 원본 증거가 아닌 케이스 보고서 파일을 `FileChannel`의 `READ` 모드로 읽는다 [11].
+증거를 읽기 전용으로 마운트하거나 서버를 읽기 전용 환경에서 실행하는 경로는 저장소에 없다.
+Java HTTP 서버는 Autopsy 프로세스 안에서 Autopsy와 같은 권한으로 실행된다 [12].
+
+**한계.** 수집 저장소에 있는 파일(`YES_REPO`)은 케이스에 내용 제공자가 등록되어 있으면 그 제공자가 읽는다 [3].
+기준 커밋에는 내용 제공자 `AutopsyContentProvider`의 구현이 없고 Autopsy는 설치된 플러그인에서 제공자를 찾는다 [13].
+그래서 이 경로가 원본을 읽기 모드로 여는지는 확인하지 못했다.
+E01·VMDK·VHD 이미지는 libewf·libvmdk·libvhdi에 읽기 플래그를 넘기는 것까지 확인했다 [9].
+이 라이브러리의 버전과 그 안의 동작은 소스로 확인하지 못했다.
+
+### 근거
+
+[1] `get_file_content`가 파일을 찾아 요청한 범위를 읽는다.
+
+```text
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+
+        if (offset < 0) {
+            offset = 0;
+        }
+        if (offset >= fileSize) {
+            return Map.of("objectId", fileId, "fileName", file.getName(), "fileSize", fileSize,
+                    "offset", offset, "bytesRead", 0, "truncated", false, "eof", true, "content", "");
+        }
+
+        long available = fileSize - offset;
+        int  toRead    = (int) Math.min(maxBytes, available);
+        boolean truncated = available > maxBytes;
+
+        byte[] buf = new byte[toRead];
+        int bytesRead = file.read(buf, offset, toRead);
+        if (bytesRead < toRead) {
+            buf = java.util.Arrays.copyOf(buf, Math.max(bytesRead, 0));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:934-953`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L934-L953)
+
+[2] MCP 질의 서비스의 모든 처리는 조회와 읽기 호출이다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:340-1395`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L340-L1395).
+
+[3] Sleuth Kit 4.15.0의 `AbstractFile.read`가 읽는 경로를 고른다: [`bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java:1130-1142`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L1130-L1142), [`AbstractFile.java:239`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L239).
+
+[4] `readLocal`은 로컬 파일을 `"r"` 모드로 연다: [`bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java:1171-1200`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L1171-L1200).
+
+[5] `FsContent`는 파일시스템 핸들에서 파일 핸들을 열고 JNI로 읽는다: [`bindings/java/src/org/sleuthkit/datamodel/FsContent.java:148-156`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L148-L156), [`FsContent.java:182-195`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L182-L195).
+
+[6] 이미지 핸들이 없으면 처음 필요할 때 연다: [`bindings/java/src/org/sleuthkit/datamodel/Image.java:122-132`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Image.java#L122-L132).
+
+[7] JNI가 형식 자동 판별로 이미지를 연다: [`bindings/java/jni/dataModel_SleuthkitJNI.cpp:1213-1216`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/jni/dataModel_SleuthkitJNI.cpp#L1213-L1216), [`tsk/img/img_open.cpp:118-226`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/img_open.cpp#L118-L226).
+
+[8] raw 이미지를 읽기 권한으로 연다: [`tsk/img/raw.c:90-108`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/raw.c#L90-L108).
+
+[9] 다른 이미지 형식은 각 라이브러리의 읽기 플래그로 연다: [`tsk/img/ewf.cpp:345-352`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/ewf.cpp#L345-L352), [`tsk/img/vmdk.c:200-206`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/vmdk.c#L200-L206), [`tsk/img/vhd.c:223-229`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/vhd.c#L223-L229), [`tsk/img/aff.c:343`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/aff.c#L343).
+
+[10] 논리 이미지 폴더의 파일을 읽기 권한으로 연다: [`tsk/fs/logical_fs.cpp:1679-1696`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/fs/logical_fs.cpp#L1679-L1696).
+
+[11] `Report.read`는 보고서 파일을 `READ`로 연다: [`bindings/java/src/org/sleuthkit/datamodel/Report.java:127-151`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Report.java#L127-L151).
+
+[12] MCP 서버는 Autopsy 시작 때 같은 프로세스 안에서 시작된다.
+
+```text
+    @Override
+    public void run() {
+        instance = this;
+        if (McpOptionsPanel.isMcpEnabled()) {
+            try {
+                startServer();
+            } catch (Exception ex) {
+                logger.log(Level.SEVERE, "Failed to start Autopsy MCP server", ex);
+            }
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java:56-66`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/AutopsyMcpModule.java#L56-L66)
+
+[13] 케이스를 열 때 메타데이터의 내용 제공자 이름으로 설치된 제공자를 찾는다.
+
+```text
+            ContentStreamProvider contentProvider = ContentProviderUtils.getContentProvider(metadata.getContentProviderName());
+            if (StringUtils.isNotBlank(metadata.getContentProviderName()) && contentProvider == null) {
+                String createdName = metadata.getContentProviderName().trim();
+                Optional<AutopsyContentProvider> installedProvider = ContentProviderUtils.findInstalledProvider(createdName);
+```
+
+[`Core/src/org/sleuthkit/autopsy/casemodule/Case.java:2795-2798`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/casemodule/Case.java#L2795-L2798)
+
+```text
+    static Optional<AutopsyContentProvider> findInstalledProvider(String createdName) {
+        Optional<String> baseName = parseProviderBaseName(createdName);
+        if (!baseName.isPresent()) {
+            return Optional.empty();
+        }
+        Collection<? extends AutopsyContentProvider> providers
+                = Lookup.getDefault().lookupAll(AutopsyContentProvider.class);
+        for (AutopsyContentProvider provider : providers) {
+            Optional<String> providerBase = parseProviderBaseName(
+                    provider != null ? provider.getName() : null);
+            if (providerBase.isPresent()
+                    && StringUtils.equalsIgnoreCase(baseName.get(), providerBase.get())) {
+                return Optional.of(provider);
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/casemodule/ContentProviderUtils.java:127-141`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/casemodule/ContentProviderUtils.java#L127-L141)

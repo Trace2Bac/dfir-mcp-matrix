@@ -1,0 +1,139 @@
+---
+cell: I04
+details:
+- id: not_applicable
+---
+
+# I04 서버 자격증명 처리
+
+### 비적용
+
+**판단.** 서버 코드는 자격증명이 필요한 외부 연동을 하지 않는다.
+서버가 다루는 비밀 값은 Java HTTP 서버가 시작할 때 만들어 파일로 STDIO 래퍼에 넘기는 Bearer 토큰 하나다 [1][2][3].
+이 토큰은 같은 서버의 두 프로그램 사이에서 호출자를 확인하는 값이고 외부 서비스 접속에 쓰는 자격증명이 아니다 [3][4].
+
+다중 사용자 케이스의 DB 서버 접속 정보는 Autopsy 본체가 케이스를 열 때 `UserPreferences.getDatabaseConnectionInfo()`로 읽는다 [5].
+MCP 코드는 이 접속 정보를 읽지 않고 본체가 연 `SleuthkitCase`와 케이스 표시 이름만 받는다 [6].
+
+### 근거
+
+[1] 토큰은 서버 객체를 만들 때 `SecureRandom`으로 만든다.
+
+```text
+    private String generateToken() {
+        byte[] bytes = new byte[32];
+        new SecureRandom().nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:190-194`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L190-L194)
+
+[2] 토큰 파일의 위치와 쓰기다.
+
+```text
+    private Path getMcpDir() {
+        String localAppData = System.getenv("LOCALAPPDATA");
+        if (localAppData != null && !localAppData.isEmpty()) {
+            return Path.of(localAppData, "autopsy", "mcp");
+        }
+        return Path.of(System.getProperty("user.home"), "AppData", "Local", "autopsy", "mcp");
+    }
+
+    private Path getTokenPath() {
+        return getMcpDir().resolve("mcp-token");
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:196-206`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L196-L206)
+
+```text
+    private void writeTokenFile() throws IOException {
+        Path tokenPath = getTokenPath();
+        Files.createDirectories(tokenPath.getParent());
+        Files.writeString(tokenPath, authToken);
+        tokenPath.toFile().deleteOnExit();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:208-213`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L208-L213)
+
+[3] 래퍼는 호출마다 토큰 파일을 읽어 헤더에 싣는다.
+
+```javascript
+function readToken() {
+    const tokenPath = path.join(MCP_DIR, "mcp-token");
+    try {
+        return fs.readFileSync(tokenPath, "utf8").trim();
+    } catch {
+        throw new Error(
+            "No Autopsy case is currently open, or the MCP token file is missing. " +
+            "Please open a case in Autopsy first."
+        );
+    }
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:225-235`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L225-L235)
+
+```javascript
+async function callJava(method, params) {
+    const token = readToken(); // fresh read each call — handles case reopen
+    log("INFO", `-> ${method}`);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
+
+    let res;
+    try {
+        res = await fetch(`${MCP_BASE_URL}/mcp`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ jsonrpc: "2.0", id: "1", method, params }),
+            signal: controller.signal
+        });
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:237-254`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L237-L254)
+
+[4] Java HTTP 서버는 모든 요청의 `Authorization` 헤더를 토큰과 대조한다.
+
+```text
+                before(ctx -> {
+                    String auth = ctx.header("Authorization");
+                    if (auth == null || !auth.equals("Bearer " + authToken)) {
+                        ctx.status(401).result("Unauthorized");
+                        ctx.skipRemainingHandlers();
+                    }
+                });
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:90-96`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L90-L96)
+
+[5] Autopsy 본체가 다중 사용자 케이스를 열 때 사용자 설정의 접속 정보를 넘긴다.
+
+```text
+            if (CaseType.SINGLE_USER_CASE == metadata.getCaseType()) {
+                caseDb = SleuthkitCase.openCase(metadata.getCaseDatabasePath(), contentProvider, APP_NAME);
+            } else if (UserPreferences.getIsMultiUserModeEnabled()) {
+                caseDb = SleuthkitCase.openCase(databaseName, UserPreferences.getDatabaseConnectionInfo(), metadata.getCaseDirectory(), contentProvider);
+            } else {
+                throw new CaseActionException(Bundle.Case_open_exception_multiUserCaseNotEnabled());
+            }
+```
+
+[`Core/src/org/sleuthkit/autopsy/casemodule/Case.java:2828-2834`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/casemodule/Case.java#L2828-L2834)
+
+[6] MCP 서버가 케이스에서 받는 값이다.
+
+```text
+    public void updateCase(Case openedCase) {
+        protocolHandler.setQueryService(
+                new TskQueryService(openedCase.getSleuthkitCase(), openedCase.getDisplayName()));
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:72-75`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L72-L75)

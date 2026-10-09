@@ -1,0 +1,256 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.03
+- id: R02.06
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 목록을 돌려주는 도구 가운데 5개가 항목 수에 상한을 둔다.
+`query_files`는 기본 50개, 최대 500개이고 상한을 SQL `LIMIT`으로 넘긴다 [1].
+`query_data_artifacts`·`query_analysis_results`는 기본 50개, 최대 500개다 [2].
+`query_timeline`은 기본 100개, 최대 1,000개다 [3].
+`get_communications_accounts`는 기본 100개, 최대 500개다 [4].
+모델이 `limit`에 0 이하나 최댓값을 넘는 값을 주면 서버는 거부하지 않고 기본값(50 또는 100)으로 되돌린다 [1][2][3][4].
+
+`query_data_artifacts`·`query_analysis_results`는 속성 필터(`attributeType`·`attributeValue`)가 없을 때만 상한을 SQL `LIMIT`으로 넘긴다 [2].
+속성 필터가 있으면 조건에 맞는 유형의 아티팩트를 모두 읽은 뒤 Java에서 걸러 상한까지 싣는다 [2].
+`query_timeline`은 Sleuth Kit `TimelineManager.getEvents`가 기간 안의 사건을 모두 돌려준 뒤 Java에서 상한까지 싣는다 [3][5].
+`get_communications_accounts`도 관계가 있는 계정을 모두 읽은 뒤 상한까지 싣는다 [4].
+`orderBy` 없는 `query_files`, 아티팩트 두 도구, `get_communications_accounts`는 정렬 조건 없이 자르므로 상한에 닿을 때 어느 항목이 남는지는 DB가 돌려주는 차례에 달려 있다 [1][2][4].
+`query_timeline`은 시각 차례로 읽은 사건 가운데 이른 것부터 남긴다 [3][5].
+
+다음 도구의 응답에는 항목 수 상한이 없다.
+`get_hosts`·`query_data_sources`·`get_data_source_tree`·`list_reports`는 케이스의 호스트, 데이터 소스, 저장 구조, 보고서를 모두 싣는다 [6].
+`query_tags`는 사용 중인 태그 이름마다 태그된 파일과 아티팩트를 모두 싣는다 [7].
+`get_os_accounts`는 OS 계정을 모두 싣고 계정마다 확장 속성과 데이터 소스 인스턴스를 모두 싣는다 [8].
+`get_account_relationships`는 대상 계정과 관계가 있는 계정을 모두 싣고 `get_object_children`은 객체의 자식을 모두 싣는다 [9][10].
+아티팩트 항목에 붙는 속성 목록과 파일 항목의 `attributes`에도 개수 상한이 없다 [2][11].
+
+Java HTTP 서버와 STDIO 래퍼에는 응답 전체의 크기를 재거나 자르는 코드가 없다 [12].
+
+**한계.** 목록 도구의 상한 설명과 실제 처리가 다르다.
+`get_communications_accounts`를 뺀 네 도구의 설명은 `limit`의 최댓값을 적지만 그 값을 넘는 요청은 최댓값이 아니라 기본값으로 처리되고 응답에는 적용한 상한이 실리지 않는다 [1][2][3][13].
+`get_communications_accounts`의 설명은 기본값 100만 적고 최댓값 500은 적지 않는다 [4][13].
+사용자 문서는 결과가 1MB를 넘을 수 없다고 적는다 [14].
+서버 코드에서 1,048,576바이트는 내용을 읽는 두 도구의 `maxBytes` 최댓값으로만 쓰이고 응답 전체에는 적용되지 않는다 [15][16].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 내용을 읽는 `get_file_content`와 `get_report_content`에 적용된다 [15][16].
+두 도구는 파일 전체 크기 `fileSize`, 읽기 시작 위치 `offset`, 이번에 읽은 바이트 수 `bytesRead`, 남은 내용이 있는지를 뜻하는 `truncated`를 함께 싣는다 [15][16].
+
+목록 도구 5개는 상한으로 자른 응답에 전체 건수나 잘렸다는 표시를 싣지 않는다 [1][2][3][4].
+그래서 모델은 상한과 같은 수의 항목을 받았을 때 결과가 더 있는지 응답으로 알 수 없다 [1][2][3][4].
+
+**한계.** `truncated`는 파일 크기에서 `offset`을 뺀 값이 요청 크기보다 큰지로만 정하고 실제로 읽은 바이트 수와 대조하지 않는다 [15][16].
+Sleuth Kit은 이미지 경로가 없는 데이터 소스의 파일을 읽으면 0바이트를 돌려준다 [17].
+보고서 파일 읽기에서 `IOException`이 나면 그때까지 읽은 바이트 수를 돌려준다 [18].
+이때 응답은 `bytesRead`가 0이거나 요청보다 작으면서 `truncated`가 `false`일 수 있고 읽지 못했다는 표시가 없다 [15][16].
+Sleuth Kit `Report.getSize()`는 보고서 파일 크기를 읽다가 `IOException`이 나면 0을 돌려준다 [19].
+그러면 `get_report_content`는 `fileSize` 0, `eof: true`, 빈 `content`를 돌려주고 이 응답은 빈 보고서의 응답과 구별되지 않는다 [16][19].
+
+### R02.03 페이지·커서 조회
+
+**구현.** `get_file_content`와 `get_report_content`는 인자 `offset`과 `maxBytes`로 내용의 다음 구간을 이어서 읽게 한다 [15][16].
+두 도구의 설명은 큰 파일을 `offset`과 `maxBytes`로 나눠 읽으라고 적는다 [13].
+`offset`이 파일 크기 이상이면 빈 `content`와 `eof: true`를 돌려준다 [15][16].
+`get_report_content`는 정상 응답에도 `eof`를 `truncated`의 반대 값으로 싣는다 [16].
+`get_file_content`의 정상 응답에는 `eof`가 없고 `truncated`만 있다 [15].
+음수 `offset`은 거부하지 않고 0으로 바꿔 읽으며 응답의 `offset`에는 바뀐 값 0이 실린다 [15][16].
+
+목록 도구에는 `offset`이나 커서 인자가 없어 상한 뒤의 항목을 이어서 읽는 길이 없다 [13].
+
+### R02.06 값 단위 잘림
+
+**구현.** `get_file_content`와 `get_report_content`는 파일이나 보고서 하나의 내용을 `maxBytes`바이트에서 자른다 [15][16].
+`maxBytes`의 기본값은 65,536바이트이고 최댓값은 1,048,576바이트다 [15][16].
+자른 내용은 UTF-8로 해석한 글로 싣는다 [15][16].
+
+**한계.** 두 도구의 설명은 1,048,576바이트를 넘는 `maxBytes` 요청을 거부한다고 적지만 서버는 그 값을 거부하지 않고 65,536바이트로 바꿔 읽는다 [13][15][16].
+설명은 65,536바이트보다 큰 파일에 `maxBytes`를 따로 주어야 한다고 적지만 서버는 `maxBytes` 없이도 앞 65,536바이트를 읽어 돌려준다 [13][15].
+자르는 위치는 바이트 단위이므로 여러 바이트로 된 UTF-8 문자가 구간 경계에서 나뉘면 앞뒤 응답의 경계 문자가 대체 문자로 바뀐다 [15][16].
+
+### 근거
+
+[1] `query_files`의 상한과 SQL `LIMIT`.
+
+```text
+        int limit = args.path("limit").asInt(50);
+        if (limit <= 0 || limit > 500) {
+            limit = 50;
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:380-383`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L380-L383)
+
+```text
+        String whereClause = (conditions.isEmpty() ? "1=1" : String.join(" AND ", conditions))
+                + orderClause + " LIMIT " + limit;
+
+        List<AbstractFile> files = skCase.findAllFilesWhere(whereClause);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:489-492`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L489-L492)
+
+[2] 아티팩트 질의는 속성 필터가 없을 때만 SQL에 상한을 넘기고 나머지는 Java에서 거른다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:603-604`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L603-L604), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:627-654`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L627-L654), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:670-677`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L670-L677).
+
+[3] `query_timeline`의 상한과 전체 조회 뒤 자르기.
+
+```text
+        int limit = args.path("limit").asInt(100);
+        if (limit <= 0 || limit > 1000) {
+            limit = 100;
+        }
+
+        TimelineManager tm = skCase.getTimelineManager();
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        Interval interval = new Interval(startEpoch * 1000L, (endEpoch + 1) * 1000L, DateTimeZone.UTC);
+        TimelineFilter.RootFilter filter = buildTimelineFilter(args);
+
+        // TimelineManager.getEvents() has no streaming or limit overload — it
+        // materializes the full result set. The limit is applied in Java below.
+        // A SQL-level limit would require a Blackboard API change.
+        List<TimelineEvent> events = tm.getEvents(interval, filter);
+
+        List<Map<String, Object>> result = new ArrayList<>(Math.min(events.size(), limit));
+        for (TimelineEvent e : events) {
+            if (result.size() >= limit) break;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:984-1003`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L984-L1003)
+
+[4] `get_communications_accounts`의 상한과 전체 조회 뒤 자르기.
+
+```text
+        int limit = args.path("limit").asInt(100);
+        if (limit <= 0 || limit > 500) limit = 100;
+
+        String accountTypeStr = textOrNull(args, "accountType");
+
+        CommunicationsFilter filter = new CommunicationsFilter();
+        if (accountTypeStr != null) {
+            Account.Type type = lookupAccountType(accountTypeStr);
+            if (type != null) {
+                filter.addAndFilter(new CommunicationsFilter.AccountTypeFilter(
+                        Collections.singleton(type)));
+            }
+        }
+
+        CommunicationsManager cm = skCase.getCommunicationsManager();
+        List<AccountDeviceInstance> adis = cm.getAccountDeviceInstancesWithRelationships(filter);
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (AccountDeviceInstance adi : adis) {
+            if (result.size() >= limit) break;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1095-1114`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1095-L1114)
+
+[5] Sleuth Kit 4.15.0의 `getEvents`는 기간 안의 사건을 `LIMIT` 없이 시각 차례로 조회한다: [`bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java:1294-1321`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java#L1294-L1321).
+
+[6] 호스트, 데이터 소스, 저장 구조, 보고서 목록은 모두 싣는다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:691-718`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L691-L718), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:776-793`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L776-L793), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1306-1320`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1306-L1320).
+
+[7] `query_tags`는 태그를 모두 싣는다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:878-914`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L878-L914).
+
+[8] `get_os_accounts`는 계정을 모두 싣는다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1051-1088`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1051-L1088).
+
+[9] `get_account_relationships`는 관계 계정을 모두 싣는다.
+
+```text
+        // Get all accounts that communicated with this one
+        List<AccountDeviceInstance> related = cm.getRelatedAccountDeviceInstances(targetAdi, filter);
+
+        List<Map<String, Object>> relationships = new ArrayList<>();
+        long totalRelationships = 0;
+        for (AccountDeviceInstance relAdi : related) {
+            // Count only sources shared between targetAdi and relAdi (not relAdi's total)
+            long pairCount = cm.getRelationshipSources(targetAdi, relAdi, filter).size();
+            totalRelationships += pairCount;
+            Map<String, Object> item = new LinkedHashMap<>();
+            Account relAccount = relAdi.getAccount();
+            item.put("accountType",       relAccount.getAccountType().getDisplayName());
+            item.put("accountId",         relAccount.getTypeSpecificID());
+            item.put("deviceId",          relAdi.getDeviceId());
+            item.put("relationshipCount", pairCount);
+            relationships.add(item);
+        }
+
+        result.put("account",            targetAdi.getAccount().getTypeSpecificID());
+        result.put("accountType",        targetAdi.getAccount().getAccountType().getDisplayName());
+        result.put("deviceId",           targetAdi.getDeviceId());
+        result.put("totalRelationships", totalRelationships);
+        result.put("relatedAccounts",    relationships);
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1161-1184`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1161-L1184)
+
+[10] `get_object_children`은 자식을 모두 싣는다.
+
+```text
+        List<Content> children = content.getChildren();
+        List<Map<String, Object>> childList = new ArrayList<>(children.size());
+        for (Content child : children) {
+            childList.add(buildContentSummary(child));
+        }
+
+        Content parent = content.getParent();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("object",     buildContentSummary(content));
+        result.put("parent",     parent != null ? buildContentSummary(parent) : null);
+        result.put("childCount", childList.size());
+        result.put("children",   childList);
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1207-1220`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1207-L1220)
+
+[11] 파일 속성은 모두 싣는다.
+
+```text
+        // Extended file attributes (blackboard attributes attached to this file)
+        try {
+            List<Attribute> attrs = f.getAttributes();
+            if (!attrs.isEmpty()) {
+                List<Map<String, Object>> attrList = new ArrayList<>(attrs.size());
+                for (Attribute attr : attrs) {
+                    Map<String, Object> attrMap = new LinkedHashMap<>();
+                    attrMap.put("type", attr.getAttributeType().getTypeName());
+                    attrMap.put("value", fileAttrValueAsObject(attr));
+                    attrList.add(attrMap);
+                }
+                item.put("attributes", attrList);
+            } else {
+                item.put("attributes", Collections.emptyList());
+            }
+        } catch (TskCoreException ex) {
+            item.put("attributes", Collections.emptyList());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:555-572`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L555-L572)
+
+[12] Java 서버는 처리 결과를 그대로 응답 본문에 싣고 래퍼도 받은 결과를 그대로 글로 바꾼다: [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-125`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L125), [`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:172-178`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L172-L178), [`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:320-326`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L320-L326).
+
+[13] 도구 설명의 상한과 나눠 읽기 안내: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:105`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L105), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:164`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L164), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:199`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L199), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:244`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L244), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:276`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L276), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:279-290`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L279-L290), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:324-336`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L324-L336).
+
+[14] 사용자 문서는 결과가 1MB를 넘을 수 없다고 적는다: [`docs/doxygen-user/claude_desktop_mcp.dox:134`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/docs/doxygen-user/claude_desktop_mcp.dox#L134).
+
+[15] `get_file_content`의 상한, `offset` 처리, 응답 필드: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:920-977`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L920-L977).
+
+[16] `get_report_content`의 상한, `offset` 처리, 응답 필드: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1326-1395`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1326-L1395).
+
+[17] Sleuth Kit 4.15.0의 `FsContent.readInt`는 데이터 소스 이미지에 경로가 없으면 0을 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/FsContent.java:182-194`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/FsContent.java#L182-L194).
+
+[18] Sleuth Kit 4.15.0의 `Report.read`는 `IOException`을 기록하고 그때까지 읽은 바이트 수를 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/Report.java:127-151`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Report.java#L127-L151).
+
+[19] Sleuth Kit 4.15.0의 `Report.getSize()`는 크기를 읽지 못하면 0을 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/Report.java:164-174`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Report.java#L164-L174).

@@ -1,0 +1,506 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 성공과 실패는 Java HTTP 서버의 JSON-RPC 오류 응답과 STDIO 래퍼의 MCP 오류 결과(`isError: true`)로 구분된다 [1][2].
+Java 서버는 처리 중 예외가 나면 `result` 대신 `error` 객체(`code`, `message`)를 싣는다 [1].
+알 수 없는 메서드는 `-32601`, 인자 오류로 던진 `McpException`은 `-32602`, 그 밖의 예외는 `-32603`이다 [1][3].
+알 수 없는 도구 이름은 케이스가 열려 있을 때만 `-32601`을 받는다 [4].
+케이스가 열려 있지 않으면 `get_server_status`·`get_case_summary` 밖의 도구 호출은 알 수 없는 이름이어도 케이스가 열려 있지 않다는 `-32603` 오류를 받는다 [4].
+JSON 형식이 잘못된 요청에는 `-32700`을 돌려준다 [1].
+요청 본문을 읽다가 예외가 나거나 오류 응답을 만드는 데 실패하면 `McpServer.handleMcpRequest`가 HTTP 500과 함께 `-32603`, 고정 문구 `Internal error`, 예외 문구를 담은 `data`를 보낸다 [5].
+래퍼는 Java 응답에 `error`가 있거나 HTTP 상태가 성공이 아니면 예외를 던진다 [2].
+도구 호출 처리기는 그 예외를 `isError: true`와 오류 문구를 담은 결과로 바꾼다 [6].
+`get_server_status`는 케이스 열림 여부를 `caseOpen` 필드로 돌려준다 [7].
+
+**한계.** 래퍼는 처리기까지 온 도구 호출의 오류를 모두 "Autopsy is not reachable: "로 시작하는 문구로 돌려준다 [6].
+그래서 인자 오류(`-32602`)나 HTTP 500처럼 Autopsy에 연결된 상태에서 난 오류도 연결할 수 없다는 문구로 표시된다 [6][8].
+래퍼는 Java 오류의 `code`를 결과에 싣지 않으므로 오류 종류는 `message` 문구로만 남는다 [2][8].
+처리기에 닿기 전의 오류는 다르게 돌아온다.
+MCP TypeScript SDK 1.27.1은 `name`이 문자열이 아니거나 `arguments`가 객체가 아닌 `tools/call`을 래퍼의 처리기에 넘기지 않고 zod 검사 문구를 담은 `-32603` 오류로 돌려준다 [9][10].
+
+래퍼가 Autopsy에 연결하지 못하면 `tools/list`는 오류 대신 `get_server_status` 하나만 담은 도구 목록을 돌려준다 [11][12].
+Autopsy에 계속 닿지 못하는 동안 이 대체 도구를 부르면 Java 서버의 상태 응답이 아니라 연결 실패를 알리는 `isError: true` 결과가 돌아온다 [12].
+래퍼는 도구 목록이 바뀌었다는 알림(`listChanged`)을 선언하지 않는다 [13].
+그래서 클라이언트가 대체 목록을 계속 쓰는 사이 Autopsy가 켜지면 같은 이름의 호출은 Java 쪽 `get_server_status`의 결과를 받는다 [13].
+
+래퍼는 토큰 파일이 없으면 Autopsy에 케이스가 열려 있지 않다는 문구를 돌려준다 [14].
+Java 쪽은 MCP 서버를 시작할 때 토큰 파일을 쓰고 서버를 멈출 때 지우며 케이스를 열거나 닫을 때는 토큰 파일을 건드리지 않는다 [15].
+그래서 토큰 파일이 없는 것은 Autopsy가 실행 중이 아니거나 MCP 서버가 꺼진 상태인데 응답은 케이스 상태를 원인으로 적는다 [14][15].
+
+`get_case_summary`는 아티팩트 수를 세는 질의에서 `SQLException`이 나면 `totalArtifacts`를 0으로 싣고 실패를 알리지 않는다 [16].
+래퍼 코드는 HTTP 응답이 30초 안에 오지 않으면 시간 초과 오류를 돌려주게 되어 있지만 설치본 실행 파일에서는 이 제한이 적용되지 않았다 [17][18].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 목록을 돌려주는 도구는 조건에 맞는 항목이 없으면 성공 응답에 빈 목록을 싣고 처리 중 예외가 나면 JSON-RPC 오류를 돌려준다 [1][19].
+래퍼는 성공 응답을 글로 바꾸고 오류 응답은 `isError: true` 결과로 바꾸므로 일치 0건과 실패는 `isError`로 갈린다 [6].
+`get_account_relationships`는 계정을 찾지 못하면 오류가 아닌 결과 안에 `error` 필드와 "Account not found" 문구를 싣는다 [20].
+이 도구는 `accountId`나 `accountType`이 없으면 `-32602` 오류를 돌려주므로 대상 없음과 입력 부재도 갈린다 [21].
+케이스가 열려 있지 않을 때 `get_case_summary`는 오류가 아닌 결과에 `message` 필드를 싣고 다른 도구는 `-32603` 오류를 돌려준다 [4].
+응답에 찾지 못함만을 뜻하는 상태 값은 없고 `get_account_relationships`의 필드 이름은 `error`다 [20].
+
+**한계.** 다음 도구는 대상이 없는 상태를 실패와 같은 오류로 돌려준다.
+`query_data_artifacts`·`query_analysis_results`는 아티팩트 유형 조회의 `TskCoreException`만 처리해 빈 목록을 돌려주게 되어 있다 [22].
+Sleuth Kit `getArtifactType`은 없는 유형 이름에 예외 대신 `null`을 돌려주므로 없는 유형을 주면 `NullPointerException`으로 생긴 `-32603` 오류가 된다 [22].
+`get_object_children`은 없는 객체 ID에 인자 오류와 같은 `-32602` 오류를, `get_file_content`는 없는 파일 ID에 `NullPointerException`으로 생긴 `-32603` 오류를 돌려준다 [23][24].
+`get_report_content`의 "No report found" 처리는 실행되지 않는다 [25].
+Sleuth Kit `getReportById`는 없는 ID에 `null`을 돌려주지 않고 `TskCoreException`을 던지므로 이 경우 `-32603` 오류가 된다 [25][26].
+래퍼는 이 오류들도 "Autopsy is not reachable: "로 시작하는 문구로 돌려준다 [6].
+`get_file_content`는 `objectId`가 없으면 `McpException`이 아니라 `TskCoreException`을 던지므로 입력 부재도 `-32603`이 되어 없는 파일 ID와 같은 코드를 받는다 [27].
+
+계정 유형 값은 도구 사이에서 이어지지 않는다.
+`get_communications_accounts`와 `get_account_relationships`의 결과는 계정 유형을 Sleuth Kit의 표시 이름(`Credit Card`, `MessagingApp` 등)으로 싣는다 [28].
+`get_account_relationships`는 받은 `accountType`을 유형 이름(`CREDIT_CARD`, `MESSAGING_APP` 등)과 대소문자 없이 대조한다 [29][30].
+그래서 결과에서 받은 표시 이름을 그대로 넘기면 표시 이름과 유형 이름이 대소문자 밖에서도 다른 유형은 계정이 있어도 "Account not found"를 담은 정상 응답이 돌아온다 [29][30].
+
+### 근거
+
+[1] Java 서버의 성공·오류 응답 처리: [`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:68-98`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L68-L98), [`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:180-189`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L180-L189), [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-146`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L146).
+
+[2] 래퍼는 HTTP 오류와 JSON-RPC 오류를 예외로 바꾼다.
+
+```javascript
+    if (!res.ok) {
+        const msg = `Autopsy HTTP error ${res.status}. Is Autopsy running with a case open?`;
+        log("ERROR", `<- ${method} HTTP ${res.status}`);
+        throw new Error(msg);
+    }
+    const data = await res.json();
+    if (data.error) {
+        log("ERROR", `<- ${method} MCP error: ${data.error.message}`);
+        throw new Error(`Autopsy MCP error: ${data.error.message}`);
+    }
+    log("INFO", `<- ${method} OK`);
+    return data.result;
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:266-277`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L266-L277)
+
+[3] `McpException`의 오류 코드.
+
+```text
+    /** Unknown method or tool name. */
+    static final int ERR_METHOD_NOT_FOUND = -32601;
+    /** Missing or invalid parameter. */
+    static final int ERR_INVALID_PARAMS   = -32602;
+    /** Internal server error. */
+    static final int ERR_INTERNAL_ERROR   = -32603;
+
+    private final int jsonRpcCode;
+
+    /** Parameter-validation error (defaults to ERR_INVALID_PARAMS). */
+    McpException(String message) {
+        super(message);
+        this.jsonRpcCode = ERR_INVALID_PARAMS;
+    }
+
+    McpException(String message, int jsonRpcCode) {
+        super(message);
+        this.jsonRpcCode = jsonRpcCode;
+    }
+
+    /** Wraps a cause; defaults to ERR_INTERNAL_ERROR. */
+    McpException(String message, Throwable cause) {
+        super(message, cause);
+        this.jsonRpcCode = ERR_INTERNAL_ERROR;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpException.java:28-52`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpException.java#L28-L52)
+
+[4] 케이스가 없을 때의 처리.
+
+```text
+        // Tools that work regardless of whether a case is open
+        if ("get_server_status".equals(toolName)) {
+            return buildServerStatus();
+        }
+        if ("get_case_summary".equals(toolName) && queryService == null) {
+            return wrapWithCaseId(
+                Map.of("message", "No case is currently open in Autopsy."), null);
+        }
+
+        TskQueryService qs = queryService;
+        if (qs == null) {
+            throw new McpException(
+                "No case is currently open in Autopsy. Open a case first to use MCP tools.",
+                McpException.ERR_INTERNAL_ERROR);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:104-118`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L104-L118)
+
+[5] 요청 처리 중 예외가 처리기 밖으로 나오면 HTTP 500과 `data`를 담은 오류를 보낸다.
+
+```text
+    private void handleMcpRequest(Context ctx) {
+        try {
+            String requestBody = ctx.body();
+            String response = protocolHandler.handle(requestBody);
+            ctx.contentType("application/json").result(response);
+        } catch (Exception ex) {
+            logger.log(Level.SEVERE, "MCP protocol handler threw unexpectedly", ex);
+            String msg = ex.getMessage() != null ? ex.getMessage() : "Internal error";
+            Map<String, Object> errorDetail = new LinkedHashMap<>();
+            errorDetail.put("code",    McpProtocolHandler.ERR_INTERNAL_ERROR);
+            errorDetail.put("message", "Internal error");
+            errorDetail.put("data",    msg);
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("jsonrpc", "2.0");
+            envelope.put("error",   errorDetail);
+            envelope.put("id",      null);
+            String body;
+            try {
+                body = MAPPER.writeValueAsString(envelope);
+            } catch (Exception jsonEx) {
+                logger.log(Level.SEVERE, "Failed to serialize MCP error response", jsonEx);
+                body = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":" + McpProtocolHandler.ERR_INTERNAL_ERROR + ",\"message\":\"Internal error\"},\"id\":null}";
+            }
+            ctx.status(500).contentType("application/json").result(body);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-145`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L145)
+
+[6] 래퍼의 도구 호출 처리기는 모든 오류를 같은 머리말의 `isError` 결과로 바꾼다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+        return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+        };
+    } catch (err) {
+        log("ERROR", `tools/call ${toolName} failed: ${err.message}`);
+        return {
+            content: [{ type: "text", text: `Autopsy is not reachable: ${err.message}` }],
+            isError: true
+        };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-334`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L334)
+
+[7] `get_server_status`의 응답.
+
+```text
+    private Map<String, Object> buildServerStatus() {
+        TskQueryService qs = queryService;
+        boolean caseOpen = qs != null;
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("server", "autopsy-mcp");
+        status.put("status", "running");
+        status.put("caseOpen", caseOpen);
+        if (caseOpen) {
+            status.put("caseName", qs.getCaseName());
+        }
+        return status;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:151-162`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L151-L162)
+
+[8] (실행 확인) 설치본 `autopsy-mcp-stdio.exe`는 HTTP 서버가 `-32602` 오류 "accountId is required"를 돌려주자 "Autopsy is not reachable: Autopsy MCP error: accountId is required"를, HTTP 500을 돌려주자 "Autopsy is not reachable: Autopsy HTTP error 500. Is Autopsy running with a case open?"을 `isError: true`로 돌려주었고 오류 코드는 싣지 않았다.
+
+[9] MCP TypeScript SDK 1.27.1은 등록한 요청 스키마로 요청을 먼저 해석하고 예외에 `code`가 없으면 `-32603`으로 응답한다: [`src/shared/protocol.ts:1419-1422`](https://github.com/modelcontextprotocol/typescript-sdk/blob/4faa8c899c069a98f8a0c3f804ec1a50dc2bae64/src/shared/protocol.ts#L1419-L1422), [`src/shared/protocol.ts:816-823`](https://github.com/modelcontextprotocol/typescript-sdk/blob/4faa8c899c069a98f8a0c3f804ec1a50dc2bae64/src/shared/protocol.ts#L816-L823).
+
+[10] (실행 확인) 기준 커밋의 `autopsy-mcp-stdio.js`를 Node.js 24.21.0과 잠금 파일의 SDK 1.27.1로 실행해 `params`가 빈 `tools/call`과 `arguments`가 배열인 `tools/call`을 보내자 둘 다 zod 검사 문구를 담은 `-32603` 오류가 돌아왔다.
+
+[11] 연결하지 못하면 대체 도구 목록을 돌려준다.
+
+```javascript
+// Synthetic fallback tool returned when Autopsy is not reachable.
+// Keeps Claude Desktop from reporting the server as broken.
+const UNAVAILABLE_TOOL = {
+    name: "get_server_status",
+    description:
+        "Autopsy is not reachable. Make sure the Autopsy desktop application is running " +
+        "with a case open and that the MCP server is enabled. Then ask Claude to try again.",
+    inputSchema: { type: "object", properties: {} }
+};
+
+// Proxy tools/list straight through — tool definitions live only in Java.
+// If Autopsy is not running, return a single status tool so Claude Desktop
+// can report a useful message rather than failing to load the server entirely.
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+        const tools = await callJava("tools/list", {});
+        log("INFO", `tools/list returned ${tools.length} tools`);
+        return { tools };
+    } catch (err) {
+        log("ERROR", `tools/list failed — Autopsy not reachable: ${err.message}`);
+        return { tools: [UNAVAILABLE_TOOL] };
+    }
+});
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:289-311`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L289-L311)
+
+[12] (실행 확인) 토큰 파일이 없을 때 설치본 실행 파일은 `tools/list`에 설명이 "Autopsy is not reachable."로 시작하는 `get_server_status` 하나를 돌려주었다.
+도구 호출에는 "Autopsy is not reachable: No Autopsy case is currently open, or the MCP token file is missing. Please open a case in Autopsy first."를 `isError: true`로 돌려주었다.
+
+[13] 래퍼는 `tools` 능력만 선언하고 `listChanged`를 두지 않는다.
+
+```javascript
+const server = new Server(
+    { name: "autopsy", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+);
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:284-287`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L284-L287)
+
+[14] 토큰 파일이 없을 때의 오류 문구.
+
+```javascript
+function readToken() {
+    const tokenPath = path.join(MCP_DIR, "mcp-token");
+    try {
+        return fs.readFileSync(tokenPath, "utf8").trim();
+    } catch {
+        throw new Error(
+            "No Autopsy case is currently open, or the MCP token file is missing. " +
+            "Please open a case in Autopsy first."
+        );
+    }
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:225-235`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L225-L235)
+
+[15] 토큰 파일은 서버를 시작할 때 쓰고 멈출 때 지우며 케이스 처리는 질의 서비스만 바꾼다.
+
+```text
+    public void updateCase(Case openedCase) {
+        protocolHandler.setQueryService(
+                new TskQueryService(openedCase.getSleuthkitCase(), openedCase.getDisplayName()));
+    }
+
+    /**
+     * Called when a case is closed. Clears the query service so subsequent
+     * tool calls return a "no case open" error. The HTTP server keeps running
+     * and the token file remains valid so the STDIO wrapper stays connected.
+     */
+    public void clearCase() {
+        protocolHandler.clearQueryService();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:72-84`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L72-L84)
+
+```text
+        int port = readOrCreateConfigPort();
+        app.start("127.0.0.1", port); // localhost only — never 0.0.0.0
+        try {
+            writeTokenFile();
+        } catch (IOException ex) {
+            app.stop();
+            throw new RuntimeException("MCP server started but failed to write token file — aborting", ex);
+        }
+    }
+
+    public void stop() {
+        if (app != null) {
+            app.stop();
+            app = null;
+        }
+        deleteTokenFile();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:103-119`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L103-L119)
+
+[16] `get_case_summary`는 `SQLException`이 나면 아티팩트 수를 0으로 둔다.
+
+```text
+        final long[] artifactCount = {0};
+        skCase.getCaseDbAccessManager().select(
+            "COUNT(*) AS cnt FROM blackboard_artifacts",
+            rs -> {
+                try {
+                    if (rs.next()) {
+                        artifactCount[0] = rs.getLong("cnt");
+                    }
+                } catch (java.sql.SQLException ex) {
+                    // leave count at 0
+                }
+            });
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:347-358`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L347-L358)
+
+[17] 래퍼의 30초 시간 제한.
+
+```javascript
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
+
+    let res;
+    try {
+        res = await fetch(`${MCP_BASE_URL}/mcp`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ jsonrpc: "2.0", id: "1", method, params }),
+            signal: controller.signal
+        });
+    } catch (err) {
+        clearTimeout(timer);
+        if (err.name === "AbortError") {
+            const msg = `Autopsy MCP timed out after ${CALL_TIMEOUT_MS / 1000}s (${method})`;
+            log("ERROR", msg);
+            throw new Error(msg);
+        }
+        throw err;
+    }
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:241-263`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L241-L263)
+
+[18] (실행 확인) 설치본 실행 파일은 응답이 33초와 75초 늦는 호출을 시간 초과 없이 성공 결과로 돌려주었다.
+같은 기준 커밋 소스를 Node.js 24.21.0으로 실행하면 30초에 "Autopsy MCP timed out after 30s (tools/call)"를 `isError: true`로 돌려주었다.
+
+[19] 목록 도구는 질의 결과가 없으면 빈 목록을 돌려준다.
+
+```text
+        List<AbstractFile> files = skCase.findAllFilesWhere(whereClause);
+
+        List<Map<String, Object>> result = new ArrayList<>(files.size());
+        for (AbstractFile f : files) {
+            result.add(buildFileItem(f));
+        }
+        return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:492-498`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L492-L498)
+
+[20] 계정을 찾지 못하면 결과에 `error` 필드를 싣는다.
+
+```text
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (targetAdi == null) {
+            result.put("error", "Account not found: " + accountId);
+            return result;
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1155-1159`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1155-L1159)
+
+[21] `get_account_relationships`는 필수 인자가 없으면 `McpException`을 던진다.
+
+```text
+        if (accountId == null) {
+            throw new McpException("accountId is required");
+        }
+        if (accountTypeStr == null) {
+            throw new McpException("accountType is required");
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1134-1139`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1134-L1139)
+
+[22] 유형 조회는 `TskCoreException`만 처리하고 돌려받은 유형을 `null` 확인 없이 쓴다.
+
+```text
+        if (artifactTypeName != null) {
+            BlackboardArtifact.Type type;
+            try {
+                type = skCase.getBlackboard().getArtifactType(artifactTypeName);
+            } catch (TskCoreException ex) {
+                return Collections.emptyList(); // unknown type → no results
+            }
+            where.append(" AND artifacts.artifact_type_id = ").append(type.getTypeID());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:614-622`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L614-L622)
+
+Sleuth Kit 4.15.0의 `Blackboard.getArtifactType(String)`은 이름이 없으면 `null`을 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/Blackboard.java:383-404`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L383-L404).
+
+[23] `get_object_children`은 없는 객체에 `McpException`을 던진다.
+
+```text
+        Content content = skCase.getContentById(objectId);
+        if (content == null) {
+            throw new McpException("No object found with id " + objectId);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1202-1205`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1202-L1205)
+
+[24] `get_file_content`는 `getAbstractFileById`의 결과를 확인하지 않고 쓴다.
+
+```text
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:934-935`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L934-L935)
+
+Sleuth Kit 4.15.0의 `getAbstractFileById`는 파일이 없으면 `null`을 돌려준다: [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:6370-6385`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L6370-L6385).
+
+[25] `get_report_content`의 `null` 확인.
+
+```text
+        Report report = skCase.getReportById(reportId);
+        if (report == null) {
+            throw new McpException("No report found with id " + reportId);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1337-1340`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1337-L1340)
+
+[26] Sleuth Kit 4.15.0의 `getReportById`는 없는 ID에 `TskCoreException`을 던진다: [`bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java:13173-13212`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L13173-L13212).
+
+[27] `get_file_content`는 `objectId`가 없으면 `TskCoreException`을 던진다.
+
+```text
+    Map<String, Object> getFileContent(JsonNode args) throws TskCoreException {
+        long fileId  = args.path("objectId").asLong(-1);
+        if (fileId < 0) {
+            throw new TskCoreException("objectId is required");
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:920-924`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L920-L924)
+
+[28] 결과의 계정 유형은 표시 이름이다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1117`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1117), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1172`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1172), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1180`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1180).
+
+[29] `get_account_relationships`는 유형 이름과 대조한다.
+
+```text
+        for (AccountDeviceInstance adi : cm.getAccountDeviceInstancesWithRelationships(filter)) {
+            Account account = adi.getAccount();
+            if (account.getTypeSpecificID().equalsIgnoreCase(accountId)
+                    && account.getAccountType().getTypeName().equalsIgnoreCase(accountTypeStr)) {
+                targetAdi = adi;
+                break;
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (targetAdi == null) {
+            result.put("error", "Account not found: " + accountId);
+            return result;
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1146-1158`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1146-L1158)
+
+[30] Sleuth Kit 4.15.0의 계정 유형은 유형 이름과 표시 이름을 따로 가진다: [`bindings/java/src/org/sleuthkit/datamodel/Account.java:47-66`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Account.java#L47-L66).

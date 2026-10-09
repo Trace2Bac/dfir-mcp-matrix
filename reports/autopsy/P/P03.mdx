@@ -1,0 +1,117 @@
+---
+cell: P03
+details:
+- id: not_implemented
+---
+
+# P03 조사 진척 판단
+
+### 미구현
+
+**판단.** 서버는 무엇을 조회했는지나 무엇이 남았는지 기록하거나 응답에 싣지 않는다.
+도구 처리는 케이스 DB를 질의해 결과를 돌려줄 뿐 호출 내용을 저장하지 않는다 [1].
+Java 쪽은 잘못된 JSON, 예상하지 못한 예외, 포트 설정·토큰 파일 처리의 실패만 기록한다 [2][3].
+STDIO 래퍼의 `mcp-stdio.log`에는 `ERROR` 수준 줄만 남는다 [4].
+`get_case_summary`는 케이스 이름, 데이터 소스 수, 전체 파일 수, 아티팩트 수만 돌려준다 [5].
+ingest 모듈이 어느 데이터 소스에서 실행되었는지나 끝났는지를 돌려주는 도구는 없다 [6].
+`get_server_status`는 서버가 실행 중인지와 케이스가 열렸는지만 알린다 [7].
+그래서 수행한 범위와 완료 판단은 모델과 사용자에게 맡겨진다.
+
+### 근거
+
+[1] 도구 호출은 이름에 맞는 질의 메서드를 불러 결과를 감싸 돌려준다: [`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:100-142`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L100-L142).
+
+[2] Java 쪽 요청 처리는 잘못된 JSON과 예상하지 못한 오류만 기록한다.
+
+```text
+        } catch (JsonProcessingException ex) {
+            logger.log(Level.WARNING, "MCP request contained malformed JSON", ex);
+            return buildError(NullNode.getInstance(), ERR_PARSE_ERROR, "Parse error");
+        } catch (McpException ex) {
+            // Expected protocol-level errors (unknown method/tool, bad params, no case open)
+            // are client-visible in the response — no need to flood the Autopsy log.
+            return buildError(id, ex.getJsonRpcCode(), ex.getMessage());
+        } catch (Exception ex) {
+            logger.log(Level.SEVERE, "Unexpected error handling MCP request", ex);
+            return buildError(id, ERR_INTERNAL_ERROR, ex.getMessage());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:87-97`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L87-L97)
+
+[3] `McpServer`가 기록하는 경우다: [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:121-146`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L121-L146), [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:154-188`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L154-L188), [`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:215-221`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L215-L221).
+
+[4] 래퍼의 기록 함수는 `ERROR` 수준만 파일에 쓴다.
+
+```javascript
+function log(level, message) {
+    // Only ERROR level is persisted to disk. INFO/DEBUG calls are no-ops
+    // by design — they would be too noisy in production and are visible
+    // during development via a debugger or by temporarily removing this guard.
+    if (level !== "ERROR") return;
+    try {
+        // Rotate if the log has grown too large
+        try {
+            if (fs.statSync(LOG_PATH).size > MAX_LOG_BYTES) {
+                fs.renameSync(LOG_PATH, LOG_PATH + ".1");
+            }
+        } catch { /* file doesn't exist yet — that's fine */ }
+
+        const line = `${new Date().toISOString()} [${level}] ${message}\n`;
+        fs.appendFileSync(LOG_PATH, line, "utf8");
+    } catch { /* never let logging crash the process */ }
+}
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:75-91`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L75-L91)
+
+[5] `get_case_summary`가 돌려주는 값이다.
+
+```text
+    Map<String, Object> getCaseSummary() throws TskCoreException {
+        long totalFiles = skCase.countFilesWhere("1=1");
+
+        final long[] artifactCount = {0};
+        skCase.getCaseDbAccessManager().select(
+            "COUNT(*) AS cnt FROM blackboard_artifacts",
+            rs -> {
+                try {
+                    if (rs.next()) {
+                        artifactCount[0] = rs.getLong("cnt");
+                    }
+                } catch (java.sql.SQLException ex) {
+                    // leave count at 0
+                }
+            });
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("caseName", caseName);
+        summary.put("dataSources", skCase.getDataSources().size());
+        summary.put("totalFiles", totalFiles);
+        summary.put("totalArtifacts", artifactCount[0]);
+        return summary;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:344-366`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L344-L366)
+
+[6] 등록 도구 18개의 정의다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:66-338`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L66-L338).
+
+[7] `get_server_status`가 돌려주는 값이다.
+
+```text
+    private Map<String, Object> buildServerStatus() {
+        TskQueryService qs = queryService;
+        boolean caseOpen = qs != null;
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("server", "autopsy-mcp");
+        status.put("status", "running");
+        status.put("caseOpen", caseOpen);
+        if (caseOpen) {
+            status.put("caseName", qs.getCaseName());
+        }
+        return status;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:151-162`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L151-L162)

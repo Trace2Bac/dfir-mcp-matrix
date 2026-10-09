@@ -80,7 +80,7 @@ python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·�
 python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
 python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
 python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
-python tools/pilot.py new <서버> …        # 새 서버 원고의 틀(서버 머리, 시범 셀)을 만든다
+python tools/pilot.py new <서버> …        # 새 서버 원고의 틀(서버 개요, 시범 셀)을 만든다
 python tools/coverage.py <서버>          # reports/<서버>/coverage.mdx 머리말의 기능 목록으로 기능→셀 대응표(같은 파일 본문)를 만든다
 ```
 

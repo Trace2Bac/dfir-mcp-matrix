@@ -1,0 +1,626 @@
+---
+cell: T01
+details:
+- id: T01.01
+- id: T01.02
+- id: T01.06
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 이 방식은 Java HTTP 서버의 `TskQueryService`가 도구 인자를 읽는 단계에 적용된다 [1].
+STDIO 래퍼가 쓰는 MCP TypeScript SDK 1.27.1은 도구 호출 처리기를 부르기 전에 요청 구조를 검사한다 [2].
+`name`이 문자열이 아니거나 `arguments`가 객체가 아니면 SDK가 처리기를 부르지 않고 JSON-RPC 오류 `-32603`을 돌려준다 [2][3].
+이 검사를 통과한 `arguments`는 래퍼가 값을 검사하지 않고 그대로 HTTP 요청에 싣는다 [4].
+결과 수 인자 `limit`은 0 이하이거나 도구별 최댓값을 넘으면 최댓값이 아니라 기본값으로 바뀐다 [1].
+`query_files`·`query_data_artifacts`·`query_analysis_results`는 최댓값 500·기본값 50, `query_timeline`은 1,000·100, `get_communications_accounts`는 500·100이다 [1].
+`get_file_content`·`get_report_content`의 `maxBytes`는 0 이하이거나 1,048,576을 넘으면 65,536으로 바뀌고 음수 `offset`은 0으로 바뀐다 [5].
+`orderBy`는 정해 둔 8개 값만 정렬 구문으로 바꾸고 다른 값이면 정렬하지 않는다 [6].
+`knownState`는 `UNKNOWN`·`KNOWN`·`NOTABLE`·`BAD`만 조건으로 바꾼다 [7].
+`get_communications_accounts`의 `accountType`은 코드에 적은 20개 계정 유형만 조건으로 바꾼다 [8].
+`get_account_relationships`의 `accountType`은 목록과 대조하지 않고 계정 유형 이름과 대소문자 구별 없이 비교한다 [9].
+`artifactType`은 케이스 DB의 `blackboard_artifact_types`에서 같은 이름의 유형을 찾아 그 ID로 조건을 만든다 [10][11].
+문자열 인자는 `textOrNull`이 앞뒤 공백을 지우고 빈 문자열을 인자가 없는 것으로 본다 [12].
+기간 인자는 `parseTimeArg`가 `Instant.parse`로 바꾸고 길이가 10인 문자열에는 시작 경계면 `T00:00:00Z`, 끝 경계면 `T23:59:59Z`를 붙인다 [13].
+`Instant.parse`가 해석하지 못한 문자열은 예외를 내고 그 호출은 조건 질의 전에 JSON-RPC 오류 `-32603`으로 끝난다 [13][14].
+필수 인자는 도구마다 따로 확인한다.
+`get_account_relationships`는 `accountId`나 `accountType`이 없으면, `get_object_children`·`get_report_content`는 `objectId`가 없으면 `McpException`으로 오류 `-32602`를 돌려준다 [15][16].
+`get_file_content`는 `objectId`가 없거나 음수이면 `TskCoreException`을 내고 이 호출은 오류 `-32603`으로 끝난다 [17][14].
+이 오류 코드는 Java HTTP 응답의 값이다.
+STDIO 래퍼는 Java 오류의 `code`를 버리고 `message`만 담은 `isError` 글로 바꾸므로 MCP 클라이언트는 Java 쪽이 정한 오류 코드를 받지 않는다 [18].
+문자열 필터 값은 형식을 검사하지 않고 작은따옴표만 두 번 써서 SQL 조건에 넣는다 [19].
+
+**한계.** 입력 schema에 없는 인자 이름은 거부하지 않고 읽지 않은 채 둔다 [20].
+`arguments`가 없는 호출도 거부하지 않고 모든 인자를 기본값으로 처리해 실행한다 [20].
+숫자·논리값 인자는 Jackson의 변환 함수로 읽으므로 자료형이 다른 값도 거부하지 않는다 [21].
+숫자로 읽히지 않는 문자열은 `asLong()`에서 0이 되고 `asInt(기본값)`·`asLong(기본값)`에서 기본값이 된다 [21].
+예를 들어 `minSize`에 숫자가 아닌 문자열을 주면 `size >= 0` 조건이 만들어진다 [21][22].
+`"true"`가 아닌 문자열을 받은 `isDirectory`·`allocated`는 `false`가 되어 반대 조건이 적용된다 [21][22].
+`knownState`·`accountType`·`orderBy`가 정해 둔 값이 아니면 서버는 거부하지 않고 그 조건을 빼고 질의하며 응답에 조건을 뺐다는 표시를 하지 않는다 [6][7][8].
+`get_communications_accounts`가 응답에 싣는 계정 유형은 표시 이름이다 [23].
+그래서 그 값 가운데 `Credit Card`·`MessagingApp`을 이 도구의 `accountType`에 다시 넘기면 대조 목록의 이름과 맞지 않아 필터가 알림 없이 빠진다 [8][23][24].
+문자열 인자에 객체나 배열을 주면 `textOrNull`이 부르는 `asText()`가 빈 문자열을 돌려주므로 대부분의 필터는 알림 없이 빠진다 [12][25].
+`query_files`의 기간 인자 `modifiedAfter`·`modifiedBefore`·`createdAfter`·`createdBefore`는 다르게 처리된다 [26].
+이 인자들은 인자가 있는지만 보고 `parseTimeArg`에 대체값 0을 넘기므로 빈 문자열, `null`, 객체, 배열을 받으면 필터가 빠지지 않고 0을 기준으로 한 조건이 된다 [26][13].
+그래서 `*Before`는 시각이 0 이하인 파일만 고르고 `*After`는 시각이 0 이상인 모든 파일을 고른다 [26].
+기간의 시작이 끝보다 늦어도 서버는 거부하지 않고 도구마다 다른 결과를 낸다 [27].
+`query_timeline`은 Joda-Time 2.13.0의 `Interval`을 만들다 예외가 나 오류 `-32603`으로 끝나고 `summarize_timeline`은 0건을, `query_files`는 빈 목록을 돌려준다 [27][28].
+`artifactType`이 케이스 DB에 없는 이름이면 Sleuth Kit 4.15.0의 `getArtifactType`이 `null`을 돌려준다 [11].
+코드는 이 경우에 빈 목록을 돌려주려고 `TskCoreException`만 처리하므로 실제로는 `null`의 메서드를 부르다 실패해 오류 `-32603`이 된다 [10][14].
+`get_object_children`·`get_report_content`는 `objectId`가 빠졌는지만 보므로 `null`이나 숫자가 아닌 문자열을 받으면 0번 객체를 찾는다 [16][21].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 방식은 객체 ID를 받는 `get_object_children`에 적용된다 [16].
+`objectId`는 케이스 DB의 객체 ID이고 그 객체는 Autopsy 본체가 추가한 데이터 소스와 보고서, ingest 모듈이 남긴 파생물과 아티팩트 등이다 [29].
+MCP에는 객체를 등록하는 도구가 없고 서버가 따로 두는 ID 목록도 없다.
+`get_object_children`은 `getContentById`가 `null`을 돌려주면 자식 객체를 조회하기 전에 `No object found with id`로 거부한다 [16].
+
+객체 ID를 받는 다른 두 도구에는 이 검사가 없다.
+`get_report_content`의 코드에는 `report == null` 확인이 있다 [16].
+그러나 Sleuth Kit 4.15.0의 `getReportById`는 `reports` 표에 그 ID가 없으면 `null`을 돌려주지 않고 `No report found for id`로 `TskCoreException`을 낸다 [30].
+그래서 그 확인은 실행되지 않고 이 호출은 오류 `-32603`으로 끝난다 [16][14].
+`get_file_content`는 `getAbstractFileById`가 돌려준 값을 확인하지 않는다 [17].
+Sleuth Kit은 `tsk_files`에 그 ID가 없으면 `null`을 돌려주고 서버는 그 값의 크기를 읽다 실패해 오류 `-32603`을 돌려준다 [17][31][14].
+이때 오류 문구는 없는 ID라는 안내가 아니라 `NullPointerException`의 글이고 JRE 15부터 기본으로 켜진 자세한 NPE 글에는 `null`이었던 식이 적힌다 [32].
+`get_account_relationships`는 받은 `accountType`·`accountId`와 같은 계정을 관계가 있는 계정 목록에서 찾고 없으면 관계를 조회하지 않고 `error` 필드를 담은 정상 응답을 돌려준다 [9].
+데이터 소스를 고르는 `dataSourceId`는 있는지 확인하지 않는다 [33].
+없는 ID를 받으면 `query_data_artifacts`·`query_analysis_results`·`query_timeline`·`summarize_timeline`은 빈 결과나 0건을 돌려주고 `get_data_source_tree`는 빈 목록을 돌려준다 [33].
+음수 `dataSourceId`는 필터가 없는 것으로 처리되어 `query_data_artifacts`·`query_analysis_results`·`get_data_source_tree`가 모든 데이터 소스의 결과를 돌려준다 [33][34].
+
+### T01.06 고정 입력 경로 사용
+
+**구현.** 이 방식은 모든 도구에 적용된다.
+모델은 파일 경로를 넘기지 않고 도구는 지금 열린 케이스의 `SleuthkitCase` 하나로만 조회한다 [35].
+`get_file_content`는 `objectId`로 찾은 `AbstractFile`의 `read`로 내용을 읽는다 [17].
+Sleuth Kit 4.15.0의 `AbstractFile.read`는 읽는 곳을 셋 가운데 하나로 고른다 [36].
+수집 저장소에 있는 파일이고 케이스에 내용 제공자가 등록되어 있으면 그 제공자의 스트림을 읽는다 [36].
+로컬 경로가 등록된 파일이면 그 경로를 읽고 그 밖에는 데이터 소스 이미지에서 읽는다 [36].
+`get_report_content`는 `reports` 표의 `path`를 케이스 DB 폴더와 이은 경로의 파일을 읽는다 [30].
+이 경로들은 Autopsy 본체가 데이터 소스와 보고서를 케이스에 추가하거나 ingest 모듈이 파생물을 만들 때 정하고 MCP 도구는 바꾸지 않는다.
+
+### 근거
+
+[1] `limit`은 범위를 벗어나면 기본값으로 바뀐다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:380-383`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L380-L383), [`TskQueryService.java:603-604`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L603-L604), [`TskQueryService.java:984-987`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L984-L987), [`TskQueryService.java:1095-1096`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1095-L1096).
+
+[2] MCP TypeScript SDK 1.27.1의 `Protocol.setRequestHandler`는 처리기를 부르기 전에 요청을 schema로 해석한다: [`src/shared/protocol.ts:1419-1422`](https://github.com/modelcontextprotocol/typescript-sdk/blob/4faa8c899c069a98f8a0c3f804ec1a50dc2bae64/src/shared/protocol.ts#L1419-L1422).
+
+[3] (실행 확인) Node.js 24.21.0에서 기준 커밋의 `autopsy-mcp-stdio.js`에 `params`가 빈 `tools/call`과 `arguments`가 배열인 `tools/call`을 보내자 두 요청 모두 처리기에 닿지 않고 zod 문구를 담은 오류 `-32603`이 돌아왔다.
+
+[4] (실행 확인) 설치본 `autopsy-mcp-stdio.exe`에 인자 `{"x":1}`로 `tools/call`을 보내면 흉내 낸 HTTP 서버가 받은 요청의 `arguments`도 `{"x": 1}`이었다.
+래퍼 소스는 `request.params.arguments ?? {}`를 그대로 넘긴다.
+
+```javascript
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("INFO", `tools/call ${toolName}`);
+    try {
+        const result = await callJava("tools/call", {
+            name: toolName,
+            arguments: request.params.arguments ?? {}
+        });
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:316-323`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L316-L323)
+
+[5] `get_file_content`의 `maxBytes`와 `offset` 처리이고 `get_report_content`도 같은 값을 쓴다.
+
+```text
+        long offset   = args.path("offset").asLong(0);
+        int  maxBytes = args.path("maxBytes").asInt(65536);
+
+        // Cap at 1 MB; default to 64 KB
+        if (maxBytes <= 0 || maxBytes > 1_048_576) {
+            maxBytes = 65536;
+        }
+
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+
+        if (offset < 0) {
+            offset = 0;
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:926-939`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L926-L939)
+
+```text
+        long offset   = args.path("offset").asLong(0);
+        int  maxBytes = args.path("maxBytes").asInt(65536);
+        if (maxBytes <= 0 || maxBytes > 1_048_576) {
+            maxBytes = 65536;
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1331-1335`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1331-L1335)
+
+[6] `orderBy`는 정해 둔 값만 정렬 구문으로 바꾼다.
+
+```text
+        String orderBy = textOrNull(args, "orderBy");
+        String orderClause = switch (orderBy == null ? "" : orderBy.toLowerCase()) {
+            case "size_desc"     -> " ORDER BY size DESC";
+            case "size_asc"      -> " ORDER BY size ASC";
+            case "name_asc"      -> " ORDER BY name ASC";
+            case "name_desc"     -> " ORDER BY name DESC";
+            case "modified_desc" -> " ORDER BY mtime DESC";
+            case "modified_asc"  -> " ORDER BY mtime ASC";
+            case "created_desc"  -> " ORDER BY crtime DESC";
+            case "created_asc"   -> " ORDER BY crtime ASC";
+            default              -> "";
+        };
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:476-487`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L476-L487)
+
+[7] `knownState`는 바꾸지 못한 값이면 조건을 더하지 않는다.
+
+```text
+        String knownStateStr = textOrNull(args, "knownState");
+        if (knownStateStr != null) {
+            TskData.FileKnown knownVal = parseKnownState(knownStateStr);
+            if (knownVal != null) {
+                conditions.add("known = " + knownVal.getFileKnownValue());
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:455-461`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L455-L461)
+
+```text
+    private static TskData.FileKnown parseKnownState(String value) {
+        switch (value.toUpperCase()) {
+            case "KNOWN":   return TskData.FileKnown.KNOWN;
+            case "NOTABLE":
+            case "BAD":     return TskData.FileKnown.BAD;
+            case "UNKNOWN": return TskData.FileKnown.UNKNOWN;
+            default:        return null;
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1554-1562`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1554-L1562)
+
+[8] `accountType`은 코드의 목록에서 찾지 못하면 필터를 더하지 않는다.
+
+```text
+        String accountTypeStr = textOrNull(args, "accountType");
+
+        CommunicationsFilter filter = new CommunicationsFilter();
+        if (accountTypeStr != null) {
+            Account.Type type = lookupAccountType(accountTypeStr);
+            if (type != null) {
+                filter.addAndFilter(new CommunicationsFilter.AccountTypeFilter(
+                        Collections.singleton(type)));
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1098-1107`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1098-L1107)
+
+```text
+    private static Account.Type lookupAccountType(String name) {
+        switch (name.toUpperCase()) {
+            case "CREDIT_CARD":   return Account.Type.CREDIT_CARD;
+            case "DEVICE":        return Account.Type.DEVICE;
+            case "EMAIL":         return Account.Type.EMAIL;
+            case "FACEBOOK":      return Account.Type.FACEBOOK;
+            case "IMO":           return Account.Type.IMO;
+            case "INSTAGRAM":     return Account.Type.INSTAGRAM;
+            case "LINE":          return Account.Type.LINE;
+            case "MESSAGING_APP": return Account.Type.MESSAGING_APP;
+            case "PHONE":         return Account.Type.PHONE;
+            case "SHAREIT":       return Account.Type.SHAREIT;
+            case "SKYPE":         return Account.Type.SKYPE;
+            case "TANGO":         return Account.Type.TANGO;
+            case "TEXTNOW":       return Account.Type.TEXTNOW;
+            case "THREEMA":       return Account.Type.THREEMA;
+            case "TWITTER":       return Account.Type.TWITTER;
+            case "VIBER":         return Account.Type.VIBER;
+            case "WEBSITE":       return Account.Type.WEBSITE;
+            case "WHATSAPP":      return Account.Type.WHATSAPP;
+            case "XENDER":        return Account.Type.XENDER;
+            case "ZAPYA":         return Account.Type.ZAPYA;
+            default:              return null;
+        }
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1525-1549`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1525-L1549)
+
+[9] `get_account_relationships`는 계정을 찾지 못하면 `error` 필드를 담아 돌려준다.
+
+```text
+        // Find the target AccountDeviceInstance by exact account ID and type
+        AccountDeviceInstance targetAdi = null;
+        for (AccountDeviceInstance adi : cm.getAccountDeviceInstancesWithRelationships(filter)) {
+            Account account = adi.getAccount();
+            if (account.getTypeSpecificID().equalsIgnoreCase(accountId)
+                    && account.getAccountType().getTypeName().equalsIgnoreCase(accountTypeStr)) {
+                targetAdi = adi;
+                break;
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (targetAdi == null) {
+            result.put("error", "Account not found: " + accountId);
+            return result;
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1144-1159`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1144-L1159)
+
+[10] `artifactType`은 케이스 DB의 유형 이름으로 찾고 `TskCoreException`만 처리한다.
+
+```text
+        if (artifactTypeName != null) {
+            BlackboardArtifact.Type type;
+            try {
+                type = skCase.getBlackboard().getArtifactType(artifactTypeName);
+            } catch (TskCoreException ex) {
+                return Collections.emptyList(); // unknown type → no results
+            }
+            where.append(" AND artifacts.artifact_type_id = ").append(type.getTypeID());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:614-622`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L614-L622)
+
+[11] Sleuth Kit 4.15.0의 `Blackboard.getArtifactType(String)`은 이름이 없으면 `null`을 돌려준다: [`Blackboard.java:383-404`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Blackboard.java#L383-L404).
+
+[12] 문자열 인자를 읽는 함수다.
+
+```text
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode child = node.path(field);
+        if (child.isMissingNode() || child.isNull()) {
+            return null;
+        }
+        String text = child.asText().trim();
+        return text.isEmpty() ? null : text;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1492-1499`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1492-L1499)
+
+[13] 기간 인자를 바꾸는 함수다.
+
+```text
+    private static long parseTimeArg(JsonNode args, String field, Long fallback) {
+        String s = textOrNull(args, field);
+        if (s == null) {
+            return fallback != null ? fallback : 0L;
+        }
+        // Accept date-only strings (e.g. "2012-03-02").
+        // End-boundary fields (endTime, *Before) expand to 23:59:59 so the full
+        // day is included; start-boundary fields expand to 00:00:00 (midnight UTC).
+        if (s.length() == 10) {
+            boolean isEndBoundary = "endTime".equals(field) || field.endsWith("Before");
+            s = s + (isEndBoundary ? "T23:59:59Z" : "T00:00:00Z");
+        }
+        return Instant.parse(s).getEpochSecond();
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1438-1451`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1438-L1451)
+
+[14] `McpException`이 아닌 예외는 `-32603`과 예외 글로 응답한다.
+
+```text
+        } catch (JsonProcessingException ex) {
+            logger.log(Level.WARNING, "MCP request contained malformed JSON", ex);
+            return buildError(NullNode.getInstance(), ERR_PARSE_ERROR, "Parse error");
+        } catch (McpException ex) {
+            // Expected protocol-level errors (unknown method/tool, bad params, no case open)
+            // are client-visible in the response — no need to flood the Autopsy log.
+            return buildError(id, ex.getJsonRpcCode(), ex.getMessage());
+        } catch (Exception ex) {
+            logger.log(Level.SEVERE, "Unexpected error handling MCP request", ex);
+            return buildError(id, ERR_INTERNAL_ERROR, ex.getMessage());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:87-97`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L87-L97)
+
+[15] `get_account_relationships`의 필수 인자 확인이다.
+
+```text
+        String accountTypeStr = textOrNull(args, "accountType");
+        String accountId      = textOrNull(args, "accountId");
+
+        if (accountId == null) {
+            throw new McpException("accountId is required");
+        }
+        if (accountTypeStr == null) {
+            throw new McpException("accountType is required");
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1131-1139`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1131-L1139)
+
+[16] `get_object_children`과 `get_report_content`의 `objectId` 확인과 조회다.
+
+```text
+        if (args.path("objectId").isMissingNode()) {
+            throw new McpException("objectId is required");
+        }
+        long objectId = args.path("objectId").asLong();
+
+        Content content = skCase.getContentById(objectId);
+        if (content == null) {
+            throw new McpException("No object found with id " + objectId);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1197-1205`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1197-L1205)
+
+```text
+        if (args.path("objectId").isMissingNode()) {
+            throw new McpException("objectId is required");
+        }
+        long reportId = args.path("objectId").asLong();
+        long offset   = args.path("offset").asLong(0);
+        int  maxBytes = args.path("maxBytes").asInt(65536);
+        if (maxBytes <= 0 || maxBytes > 1_048_576) {
+            maxBytes = 65536;
+        }
+
+        Report report = skCase.getReportById(reportId);
+        if (report == null) {
+            throw new McpException("No report found with id " + reportId);
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1327-1340`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1327-L1340)
+
+[17] `get_file_content`는 `objectId`를 확인한 뒤 찾은 파일의 크기를 바로 읽는다.
+
+```text
+        long fileId  = args.path("objectId").asLong(-1);
+        if (fileId < 0) {
+            throw new TskCoreException("objectId is required");
+        }
+
+        long offset   = args.path("offset").asLong(0);
+        int  maxBytes = args.path("maxBytes").asInt(65536);
+
+        // Cap at 1 MB; default to 64 KB
+        if (maxBytes <= 0 || maxBytes > 1_048_576) {
+            maxBytes = 65536;
+        }
+
+        AbstractFile file = skCase.getAbstractFileById(fileId);
+        long fileSize = file.getSize();
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:921-935`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L921-L935)
+
+[18] 래퍼는 Java 오류의 `message`만 꺼내 `isError` 글을 만든다.
+
+```javascript
+    const data = await res.json();
+    if (data.error) {
+        log("ERROR", `<- ${method} MCP error: ${data.error.message}`);
+        throw new Error(`Autopsy MCP error: ${data.error.message}`);
+    }
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:271-275`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L271-L275)
+
+```javascript
+    } catch (err) {
+        log("ERROR", `tools/call ${toolName} failed: ${err.message}`);
+        return {
+            content: [{ type: "text", text: `Autopsy is not reachable: ${err.message}` }],
+            isError: true
+        };
+    }
+```
+
+[`Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js:327-333`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Tools/autopsy-mcp-stdio/autopsy-mcp-stdio.js#L327-L333)
+
+[19] 문자열 값은 작은따옴표만 두 번 쓴다.
+
+```text
+    private static String escapeSql(String value) {
+        return value.replace("'", "''");
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1509-1511`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1509-L1511)
+
+[20] 도구 이름과 `arguments`를 꺼내 그대로 질의 메서드에 넘긴다.
+
+```text
+    private Object dispatchToolCall(JsonNode params) throws Exception {
+        String toolName = params.path("name").asText();
+        JsonNode args = params.path("arguments");
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java:100-102`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpProtocolHandler.java#L100-L102)
+
+[21] Jackson 2.18.2의 `TextNode`는 숫자로 읽지 못하면 기본값을 돌려주고([`node/TextNode.java:126-133`](https://github.com/FasterXML/jackson-databind/blob/287af92705039b2afaa5ce2680026a3f6c25a8e9/src/main/java/com/fasterxml/jackson/databind/node/TextNode.java#L126-L133)) 인자 없는 `asLong()`·`asBoolean()`의 기본값은 0과 `false`다([`JsonNode.java:687-689`](https://github.com/FasterXML/jackson-databind/blob/287af92705039b2afaa5ce2680026a3f6c25a8e9/src/main/java/com/fasterxml/jackson/databind/JsonNode.java#L687-L689), [`JsonNode.java:743-745`](https://github.com/FasterXML/jackson-databind/blob/287af92705039b2afaa5ce2680026a3f6c25a8e9/src/main/java/com/fasterxml/jackson/databind/JsonNode.java#L743-L745)).
+`TextNode.asBoolean`은 다듬은 값이 `"true"`일 때만 `true`다([`node/TextNode.java:112-122`](https://github.com/FasterXML/jackson-databind/blob/287af92705039b2afaa5ce2680026a3f6c25a8e9/src/main/java/com/fasterxml/jackson/databind/node/TextNode.java#L112-L122)).
+
+[22] `query_files`는 크기와 논리값 인자를 변환 함수로 읽어 조건을 만든다.
+
+```text
+        if (!args.path("minSize").isMissingNode()) {
+            conditions.add("size >= " + args.path("minSize").asLong());
+        }
+        if (!args.path("maxSize").isMissingNode()) {
+            conditions.add("size <= " + args.path("maxSize").asLong());
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:411-416`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L411-L416)
+
+```text
+        if (!args.path("isDirectory").isMissingNode()) {
+            boolean isDir = args.path("isDirectory").asBoolean();
+            conditions.add("dir_type = " + (isDir ? TskData.TSK_FS_NAME_TYPE_ENUM.DIR.getValue()
+                                                   : TskData.TSK_FS_NAME_TYPE_ENUM.REG.getValue()));
+        }
+
+        // --- allocated / unallocated ---
+        if (!args.path("allocated").isMissingNode()) {
+            boolean alloc = args.path("allocated").asBoolean();
+            conditions.add("dir_flags = " + (alloc ? TskData.TSK_FS_NAME_FLAG_ENUM.ALLOC.getValue()
+                                                    : TskData.TSK_FS_NAME_FLAG_ENUM.UNALLOC.getValue()));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:441-452`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L441-L452)
+
+[23] `get_communications_accounts`는 계정 유형의 표시 이름을 싣는다.
+
+```text
+            Map<String, Object> item = new LinkedHashMap<>();
+            Account account = adi.getAccount();
+            item.put("accountType",        account.getAccountType().getDisplayName());
+            item.put("accountId",          account.getTypeSpecificID());
+            item.put("deviceId",           adi.getDeviceId());
+            item.put("relationshipCount",  cm.getRelationshipSourcesCount(adi, new CommunicationsFilter()));
+            result.add(item);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1115-1121`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1115-L1121)
+
+[24] Sleuth Kit 4.15.0의 계정 유형 이름과 표시 이름이다: [`Account.java:47-68`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/Account.java#L47-L68).
+
+[25] Jackson 2.18.2의 `ContainerNode.asText()`는 객체·배열 값에 빈 문자열을 돌려준다: [`node/ContainerNode.java:41`](https://github.com/FasterXML/jackson-databind/blob/287af92705039b2afaa5ce2680026a3f6c25a8e9/src/main/java/com/fasterxml/jackson/databind/node/ContainerNode.java#L41).
+
+[26] `query_files`의 기간 인자는 인자가 있는지만 보고 대체값 0으로 바꾼다.
+
+```text
+        // --- mtime ---
+        if (!args.path("modifiedAfter").isMissingNode()) {
+            conditions.add("mtime >= " + parseTimeArg(args, "modifiedAfter", 0L));
+        }
+        if (!args.path("modifiedBefore").isMissingNode()) {
+            conditions.add("mtime <= " + parseTimeArg(args, "modifiedBefore", 0L));
+        }
+
+        // --- crtime (birth/creation time) ---
+        if (!args.path("createdAfter").isMissingNode()) {
+            conditions.add("crtime >= " + parseTimeArg(args, "createdAfter", 0L));
+        }
+        if (!args.path("createdBefore").isMissingNode()) {
+            conditions.add("crtime <= " + parseTimeArg(args, "createdBefore", 0L));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:418-432`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L418-L432)
+
+[27] 두 타임라인 도구는 기간을 확인하지 않고 구간을 만들거나 집계를 부른다.
+
+```text
+        TimelineManager tm = skCase.getTimelineManager();
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        Interval interval = new Interval(startEpoch * 1000L, (endEpoch + 1) * 1000L, DateTimeZone.UTC);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:989-993`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L989-L993)
+
+```text
+        TimelineManager tm = skCase.getTimelineManager();
+        long startEpoch = parseTimeArg(args, "startTime", tm.getMinEventTime());
+        long endEpoch   = parseTimeArg(args, "endTime",   tm.getMaxEventTime());
+
+        TimelineFilter.RootFilter filter = buildTimelineFilter(args);
+
+        Map<TimelineEventType, Long> counts = tm.countEventsByType(
+                startEpoch, endEpoch, filter, TimelineEventType.HierarchyLevel.CATEGORY);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1023-1030`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1023-L1030)
+
+Sleuth Kit 4.15.0의 `countEventsByType`은 `time >= 시작 AND time < 끝`으로 센다: [`TimelineManager.java:1173-1180`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TimelineManager.java#L1173-L1180).
+
+[28] Joda-Time 2.13.0의 `Interval`은 끝이 시작보다 앞이면 `IllegalArgumentException`을 낸다: [`Interval`](https://www.joda.org/joda-time/apidocs/org/joda/time/Interval.html#%3Cinit%3E(long,long,org.joda.time.DateTimeZone)).
+
+[29] 도구 설명은 객체 트리에 파일, 파생물(derived file), 아티팩트, 이미지, 볼륨 시스템, 볼륨, 파일 시스템이 있다고 적는다.
+
+```text
+            toolWithNote("get_object_children",
+                "Return the parent and children of any object in the case database by its object ID. " +
+                "All TSK objects (files, directories, artifacts, images, volume systems, volumes, " +
+                "file systems) share a common parent-child hierarchy. A file's children may include " +
+                "both derived files and blackboard artifacts. An image's children include volume systems " +
+                "and file systems. Use this to navigate the object tree starting from any known ID. " +
+                "Each child entry includes its objectId, objectType, and type-specific summary fields " +
+                "(name/path/size for files; artifactType/attributes for artifacts; fsType for file " +
+                "systems; etc.).",
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:303-311`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L303-L311)
+
+[30] Sleuth Kit 4.15.0의 `getReportById`는 `reports` 표의 `path`를 케이스 DB 폴더와 잇고 행이 없으면 예외를 낸다: [`SleuthkitCase.java:13173-13209`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L13173-L13209).
+
+[31] Sleuth Kit 4.15.0의 `getAbstractFileById`는 파일이 없으면 `null`을 돌려준다고 적는다: [`SleuthkitCase.java:6370-6385`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L6370-L6385).
+
+[32] JDK 15부터 자세한 NPE 글 옵션 `ShowCodeDetailsInExceptionMessages`가 기본으로 켜졌다: [JEP 358](https://openjdk.org/jeps/358), [JDK-8233014](https://bugs.openjdk.org/browse/JDK-8233014).
+
+[33] `dataSourceId`는 조건에만 쓰이고 목록과 대조되지 않는다: [`TskQueryService.java:609-625`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L609-L625), [`TskQueryService.java:777-792`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L777-L792), [`TskQueryService.java:1408-1412`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1408-L1412).
+
+[34] `get_data_source_tree`도 0 이상인 `dataSourceId`만 필터로 쓴다.
+
+```text
+    Object getDataSourceTree(JsonNode args) throws TskCoreException {
+        long filterDsId = args.path("dataSourceId").isMissingNode() ? -1
+                        : args.path("dataSourceId").asLong();
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Content ds : skCase.getDataSources()) {
+            if (filterDsId >= 0 && ds.getId() != filterDsId) {
+                continue;
+            }
+            result.add(buildDataSourceTreeNode(ds));
+        }
+
+        // If a specific ID was requested, unwrap the single result
+        if (filterDsId >= 0 && result.size() == 1) {
+            return result.get(0);
+        }
+        return result;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:776-793`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L776-L793)
+
+[35] 질의 서비스는 열린 케이스의 `SleuthkitCase`로 만들어진다.
+
+```text
+    public void updateCase(Case openedCase) {
+        protocolHandler.setQueryService(
+                new TskQueryService(openedCase.getSleuthkitCase(), openedCase.getDisplayName()));
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/McpServer.java:72-75`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/McpServer.java#L72-L75)
+
+```text
+/**
+ * All TSK Java API calls live here. Nothing else touches SleuthkitCase directly.
+ * Accepts strongly-typed or JSON-parsed parameters; returns plain Map/List results
+ * that Jackson can serialize directly into the MCP JSON-RPC response.
+ */
+class TskQueryService {
+
+    private final SleuthkitCase skCase;
+    private final String caseName;
+
+    TskQueryService(SleuthkitCase skCase, String caseName) {
+        this.skCase = skCase;
+        this.caseName = caseName;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:40-53`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L40-L53)
+
+[36] Sleuth Kit 4.15.0의 `AbstractFile.read`는 내용 제공자 스트림, 로컬 경로, 하위 클래스의 읽기(이미지) 가운데 하나를 쓰고 내용 제공자는 수집 저장소 파일에만 쓴다: [`AbstractFile.java:1131-1141`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L1131-L1141), [`AbstractFile.java:239`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/AbstractFile.java#L239).

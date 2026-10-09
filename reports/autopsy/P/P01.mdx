@@ -1,0 +1,133 @@
+---
+cell: P01
+details:
+- id: not_implemented
+---
+
+# P01 분석 방법 적합성 확인
+
+### 미구현
+
+**판단.** MCP 도구는 증거 형식이나 OS를 판별하지 않고 Autopsy 본체가 케이스 DB에 이미 쓴 결과를 조회한다 [1].
+`get_data_source_tree`가 싣는 데이터 소스 종류, 이미지 형식, 볼륨 시스템 형식, 파일 시스템 형식은 케이스 DB 객체에서 읽은 값이다 [2].
+`get_data_source_tree`는 데이터 소스가 `Image` 객체이면 볼륨 시스템과 파일 시스템을 따라 내려가고 그 밖의 객체이면 빈 목록을 싣는다 [3].
+이 분기는 케이스 DB의 객체 종류에 따라 응답 구조를 고를 뿐 분석 방법을 고르지 않는다.
+`get_file_content`는 파일의 MIME 형식이나 확장자를 보지 않고 읽은 바이트를 모두 UTF-8로 해석한다 [4].
+`list_reports`와 `get_report_content`는 보고서 경로가 `.html`·`.htm`·`.xhtml`로 끝나면 `contentType`을 `text/html`로, 그 밖에는 `text/plain`으로 적는다 [5].
+이 값은 응답에 붙는 표시이고 `get_report_content`는 두 형식을 같은 방식으로 읽어 UTF-8로 해석한다 [6].
+`query_data_artifacts`·`query_analysis_results`·`get_communications_accounts`의 도구 설명은 고를 수 있는 유형 이름을 늘어놓을 뿐이다 [7].
+서버는 이 유형을 증거 형식이나 OS와 대조하지 않는다 [7].
+
+### 근거
+
+[1] 도구 처리는 Sleuth Kit Java API로 케이스 DB를 조회하는 `TskQueryService` 한 곳에 있다.
+
+```text
+/**
+ * All TSK Java API calls live here. Nothing else touches SleuthkitCase directly.
+ * Accepts strongly-typed or JSON-parsed parameters; returns plain Map/List results
+ * that Jackson can serialize directly into the MCP JSON-RPC response.
+ */
+class TskQueryService {
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:40-45`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L40-L45)
+
+[2] 형식 값은 데이터 소스·볼륨 시스템·파일 시스템 객체의 메서드에서 읽는다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:724-765`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L724-L765), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:825-872`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L825-L872).
+
+[3] 데이터 소스 객체의 종류로 하위 구조를 따라갈지 정한다.
+
+```text
+    private Map<String, Object> buildDataSourceTreeNode(Content ds) throws TskCoreException {
+        Map<String, Object> node = buildDataSourceItem(ds);
+
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            List<Map<String, Object>> vsNodes = new ArrayList<>();
+
+            for (VolumeSystem vs : image.getVolumeSystems()) {
+                vsNodes.add(buildVolumeSystemNode(vs));
+            }
+
+            // Images may also have file systems directly (no volume system layer)
+            List<Map<String, Object>> directFsNodes = new ArrayList<>();
+            for (FileSystem fs : image.getFileSystems()) {
+                directFsNodes.add(buildFileSystemNode(fs));
+            }
+
+            node.put("volumeSystems", vsNodes);
+            // Only include fileSystems at the image level when there is no volume system.
+            // When volume systems exist, file systems are already nested inside their volumes.
+            node.put("fileSystems", vsNodes.isEmpty() ? directFsNodes : Collections.emptyList());
+        } else {
+            // LocalFilesDataSource / other — no storage sub-structure
+            node.put("volumeSystems", Collections.emptyList());
+            node.put("fileSystems", Collections.emptyList());
+        }
+
+        return node;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:795-823`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L795-L823)
+
+[4] 파일 내용을 형식과 관계없이 UTF-8로 해석한다.
+
+```text
+        // Decode as UTF-8, replacing undecodable bytes with '?'
+        // REPLACE mode should never throw, but decode() declares CharacterCodingException.
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        CharBuffer chars;
+        try {
+            chars = decoder.decode(ByteBuffer.wrap(buf));
+        } catch (java.nio.charset.CharacterCodingException ex) {
+            // Cannot happen with REPLACE policy; fall back to lossy Latin-1 conversion
+            chars = CharBuffer.wrap(new String(buf, StandardCharsets.ISO_8859_1));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:955-966`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L955-L966)
+
+[5] 보고서의 `contentType`은 경로 끝 글자로만 정한다.
+
+```text
+    private static String guessReportTypeByExtension(String path) {
+        String p = path.toLowerCase();
+        if (p.endsWith(".html") || p.endsWith(".htm") || p.endsWith(".xhtml")) {
+            return "text/html";
+        }
+        return "text/plain";
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1501-1507`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1501-L1507)
+
+[6] 보고서 내용도 형식과 관계없이 같은 방식으로 읽어 UTF-8로 해석한다.
+
+```text
+        long available = fileSize - offset;
+        int  toRead    = (int) Math.min(maxBytes, available);
+        boolean truncated = available > maxBytes;
+
+        byte[] buf = new byte[toRead];
+        int bytesRead = report.read(buf, offset, toRead);
+        if (bytesRead < toRead) {
+            buf = java.util.Arrays.copyOf(buf, Math.max(bytesRead, 0));
+        }
+
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        CharBuffer chars;
+        try {
+            chars = decoder.decode(ByteBuffer.wrap(buf));
+        } catch (java.nio.charset.CharacterCodingException ex) {
+            chars = CharBuffer.wrap(new String(buf, StandardCharsets.ISO_8859_1));
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:1363-1381`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L1363-L1381)
+
+[7] 유형 이름을 늘어놓는 도구 설명이다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:109-158`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L109-L158), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:167-193`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L167-L193), [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:267-273`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L267-L273).

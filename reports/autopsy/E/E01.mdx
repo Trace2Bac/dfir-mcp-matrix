@@ -1,0 +1,117 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** MCP 서버는 증거를 받거나 등록하는 도구를 두지 않는다 [1].
+증거를 케이스에 더하는 일은 Autopsy 본체가 데이터 소스 추가로 한다.
+본체는 그때 데이터 소스의 정보를 케이스 DB에 쓴다 [2].
+MCP 도구는 열린 케이스의 케이스 DB를 조회할 뿐 증거 목록이나 등록 정보를 따로 남기지 않는다 [1].
+
+MCP 도구 가운데 등록 정보를 조회해 돌려주는 도구는 `query_data_sources`, `get_hosts`, `get_data_source_tree`다 [2][3][4].
+`query_data_sources`는 케이스 DB의 데이터 소스마다 `objectId`, 이름, 형식, 크기, 시간대, `deviceId`, 추가 시각 `addedDate`를 싣는다 [2].
+디스크 이미지이면 이미지 형식, 섹터 크기, 이미지 파일 경로 `paths`, 수집 해시, 수집 도구 정보를 함께 싣는다 [5].
+`get_hosts`는 호스트마다 그 호스트에 속한 데이터 소스를 같은 항목으로 싣고 `get_data_source_tree`도 트리의 맨 위 마디에 같은 항목을 싣는다 [3][4].
+이 값은 본체가 데이터 소스를 추가할 때 쓴 값이고 MCP 코드는 읽기만 한다 [2].
+Sleuth Kit 4.15.0에서 추가 시각 열을 채우는 곳은 `SleuthkitCase.addImage`뿐이다 [6].
+`TskCaseDbBridge.addImageToDb`와 `SleuthkitCase.addLocalFilesDataSource`는 이 열을 비워 둔다 [6].
+이 열이 비어 있으면 `getDateAdded`가 0을 돌려주고 MCP 코드는 `addedDate`를 `null`로 싣는다 [2][7].
+등록한 주체를 담는 항목은 응답에 없다 [2][5].
+
+### 근거
+
+[1] MCP 도구 18개는 모두 케이스 DB를 조회하거나 파일·보고서 내용을 읽는 도구다: [`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:66-338`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L66-L338).
+
+[2] 데이터 소스 항목의 공통 필드와 추가 시각을 읽는 처리다.
+주석은 추가 시각을 쓰는 곳이 `SleuthkitCase`의 등록 문 하나라고 적는다.
+
+```text
+    private Map<String, Object> buildDataSourceItem(Content ds) throws TskCoreException {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("objectId", ds.getId());
+        item.put("name", ds.getName());
+        item.put("type", ds.getClass().getSimpleName());
+        item.put("size", ds.getSize());
+
+        if (ds instanceof DataSource) {
+            DataSource dataSource = (DataSource) ds;
+            item.put("timezone", dataSource.getTimeZone());
+            item.put("deviceId", dataSource.getDeviceId());
+            // added_date_time is always stored as Java milliseconds via new Date().getTime()
+            // (sole write site: SleuthkitCase.java INSERT_DATA_SOURCE_INFO) — divide by 1000 for epoch seconds
+            try {
+                Long addedMs = dataSource.getDateAdded();
+                item.put("addedDate", addedMs != null && addedMs > 0 ? epochToIso(addedMs / 1000) : null);
+            } catch (TskCoreException ex) {
+                item.put("addedDate", null);
+            }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:724-743`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L724-L743)
+
+[3] `get_hosts`는 호스트마다 데이터 소스 항목을 싣는다.
+
+```text
+    List<Map<String, Object>> getHosts() throws TskCoreException {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Host host : skCase.getHostManager().getAllHosts()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", host.getHostId());
+            item.put("name", host.getName());
+
+            List<Map<String, Object>> dataSources = new ArrayList<>();
+            for (DataSource ds : skCase.getHostManager().getDataSourcesForHost(host)) {
+                dataSources.add(buildDataSourceItem((Content) ds));
+            }
+            item.put("dataSources", dataSources);
+            result.add(item);
+        }
+        return result;
+    }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:691-706`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L691-L706)
+
+[4] `get_data_source_tree`는 데이터 소스 항목을 맨 위 마디로 쓴다.
+
+```text
+    private Map<String, Object> buildDataSourceTreeNode(Content ds) throws TskCoreException {
+        Map<String, Object> node = buildDataSourceItem(ds);
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:795-796`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L795-L796)
+
+[5] 디스크 이미지이면 이미지 파일 경로와 수집 해시, 수집 도구 정보를 더한다.
+
+```text
+        if (ds instanceof Image) {
+            Image image = (Image) ds;
+            item.put("imageType", image.getType().name());
+            item.put("sectorSize", image.getSsize());
+            item.put("paths", List.of(image.getPaths()));
+            try { item.put("md5", image.getMd5()); }
+            catch (TskCoreException ex) { item.put("md5", null); }
+            try { item.put("sha1", image.getSha1()); }
+            catch (TskCoreException ex) { item.put("sha1", null); }
+            try { item.put("sha256", image.getSha256()); }
+            catch (TskCoreException ex) { item.put("sha256", null); }
+            try { item.put("acquisitionDetails", image.getAcquisitionDetails()); }
+            catch (TskCoreException ex) { item.put("acquisitionDetails", null); }
+            try { item.put("acquisitionToolName", image.getAcquisitionToolName()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolName", null); }
+            try { item.put("acquisitionToolVersion", image.getAcquisitionToolVersion()); }
+            catch (TskCoreException ex) { item.put("acquisitionToolVersion", null); }
+        }
+```
+
+[`Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java:745-762`](https://github.com/sleuthkit/autopsy/blob/cb3dacdcad67abe7cf863c74f10dcdb8e25a5c21/Core/src/org/sleuthkit/autopsy/mcp/TskQueryService.java#L745-L762)
+
+[6] Sleuth Kit 4.15.0에서 `data_source_info`에 행을 넣는 세 곳 가운데 `added_date_time`을 넣는 곳은 `addImage`의 `INSERT_DATA_SOURCE_INFO`뿐이다: [`SleuthkitCase.java:7108-7109`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L7108-L7109), [`SleuthkitCase.java:7303-7311`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L7303-L7311), [`TskCaseDbBridge.java:1050-1059`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/TskCaseDbBridge.java#L1050-L1059).
+
+[7] `getDataSourceInfoLong`은 열 값을 `ResultSet.getLong`으로 읽으므로 빈 열은 0이 된다: [`SleuthkitCase.java:11848-11864`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/bindings/java/src/org/sleuthkit/datamodel/SleuthkitCase.java#L11848-L11864).
