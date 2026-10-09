@@ -5,7 +5,7 @@ import { useHistory, useLocation } from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import BrowserOnly from '@docusaurus/BrowserOnly';
-import ReportDrawer from '@site/src/components/Matrix/ReportDrawer';
+import PageDrawer from '@site/src/components/Matrix/PageDrawer';
 import styles from './compare.module.css';
 
 // 셀(행) × 서버(열) 표. 칸에는 그 서버가 해당하는 상세 번호(또는 미구현·비적용)를 둔다.
@@ -133,11 +133,11 @@ function CompareTable() {
       </div>
 
       {open && openServer && (
-        <ReportDrawer
-          server={openServer}
-          cellId={open.id}
-          url={`${reportsUrl}${openServer}/${open.axis}/${open.id}`}
-          detail={openDetail}
+        <PageDrawer
+          title={openServer}
+          subtitle={open.id}
+          label={`${openServer} ${open.id} 원고`}
+          page={{ url: `${reportsUrl}${openServer}/${open.axis}/${open.id}`, detail: openDetail }}
           editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${open.axis}/${open.id}.mdx`}
           onClose={closeDrawer}
         />
@@ -155,7 +155,7 @@ export default function Compare() {
           셀마다 각 서버가 해당하는 상세를 나란히 봅니다. 번호에 마우스를 올리면 상세 이름이, 누르면 그 원고가 보입니다.
           빈칸(·)은 아직 원고가 없는 셀입니다.
         </p>
-        {/* ReportDrawer가 window·localStorage를 쓰므로 브라우저에서만 그린다 */}
+        {/* PageDrawer가 window·localStorage를 쓰므로 브라우저에서만 그린다 */}
         <BrowserOnly fallback={<p className={styles.loading}>데이터를 불러오는 중입니다...</p>}>
           {() => <CompareTable />}
         </BrowserOnly>

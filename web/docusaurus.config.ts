@@ -3,6 +3,7 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import fs from 'fs';
 import path from 'path';
+import cellData from './src/remark/cellData';
 import evidenceLinks from './src/remark/evidenceLinks';
 import noSingleTilde from './src/remark/noSingleTilde';
 import sentenceLines from './src/remark/sentenceLines';
@@ -202,7 +203,8 @@ const config: Config = {
         routeBasePath: '/',
         sidebarPath: './sidebarsCells.ts',
         editUrl: editUrlIn('matrix/cells'),
-        remarkPlugins: [noSingleTilde],
+        // 셀 화면에 그 셀의 화면 데이터를 붙인다(plugins/matrix-data.ts)
+        remarkPlugins: [noSingleTilde, cellData],
       },
     ],
   ],
