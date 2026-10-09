@@ -2,6 +2,7 @@
 // 원고는 [n]으로 쓰고(reports/README.mdx), 링크와 앵커는 여기서만 만든다.
 // - "### 근거" 소절에서 "[n] "으로 시작하는 단락 앞에 앵커 <a id="ev-n">를 단다.
 // - 그 밖의 글에서 근거 항목이 있는 [n]만 #ev-n 링크로 바꾼다. 코드·인라인 코드·링크 안은 건드리지 않는다.
+// - 근거 소절 밖의 단락에 표지를 달아, markLines가 표지로 끝나는 문장마다 끊게 한다.
 // - 코드의 제어 문자를 보이는 기호로 바꾼다(showControls).
 // 앵커는 MDXComponents의 a(Link)로 그려져 Docusaurus 앵커 검사에 잡힌다.
 
@@ -27,8 +28,17 @@ function linkMarks(node: Node, ids: Set<string>): void {
       let last = 0;
       for (const m of c.value.matchAll(MARK)) {
         if (!ids.has(m[1])) continue;
-        if (m.index! > last) out.push({type: 'text', value: c.value.slice(last, m.index)});
-        out.push({type: 'link', url: `#ev-${m[1]}`, children: [{type: 'text', value: m[0]}]});
+        // 표지는 화면에서 앞 글자에 붙은 위첨자로 보이므로(custom.css의 .report-mark) 앞의 빈칸을 빼고,
+        // 여는 괄호 앞에서 줄이 바뀌어 표지만 다음 줄로 떨어지지 않게 단어 결합 문자(U+2060)를 둔다.
+        // 단락 맨 앞의 표지(근거 항목의 머리)에는 붙일 글이 없으므로 두지 않는다
+        const before = m.index! > last ? c.value.slice(last, m.index).replace(/ $/, '') : '';
+        if (before || out.length) out.push({type: 'text', value: `${before}\u2060`});
+        out.push({
+          type: 'link',
+          url: `#ev-${m[1]}`,
+          children: [{type: 'text', value: m[0]}],
+          data: {hProperties: {className: ['report-mark']}},
+        });
         last = m.index! + m[0].length;
       }
       if (last === 0) out.push(c);
@@ -71,6 +81,12 @@ export default function evidenceLinks() {
     }
     if (!ids.size) return;
     linkMarks(tree, ids);
+    // 근거 소절 밖의 단락은 표지로 끝나는 문장마다 끊어 보인다(src/remark/markLines.ts)
+    inEvid = false;
+    for (const n of top) {
+      if (n.type === 'heading') inEvid = n.depth === 3 && textOf(n).trim() === EVID_HEADING;
+      else if (!inEvid && n.type === 'paragraph') n.data = {...n.data, markLines: true};
+    }
     for (const p of heads) {
       // 항목 머리의 [n]은 링크가 아니라 앵커 자리다. linkMarks가 바꾼 첫 링크를 글로 되돌린다.
       const [first, ...rest] = p.children!;

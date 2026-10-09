@@ -5,8 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import cellData from './src/remark/cellData';
 import evidenceLinks from './src/remark/evidenceLinks';
+import markLines from './src/remark/markLines';
 import noSingleTilde from './src/remark/noSingleTilde';
-import sentenceLines from './src/remark/sentenceLines';
 import matrixDataPlugin from './plugins/matrix-data';
 import reportLayout from './src/remark/reportLayout';
 
@@ -94,8 +94,9 @@ const config: Config = {
           path: '../reports',
           routeBasePath: 'reports',
           sidebarPath: './sidebars.ts',
-          // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾸고, 구현·한계·근거를 덩어리로 묶은 뒤 문장마다 줄을 나눈다
-          remarkPlugins: [noSingleTilde, evidenceLinks, reportLayout, sentenceLines],
+          // 원고의 근거 표지 [n]을 #ev-n 링크로 바꾸고, 구현·한계·근거를 덩어리로 묶는다.
+          // 원고는 문장마다 줄을 나눠 쓰고, 화면에서는 근거 표지로 끝나는 문장 뒤에서만 줄을 바꾼다
+          remarkPlugins: [noSingleTilde, evidenceLinks, reportLayout, markLines],
           editUrl: editUrlIn('reports'),
           sidebarItemsGenerator: async ({defaultSidebarItemsGenerator, ...args}) =>
             relabelAxes(await defaultSidebarItemsGenerator(args)) as any,

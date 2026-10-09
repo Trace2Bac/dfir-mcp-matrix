@@ -4,7 +4,7 @@
 //   굵은 머리를 셀 화면의 포함·제외처럼 이름표로 보인다.
 // - 근거 소절은 "[n] "으로 시작하는 단락부터 다음 항목 앞까지를 한 덩어리로 묶고, 발췌 아래 출처 링크 단락에 클래스를 단다.
 // - 발췌 코드의 공통 들여쓰기를 화면에서만 걷어 낸다.
-// evidenceLinks 뒤, sentenceLines 앞에 둔다(근거 앵커가 먼저 붙고, 줄 나누기는 묶은 뒤에 한다).
+// evidenceLinks 뒤, markLines 앞에 둔다(근거 앵커가 먼저 붙고, 문장 나누기는 묶은 뒤에 한다).
 
 type Node = {type: string; value?: string; depth?: number; children?: Node[]; data?: any; url?: string};
 
