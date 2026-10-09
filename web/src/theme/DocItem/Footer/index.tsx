@@ -6,7 +6,7 @@ import {useDoc, useCurrentSidebarCategory} from '@docusaurus/plugin-content-docs
 import DocCardList from '@theme/DocCardList';
 import CellToolList from '@site/src/components/Matrix/CellToolList';
 import {useCellData} from '@site/src/components/Matrix/CellDataContext';
-import EvidenceBack from '@site/src/components/Matrix/EvidenceBack';
+import EvidenceRefs from '@site/src/components/Matrix/EvidenceRefs';
 
 type Props = WrapperProps<typeof FooterType>;
 
@@ -32,7 +32,7 @@ export default function FooterWrapper(props: Props): ReactNode {
     <>
       {cell && <CellToolList cell={cell} />}
       {isAxis && <AxisCellList />}
-      {isReport && <EvidenceBack />}
+      {isReport && <EvidenceRefs />}
       <Footer {...props} />
     </>
   );

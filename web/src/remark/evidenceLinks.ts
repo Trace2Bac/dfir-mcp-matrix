@@ -2,6 +2,8 @@
 // 원고는 [n]으로 쓰고(reports/README.mdx), 링크와 앵커는 여기서만 만든다.
 // - "### 근거" 소절에서 "[n] "으로 시작하는 단락 앞에 앵커 <a id="ev-n">를 단다.
 // - 그 밖의 글에서 근거 항목이 있는 [n]만 #ev-n 링크로 바꾼다. 코드·인라인 코드·링크 안은 건드리지 않는다.
+// - 본문의 표지 링크마다 id ev-n-ref-k(k는 그 근거를 가리킨 차례)를 달고, 근거 항목 머리에 첫 표지의 id를 남겨
+//   reportLayout이 번호 이름표를 본문으로 돌아가는 링크로 만들게 한다(src/components/Matrix/EvidenceRefs.tsx).
 // - 근거 소절 밖의 단락에 표지를 달아, markLines가 표지로 끝나는 문장마다 끊게 한다.
 // - 코드의 제어 문자를 보이는 기호로 바꾼다(showControls).
 // 앵커는 MDXComponents의 a(Link)로 그려져 Docusaurus 앵커 검사에 잡힌다.
@@ -93,6 +95,23 @@ export default function evidenceLinks() {
       const n = HEAD.exec(textOf(p))![1];
       if (first.type === 'link') p.children = [anchor(n), {type: 'text', value: `[${n}]`}, ...rest];
       else p.children = [anchor(n), ...p.children!];
+    }
+    // 머리를 되돌린 뒤에 남은 표지 링크만 본문의 참조다. 문서 차례대로 번호를 매긴다
+    const refs = new Map<string, number>();
+    const numberRefs = (node: Node): void => {
+      if (node.type === 'link' && node.data?.hProperties?.className?.includes('report-mark')) {
+        const n = node.url!.slice('#ev-'.length);
+        const k = (refs.get(n) ?? 0) + 1;
+        refs.set(n, k);
+        node.data.hProperties.id = `ev-${n}-ref-${k}`;
+        return;
+      }
+      node.children?.forEach(numberRefs);
+    };
+    numberRefs(tree);
+    for (const p of heads) {
+      const n = HEAD.exec(textOf(p))![1];
+      if (refs.has(n)) p.data = {...p.data, evidenceRef: `ev-${n}-ref-1`};
     }
   };
 }

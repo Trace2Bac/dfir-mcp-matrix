@@ -42,7 +42,8 @@ function labelNode(kind: string): Node {
   return box(`report-label report-label--${kind}`, [{type: 'text', value: name}], 'span');
 }
 
-// 근거 항목 머리의 "[n]"을 번호 이름표로 바꾼다. 앞에 붙은 앵커(evidenceLinks)는 그대로 둔다
+// 근거 항목 머리의 "[n]"을 번호 이름표로 바꾼다. 앞에 붙은 앵커(evidenceLinks)는 그대로 둔다.
+// 본문에 이 근거를 가리킨 표지가 있으면 이름표는 첫 표지로 돌아가는 링크다(evidenceLinks가 남긴 evidenceRef)
 function markEvidenceNo(p: Node): void {
   const children = p.children ?? [];
   const i = children.findIndex(c => c.type === 'text');
@@ -50,7 +51,11 @@ function markEvidenceNo(p: Node): void {
   const m = EVID_HEAD.exec(children[i].value!);
   if (!m) return;
   const rest = children[i].value!.slice(m[0].length);
-  const no = box('report-evidence-no', [{type: 'text', value: `[${m[1]}]`}], 'span');
+  const label = [{type: 'text', value: `[${m[1]}]`}];
+  const ref: string | undefined = p.data?.evidenceRef;
+  const no: Node = ref
+    ? {type: 'link', url: `#${ref}`, children: label, data: {hProperties: {className: ['report-evidence-no'], title: '본문으로 돌아가기'}}}
+    : box('report-evidence-no', label, 'span');
   p.children = [...children.slice(0, i), no, ...(rest ? [{type: 'text', value: rest}] : []), ...children.slice(i + 1)];
 }
 
