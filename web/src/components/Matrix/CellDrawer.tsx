@@ -64,6 +64,7 @@ export default function CellDrawer({ cell, openServer, openDetail, open, onClose
         openServer={openServer}
         openDetail={openDetail}
         onOpen={(server, detail) => open(cell.id, server, detail)}
+        onOpenCell={id => open(id)}
       />
     </PageDrawer>
   );

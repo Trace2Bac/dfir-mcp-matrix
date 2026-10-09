@@ -145,6 +145,12 @@ CELL_OR_DETAIL_REF = re.compile(r"(?<![\w.])[" + AXIS_CHARS + r"]\d\d(?:\.\d\d)?
 def criteria_refs(text):
     """include·exclude 글에 든 셀·상세 번호. 작성 규칙 0006"""
     return sorted(set(CELL_OR_DETAIL_REF.findall(str(text or ""))))
+
+
+DETAIL_REF = re.compile(r"(?<![\w.])[" + AXIS_CHARS + r"]\d\d\.\d\d(?!\d)")
+CELL_FIELDS = ("question", "applies_to", "scope", "not_implemented", "not_applicable", "boundary")
+
+
 MARK = re.compile(r"\[(\d+)\](?!\()")
 LEAD = re.compile(r"^\*\*([^*]+?)\.\*\*\s?")
 
@@ -339,6 +345,11 @@ def validate():
             errs.append("%s: 상세 번호 %s가 겹친다" % (f, iid))
         if c.get("conditional") and not c.get("applies_to"):
             errs.append("%s: 조건부 셀에 applies_to가 없다" % f)
+        # 셀 수준의 글(boundary 등)에서 다른 곳은 셀 번호로만 가리킨다. 상세 번호는 쓰지 않는다(작성 규칙 0006)
+        for k in CELL_FIELDS:
+            refs = sorted(set(DETAIL_REF.findall(str(c.get(k) or ""))))
+            if refs:
+                warns.append("%s: %s가 상세 번호(%s)를 가리킨다. 셀 번호로만 가리킨다(작성 규칙 0006)" % (f, k, ", ".join(refs)))
         if c.get("scope"):
             for d in c.get("details") or []:
                 if not d.get("include"):  # exclude는 헷갈릴 상세가 있을 때만 쓰는 선택 필드다

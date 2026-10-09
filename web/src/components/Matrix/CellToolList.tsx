@@ -7,11 +7,45 @@ import Link from '@docusaurus/Link';
 import PageDrawer from './PageDrawer';
 import styles from './Matrix.module.css';
 
+// 셀 정의의 글은 다른 셀을 셀 번호(R01)나 축(R축)으로만 가리킨다(작성 규칙 0006). 그 번호를 셀·축 페이지 링크로 바꾼다.
+// E01은 디스크 이미지 형식 이름이기도 하므로("E01 이미지") 링크하지 않는다
+const CELL_REF = /(?<![\w.])([PETRFLDI])(\d\d)?(축)?(?![\w.])/g;
+
+function CellRefs({ text, onOpenCell }: { text: string; onOpenCell?: (cell: string) => void }) {
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(CELL_REF)) {
+    const [whole, axis, no, isAxis] = m;
+    if (!no === !isAxis) continue; // "R01" 또는 "R축"만. "R01축"이나 글자 하나는 두지 않는다
+    if (no && /^ ?(이미지|형식|파일)/.test(text.slice(m.index! + whole.length))) continue;
+    const id = no ? `${axis}${no}` : null;
+    out.push(text.slice(last, m.index));
+    out.push(
+      <Link
+        key={m.index}
+        to={id ? `/${axis}/${id}` : `/${axis}/`}
+        className={styles.cellRef}
+        onClick={id && onOpenCell ? e => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          onOpenCell(id);
+        } : undefined}
+      >
+        {whole}
+      </Link>,
+    );
+    last = m.index! + whole.length;
+  }
+  if (!out.length) return <>{text}</>;
+  out.push(text.slice(last));
+  return <>{out}</>;
+}
+
 // 정의 글은 여러 문장이라 원고처럼 문장마다 줄을 나눠 보인다("~다." 뒤에서 나눈다)
-function Sentences({ text }: { text: string }) {
+function Sentences({ text, onOpenCell }: { text: string; onOpenCell?: (cell: string) => void }) {
   const parts = text.split(/(?<=[다요]\.)\s+/).filter(Boolean);
-  if (parts.length < 2) return <>{text}</>;
-  return <>{parts.map((t, i) => <span key={i} className={styles.sentence}>{t}</span>)}</>;
+  if (parts.length < 2) return <CellRefs text={text} onOpenCell={onOpenCell} />;
+  return <>{parts.map((t, i) => <span key={i} className={styles.sentence}><CellRefs text={t} onOpenCell={onOpenCell} /></span>)}</>;
 }
 
 type DetailsProps = {
@@ -19,10 +53,11 @@ type DetailsProps = {
   openServer: string | null; // 패널에 연 서버. 그 서버 링크를 진하게 보인다
   openDetail: string | null;
   onOpen: (server: string, detail: string) => void; // 서버 링크를 눌러 원고를 패널에 열 때
+  onOpenCell?: (cell: string) => void; // 다른 셀과 차이점의 셀 번호를 눌러 그 셀을 패널에 열 때. 없으면 셀 페이지로 간다
 };
 
 // 셀의 정의와 상세 항목, 상세마다 해당하는 서버. 셀 화면과 매트릭스 패널이 함께 쓴다
-export function CellDetails({ cell, openServer, openDetail, onOpen }: DetailsProps) {
+export function CellDetails({ cell, openServer, openDetail, onOpen, onOpenCell }: DetailsProps) {
   const defined = cell.defined || false;
   const studied = cell.studied || 0;
 
@@ -52,13 +87,13 @@ export function CellDetails({ cell, openServer, openDetail, onOpen }: DetailsPro
           {cell.dscope && (
             <div>
               <dt>확인 범위</dt>
-              <dd><Sentences text={cell.dscope} /></dd>
+              <dd><Sentences text={cell.dscope} onOpenCell={onOpenCell} /></dd>
             </div>
           )}
           {cell.note && (
             <div>
               <dt>다른 셀과 차이점</dt>
-              <dd><Sentences text={cell.note} /></dd>
+              <dd><Sentences text={cell.note} onOpenCell={onOpenCell} /></dd>
             </div>
           )}
         </dl>
