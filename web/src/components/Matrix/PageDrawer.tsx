@@ -30,10 +30,17 @@ export default function PageDrawer({ title, subtitle, label, url, detail, editUr
 
   // 처음 열 때는 주소의 detail로 스크롤하고, 같은 원고에서 다른 행을 누르면 다시 읽지 않고 메시지로 스크롤시킨다
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const srcRef = useRef<{ url: string; src: string } | null>(null);
-  if (srcRef.current?.url !== url) {
-    srcRef.current = { url, src: `${url}?embed=1${detail ? `&detail=${encodeURIComponent(detail)}` : ''}` };
+  const makeSrc = (u: string) => `${u}?embed=1${detail ? `&detail=${encodeURIComponent(detail)}` : ''}`;
+  // 다른 페이지로 바꿀 때는 새 iframe을 숨겨 읽고, 다 읽으면 그것을 보인다. 바로 바꾸면 읽는 동안 빈 화면이 깜빡인다.
+  // 보이던 iframe은 지우지 않고 숨겨 두어, 그 페이지로 돌아가면 다시 읽지 않고 보던 스크롤 그대로 보인다.
+  // 남기는 iframe은 보이는 것과 새 것 둘뿐이다
+  const [frames, setFrames] = useState(() => [{ url, src: makeSrc(url), loaded: false }]);
+  const [shown, setShown] = useState(url);
+  if (!frames.some(f => f.url === url)) {
+    setFrames([...frames.filter(f => f.url === shown), { url, src: makeSrc(url), loaded: false }]);
   }
+  if (shown !== url && frames.some(f => f.url === url && f.loaded)) setShown(url);
+  const onFrameLoad = (u: string) => setFrames(fs => fs.map(f => (f.url === u ? { ...f, loaded: true } : f)));
   const firstDetail = useRef(detail);
   useEffect(() => {
     if (detail === firstDetail.current) return;
@@ -125,7 +132,19 @@ export default function PageDrawer({ title, subtitle, label, url, detail, editUr
         {/* 끄는 동안 iframe이 포인터를 가져가지 않게 화면 전체를 덮는다.
             iframe에 pointer-events: none을 줬다 풀면, 폭이 더 바뀌지 않은 채 끝났을 때 Chrome이 휠 대상을 갱신하지 않아 원고가 스크롤되지 않았다 */}
         {dragging && <div className={styles.shield} />}
-        <iframe ref={frameRef} key={url} className={styles.frame} src={srcRef.current.src} title={label} />
+        <div className={styles.frames}>
+          {/* 앞의 iframe을 지워도 남은 iframe은 자리를 옮기지 않으므로 다시 읽지 않는다 */}
+          {frames.map(f => (
+            <iframe
+              ref={f.url === url ? frameRef : undefined}
+              key={f.url}
+              className={`${styles.frame} ${f.url === shown ? '' : styles.hidden}`}
+              src={f.src}
+              title={label}
+              onLoad={() => onFrameLoad(f.url)}
+            />
+          ))}
+        </div>
       </aside>
     </div>
   );
