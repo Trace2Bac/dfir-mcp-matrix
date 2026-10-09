@@ -1,6 +1,6 @@
 import React, { type ReactNode, useEffect } from 'react';
 
-// 원고를 셀 페이지 패널(iframe) 안에서 ?embed=1로 열었을 때의 동작.
+// 원고나 셀 화면을 패널(iframe) 안에서 ?embed=1로 열었을 때의 동작.
 // data-embed 속성은 docusaurus.config.ts의 headTags 스크립트가 미리 붙인다.
 
 // 소제목 머리가 detail(T03.02, 미구현 등)인 소제목으로 iframe 안만 스크롤한다.
@@ -22,6 +22,8 @@ export default function Root({ children }: { children: ReactNode }): ReactNode {
     const onClick = (e: MouseEvent) => {
       const a = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
       if (!a || e.defaultPrevented) return;
+      // 셀 화면의 서버 링크는 바깥 패널에 원고를 열도록 CellToolList가 처리한다
+      if (a.hasAttribute('data-drawer-link')) return;
       const url = new URL(a.href, window.location.href);
       if (url.origin === window.location.origin && url.pathname === window.location.pathname && url.hash) return;
       e.preventDefault();
@@ -29,11 +31,11 @@ export default function Root({ children }: { children: ReactNode }): ReactNode {
       window.open(url.href, '_blank', 'noopener');
     };
     const onMessage = (e: MessageEvent) => {
-      if (e.origin === window.location.origin && e.data?.type === 'report-drawer:detail') scrollToDetail(e.data.detail);
+      if (e.origin === window.location.origin && e.data?.type === 'drawer:detail') scrollToDetail(e.data.detail);
     };
     requestAnimationFrame(() => scrollToDetail(new URLSearchParams(window.location.search).get('detail')));
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') window.parent.postMessage({ type: 'report-drawer:close' }, window.location.origin);
+      if (e.key === 'Escape') window.parent.postMessage({ type: 'drawer:close' }, window.location.origin);
     };
     document.addEventListener('click', onClick, true);
     document.addEventListener('keydown', onKey);

@@ -2,7 +2,13 @@ import React from 'react';
 import Link from '@docusaurus/Link';
 import styles from './Matrix.module.css';
 
-export default function GridBoard({ data }: any) {
+type Props = {
+  data: any;
+  openCell: string | null; // 패널에 연 셀
+  onOpen: (e: React.MouseEvent, cell: string) => void;
+};
+
+export default function GridBoard({ data, openCell, onOpen }: Props) {
   // 축 수만큼 열을 만든다. 축은 matrix/cells/<축>/index.mdx에서 오므로 축을 더해도 여기를 고치지 않는다
   const n = Object.keys(data.axes).length;
   return (
@@ -21,7 +27,8 @@ export default function GridBoard({ data }: any) {
               <Link
                 key={c.id}
                 to={`/${c.axis}/${c.id}`}
-                className={styles.tile}
+                onClick={e => onOpen(e, c.id)}
+                className={`${styles.tile} ${c.id === openCell ? styles.tileActive : ''}`}
                 style={{ textDecoration: 'none' }}
               >
                 <span style={{ display: 'block' }}>

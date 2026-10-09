@@ -3,7 +3,7 @@ import { useHistory, useLocation } from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Link from '@docusaurus/Link';
-import ReportDrawer from './ReportDrawer';
+import PageDrawer from './PageDrawer';
 import styles from './Matrix.module.css';
 
 // 정의 글은 여러 문장이라 원고처럼 문장마다 줄을 나눠 보인다("~다." 뒤에서 나눈다)
@@ -41,6 +41,11 @@ export default function CellToolList({ cellId }: { cellId: string }) {
     // 수정 키나 가운데 버튼으로 누르면 원래대로 원고 페이지를 연다
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
+    // 매트릭스 패널 안에 열린 셀 화면이면 패널을 겹치지 않고, 바깥 매트릭스가 같은 패널에 원고를 열게 한다(MatrixGrid.tsx)
+    if (document.documentElement.hasAttribute('data-embed')) {
+      window.parent.postMessage({ type: 'drawer:report', server, detail }, window.location.origin);
+      return;
+    }
     history.replace(withServer(server, detail));
   };
 
@@ -138,6 +143,7 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                       key={m.s}
                       to={`/reports/${m.s}/${cell.axis}/${cellId}`}
                       onClick={e => openDrawer(e, m.s, detail)}
+                      data-drawer-link
                       className={`${styles.chip} ${m.s === openServer && detail === openDetail ? styles.chipActive : ''}`}
                     >
                       {m.s}
@@ -151,9 +157,10 @@ export default function CellToolList({ cellId }: { cellId: string }) {
       </div>
 
       {openServer && (
-        <ReportDrawer
-          server={openServer}
-          cellId={cellId}
+        <PageDrawer
+          title={openServer}
+          subtitle={cellId}
+          label={`${openServer} ${cellId} 원고`}
           url={`${reportsUrl}${openServer}/${cell.axis}/${cellId}`}
           detail={openDetail}
           editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cell.axis}/${cellId}.mdx`}

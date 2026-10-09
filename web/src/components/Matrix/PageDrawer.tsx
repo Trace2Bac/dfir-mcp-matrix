@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import styles from './ReportDrawer.module.css';
+import styles from './PageDrawer.module.css';
 
 type Props = {
-  server: string;
-  cellId: string;
-  url: string; // baseUrl을 붙인 원고 주소
+  title: string; // 머리에 보일 제목
+  subtitle?: string; // 제목 뒤에 흐리게 보일 말(원고의 셀 번호 등)
+  label: string; // 화면 읽기 프로그램이 읽을 패널 이름
+  url: string; // baseUrl을 붙인 페이지 주소(원고나 셀 화면)
   detail: string | null; // 원고에서 보일 소제목의 머리(T03.02, 미구현 등)
-  editUrl: string; // GitHub에서 원고 파일을 고치는 주소
+  editUrl: string; // GitHub에서 그 파일을 고치는 주소
+  back?: { label: string; onClick: () => void }; // 앞 페이지로 돌아가는 단추(매트릭스 패널에서 셀 화면으로)
   onClose: () => void;
 };
 
@@ -15,9 +17,9 @@ const MIN_WIDTH = 360;
 
 const clampWidth = (w: number) => Math.max(MIN_WIDTH, Math.min(w, window.innerWidth - 80));
 
-// 셀 페이지 오른쪽에 원고를 띄우는 패널. 원고는 ?embed=1로 열어 머리·사이드바를 숨긴다.
+// 화면 오른쪽에 원고나 셀 화면을 띄우는 패널. 페이지는 ?embed=1로 열어 머리·사이드바를 숨긴다.
 // 왼쪽 가장자리를 끌어 폭을 바꾸고, 바꾼 폭은 localStorage에 남긴다.
-export default function ReportDrawer({ server, cellId, url, detail, editUrl, onClose }: Props) {
+export default function PageDrawer({ title, subtitle, label, url, detail, editUrl, back, onClose }: Props) {
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem(WIDTH_KEY));
     return clampWidth(saved || Math.round(window.innerWidth * 0.55));
@@ -36,7 +38,7 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
   useEffect(() => {
     if (detail === firstDetail.current) return;
     firstDetail.current = detail;
-    frameRef.current?.contentWindow?.postMessage({ type: 'report-drawer:detail', detail }, window.location.origin);
+    frameRef.current?.contentWindow?.postMessage({ type: 'drawer:detail', detail }, window.location.origin);
   }, [detail]);
 
   useEffect(() => {
@@ -45,7 +47,7 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
     };
     // iframe 안에 초점이 있을 때는 iframe이 ESC를 메시지로 알린다(src/theme/Root.tsx)
     const onMessage = (e: MessageEvent) => {
-      if (e.origin === window.location.origin && e.data?.type === 'report-drawer:close') onClose();
+      if (e.origin === window.location.origin && e.data?.type === 'drawer:close') onClose();
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('message', onMessage);
@@ -90,15 +92,27 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
         style={{ width }}
         role="dialog"
         aria-modal="true"
-        aria-label={`${server} ${cellId} 원고`}
+        aria-label={label}
         onClick={e => e.stopPropagation()}
       >
         <div className={styles.resizer} onPointerDown={startResize} aria-hidden="true" />
         <header className={styles.header}>
+          {back && (
+            <button
+              className={`${styles.action} ${styles.back}`}
+              onClick={back.onClick}
+              title={`${back.label}(으)로 돌아가기`}
+              aria-label={`${back.label}(으)로 돌아가기`}
+            >
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                <path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
           <span className={styles.title}>
-            {server} <span className={styles.cell}>· {cellId}</span>
+            {title} {subtitle && <span className={styles.cell}>· {subtitle}</span>}
           </span>
-          <a className={styles.action} href={editUrl} target="_blank" rel="noopener noreferrer" title="GitHub에서 원고 편집">
+          <a className={styles.action} href={editUrl} target="_blank" rel="noopener noreferrer" title="GitHub에서 편집">
             편집 ✎
           </a>
           <a className={styles.action} href={url} target="_blank" rel="noopener noreferrer" title="새 탭에서 열기">
@@ -111,7 +125,7 @@ export default function ReportDrawer({ server, cellId, url, detail, editUrl, onC
         {/* 끄는 동안 iframe이 포인터를 가져가지 않게 화면 전체를 덮는다.
             iframe에 pointer-events: none을 줬다 풀면, 폭이 더 바뀌지 않은 채 끝났을 때 Chrome이 휠 대상을 갱신하지 않아 원고가 스크롤되지 않았다 */}
         {dragging && <div className={styles.shield} />}
-        <iframe ref={frameRef} key={url} className={styles.frame} src={srcRef.current.src} title={`${server} ${cellId} 원고`} />
+        <iframe ref={frameRef} key={url} className={styles.frame} src={srcRef.current.src} title={label} />
       </aside>
     </div>
   );
