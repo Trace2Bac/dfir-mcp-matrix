@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback } from 'react';
 import { useHistory, useLocation } from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
+import useIsBrowser from '@docusaurus/useIsBrowser';
 import Link from '@docusaurus/Link';
 import PageDrawer from './PageDrawer';
 import styles from './Matrix.module.css';
@@ -13,61 +14,26 @@ function Sentences({ text }: { text: string }) {
   return <>{parts.map((t, i) => <span key={i} className={styles.sentence}>{t}</span>)}</>;
 }
 
-export default function CellToolList({ cellId }: { cellId: string }) {
-  const [data, setData] = useState<any>(null);
-  const dataUrl = useBaseUrl('/data/matrix.json');
-  const reportsUrl = useBaseUrl('/reports/');
-  const { organizationName, projectName } = useDocusaurusContext().siteConfig;
-  const history = useHistory();
-  const location = useLocation();
-  // 패널에 연 서버와 원고에서 보일 소제목은 ?server=&detail=로 주소에 남긴다.
-  // push로 바꾸면 Docusaurus가 페이지 맨 위로 초점을 옮겨 스크롤이 올라가므로 replace만 쓴다
-  const query = new URLSearchParams(location.search);
-  const openServer = query.get('server');
-  const openDetail = query.get('detail');
+type DetailsProps = {
+  cell: any; // matrix.json의 셀 하나
+  openServer: string | null; // 패널에 연 서버. 그 서버 링크를 진하게 보인다
+  openDetail: string | null;
+  onOpen: (server: string, detail: string) => void; // 서버 링크를 눌러 원고를 패널에 열 때
+};
 
-  const withServer = (server: string | null, detail: string | null = null) => {
-    const params = new URLSearchParams(location.search);
-    for (const [k, v] of [['server', server], ['detail', detail]] as const) {
-      if (v) params.set(k, v);
-      else params.delete(k);
-    }
-    const search = params.toString();
-    return { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash };
-  };
+// 셀의 정의와 상세 항목, 상세마다 해당하는 서버. 셀 화면과 매트릭스 패널이 함께 쓴다
+export function CellDetails({ cell, openServer, openDetail, onOpen }: DetailsProps) {
+  const defined = cell.defined || false;
+  const studied = cell.studied || 0;
 
   // detail은 원고 소제목의 머리(상세 번호, 또는 미구현·비적용). 패널이 그 소제목으로 스크롤한다
-  const openDrawer = (e: React.MouseEvent, server: string, detail: string) => {
+  const open = (e: React.MouseEvent, server: string, detail: string) => {
     // 수정 키나 가운데 버튼으로 누르면 원래대로 원고 페이지를 연다
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    // 매트릭스 패널 안에 열린 셀 화면이면 패널을 겹치지 않고, 바깥 매트릭스가 같은 패널에 원고를 열게 한다(MatrixGrid.tsx)
-    if (document.documentElement.hasAttribute('data-embed')) {
-      window.parent.postMessage({ type: 'drawer:report', server, detail }, window.location.origin);
-      return;
-    }
-    history.replace(withServer(server, detail));
+    onOpen(server, detail);
   };
 
-  const closeDrawer = useCallback(() => {
-    history.replace(withServer(null));
-  }, [history, location]);
-
-  useEffect(() => {
-    fetch(dataUrl)
-      .then(res => res.json())
-      .then(d => setData(d))
-      .catch(console.error);
-  }, [dataUrl]);
-
-  if (!data) return null;
-
-  const cell = data.cells.find((c: any) => c.id === cellId);
-  if (!cell) return null;
-
-  const defined = cell.defined || false;
-  const studied = cell.studied || 0;
-  
   return (
     <div className={styles.cellPage}>
       {/* 확인 사항: 이 셀이 서버에서 무엇을 분류하는지 */}
@@ -141,9 +107,8 @@ export default function CellToolList({ cellId }: { cellId: string }) {
                   {r.m?.map((m: any) => (
                     <Link
                       key={m.s}
-                      to={`/reports/${m.s}/${cell.axis}/${cellId}`}
-                      onClick={e => openDrawer(e, m.s, detail)}
-                      data-drawer-link
+                      to={`/reports/${m.s}/${cell.axis}/${cell.id}`}
+                      onClick={e => open(e, m.s, detail)}
                       className={`${styles.chip} ${m.s === openServer && detail === openDetail ? styles.chipActive : ''}`}
                     >
                       {m.s}
@@ -155,18 +120,56 @@ export default function CellToolList({ cellId }: { cellId: string }) {
           );
         })}
       </div>
+    </div>
+  );
+}
 
-      {openServer && (
+// 셀 화면. 서버 링크를 누르면 오른쪽 패널에 그 원고를 연다
+export default function CellToolList({ cell }: { cell: any }) {
+  const reportsUrl = useBaseUrl('/reports/');
+  const { organizationName, projectName } = useDocusaurusContext().siteConfig;
+  const isBrowser = useIsBrowser();
+  const history = useHistory();
+  const location = useLocation();
+  // 패널에 연 서버와 원고에서 보일 소제목은 ?server=&detail=로 주소에 남긴다.
+  // push로 바꾸면 Docusaurus가 페이지 맨 위로 초점을 옮겨 스크롤이 올라가므로 replace만 쓴다
+  const query = new URLSearchParams(location.search);
+  const openServer = query.get('server');
+  const openDetail = query.get('detail');
+
+  const withServer = (server: string | null, detail: string | null = null) => {
+    const params = new URLSearchParams(location.search);
+    for (const [k, v] of [['server', server], ['detail', detail]] as const) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    const search = params.toString();
+    return { pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash };
+  };
+
+  const closeDrawer = useCallback(() => {
+    history.replace(withServer(null));
+  }, [history, location]);
+
+  return (
+    <>
+      <CellDetails
+        cell={cell}
+        openServer={openServer}
+        openDetail={openDetail}
+        onOpen={(server, detail) => history.replace(withServer(server, detail))}
+      />
+      {/* 셀 화면은 빌드 때 그려지고 주소의 ?server=는 브라우저에서만 알므로, 패널은 브라우저에서만 그린다 */}
+      {isBrowser && openServer && (
         <PageDrawer
           title={openServer}
-          subtitle={cellId}
-          label={`${openServer} ${cellId} 원고`}
-          url={`${reportsUrl}${openServer}/${cell.axis}/${cellId}`}
-          detail={openDetail}
-          editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cell.axis}/${cellId}.mdx`}
+          subtitle={cell.id}
+          label={`${openServer} ${cell.id} 원고`}
+          page={{ url: `${reportsUrl}${openServer}/${cell.axis}/${cell.id}`, detail: openDetail }}
+          editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${cell.axis}/${cell.id}.mdx`}
           onClose={closeDrawer}
         />
       )}
-    </div>
+    </>
   );
 }

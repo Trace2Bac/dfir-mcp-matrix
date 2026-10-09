@@ -137,8 +137,7 @@ function CompareTable() {
           title={openServer}
           subtitle={open.id}
           label={`${openServer} ${open.id} 원고`}
-          url={`${reportsUrl}${openServer}/${open.axis}/${open.id}`}
-          detail={openDetail}
+          page={{ url: `${reportsUrl}${openServer}/${open.axis}/${open.id}`, detail: openDetail }}
           editUrl={`https://github.com/${organizationName}/${projectName}/edit/main/reports/${openServer}/${open.axis}/${open.id}.mdx`}
           onClose={closeDrawer}
         />

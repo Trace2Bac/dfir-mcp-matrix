@@ -5,6 +5,7 @@ import type {WrapperProps} from '@docusaurus/types';
 import {useDoc, useCurrentSidebarCategory} from '@docusaurus/plugin-content-docs/client';
 import DocCardList from '@theme/DocCardList';
 import CellToolList from '@site/src/components/Matrix/CellToolList';
+import {useCellData} from '@site/src/components/Matrix/CellDataContext';
 import EvidenceBack from '@site/src/components/Matrix/EvidenceBack';
 
 type Props = WrapperProps<typeof FooterType>;
@@ -20,16 +21,16 @@ function AxisCellList(): ReactNode {
 }
 
 export default function FooterWrapper(props: Props): ReactNode {
-  // 셀 파일은 머리말에 question이, 축 파일은 axis가 있다(matrix/README.md)
+  // 셀 화면에는 MDX가 그 셀의 데이터를 붙이고(src/remark/cellData.ts), 축 파일은 머리말에 axis가 있다(matrix/README.md)
   const frontMatter = useDoc().frontMatter as Record<string, unknown>;
-  const cellId = typeof frontMatter.question === 'string' ? (frontMatter.id as string) : null;
+  const cell = useCellData();
   const isAxis = typeof frontMatter.axis === 'string';
   // 서버 원고는 머리말에 cell이 있다(reports/README.mdx)
   const isReport = typeof frontMatter.cell === 'string';
 
   return (
     <>
-      {cellId && <CellToolList cellId={cellId} />}
+      {cell && <CellToolList cell={cell} />}
       {isAxis && <AxisCellList />}
       {isReport && <EvidenceBack />}
       <Footer {...props} />

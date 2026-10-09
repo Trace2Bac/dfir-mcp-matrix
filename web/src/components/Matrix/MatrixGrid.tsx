@@ -4,6 +4,7 @@ import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import GridBoard from './GridBoard';
 import PageDrawer from './PageDrawer';
+import { CellDetails } from './CellToolList';
 
 export default function MatrixGrid() {
   const [data, setData] = useState<any>(null);
@@ -12,7 +13,7 @@ export default function MatrixGrid() {
   const { organizationName, projectName } = useDocusaurusContext().siteConfig;
   const history = useHistory();
   const location = useLocation();
-  // 패널에 연 셀은 ?cell=로, 패널 안 셀 화면에서 연 원고는 &server=&detail=로 주소에 남긴다.
+  // 패널에 연 셀은 ?cell=로, 패널의 셀 화면에서 연 원고는 &server=&detail=로 주소에 남긴다.
   // 셀 화면과 같이 replace만 쓴다(CellToolList.tsx)
   const query = new URLSearchParams(location.search);
   const openCell = query.get('cell');
@@ -41,18 +42,6 @@ export default function MatrixGrid() {
 
   const closeDrawer = useCallback(() => history.replace(withOpen(null)), [history, withOpen]);
 
-  // 패널 안 셀 화면에서 서버를 누르면 그 원고를 같은 패널에 연다(CellToolList.tsx)
-  useEffect(() => {
-    if (!openCell) return;
-    const onMessage = (e: MessageEvent) => {
-      if (e.origin === window.location.origin && e.data?.type === 'drawer:report') {
-        history.replace(withOpen(openCell, e.data.server, e.data.detail));
-      }
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [openCell, history, withOpen]);
-
   useEffect(() => {
     fetch(dataUrl)
       .then(res => res.json())
@@ -79,27 +68,26 @@ export default function MatrixGrid() {
         <GridBoard data={data} openCell={cell?.id ?? null} onOpen={openDrawer} />
       </div>
 
-      {cell && (openServer ? (
+      {/* 셀 화면은 이미 받은 데이터로 바로 그리고, 원고만 iframe으로 띄운다. 원고에서 돌아가면 셀 화면이 보던 자리 그대로 보인다 */}
+      {cell && (
         <PageDrawer
-          title={openServer}
-          subtitle={cell.id}
-          label={`${openServer} ${cell.id} 원고`}
-          url={`${baseUrl}reports/${openServer}/${cell.axis}/${cell.id}`}
-          detail={openDetail}
-          editUrl={`${editBase}/reports/${openServer}/${cell.axis}/${cell.id}.mdx`}
-          back={{ label: cell.id, onClick: () => history.replace(withOpen(cell.id)) }}
+          title={openServer ?? `${cell.id} ${cell.name}`}
+          subtitle={openServer ? cell.id : undefined}
+          label={openServer ? `${openServer} ${cell.id} 원고` : `${cell.id} ${cell.name} 셀`}
+          page={openServer ? { url: `${baseUrl}reports/${openServer}/${cell.axis}/${cell.id}`, detail: openDetail } : null}
+          openUrl={openServer ? undefined : `${baseUrl}${cell.axis}/${cell.id}`}
+          editUrl={openServer ? `${editBase}/reports/${openServer}/${cell.axis}/${cell.id}.mdx` : `${editBase}/matrix/cells/${cell.axis}/${cell.id}.mdx`}
+          back={openServer ? { label: cell.id, onClick: () => history.replace(withOpen(cell.id)) } : undefined}
           onClose={closeDrawer}
-        />
-      ) : (
-        <PageDrawer
-          title={`${cell.id} ${cell.name}`}
-          label={`${cell.id} ${cell.name} 셀`}
-          url={`${baseUrl}${cell.axis}/${cell.id}`}
-          detail={null}
-          editUrl={`${editBase}/matrix/cells/${cell.axis}/${cell.id}.mdx`}
-          onClose={closeDrawer}
-        />
-      ))}
+        >
+          <CellDetails
+            cell={cell}
+            openServer={openServer}
+            openDetail={openDetail}
+            onOpen={(server, detail) => history.replace(withOpen(cell.id, server, detail))}
+          />
+        </PageDrawer>
+      )}
     </div>
   );
 }
