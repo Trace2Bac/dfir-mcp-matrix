@@ -777,7 +777,7 @@ def check_cell(cid, s, slugs):
 
 EXCERPT_MAX = 30          # 이 줄 수 이하의 한 범위는 발췌를 붙인다(reports/README.mdx 근거 규칙)
 EXCERPT_LINK_ONLY = 3     # 코드 위치가 이만큼 이상이면 링크만 두어도 된다
-NON_CODE = (".md", ".txt", ".rst")
+NON_CODE = (".md", ".txt", ".rst", ".dox")
 
 
 def excerpt_warnings(evid, slugs):
