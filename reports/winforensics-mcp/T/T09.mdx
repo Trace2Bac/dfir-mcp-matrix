@@ -1,0 +1,200 @@
+---
+cell: T09
+details:
+- id: not_implemented
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### 미구현
+
+**판단.** 서버에는 살아 있는 Windows 단말의 상태를 바꾸는 경로가 하나 있지만 그 변경의 전후 상태, 변경 내역, 되돌릴 방법을 남기지 않는다.
+`remote_collect_artifacts`는 WinRM으로 원격 단말에 접속해 이벤트 로그 8개와 레지스트리 하이브 5개를 PowerShell로 읽어 온다 [1][2].
+파일마다 실행하는 스크립트는 파일을 바로 읽어 보고 읽지 못하면 `Win32_ShadowCopy`의 `Create`로 C 드라이브의 섀도 복사본을 만든다 [3].
+그다음 `InstallDate`가 가장 늦은 섀도 복사본을 골라 그 안의 같은 경로를 읽고 그 섀도 복사본을 `Delete`로 지운다 [3].
+스크립트는 `Create`의 결과를 확인하지 않고 지울 섀도 복사본을 만든 복사본의 ID가 아니라 만든 시각 순서로 고른다 [3].
+바로 읽기가 실패하는 파일은 모두 이 경로로 읽힌다 [3].
+섀도 복사본을 만들고 지우는 일은 조사 대상 단말의 저장소 상태를 바꾼다.
+
+서버는 이 변경을 기록하지 않는다.
+응답은 아티팩트마다 이름, 성공 여부, 로컬 경로, 크기, 오류만 싣고 섀도 복사본을 만들었는지, 어느 복사본을 지웠는지 싣지 않는다 [2].
+`CollectionResult`의 원격 경로와 시각 필드는 응답에 옮겨지지 않는다 [4][2].
+서버는 호출 기록을 남기지 않고 원격에서 실행한 스크립트도 남기지 않는다 [2].
+되돌리는 도구나 경로도 없다.
+도구 설명은 WinRM으로 아티팩트를 모은다고만 적고 섀도 복사본을 만들고 지운다는 사실을 적지 않는다 [5].
+
+`remote_get_system_info`는 WMI로 운영체제, 도메인, 사용자 계정 정보를 읽기만 한다 [6].
+나머지 도구는 사용자가 넘긴 증거 파일을 읽어 분석하고 살아 있는 단말에 접속하지 않는다.
+
+### 근거
+
+[1] 수집 대상은 정해 둔 이벤트 로그 8개와 레지스트리 하이브 5개다.
+
+```python
+ARTIFACT_PATHS = {
+    "evtx": {
+        "Security": r"C:\Windows\System32\winevt\Logs\Security.evtx",
+        "System": r"C:\Windows\System32\winevt\Logs\System.evtx",
+        "Application": r"C:\Windows\System32\winevt\Logs\Application.evtx",
+        "PowerShell-Operational": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-PowerShell%4Operational.evtx",
+        "Sysmon": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-Sysmon%4Operational.evtx",
+        "WinRM": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-WinRM%4Operational.evtx",
+        "TaskScheduler": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-TaskScheduler%4Operational.evtx",
+        "TerminalServices": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
+    },
+    "registry": {
+        "SAM": r"C:\Windows\System32\config\SAM",
+        "SYSTEM": r"C:\Windows\System32\config\SYSTEM",
+        "SOFTWARE": r"C:\Windows\System32\config\SOFTWARE",
+        "SECURITY": r"C:\Windows\System32\config\SECURITY",
+        "DEFAULT": r"C:\Windows\System32\config\DEFAULT",
+    },
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:33-50`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L33-L50)
+
+```python
+    if include_evtx:
+        evtx_dir = output_dir / "evtx"
+        evtx_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["evtx"].items():
+            local_path = evtx_dir / f"{name}.evtx"
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+            results.append(result)
+
+    if include_registry:
+        reg_dir = output_dir / "registry"
+        reg_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["registry"].items():
+            local_path = reg_dir / name
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+            results.append(result)
+    
+    return results
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:397-425`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L397-L425)
+
+[2] 처리 분기는 수집 결과에서 다섯 필드만 응답에 싣는다.
+
+```python
+    elif name == "remote_collect_artifacts":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3456-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3456-L3478)
+
+[3] 파일을 바로 읽지 못하면 섀도 복사본을 만들고 가장 늦은 복사본을 읽은 뒤 지운다.
+
+```python
+                # Try to read directly first
+                try {{
+                    $content = [System.IO.File]::ReadAllBytes($shadowPath)
+                    [Convert]::ToBase64String($content)
+                }} catch {{
+                    # If locked, try VSS
+                    $vss = (Get-WmiObject -List Win32_ShadowCopy).Create("C:\\", "ClientAccessible")
+                    $shadow = Get-WmiObject Win32_ShadowCopy | Sort-Object InstallDate -Descending | Select-Object -First 1
+                    $shadowRoot = $shadow.DeviceObject + "\\"
+                    
+                    $relativePath = $shadowPath -replace "^C:\\\\", ""
+                    $vssPath = $shadowRoot + $relativePath
+                    
+                    $content = [System.IO.File]::ReadAllBytes($vssPath)
+                    
+                    # Clean up shadow copy
+                    $shadow.Delete()
+                    
+                    [Convert]::ToBase64String($content)
+                }}
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:147-166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L147-L166)
+
+[4] 수집 결과에는 원격 경로와 시각 필드가 있다.
+
+```python
+@dataclass
+class CollectionResult:
+    success: bool
+    artifact_name: str
+    local_path: Optional[Path] = None
+    remote_path: Optional[str] = None
+    size_bytes: Optional[int] = None
+    error: Optional[str] = None
+    timestamp: str = ""
+    
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:59-71`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L59-L71)
+
+[5] `remote_collect_artifacts`의 도구 설명.
+
+```python
+            Tool(
+                name="remote_collect_artifacts",
+                description="Collect forensic artifacts from remote Windows system via WinRM. Supports password or pass-the-hash authentication.",
+```
+
+[`winforensics_mcp/server.py:2430-2432`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2430-L2432)
+
+[6] 원격 시스템 정보는 WMI 조회 결과다.
+
+```python
+    def get_system_info(self) -> dict[str, Any]:
+        ps_script = '''
+        @{
+            ComputerName = $env:COMPUTERNAME
+            Domain = (Get-WmiObject Win32_ComputerSystem).Domain
+            OS = (Get-WmiObject Win32_OperatingSystem).Caption
+            Version = (Get-WmiObject Win32_OperatingSystem).Version
+            Architecture = (Get-WmiObject Win32_OperatingSystem).OSArchitecture
+            LastBoot = (Get-WmiObject Win32_OperatingSystem).LastBootUpTime
+            Users = (Get-WmiObject Win32_UserAccount | Select-Object Name, SID, Disabled)
+        } | ConvertTo-Json
+        '''
+        stdout, stderr, exit_code = self.run_command(ps_script)
+        
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to get system info: {stderr}")
+
+        return json.loads(stdout)
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:232-249`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L232-L249)

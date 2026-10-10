@@ -1,0 +1,62 @@
+---
+cell: L03
+details:
+- id: L03.03
+---
+
+# L03 기록 실패 처리
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 `call_tool` 처리기가 실패한 호출에 남기는 항목에 적용된다 [1].
+처리기는 `logger.exception`으로 항목을 쓴 뒤 결과와 관계없이 `{"error": …}` 글을 돌려준다 [1].
+항목은 `basicConfig`가 붙인 `StreamHandler`가 서버 프로세스의 표준 오류에 쓴다 [2][3].
+서버는 이 처리기의 오류 처리를 바꾸지 않는다 [2].
+CPython 3.12.15의 `StreamHandler.emit`은 쓰기나 비우기에서 난 예외를 `handleError`로 넘긴다 [4].
+`handleError`는 `raiseExceptions`가 기본값인 참이면 `--- Logging error ---`와 예외를 `sys.stderr`에 쓰려 하고 그 쓰기에서 `OSError`가 나면 아무것도 하지 않는다 [5].
+기록을 받는 곳과 실패를 알리는 곳이 같은 표준 오류여서 표준 오류에 쓰지 못하면 실패를 알리는 글도 남지 않는다 [3][5].
+서버 표준 오류를 `/dev/full`에 연결해 쓰기가 실패하게 하자 항목을 쓰는 호출을 포함해 모든 호출이 평소와 같은 결과를 돌려줬고 응답에 기록 실패를 알리는 내용은 없었다 [6].
+
+### 근거
+
+[1] `call_tool`은 항목을 쓴 뒤 오류 글을 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[2] 서버는 `basicConfig`에 수준만 주고 처리기를 따로 붙이지 않는다.
+
+```python
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("winforensics-mcp")
+
+server = Server("winforensics-mcp", version=__version__)
+```
+
+[`winforensics_mcp/server.py:139-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L139-L142)
+
+[3] CPython 3.12.15의 `basicConfig`는 파일 이름이 없으면 `StreamHandler`를 만들고 `StreamHandler`는 스트림을 받지 않으면 `sys.stderr`에 쓴다: [`Lib/logging/__init__.py:2110-2122`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L2110-L2122), [`Lib/logging/__init__.py:1117-1135`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1117-L1135).
+`pyproject.toml`은 Python 3.10 이상만 정하므로 실행 확인에 쓴 Python 3.12.15의 소스로 확인했다.
+
+[4] `StreamHandler.emit`은 쓰기 예외를 `handleError`로 넘긴다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1148-L1168).
+
+[5] `handleError`는 표준 오류에 실패를 쓰고 그 쓰기의 `OSError`는 호출한 쪽으로 넘기지 않는다: [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1066-L1112), [`Lib/logging/__init__.py:65`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L65).
+
+[6] (실행 확인) MCP 클라이언트 세션의 `errlog`를 `/dev/full`로 주어 서버를 실행했다.
+없는 경로로 부른 `registry_get_key`·`disk_parse_amcache`는 `{"error": …}` 결과를, `evtx_list_files`는 빈 목록을 돌려줬고 클라이언트 세션은 끊기지 않았다.

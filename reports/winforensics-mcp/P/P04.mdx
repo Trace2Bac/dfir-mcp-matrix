@@ -1,0 +1,132 @@
+---
+cell: P04
+details:
+- id: not_implemented
+---
+
+# P04 조사 단위 관리
+
+### 미구현
+
+**판단.** 서버에는 사건 ID나 세션 ID가 없다.
+도구는 호출마다 증거 파일이나 자료 폴더의 경로를 인자로 받고 그 경로가 어느 조사에 속하는지 구별하지 않는다 [1].
+서버가 파일을 쓰는 도구는 저장 위치를 호출마다 인자로 받는다.
+`evtx_export`는 `output_dir`, `remote_collect_artifacts`는 `output_dir`, `vt_lookup_behavior`는 `triage_dir`에 쓴다 [2][3][4].
+`config.py`에는 자료 기준 경로와 출력 폴더를 담는 `ForensicsConfig`가 있지만 서버 코드는 이 설정을 읽지 않는다 [5].
+EVTX 이어 읽기 값 `next_cursor`는 원본 파일의 식별 정보와 질의 조건으로 만든 `query_ref`에 묶이고 조사 단위에는 묶이지 않는다 [6].
+EVTX·NTDS 파싱 결과와 VirusTotal 조회 결과를 담는 프로세스 메모리 캐시는 파일 식별 정보나 조회 대상만 키로 쓰므로 모든 호출이 함께 쓴다 [7][8][9].
+서버는 stdio 연결 하나를 받는 프로세스이고 세션별로 상태를 나누는 코드는 없다 [10].
+
+### 근거
+
+[1] 도구 처리 분기는 인자의 경로를 그대로 파서에 넘긴다: [`winforensics_mcp/server.py:2519-2525`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2519-L2525), [`winforensics_mcp/server.py:3211-3221`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3211-L3221), [`winforensics_mcp/server.py:3242-3252`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3242-L3252).
+
+[2] `evtx_export`는 호출자가 준 `output_dir` 아래에 내보내기 파일을 만든다.
+
+```python
+    directory = Path(output_dir).absolute()
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = published = None
+    owned_identity = None
+    publication_candidates: list[Path] = []
+    complete = False
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=".evtx-export-", suffix=".part", dir=directory)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:124-131`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L124-L131)
+
+[3] `remote_collect_artifacts`는 인자 `output_dir`에 수집 파일을 쓴다.
+
+```python
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+```
+
+[`winforensics_mcp/server.py:3469-3473`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3469-L3473)
+
+[4] `vt_lookup_behavior`는 `triage_dir`을 주면 그 폴더에 응답 전체를 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[5] `ForensicsConfig`와 `get_config`는 `config.py`에만 있고 서버 코드에서 부르지 않는다: [`winforensics_mcp/config.py:159-209`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/config.py#L159-L209).
+
+[6] `query_ref`는 원본 파일의 식별 정보와 질의 조건의 해시다.
+
+```python
+    source = _cache_key(path)
+    query_ref = _digest({"source": source, "start": start_time.isoformat() if start_time else None,
+                         "end": end_time.isoformat() if end_time else None,
+                         "ids": sorted(set(event_ids)) if event_ids else None,
+                         "contains": sorted(set(contains)) if contains else None,
+                         "not_contains": sorted(set(not_contains)) if not_contains else None,
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:671-676`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L671-L676)
+
+[7] EVTX 캐시의 키는 파일 경로, 크기, 시각, 장치·inode 번호다.
+
+```python
+def _cache_key(evtx_path: Path) -> tuple:
+    stat = evtx_path.stat()
+    return (str(evtx_path.resolve()), stat.st_size, stat.st_mtime_ns,
+            stat.st_dev, stat.st_ino, stat.st_ctime_ns)
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:61-64`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L61-L64)
+
+[8] NTDS 캐시는 파일 식별 정보와 `max_scan`을 키로 쓴다.
+
+```python
+    path = Path(ntds_path)
+    source = _identity(path)
+    key = source + (max_scan,)
+    if key not in _CACHE:
+        _CACHE[key] = _scan(path, max_scan, source)
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > 2:
+        _CACHE.popitem(last=False)
+    if _identity(path) != source:
+        raise ValueError('NTDS source changed during lookup; retry')
+    return _CACHE[key]
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:384-394`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L384-L394)
+
+[9] VirusTotal 캐시는 모듈 전역 `dict`다.
+
+```python
+# Cache: key -> (result, timestamp)
+_cache: dict[str, tuple[dict, datetime]] = {}
+CACHE_TTL = timedelta(hours=24)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:31-33`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L31-L33)
+
+[10] 서버는 stdio 연결 하나로 실행된다.
+
+```python
+def main():
+    """Main entry point"""
+    import asyncio
+    
+    async def run():
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    
+    asyncio.run(run())
+```
+
+[`winforensics_mcp/server.py:3498-3506`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3498-L3506)

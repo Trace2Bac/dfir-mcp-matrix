@@ -1,0 +1,466 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.02
+- id: T08.03
+- id: T08.04
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 `windows_search_parse`의 SIDR 실행과 WinRM 도구 두 개가 원격에서 실행하는 PowerShell에 적용된다 [1][2][3].
+SIDR은 두 번 실행한다.
+`--version` 실행의 종료 코드가 0이 아니면 버전 확인 실패로 정하고 분석을 실행하지 않는다 [1].
+분석 실행의 종료 코드가 0이 아니면 `SIDR exited with status <값>; see diagnostics` 오류로 정한다 [4].
+이 오류는 응답의 `error`와 진단 목록에 실리고 `complete`는 거짓이 된다 [5].
+실행 확인에서 종료 코드 3으로 끝나는 가짜 SIDR과 손상된 입력에 종료 코드 101로 끝난 저장소의 SIDR 모두 이 오류가 응답에 실렸다 [6].
+
+`remote_collect_artifacts`는 아티팩트마다 원격 PowerShell의 종료 코드를 보고 0이 아니면 그 아티팩트를 `success: false`로 두고 표준 오류나 `Exit code: <값>`을 `error`에 싣는다 [2].
+`remote_get_system_info`는 종료 코드가 0이 아니면 `RuntimeError`를 내고 서버는 이를 `error` 응답으로 돌려준다 [3][7].
+
+**한계.** DiE 도구는 `diec`의 종료 코드를 보지 않는다 [8].
+표준 출력에서 JSON을 읽을 수 있으면 종료 코드가 0이 아니어도 판별 결과를 정상 결과로 싣는다 [8].
+실행 확인에서 JSON을 출력하고 종료 코드 1로 끝나는 가짜 `diec`로 `die_analyze_file`의 분석 함수를 부르면 `error` 없이 판별 결과가 돌아왔다 [6].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 SIDR 실행, `diec` 실행, YARA 검사에 적용된다 [1][8][9].
+`windows_search_parse`는 인자 `timeout`(기본 120초, 1~3600초)을 분석 실행의 시간 제한으로, 그 값과 10초 가운데 작은 값을 `--version` 실행의 시간 제한으로 준다 [1][4].
+`subprocess.run`은 제한을 넘으면 실행을 끊고 `TimeoutExpired`를 내고 서버는 이 예외를 응답의 `error`로 싣고 `complete`를 거짓으로 둔다 [5].
+끊기 전에 나온 SIDR 출력 파일은 읽지 않는다 [5].
+실행 확인에서 20초 동안 멈추는 가짜 SIDR을 `timeout` 2초로 부르면 2초 만에 `timed out after` 문구의 오류가 실렸다 [6].
+
+`die_analyze_file`과 `die_scan_directory`는 파일마다 `diec`를 시간 제한 60초로 실행하고 제한을 넘으면 그 파일의 결과를 `Analysis timed out (>60 seconds)` 오류로 정한다 [8].
+YARA 검사는 `yara-python`의 `match`에 시간 제한을 주고 제한을 넘으면 그 파일의 결과를 일치 0건과 `Scan timed out after <초>s` 오류로 정한다 [9].
+시간 제한은 `yara_scan_file`이 인자 `timeout`(기본 60초), `yara_scan_directory`가 파일마다 30초, `hunt_ioc`의 YARA 검사가 30초다 [9][10].
+
+**한계.** `yara_scan_directory`는 일치한 파일만 `matches`에 싣고 시간 제한을 넘은 파일도 `files_scanned`에 센다 [10].
+그래서 시간 제한을 넘은 파일은 응답에서 일치하지 않은 파일과 구별되지 않는다 [10].
+
+WinRM 도구는 서버가 시간 제한을 주지 않는다 [11].
+`pywinrm` 0.5.0의 `get_command_output`은 WinRM 작업 시간 제한 오류가 나면 명령이 끝날 때까지 다시 받기를 되풀이하므로 원격 명령 전체에 시간 제한이 적용되지 않는다 [12].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 SIDR 실행과 `diec` 실행에 적용된다 [4][8].
+SIDR 분석 실행이 끝나면 서버는 실행 기록 파일 `sidr.log`를 줄마다 읽는다 [4].
+`not clean`이나 `dirty database`가 있으면 `database_state`를 `dirty`로 두고 `complete`를 거짓으로 둔다 [4].
+`error`, `failed`, `panicked`, `warning:`이 있으면 그 줄을 진단에 싣고 `complete`를 거짓으로 둔다 [4].
+보고서 유형마다 출력 파일이 하나가 아니면 진단에 싣고 `complete`를 거짓으로 둔다 [4].
+출력 파일이 하나도 없으면 종료 코드가 0이어도 `SIDR produced no reports; exit status alone does not prove success` 오류로 정한다 [4].
+JSONL 줄을 객체로 읽지 못하면 그 줄을 건너뛰고 파일 이름과 줄 번호를 진단에 싣고 `complete`를 거짓으로 둔다 [4].
+실행 확인에서 `WARNING:` 줄만 출력하고 종료 코드 0으로 끝나는 가짜 SIDR은 출력 파일이 없다는 오류와 진단 5줄을 남겼다 [6].
+
+`diec`의 표준 출력은 첫 `{`부터 마지막 `}`까지를 JSON으로 읽는다 [8].
+읽지 못하면 `Failed to parse diec JSON output` 오류와 표준 출력 원문 `raw_output`을 돌려준다 [8].
+
+### T08.04 입력별 부분 완료 집계
+
+**구현.** 이 방식은 `hunt_ioc`, `build_timeline`, 폴더 단위 YARA·DiE 검사에 적용된다 [13][14][10][15].
+`hunt_ioc`는 아티팩트 출처 8개마다 `available`, `searched`, `found`, `error`를 둔 결과를 만든다 [16][13].
+응답은 일치한 출처, 찾았지만 일치하지 않은 출처, 쓸 수 없는 출처를 세 목록으로 나누고 요약 문장에 출처 수를 적는다 [13].
+`build_timeline`은 요청한 출처마다 `processed`, `not found`, `error: <문구>` 가운데 하나를 `sources_info`에 싣는다 [14].
+`yara_scan_directory`는 검사한 파일 수와 일치한 파일 수를 세고 예외가 난 파일을 `errors`에 싣는다 [10].
+`die_scan_directory`는 찾은 파일 수와 결과를 만든 파일 수를 세고 예외가 난 파일을 `error`가 있는 결과로 싣는다 [15].
+
+**한계.** `hunt_ioc`는 출처를 읽다가 예외가 나도 그 출처를 `searched: true`, `found: false`로 두므로 그 출처는 일치하지 않은 출처 목록에 포함된다 [16][13].
+`hunt_ioc`의 EVTX 검사는 파일 하나를 읽다가 예외가 나면 그 파일을 기록 없이 건너뛴다 [17].
+`build_timeline`은 출처 파일이 있으면 상태를 먼저 `processed`로 두므로 그 출처를 읽는 라이브러리가 없어 사건을 하나도 만들지 않아도 `processed`가 남는다 [14].
+`build_timeline`의 EVTX 출처는 파일 하나를 읽다 예외가 나면 그 파일을 기록 없이 건너뛰므로 이때도 `processed`가 남는다 [18].
+시간 범위를 주면 이 출처는 시각을 문자열로 바꿔 `iter_evtx_events`에 넘기고 이 함수는 `datetime`이 아닌 시각을 예외로 거부한다 [18][19].
+그래서 시간 범위를 준 `build_timeline` 호출은 EVTX 파일을 모두 건너뛴다 [18][19].
+시간 범위가 없어도 이 출처는 사건의 `event_id`·`timestamp` 키를 읽는데 EVTX 파서의 사건은 `EventID`·`TimeCreated` 키를 쓴다 [18][20].
+그래서 EVTX 출처는 사건을 하나도 만들지 않고 상태는 `processed`로 남는다 [14][18].
+`yara_scan_directory`는 `errors`를 10개까지만 싣고 예외가 난 파일의 수를 따로 세지 않는다 [10].
+100MB를 넘는 파일은 세지 않고 건너뛴다 [10].
+`die_scan_directory`는 시간 제한이나 JSON 해석 실패로 `error`가 생긴 파일도 결과를 만든 파일 수에 세고 실패한 파일 수는 따로 세지 않는다 [15][8].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 모든 도구 호출에 적용된다 [7].
+`call_tool`은 처리 중 난 예외를 처리해 호출을 실패로 정한다 [7].
+EVTX 도구 6개, 보안 설명자 도구 2개, NTDS 도구 4개는 예외 문구를 `isError`가 참인 결과로 돌려준다 [7][21].
+이 결과의 글은 전체 직렬화 크기가 1024자를 넘지 않도록 문구를 줄인다 [21].
+나머지 도구는 예외를 서버 기록에 남기고 `{"error": "<문구>"}` 글을 `isError`가 거짓인 정상 결과로 돌려준다 [7].
+실행 확인에서 없는 하이브로 부른 `registry_get_key`는 `isError`가 거짓인 `Registry hive not found` 응답을, 없는 파일로 부른 `evtx_search`는 `isError`가 참인 응답을 돌려주었다 [6].
+
+호출 하나 안의 일부 실패를 세는 도구도 있다.
+EVTX 파서는 레코드 하나를 사건으로 바꾸다 예외가 나면 그 레코드를 `parse_errors`에 세고 다음 레코드를 읽는다 [22].
+레코드를 내주는 반복자 자체에서 예외가 나면 그 자리에서 읽기를 멈추고 `scan_complete`를 거짓으로 둔다 [22].
+질의 결과는 `scan_complete`, `parse_errors`, 시각 해석 실패 수가 모두 맞을 때만 `total_matched_exact`와 `result_set_complete`를 참으로 둔다 [23].
+`registry_query`는 키나 값을 읽다 난 예외를 `read_errors`에 세고 그 수가 0일 때만 `total_matched_complete`를 참으로 둔다 [24].
+상관 분석 도구는 출처마다 예외를 처리해 그 출처의 결과에 `error`를 싣는다 [16].
+
+**한계.** `windows_search_parse`의 `pyesedb` 대체 경로는 파일을 열지 못한 예외 뒤에 닫기 예외가 다시 나면 닫기 예외의 문구를 `error`에 싣는다 [25].
+실행 확인에서 ESE 형식이 아닌 파일로 대체 경로를 실행하면 `error`가 `pyesedb_file_close: unable to close file`이었다 [6].
+
+### 근거
+
+[1] `--version` 실행의 시간 제한과 종료 코드를 확인한다.
+
+```python
+    with (output / "version.log").open("w+b") as version_log:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            stdout=version_log,
+            stderr=subprocess.STDOUT,
+            timeout=min(timeout, 10),
+            check=False,
+            cwd=output,
+        )
+        version_log.seek(0)
+        version_text = version_log.read(1024).decode("utf-8", errors="replace").strip()
+    result["backend_metadata"]["version"] = version_text
+    if version.returncode or not re.search(r"\b0\.9\.2\b", version_text):
+        raise ValueError(f"SIDR {SIDR_VERSION} is required; observed {version_text!r}")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:121-134`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L121-L134)
+
+[2] 원격 PowerShell의 종료 코드가 0이 아니면 그 아티팩트를 실패로 둔다.
+
+```python
+            stdout, stderr, exit_code = self.run_command(ps_script)
+            
+            if exit_code != 0:
+                return CollectionResult(
+                    success=False,
+                    artifact_name=artifact_name,
+                    remote_path=remote_path,
+                    error=stderr or f"Exit code: {exit_code}",
+                )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:179-187`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L179-L187)
+
+[3] 시스템 정보 조회는 종료 코드가 0이 아니면 예외를 낸다.
+
+```python
+        stdout, stderr, exit_code = self.run_command(ps_script)
+        
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to get system info: {stderr}")
+
+        return json.loads(stdout)
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:244-249`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L244-L249)
+
+[4] 분석 실행의 종료 코드, 실행 기록 줄, 출력 파일 수, JSONL 줄을 확인한다: [`winforensics_mcp/parsers/windows_search_parser.py:135-186`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L135-L186).
+
+[5] SIDR 경로의 예외는 `error`와 진단에 싣고 `complete`를 거짓으로 둔다.
+
+```python
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        result["error"] = str(exc)[:1024]
+        result["complete"] = False
+        _diagnostic(result, str(exc))
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:423-426`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L423-L426)
+
+[6] (실행 확인) WSL에서 `parse_windows_search`를 가짜 SIDR 실행 파일 4가지와 저장소의 `.tools/sidr_x86`으로, DiE 분석 함수를 가짜 `diec` 2가지로 실행하고 MCP 클라이언트 세션으로 `registry_get_key`와 `evtx_search`를 없는 파일로 불렀다.
+
+[7] `call_tool`은 처리 중 예외를 도구 이름에 따라 두 형태로 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[8] `diec`를 시간 제한 60초로 실행하고 종료 코드 대신 출력의 JSON으로 결과를 정한다.
+
+```python
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,  # 1 minute timeout
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "file": str(file_path),
+            "error": "Analysis timed out (>60 seconds)",
+        }
+    except Exception as e:
+        return {
+            "file": str(file_path),
+            "error": f"Failed to run diec: {e}",
+        }
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:136-152`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L136-L152)
+
+```python
+    # Parse JSON output
+    try:
+        # diec outputs a JSON object, but may have warnings before it
+        stdout = result.stdout
+
+        # Find JSON start (first '{')
+        json_start = stdout.find('{')
+        if json_start > 0:
+            stdout = stdout[json_start:]
+
+        # Find JSON end (last '}')
+        json_end = stdout.rfind('}')
+        if json_end > 0:
+            stdout = stdout[:json_end + 1]
+
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        # If JSON parsing fails, return raw output
+        return {
+            "file": str(file_path),
+            "raw_output": result.stdout,
+            "error": "Failed to parse diec JSON output",
+        }
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:154-176`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L154-L176)
+
+[9] YARA 검사는 시간 제한을 넘거나 YARA 오류가 나면 일치 0건과 오류를 돌려준다.
+
+```python
+    # Scan file
+    try:
+        matches = rules.match(str(file_path), timeout=timeout)
+    except yara.TimeoutError:
+        elapsed = (time.perf_counter() - start_time) * 1000
+        return {
+            "file": str(file_path),
+            "file_size": file_path.stat().st_size,
+            "matches": [],
+            "match_count": 0,
+            "scan_time_ms": round(elapsed, 2),
+            "error": f"Scan timed out after {timeout}s",
+        }
+    except yara.Error as e:
+        elapsed = (time.perf_counter() - start_time) * 1000
+        return {
+            "file": str(file_path),
+            "file_size": file_path.stat().st_size,
+            "matches": [],
+            "match_count": 0,
+            "scan_time_ms": round(elapsed, 2),
+            "error": f"YARA scan error: {e}",
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:210-231`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L210-L231)
+
+[10] 폴더 검사는 파일마다 30초 제한으로 검사하고 일치한 파일만 싣는다: [`winforensics_mcp/parsers/yara_scanner.py:338-375`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L338-L375).
+
+`hunt_ioc`의 YARA 검사는 30초 제한을 준다.
+
+```python
+        result = yara_scan_file(file_path, timeout=30)
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:736-736`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L736-L736)
+
+[11] WinRM 세션을 만들 때 시간 제한 인자를 주지 않는다.
+
+```python
+        protocol = "https" if use_ssl else "http"
+        self.url = f"{protocol}://{host}:{port}/wsman"
+
+        self.session = winrm.Session(
+            self.url,
+            auth=(username, self.password),
+            transport=transport,
+            server_cert_validation="ignore" if use_ssl else None,
+        )
+    
+    def run_command(self, command: str) -> tuple[str, str, int]:
+        result = self.session.run_ps(command)
+        return (
+            result.std_out.decode("utf-8", errors="replace"),
+            result.std_err.decode("utf-8", errors="replace"),
+            result.status_code,
+        )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:110-126`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L110-L126)
+
+[12] `pywinrm` 0.5.0의 `get_command_output`은 작업 시간 제한 오류가 나면 다시 받기를 되풀이한다: [`winrm/protocol.py:481-491`](https://github.com/diyan/pywinrm/blob/bf01aac15512caa00f07858ce09168f2a4e11847/winrm/protocol.py#L481-L491).
+
+[13] `hunt_ioc`는 출처 결과를 세 목록으로 나누고 요약에 출처 수를 적는다.
+
+```python
+
+    # Generate summary
+    found_sources = [r["source"] for r in results if r.get("found")]
+    not_found_sources = [r["source"] for r in results if r.get("searched") and not r.get("found")]
+    unavailable_sources = [r["source"] for r in results if not r.get("available", True)]
+
+    if found_sources:
+        summary = f"IOC '{ioc}' ({final_type}) found in {len(found_sources)} source(s): {', '.join(found_sources)}"
+    else:
+        searched = [r["source"] for r in results if r.get("searched")]
+        summary = f"IOC '{ioc}' ({final_type}) not found in any of the {len(searched)} sources searched"
+
+    return {
+        "ioc": ioc,
+        "ioc_type": final_type,
+        "ioc_type_detected": detected_type,
+        "artifacts_dir": str(artifacts_dir),
+        "found": len(found_sources) > 0,
+        "confidence": confidence,
+        "total_matches": total_matches,
+        "sources_with_matches": found_sources,
+        "sources_searched_no_match": not_found_sources,
+        "sources_unavailable": unavailable_sources,
+        "artifacts_searched": artifacts_searched,
+        "results": results,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:1053-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1053-L1079)
+
+[14] `build_timeline`은 출처마다 상태를 정한다: [`winforensics_mcp/orchestrators/timeline_builder.py:614-698`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L614-L698).
+
+[15] `die_scan_directory`는 예외가 난 파일을 `error` 항목으로 싣고 파일 수를 센다: [`winforensics_mcp/parsers/die_analyzer.py:365-404`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L365-L404).
+
+[16] 출처 함수는 예외가 나면 `searched: true`, `found: false`와 `error`를 돌려준다: [`winforensics_mcp/orchestrators/ioc_hunter.py:246-253`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L246-L253), [`winforensics_mcp/orchestrators/ioc_hunter.py:498-505`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L498-L505), [`winforensics_mcp/orchestrators/ioc_hunter.py:783-790`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L783-L790).
+
+[17] EVTX 파일 하나를 읽다 난 예외는 그 파일을 건너뛴다.
+
+```python
+        for evtx_file in evtx_files:
+            try:
+                result = get_evtx_events(
+                    str(evtx_file),
+                    contains=[ioc],
+                    limit=10,
+                )
+
+                searched_files.append(evtx_file.name)
+                events = result.get("events", [])
+
+                for event in events:
+                    all_matches.append({
+                        "log_file": evtx_file.name,
+                        "event_id": event.get("event_id"),
+                        "timestamp": event.get("timestamp"),
+                        "provider": event.get("provider"),
+                    })
+
+            except Exception:
+                continue
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:836-856`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L836-L856)
+
+[18] `build_timeline`의 EVTX 출처는 시각을 문자열로 넘기고 `event_id`·`timestamp` 키를 읽으며 파일 단위 예외는 건너뛴다: [`winforensics_mcp/orchestrators/timeline_builder.py:445-490`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L445-L490).
+
+[19] EVTX 파서는 `datetime`이 아닌 시각을 거부한다.
+
+```python
+def _validate_times(start_time, end_time):
+    normalized = []
+    for name, value in (("start_time", start_time), ("end_time", end_time)):
+        if value is not None:
+            if not isinstance(value, datetime):
+                raise ValueError(f"{name} must be a datetime")
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must include a timezone")
+            value = value.astimezone(timezone.utc)
+        normalized.append(value)
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:596-605`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L596-L605)
+
+[20] EVTX 파서의 사건은 `EventID`·`TimeCreated` 키를 쓴다.
+
+```python
+    result: dict[str, Any] = {
+        "EventRecordID": None,
+        "EventID": None,
+        "TimeCreated": None,
+        "Computer": None,
+        "Channel": None,
+        "Provider": None,
+        "EventData": {},
+        "UserData": {},
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:399-408`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L399-L408)
+
+[21] EVTX·NTDS 도구의 오류 결과는 `isError`를 참으로 두고 크기를 줄인다.
+
+```python
+def evtx_error_response(message: str) -> CallToolResult:
+    """Keep server-side errors within even the smallest supported budget."""
+    preview = message[:800]
+    while True:
+        result = CallToolResult(content=[TextContent(type="text", text=preview)], isError=True)
+        if len(result.model_dump_json(by_alias=True, exclude_none=True)) <= MIN_RESPONSE_CHARS:
+            return result
+```
+
+[`winforensics_mcp/evtx_response.py:100-106`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L100-L106)
+
+[22] EVTX 레코드 변환 실패는 세고 반복자 실패는 읽기를 멈춘다: [`winforensics_mcp/parsers/evtx_parser.py:121-162`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L121-L162).
+
+[23] 질의 메타데이터는 읽기 완료와 오류 수로 완전성을 정한다.
+
+```python
+    metadata = {
+        "total_matched": len(matched), "query_ref": query_ref,
+        "source": {"path": source[0], "size_bytes": source[1], "mtime_ns": source[2]},
+        "scan_complete": cached.scan_complete,
+        "scan_limit_hit": not cached.scan_complete and cached.scanned_records == max_scan,
+        "scanned_records": cached.scanned_records, "parse_errors": cached.parse_errors,
+        "time_filter_errors": diagnostics["time_filter_errors"],
+        "total_matched_exact": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+        "result_set_complete": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:688-696`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L688-L696)
+
+[24] `registry_query`는 읽기 오류를 세고 완전성에 반영한다.
+
+```python
+    read_errors = 0
+    diagnostics = []
+
+    def record_error(path: str, operation: str, exc: Exception) -> None:
+        nonlocal read_errors
+        read_errors += 1
+        if len(diagnostics) < diagnostic_limit:
+            diagnostics.append({"key_path": path, "operation": operation, "error": str(exc)})
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:384-391`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L384-L391)
+
+```python
+        "total_matched_complete": read_errors == 0,
+        "read_errors": read_errors,
+        "diagnostics": diagnostics,
+        "diagnostics_truncated": read_errors > len(diagnostics),
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:435-438`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L435-L438)
+
+[25] `pyesedb` 대체 경로는 `finally`에서 파일을 닫는다: [`winforensics_mcp/parsers/windows_search_parser.py:198-250`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L198-L250).

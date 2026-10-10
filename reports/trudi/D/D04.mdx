@@ -4,6 +4,7 @@ details:
 - id: D04.01
 - id: D04.03
 - id: D04.04
+- id: D04.05
 ---
 
 # D04 출력 경로 제한
@@ -57,6 +58,19 @@ live monitoring 경로의 `case_id`는 비었거나 `/`·`..`가 들어 있으�
 **한계.** `investigation_id`는 접두어 뒤를 검사하지 않아 사건 폴더 밖 경로를 만들 수 있다 [16][5].
 `monitor.baseline_capture`도 `client_id`의 접두어 뒤를 검사하지 않고 baseline 파일 이름에 넣는다 [20].
 baseline 파일은 Velociraptor 수집이 끝난 뒤에 쓰므로 그런 값이 수집 단계를 지나는지는 확인하지 못했다 [20].
+
+### D04.05 서버가 파일 이름 결정
+
+**구현.** 이 방식은 `misc.chat_db_export`, `misc.hindsight_chrome`, `misc.srum_export`와 하이브별로 실행하는 `ez.recmd`에 적용된다 [21][22][23][24].
+네 도구는 목적지 폴더를 모델이 준 `output_dir`로 받고 그 안의 이름은 서버 코드가 정한다 [21][22][23][24].
+`misc.chat_db_export`는 `output_dir` 아래에 `messages.csv`·`transfers.csv`·`participants.csv`를 쓴다 [21].
+`misc.hindsight_chrome`은 출력 이름 `hindsight_chrome`과 로그 파일 `hindsight.log`를 `output_dir`에 붙여 `hindsight.py`에 넘긴다 [22].
+`misc.srum_export`는 `output_dir` 아래 `srudb`를 `esedbexport`의 대상 이름으로 넘기고 내보낸 폴더는 그 이름에 `.export`가 붙은 폴더다 [23].
+`ez.recmd`는 하이브마다 `output_dir` 아래에 하이브의 상위 폴더 이름과 하이브 파일 이름을 이은 폴더를 정해 RECmd에 넘긴다 [24].
+이름이 고정이거나 증거 경로에서 나오므로 같은 `output_dir`로 다시 부르면 같은 이름에 쓴다 [21][23][24].
+`misc.chat_db_export`는 파일을 쓰기 모드로 열어 같은 이름의 앞 파일을 덮어쓴다 [21].
+이름이 이미 있는지 확인해 새 이름을 짓는 코드는 없다.
+`output_dir`은 증거 위치인지만 검사받는다 [7].
 
 ### 근거
 
@@ -490,3 +504,73 @@ baseline 파일은 수집이 끝난 뒤 쓴다([`tools/monitor.py:331-349`](http
 ```
 
 [`tools/monitor.py:426-428`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/monitor.py#L426-L428)
+
+[21] `misc.chat_db_export`는 `output_dir` 아래에 정해 둔 이름의 CSV 세 개를 쓴다.
+
+```python
+    out_dir = output_dir or os.path.join(".", "exports", "chat")
+    assert_output_safe(out_dir)
+
+    parsed = parse_chat_db(db_path, chat_app=chat_app)
+    output_paths: dict = {}
+    if parsed.get("success"):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            specs = (
+                ("messages.csv", parsed.get("messages", []),
+                 ["ts_utc", "author", "author_display", "chat", "partner", "body"]),
+                ("transfers.csv", parsed.get("transfers", []),
+                 ["start_utc", "finish_utc", "partner", "partner_display",
+                  "filename", "filesize", "status"]),
+                ("participants.csv",
+                 [{"participant": p} for p in parsed.get("participants", [])],
+                 ["participant"]),
+            )
+            for name, rows, header in specs:
+                p = os.path.join(out_dir, name)
+                with open(p, "w", newline="", encoding="utf-8") as fh:
+```
+
+[`tools/misc.py:567-587`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L567-L587)
+
+[22] `misc.hindsight_chrome`은 출력 이름과 로그 파일 이름을 `output_dir`에 붙인다.
+
+```python
+    output_file = os.path.join(output_dir, "hindsight_chrome")
+    cmd = [
+        "/usr/local/bin/hindsight.py",
+        "-i", profile_path,
+        "-o", output_file,
+        "-f", fmt,
+        # Explicit log location: hindsight's default log path is resolved by
+        # the tool itself and landed somewhere unwritable in two runs
+        # (logging.basicConfig FileHandler crash before any parsing).
+        "-l", os.path.join(output_dir, "hindsight.log"),
+    ]
+```
+
+[`tools/misc.py:354-364`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L354-L364)
+
+[23] `misc.srum_export`는 `output_dir` 아래 `srudb`를 대상 이름으로 넘긴다.
+
+```python
+    os.makedirs(output_dir, exist_ok=True)
+    target = os.path.join(output_dir, "srudb")
+    # esedbexport appends ".export" to the -t basename.
+    r = run([binary, "-t", target, srudb_path], timeout=1800, output_dir=output_dir)
+    export_dir = target + ".export"
+```
+
+[`tools/misc.py:518-522`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L518-L522)
+
+[24] `ez.recmd`는 하이브마다 `output_dir` 아래 폴더 이름을 짓는다.
+
+```python
+    for hive in hives:
+        parent = os.path.basename(os.path.dirname(hive)) or "root"
+        sub = os.path.join(output_dir, f"{parent}_{os.path.basename(hive)}".replace(" ", "_"))
+        args = ["-f", hive, "--bn", batch_file, "--csv", sub]
+        r = _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=sub, timeout=DEFAULT_TIMEOUT)
+```
+
+[`tools/eztools.py:274-278`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/eztools.py#L274-L278)

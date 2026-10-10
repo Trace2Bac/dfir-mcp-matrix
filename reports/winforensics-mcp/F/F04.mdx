@@ -1,0 +1,122 @@
+---
+cell: F04
+details:
+- id: not_applicable
+---
+
+# F04 발견사항·결론 기록 관리
+
+### 비적용
+
+**판단.** 서버에는 발견사항, 결론, 가설, 단서 메모를 받아 남기는 도구가 없다.
+도구 74개는 증거 파일을 파싱하거나 조회하거나 외부 서비스에 질의하거나 원격 호스트에서 아티팩트를 수집하는 도구이고 도구 정의에 발견사항이나 메모를 인자로 받는 도구가 없다 [1].
+도구 이름별 처리에도 받은 내용을 저장소에 남기는 분기가 없다 [2].
+
+파일을 쓰는 도구는 세 개이고 모두 서버가 읽거나 받아 온 자료를 쓴다.
+
+- `evtx_export`는 조건에 맞는 EVTX 레코드를 JSONL 파일로 쓴다 [3].
+- `vt_lookup_behavior`는 `triage_dir`을 주면 VirusTotal 행위 분석 응답을 JSON 파일로 쓴다 [4].
+- `remote_collect_artifacts`는 원격 호스트에서 가져온 이벤트 로그와 레지스트리 하이브를 `output_dir`에 쓴다 [5].
+
+`investigate_execution`, `hunt_ioc` 같은 도구가 만드는 판정과 요약은 응답으로만 돌려주고 서버에 남기지 않는다 [6].
+
+### 근거
+
+[1] 도구 정의 74개: [`winforensics_mcp/server.py:488-2463`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L488-L2463).
+
+[2] 도구 이름별 처리: [`winforensics_mcp/server.py:2482-3495`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2482-L3495).
+
+[3] `evtx_export`는 레코드를 한 줄씩 JSONL로 쓴다.
+
+```python
+        with stream:
+            for event in events:
+                # Read at most one extra projected row to distinguish an exact
+                # boundary from an actual export cap. Never write that row.
+                if max_rows is not None and exported_rows >= max_rows:
+                    export_limit_hit = True
+                    break
+                encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"),
+                                      allow_nan=False) + "\n").encode("utf-8")
+                written = stream.write(encoded)
+                if written != len(encoded):
+                    raise OSError("Short write while exporting EVTX records")
+                digest.update(encoded)
+                exported_bytes += len(encoded)
+                exported_rows += 1
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:145-159`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L145-L159)
+
+[4] `vt_lookup_behavior`는 `triage_dir`이 있으면 응답을 파일로 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[5] 원격 수집은 정해 둔 이벤트 로그와 하이브를 `output_dir` 아래에 쓴다.
+
+```python
+    results = []
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_evtx:
+        evtx_dir = output_dir / "evtx"
+        evtx_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["evtx"].items():
+            local_path = evtx_dir / f"{name}.evtx"
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+            results.append(result)
+
+    if include_registry:
+        reg_dir = output_dir / "registry"
+        reg_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["registry"].items():
+            local_path = reg_dir / name
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:393-422`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L393-L422)
+
+[6] `investigate_execution`은 판정과 요약을 응답 `dict`로만 돌려준다.
+
+```python
+    return {
+        "target": target,
+        "target_type": "sha1" if _is_sha1(target) else "sha256" if _is_sha256(target) else "executable",
+        "artifacts_dir": str(artifacts_dir),
+        "execution_confirmed": execution_confirmed,
+        "confidence": confidence,
+        "sha1": sha1_hash,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": _generate_summary(target, execution_confirmed, confidence, evidence_results),
+    }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:558-573`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L558-L573)

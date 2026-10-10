@@ -1,0 +1,68 @@
+---
+cell: L02
+details:
+- id: L02.05
+---
+
+# L02 기록 구성
+
+### L02.05 결과 상태·실행 시점 기록
+
+**구현.** 이 방식은 `call_tool` 처리기가 실패한 호출에 남기는 항목에 적용된다 [1].
+항목은 `logger.exception`이 쓰므로 수준이 `ERROR`이고 메시지 `Error executing tool <도구 이름>` 뒤에 예외 추적 정보가 붙는다 [1].
+예외 추적 정보의 마지막 줄은 예외 종류와 메시지다 [2].
+그래서 항목 하나가 그 호출이 예외로 실패했다는 결과 상태와 실패 원인을 담는다 [1][2].
+서버는 `logging.basicConfig(level=logging.INFO)`에 형식을 주지 않으므로 항목 형식은 CPython 기본값 `%(levelname)s:%(name)s:%(message)s`이다 [3][4].
+이 형식에는 시각 칸이 없다 [4].
+
+도구 이름은 메시지 글 안에만 있고 따로 나뉜 칸에 기록되지 않는다 [1].
+항목에는 도구 인자를 담는 칸이 없고 결과의 크기, 행 수, 해시도 들어 있지 않다 [1].
+다만 예외 메시지에는 인자 값이 실릴 수 있다 [2].
+없는 경로로 부른 `registry_get_key`의 항목에는 `FileNotFoundError: Registry hive not found: /nonexistent/SYSTEM`처럼 모델이 준 경로가 남았다 [2].
+한 호출에서 나온 여러 줄을 잇는 호출 ID는 없다 [1].
+도구 호출은 처리가 끝난 뒤 항목을 쓰므로 항목은 실패가 확정된 뒤의 상태다 [1].
+
+**한계.** 항목에 실행 시점이 없다 [4].
+표준 오류를 받아 적는 MCP 클라이언트가 시각을 붙이지 않으면 항목이 언제 쓰였는지 알 수 없다.
+성공한 호출과 오류 결과를 돌려주되 예외가 `call_tool`까지 올라오지 않은 호출은 항목을 남기지 않는다 [1][2].
+그래서 기록에 항목이 없다는 사실로는 호출이 성공했는지 호출이 없었는지 구별하지 못한다.
+
+### 근거
+
+[1] `call_tool`은 예외가 올라온 호출에만 도구 이름을 담은 메시지로 항목을 쓰고 오류 결과를 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[2] (실행 확인) MCP 클라이언트 세션으로 서버를 실행하고 표준 오류를 파일로 받았다.
+없는 하이브 경로로 `registry_get_key`를 부르자 `ERROR:winforensics-mcp:Error executing tool registry_get_key` 줄, 예외 추적 정보, 마지막 줄 `FileNotFoundError: Registry hive not found: /nonexistent/SYSTEM`이 남았다.
+성공한 `evtx_list_files` 호출과 없는 경로로 부른 `evtx_search`·`pcap_get_stats` 호출은 서버 로거의 항목을 남기지 않았다.
+
+[3] 서버는 `basicConfig`에 수준만 준다.
+
+```python
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("winforensics-mcp")
+
+server = Server("winforensics-mcp", version=__version__)
+```
+
+[`winforensics_mcp/server.py:139-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L139-L142)
+
+[4] CPython 3.12.15의 기본 형식에는 시각이 없다: [`Lib/logging/__init__.py:538`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L538).

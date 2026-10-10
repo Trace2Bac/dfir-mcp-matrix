@@ -1,0 +1,173 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 이벤트 로그, 레지스트리 하이브, `$MFT`, Prefetch, SRUM, NTDS, PE, pcap 같은 증거 파일과 수집물 폴더를 도구마다 경로 인자로 받아 그 호출에서만 읽는다 [1].
+증거를 등록하는 MCP 도구는 없고 증거를 식별하는 목록이나 등록 정보도 남기지 않는다.
+
+EVTX 도구와 NTDS 도구는 읽은 파일의 파싱 결과를 서버 메모리 캐시에 둔다 [2][3].
+캐시 항목의 키는 파일의 실제 경로, 크기, 수정 시각, 장치 번호, inode, 변경 시각과 읽은 레코드 상한이다 [2][3].
+EVTX 캐시는 10개, NTDS 캐시는 2개를 넘으면 오래된 항목부터 지운다 [2][3].
+이 캐시는 같은 파일을 다시 파싱하지 않으려고 두는 것이고 캐시 내용을 돌려주는 도구가 없다.
+그래서 이 캐시는 증거 등록 목록에 해당하지 않는다.
+
+`evtx_list_files`는 받은 폴더 아래 `.evtx` 파일마다 경로, 이름, 크기, 수정 시각을 응답으로 돌려주고 저장하지 않는다 [4].
+
+서버가 시작하는 수집도 서버 쪽 목록에 오르지 않는다.
+`remote_collect_artifacts`는 WinRM으로 대상 Windows의 정해 둔 이벤트 로그 8개와 레지스트리 하이브 5개를 읽어 `output_dir` 아래 `evtx`·`registry` 폴더에 쓴다 [5][6].
+응답은 항목마다 이름, 성공 여부, 로컬 경로, 크기, 오류를 싣고 이 목록을 파일로 남기지 않는다 [5].
+수집 결과 객체 `CollectionResult`에 있는 원격 경로와 수집 시각 `timestamp`는 응답에 싣지 않는다 [5][7].
+
+### 근거
+
+[1] 도구 처리기는 경로 인자를 받아 파서에 넘기고 경로를 따로 보관하지 않는다: [`winforensics_mcp/server.py:2482-3495`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2482-L3495).
+
+[2] EVTX 파싱 결과 캐시는 상태 값 묶음과 레코드 상한을 키로 두고 10개를 넘으면 오래된 항목을 지운다.
+
+```python
+def _get_cached(evtx_path: Path, max_scan: int = MAX_SCAN_EVENTS) -> _EvtxCacheEntry:
+    source = _cache_key(evtx_path)
+    key = source + (max_scan, EVTX_RUST_AVAILABLE)
+    if key not in _evtx_cache:
+        entry = _populate_cache(evtx_path, max_scan)
+        if _cache_key(evtx_path) != source:
+            raise ValueError("EVTX source changed during scan; retry the query")
+        _evtx_cache[key] = entry
+    _evtx_cache.move_to_end(key)
+    while len(_evtx_cache) > MAX_CACHE_FILES:
+        _evtx_cache.popitem(last=False)
+    return _evtx_cache[key]
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:168-179`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L168-L179)
+
+[3] NTDS 파싱 결과 캐시는 같은 상태 값 묶음과 레코드 상한을 키로 두고 2개를 넘으면 오래된 항목을 지운다.
+
+```python
+    path = Path(ntds_path)
+    source = _identity(path)
+    key = source + (max_scan,)
+    if key not in _CACHE:
+        _CACHE[key] = _scan(path, max_scan, source)
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > 2:
+        _CACHE.popitem(last=False)
+    if _identity(path) != source:
+        raise ValueError('NTDS source changed during lookup; retry')
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:384-393`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L384-L393)
+
+[4] `evtx_list_files`는 찾은 파일의 경로·이름·크기·수정 시각 목록을 돌려준다.
+
+```python
+    pattern = "**/*.evtx" if recursive else "*.evtx"
+    files = []
+    
+    for evtx_path in directory.glob(pattern):
+        try:
+            stat = evtx_path.stat()
+            files.append({
+                "path": str(evtx_path),
+                "name": evtx_path.name,
+                "size_bytes": stat.st_size,
+                "size_human": _human_readable_size(stat.st_size),
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+        except OSError:
+            continue
+    
+    return sorted(files, key=lambda x: x["name"])
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:849-865`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L849-L865)
+
+[5] `remote_collect_artifacts`는 수집 결과를 응답 목록으로만 돌려준다.
+
+```python
+    elif name == "remote_collect_artifacts":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3456-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3456-L3478)
+
+[6] `collect_triage_package`는 정해 둔 이벤트 로그와 하이브를 `output_dir` 아래 폴더에 쓴다.
+수집할 원격 경로는 코드에 정해 둔 표다.
+
+```python
+ARTIFACT_PATHS = {
+    "evtx": {
+        "Security": r"C:\Windows\System32\winevt\Logs\Security.evtx",
+        "System": r"C:\Windows\System32\winevt\Logs\System.evtx",
+        "Application": r"C:\Windows\System32\winevt\Logs\Application.evtx",
+        "PowerShell-Operational": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-PowerShell%4Operational.evtx",
+        "Sysmon": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-Sysmon%4Operational.evtx",
+        "WinRM": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-WinRM%4Operational.evtx",
+        "TaskScheduler": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-TaskScheduler%4Operational.evtx",
+        "TerminalServices": r"C:\Windows\System32\winevt\Logs\Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
+    },
+    "registry": {
+        "SAM": r"C:\Windows\System32\config\SAM",
+        "SYSTEM": r"C:\Windows\System32\config\SYSTEM",
+        "SOFTWARE": r"C:\Windows\System32\config\SOFTWARE",
+        "SECURITY": r"C:\Windows\System32\config\SECURITY",
+        "DEFAULT": r"C:\Windows\System32\config\DEFAULT",
+    },
+    "other": {
+        "Prefetch": r"C:\Windows\Prefetch",
+        "Amcache": r"C:\Windows\AppCompat\Programs\Amcache.hve",
+        "SRUM": r"C:\Windows\System32\sru\SRUDB.dat",
+    },
+}
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:33-56`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L33-L56)
+
+폴더를 만들고 항목마다 쓰는 흐름: [`winforensics_mcp/collectors/artifact_collector.py:386-425`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L386-L425).
+
+[7] 수집 결과 객체에는 원격 경로와 수집 시각이 있다.
+
+```python
+@dataclass
+class CollectionResult:
+    success: bool
+    artifact_name: str
+    local_path: Optional[Path] = None
+    remote_path: Optional[str] = None
+    size_bytes: Optional[int] = None
+    error: Optional[str] = None
+    timestamp: str = ""
+    
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:59-71`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L59-L71)

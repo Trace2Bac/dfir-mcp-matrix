@@ -1,0 +1,171 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.05
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 서버 프로세스 메모리에 두는 상태는 EVTX 파싱 결과, NTDS 메타데이터, VirusTotal 조회 결과의 캐시 3개다.
+EVTX 캐시 `_evtx_cache`는 파일 하나를 정한 `max_scan`까지 읽어 만든 사건 목록, 원래 레코드 문자열, 레코드 번호를 담는다 [1].
+키는 파일 경로, 크기, 시각, 장치·inode 번호와 `max_scan`, 사용한 파서이고 EVTX 검색·상세 조회·로그온 ID 상관·내보내기가 이 캐시를 함께 쓴다 [2][3].
+NTDS 캐시 `_CACHE`는 파일 식별 정보와 `max_scan`을 키로 스키마와 객체 메타데이터를 담는다 [4].
+VirusTotal 캐시 `_cache`는 조회 대상별로 응답과 조회 시각을 담는다 [5].
+세 캐시는 파일이나 DB에 쓰지 않으므로 프로세스가 끝나면 사라진다 [1][4][5].
+
+나머지 분석 도구는 호출마다 증거 파일을 다시 읽어 결과를 만든다.
+열린 사건이나 작업 목록 같은 상태는 없다.
+EVTX의 이어 읽기 값 `next_cursor`와 사건 참조 `event_ref`는 원본 식별 정보, 질의 해시, 위치를 담은 문자열이고 서버는 이를 따로 저장하지 않는다 [6].
+캐시가 비어 있으면 `evtx_get_event`는 참조한 레코드 번호까지 파일을 다시 읽어 그 사건을 찾는다 [7].
+도구가 내보내거나 수집해 쓰는 파일은 도구의 출력이고 서버는 이 파일을 다시 읽어 상태로 쓰지 않는다.
+
+### P06.05 만료
+
+**구현.** 이 방식은 세 캐시에 적용된다.
+EVTX 캐시는 항목이 10개를 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [2].
+NTDS 캐시는 항목이 2개를 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [4].
+VirusTotal 캐시는 항목마다 24시간의 유효 시간을 둔다 [5].
+유효 시간이 지난 항목은 다시 조회할 때 버린다 [5][8].
+캐시에서 꺼낸 VirusTotal 응답에는 `_cached`와 캐시에 둔 시간 `_cache_age_hours`가 붙는다 [8].
+EVTX·NTDS 캐시의 키에는 파일 크기와 시각이 들어 있어 파일이 바뀌면 새 항목을 만든다 [2][4].
+
+**한계.** VirusTotal 캐시에는 개수 한도가 없고 유효 시간이 지난 항목도 같은 대상을 다시 조회하기 전에는 메모리에 남는다 [5][8].
+
+### 근거
+
+[1] EVTX 캐시 항목은 사건, 원래 문자열, 레코드 번호를 담는다.
+
+```python
+MAX_CACHE_FILES = 10
+
+
+class _EvtxCacheEntry:
+    def __init__(self, events, raw_strings, ordinals, scanned_records,
+                 parse_errors, scan_complete):
+        self.events = events
+        self.raw_strings = raw_strings
+        self.ordinals = ordinals
+        self.scanned_records = scanned_records
+        self.parse_errors = parse_errors
+        self.scan_complete = scan_complete
+        self.total_events = len(events)
+
+
+from collections import OrderedDict
+_evtx_cache: OrderedDict[tuple, _EvtxCacheEntry] = OrderedDict()
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:42-58`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L42-L58)
+
+[2] 캐시 키에 파일 식별 정보가 들어 있고 항목이 10개를 넘으면 가장 오래 쓰지 않은 항목을 버린다.
+
+```python
+def _get_cached(evtx_path: Path, max_scan: int = MAX_SCAN_EVENTS) -> _EvtxCacheEntry:
+    source = _cache_key(evtx_path)
+    key = source + (max_scan, EVTX_RUST_AVAILABLE)
+    if key not in _evtx_cache:
+        entry = _populate_cache(evtx_path, max_scan)
+        if _cache_key(evtx_path) != source:
+            raise ValueError("EVTX source changed during scan; retry the query")
+        _evtx_cache[key] = entry
+    _evtx_cache.move_to_end(key)
+    while len(_evtx_cache) > MAX_CACHE_FILES:
+        _evtx_cache.popitem(last=False)
+    return _evtx_cache[key]
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:168-179`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L168-L179)
+
+[3] 사건 순회, 질의 준비, 로그온 ID 상관이 같은 캐시를 부른다: [`winforensics_mcp/parsers/evtx_parser.py:515`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L515), [`winforensics_mcp/parsers/evtx_parser.py:680`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L680), [`winforensics_mcp/parsers/evtx_correlation.py:91`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_correlation.py#L91).
+
+[4] NTDS 캐시는 항목이 2개를 넘으면 가장 오래 쓰지 않은 항목을 버린다.
+
+```python
+    _integer(max_scan, 'max_scan', 1)
+    _integer(diagnostic_limit, 'diagnostic_limit', 0, 100)
+    if not PYESEDB_AVAILABLE:
+        raise ImportError('libesedb-python is required for read-only NTDS metadata')
+    path = Path(ntds_path)
+    source = _identity(path)
+    key = source + (max_scan,)
+    if key not in _CACHE:
+        _CACHE[key] = _scan(path, max_scan, source)
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > 2:
+        _CACHE.popitem(last=False)
+    if _identity(path) != source:
+        raise ValueError('NTDS source changed during lookup; retry')
+    return _CACHE[key]
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:380-394`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L380-L394)
+
+[5] VirusTotal 캐시는 모듈 전역 `dict`이고 유효 시간은 24시간이다.
+
+```python
+# Cache: key -> (result, timestamp)
+_cache: dict[str, tuple[dict, datetime]] = {}
+CACHE_TTL = timedelta(hours=24)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:31-33`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L31-L33)
+
+[6] 이어 읽기 값과 사건 참조는 원본 식별 정보와 위치를 담은 문자열이다.
+
+```python
+def make_evtx_cursor(query_ref: str, offset: int) -> str:
+    """Encode a versioned query-bound continuation (not an authorization token)."""
+    if not isinstance(query_ref, str) or not re.fullmatch(r"[0-9a-f]{64}", query_ref):
+        raise ValueError("Invalid query_ref")
+    _validate_integer(offset, "offset", 0)
+    return _encode_token({"v": 1, "q": query_ref, "o": offset})
+
+
+def _event_ref(source: tuple, ordinal: int) -> str:
+    return _encode_token({"v": 1, "s": _digest(source), "r": ordinal})
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:90-99`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L90-L99)
+
+[7] 캐시에 없으면 참조한 레코드 번호까지 다시 읽는다.
+
+```python
+    # Prefer an existing scan; on a cache miss, stop at the referenced record.
+    cached = next((entry for key, entry in reversed(_evtx_cache.items())
+                   if key[:-2] == source and key[-1] == EVTX_RUST_AVAILABLE
+                   and ordinal in entry.ordinals), None)
+    if cached is None:
+        cached = _get_cached(path, ordinal)
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:812-817`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L812-L817)
+
+[8] 유효 시간이 지나지 않았으면 표시를 붙여 돌려주고 지났으면 그 항목을 지운다.
+
+```python
+def _get_cached(key: str) -> Optional[dict]:
+    """Get cached result if not expired."""
+    if key in _cache:
+        result, timestamp = _cache[key]
+        if datetime.now() - timestamp < CACHE_TTL:
+            result = dict(result)  # Copy to avoid mutation
+            result["_cached"] = True
+            result["_cache_age_hours"] = round(
+                (datetime.now() - timestamp).total_seconds() / 3600, 1
+            )
+            return result
+        else:
+            # Expired, remove from cache
+            del _cache[key]
+    return None
+
+
+def _set_cached(key: str, result: dict) -> None:
+    """Cache result."""
+    _cache[key] = (dict(result), datetime.now())
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:89-108`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L89-L108)

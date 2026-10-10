@@ -1,0 +1,559 @@
+---
+cell: E04
+details:
+- id: E04.01
+- id: E04.02
+- id: E04.04
+- id: E04.05
+- id: E04.06
+- id: E04.07
+---
+
+# E04 분석 입력 준비
+
+### E04.01 작업 사본 생성
+
+**구현.** 이 방식은 브라우저 기록을 읽는 경로와 `windows_search_parse`에 적용된다 [1][2].
+브라우저 기록을 읽는 함수 넷은 SQLite DB 파일 전체를 `tempfile.mkdtemp`로 만든 임시 폴더에 복사하고 그 사본을 연다 [1][3].
+이 함수들은 `browser_get_history`와 `hunt_ioc`·`investigate_user_activity`의 브라우저 단계가 부른다 [3].
+읽기를 마치면 임시 폴더를 지운다 [4].
+`windows_search_parse`는 받은 `Windows.edb`를 임시 폴더의 `input/Windows.edb`로 복사하고 사본의 SHA-256이 원본과 같은지 확인한다 [2].
+SIDR나 대체 경로인 `pyesedb`는 이 사본을 읽는다 [2][5].
+
+다른 파서는 받은 경로의 원본을 제자리에서 읽고 사본을 만들지 않는다.
+서버에는 디스크 이미지를 마운트하거나 보관 파일을 디스크에 푸는 코드가 없다.
+
+**한계.** 브라우저 기록 도구는 `browser`가 기본값 `auto`이면 종류를 판별할 때 사본이 아니라 원본 DB를 연다 [6].
+
+### E04.02 선택 추출
+
+**구현.** 이 방식은 수집물 폴더 `artifacts_dir`를 받는 오케스트레이터 도구와 `hunt_ioc_pack`, APMX 도구에 적용된다 [7][8][9].
+`investigate_execution`·`build_timeline`·`hunt_ioc`는 `artifacts_dir` 아래에서 정해 둔 상대 경로 목록을 차례로 확인해 처음 있는 경로를 아티팩트별 입력으로 고른다 [7][10].
+예를 들어 Prefetch는 `Windows/Prefetch`·`prefetch` 같은 폴더, Amcache는 `Windows/AppCompat/Programs/Amcache.hve`, SRUM은 `Windows/System32/sru/SRUDB.dat`를 찾는다 [7].
+`build_timeline`은 여기에 `$MFT`, `$UsnJrnl_$J`, 이벤트 로그 폴더를 더하고 `hunt_ioc`는 이 셋과 사용자별 브라우저 기록 경로를 더한다 [10].
+`investigate_user_activity`는 사용자 이름이나 `*`를 넣은 glob으로 브라우저 기록, `Recent` 폴더, `UsrClass.dat`, `NTUSER.DAT`를 찾는다 [11].
+모델이 아티팩트별 경로 인자를 주면 그 경로가 찾은 경로를 대신한다 [12].
+고른 파일은 제자리에서 읽고 브라우저 기록만 사본을 만든다.
+
+`hunt_ioc_pack`은 `artifacts_dir` 아래 모든 파일을 훑어 `max_file_size` 이하인 파일을 `max_files`개까지 고른다 [8].
+고른 파일은 모두 상대 경로를 파일 이름 규칙과 대조한다 [8].
+고른 파일 가운데 확장자가 정해 둔 텍스트 확장자인 파일은 내용을, `.pcap`·`.pcapng`·`.cap` 파일은 패킷 내용을 검사한다 [8].
+
+APMX 도구는 캡처 파일 전체를 메모리로 읽고 `PK` 서명 뒤의 ZIP 부분을 메모리에서 연다 [9].
+그 안에서 `info`, `process/<번호>/info`·`calls`·`data`, `definitions`, `log/monitoring.txt` 같은 이름의 항목만 골라 읽는다 [9][13].
+
+**한계.** `hunt_ioc`의 브라우저 경로 탐색은 `Users/*/…` 꼴 경로를 `artifacts_dir` 바로 아래 폴더를 사용자 폴더로 삼아 맞춘다 [14].
+그래서 `artifacts_dir`가 수집물 루트이고 기록이 `Users/<이름>/AppData/…`에 있으면 브라우저 기록을 찾지 못한다 [15].
+Firefox 경로는 별표가 두 개라 둘째 별표가 글자 그대로 남아 어느 배치에서도 찾지 못한다 [14][15].
+이때 응답은 브라우저 기록이 없다고 적는다 [16].
+`investigate_user_activity`는 사용자 이름을 받지 않으면 glob이 찾은 첫 기록 하나만 쓰고 다른 사용자의 기록은 읽지 않는다 [11].
+`hunt_ioc_pack`의 `max_files`는 확장자와 관계없이 크기 상한 이하의 모든 파일을 센다 [8].
+그래서 내용 검사 대상이 아닌 파일이 먼저 나오면 뒤의 텍스트·pcap 파일은 내용을 읽지 않는다 [8].
+
+### E04.04 추출·생략 범위 기록
+
+**구현.** 이 방식은 `investigate_execution`, `investigate_user_activity`, `hunt_ioc`, `build_timeline`에 적용된다 [16][17][18][19].
+앞의 세 도구는 아티팩트별로 입력을 찾았는지를 `artifacts_searched`에 참·거짓으로 싣는다 [16][17][18].
+찾지 못한 아티팩트는 결과 목록에 "Prefetch directory not found", "Amcache.hve not found" 같은 오류와 `available: false`로 실린다 [17][16].
+`build_timeline`은 요청한 출처마다 경로와 `processed`·`not found`·오류 상태를 `sources_info`에 싣는다 [19].
+
+`hunt_ioc_pack`은 훑은 파일 수, 크기 상한이나 `max_files` 때문에 건너뛴 파일, 검사한 pcap 수를 응답에 싣지 않는다 [8][20].
+브라우저 기록 도구는 사본을 만들었는지와 함께 복사한 부속 파일을 응답에 적지 않는다 [1].
+
+**한계.** `artifacts_searched`는 경로가 있는지만 적고 어느 경로를 골랐는지는 적지 않는다 [17][18].
+`hunt_ioc`가 경로 탐색 문제로 브라우저 기록을 찾지 못한 경우에도 기록이 없다고 적는다 [16].
+
+### E04.05 부속 자료 탐색
+
+**구현.** 이 방식은 브라우저 기록을 읽는 경로에 적용된다.
+서버 코드는 DB 파일을 복사한 뒤 같은 폴더에 같은 이름으로 `-wal`·`-shm`·`-journal`이 붙은 파일이 있으면 사본 옆으로 함께 복사한다 [1].
+
+`windows_search_parse`는 `Windows.edb`만 복사하고 같은 폴더의 ESE 트랜잭션 로그와 체크포인트 파일은 옮기지 않는다 [2].
+SIDR는 사본 하나만 들어 있는 폴더를 받는다 [5].
+SRUM·NTDS 도구는 받은 데이터베이스 경로만 `pyesedb`에 넘기고 트랜잭션 로그를 찾지 않는다 [21].
+레지스트리 도구는 하이브 경로만 `python-registry`에 넘기고 `.LOG1`·`.LOG2`를 찾지 않는다 [21].
+
+### E04.06 부속 자료 누락·로그 미반영 표시
+
+**구현.** 이 방식은 NTDS 도구와 `windows_search_parse`에 적용된다 [22][23].
+NTDS 도구는 ESE 헤더의 상태 값과 예비 헤더의 같은 값을 읽어 `database_state`, `database_clean`, `header_copies_consistent`로 응답에 싣는다 [22][24].
+정상 종료 상태가 아니거나 두 헤더가 다르면 진단 `database_not_clean_or_header_disagreement`를 더하고 `results_complete`를 거짓으로 둔다 [22][24].
+이때 응답 글은 "Source/query is incomplete; inspect diagnostics."로 끝난다 [25].
+`ntds_get_trusts`의 설명은 로그를 재생하거나 데이터베이스를 고치지 않는다고 적는다 [26].
+
+`windows_search_parse`는 SIDR 출력에 "not clean"·"dirty database"가 있거나 보고서 파일 이름에 `_dirty`가 있으면 `database_state`를 `dirty`로 둔다 [23].
+이때 `complete`를 거짓으로 두고 진단에 "Dirty ESE database: results may be inaccurate or incomplete."를 더한다 [23].
+dirty 표시가 없으면 `database_state`는 `no_dirty_warning`이다 [23].
+
+SRUM·레지스트리·브라우저 기록 도구는 데이터베이스나 하이브의 상태와 부속 자료 유무를 응답에 적지 않는다.
+
+**한계.** `windows_search_parse`가 SIDR 없이 `pyesedb`로 읽으면 데이터베이스 상태를 보지 않아 `database_state`가 `unknown`으로 남는다 [27].
+이 경로는 결과를 늘 불완전으로 표시하지만 그 이유로 싣는 진단은 긴 값과 압축 내용을 읽지 못한다는 것이다 [27].
+NTDS 도구의 상태 값은 헤더 체크섬을 확인하지 않은 값이고 응답은 `header_checksum_verified`를 늘 거짓으로 싣는다 [22].
+
+### E04.07 로그 재생·복원
+
+**구현.** 이 방식은 브라우저 기록을 읽는 경로에 적용된다.
+서버 코드는 `-wal` 파일을 사본 옆으로 함께 복사한다 [1].
+Python에 묶인 SQLite는 사본을 열 때 그 WAL을 읽는다 [3].
+실행 확인에서 체크포인트하지 않아 `-wal`에만 있던 방문 기록이 응답에 실렸다 [28].
+`-shm`이 없는 경우에도 같았다 [28].
+서버는 WAL이 있었는지나 반영했는지를 응답에 적지 않는다 [1].
+
+ESE 데이터베이스와 레지스트리 하이브의 트랜잭션 로그는 서버 코드가 적용하지 않는다 [21].
+
+**한계.** 사본 옆에 롤백 저널 `-journal`이 함께 복사된 경우에 SQLite가 읽기 전용 연결에서 그 저널을 어떻게 처리하는지는 실행해 확인하지 않았다 [1][3].
+
+### 근거
+
+[1] 브라우저 DB와 `-wal`·`-shm`·`-journal`을 임시 폴더로 복사한다.
+
+```python
+def _copy_to_temp(db_path: Path) -> Path:
+    """
+    Copy database to temp location to avoid SQLite locking issues.
+    Browser databases are often locked when the browser is running.
+    """
+    temp_dir = tempfile.mkdtemp(prefix="browser_history_")
+    temp_path = Path(temp_dir) / db_path.name
+    shutil.copy2(db_path, temp_path)
+
+    # Also copy any WAL/SHM files if present
+    for suffix in ['-wal', '-shm', '-journal']:
+        wal_path = db_path.parent / (db_path.name + suffix)
+        if wal_path.exists():
+            shutil.copy2(wal_path, temp_path.parent / (temp_path.name + suffix))
+
+    return temp_path
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:85-100`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L85-L100)
+
+[2] `windows_search_parse`는 `Windows.edb`만 임시 폴더에 복사하고 사본 해시를 확인한다.
+
+```python
+        before = _sha256(source)
+        result["evidence_sha256_before"] = before
+        try:
+            with tempfile.TemporaryDirectory(prefix="winforensics-search-") as temp:
+                root = Path(temp)
+                input_dir, output = root / "input", root / "output"
+                input_dir.mkdir()
+                output.mkdir()
+                copied = input_dir / "Windows.edb"
+                shutil.copyfile(source, copied)
+                if _sha256(copied) != before:
+                    raise ValueError("Evidence changed while copying; retry from a stable copy")
+                rows = (
+                    _sidr_rows(binary, copied, output, timeout, result)
+                    if binary
+                    else _fallback_rows(copied, result)
+                )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:341-357`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L341-L357)
+
+[3] 브라우저 기록 함수 넷이 사본을 `mode=ro`로 연다.
+오케스트레이터의 브라우저 단계가 이 함수들을 부른다: [`winforensics_mcp/parsers/browser_parser.py:115-120`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L115-L120), [`winforensics_mcp/parsers/browser_parser.py:225-228`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L225-L228), [`winforensics_mcp/parsers/browser_parser.py:316-319`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L316-L319), [`winforensics_mcp/parsers/browser_parser.py:390-393`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L390-L393), [`winforensics_mcp/orchestrators/ioc_hunter.py:601-609`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L601-L609), [`winforensics_mcp/orchestrators/user_activity_investigator.py:199-225`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L199-L225).
+
+[4] 읽기를 마치면 임시 폴더를 지운다.
+
+```python
+    finally:
+        # Cleanup temp files
+        shutil.rmtree(temp_path.parent, ignore_errors=True)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:168-170`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L168-L170)
+
+[5] SIDR에는 사본이 들어 있는 임시 폴더를 넘긴다.
+
+```python
+    with (output / "sidr.log").open("w+b") as log:
+        process = subprocess.run(
+            [str(binary), "-f", "json", "-r", "to-file", "-o", str(output), str(copied.parent)],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+            cwd=output,
+        )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:135-143`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L135-L143)
+
+[6] `browser`가 `auto`이면 원본 경로로 판별 함수를 부른다.
+
+```python
+    # Detect browser type
+    if browser == "auto":
+        browser = _detect_browser_type(history_path)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:510-512`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L510-L512)
+
+```python
+def _detect_browser_type(db_path: Path) -> str:
+    """Detect browser type from database schema"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:59-62`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L59-L62)
+
+[7] 아티팩트별 상대 경로 목록과 처음 있는 경로를 고르는 함수다.
+
+```python
+ARTIFACT_PATHS = {
+    "prefetch": [
+        "Windows/prefetch",
+        "Windows/Prefetch",
+        "prefetch",
+        "Prefetch",
+        "C/Windows/prefetch",
+        "C/Windows/Prefetch",
+    ],
+    "amcache": [
+        "Windows/appcompat/Programs/Amcache.hve",
+        "Windows/AppCompat/Programs/Amcache.hve",
+        "Amcache.hve",
+        "C/Windows/appcompat/Programs/Amcache.hve",
+        "C/Windows/AppCompat/Programs/Amcache.hve",
+    ],
+    "srum": [
+        "Windows/System32/sru/SRUDB.dat",
+        "Windows/system32/sru/SRUDB.dat",
+        "SRUDB.dat",
+        "sru/SRUDB.dat",
+        "C/Windows/System32/sru/SRUDB.dat",
+    ],
+}
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:33-56`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L33-L56)
+
+```python
+    artifacts_dir = Path(artifacts_dir)
+    found = {
+        "prefetch": None,
+        "amcache": None,
+        "srum": None,
+    }
+
+    if not artifacts_dir.exists():
+        return found
+
+    # Search for each artifact type
+    for artifact_type, patterns in ARTIFACT_PATHS.items():
+        for pattern in patterns:
+            candidate = artifacts_dir / pattern
+            if candidate.exists():
+                found[artifact_type] = candidate
+                break
+
+    return found
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:98-116`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L98-L116)
+
+[8] `hunt_ioc_pack`은 크기 상한 이하 파일을 `max_files`개까지 세어 고르고 확장자로 검사 대상을 나눈다: [`winforensics_mcp/ioc_packs/behavior_hunter.py:19-36`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L19-L36), [`winforensics_mcp/ioc_packs/behavior_hunter.py:104-123`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L104-L123), [`winforensics_mcp/ioc_packs/behavior_hunter.py:160-163`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L160-L163).
+
+[9] APMX 파일을 메모리로 읽어 ZIP 부분을 연다.
+
+```python
+def _open_apmx_zip(file_path: str | Path) -> zipfile.ZipFile:
+    """Open an APMX file, skipping past the custom header to the ZIP data."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"APMX file not found: {file_path}")
+
+    data = file_path.read_bytes()
+    pk_offset = data.find(b"PK\x03\x04")
+    if pk_offset == -1:
+        raise ValueError(f"Not a valid APMX file (no ZIP signature found): {file_path}")
+
+    return zipfile.ZipFile(io.BytesIO(data[pk_offset:]))
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:47-58`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L47-L58)
+
+[10] `build_timeline`과 `hunt_ioc`의 확장 경로 목록과 탐색 함수다: [`winforensics_mcp/orchestrators/timeline_builder.py:23-83`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L23-L83), [`winforensics_mcp/orchestrators/ioc_hunter.py:50-79`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L50-L79), [`winforensics_mcp/orchestrators/ioc_hunter.py:122-165`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L122-L165).
+
+[11] `investigate_user_activity`는 glob이 찾은 첫 기록을 고른다.
+
+```python
+    # Try to find browser history (check multiple browsers)
+    for browser_type, paths in [
+        ("edge", USER_ARTIFACT_PATHS["browser_edge"]),
+        ("chrome", USER_ARTIFACT_PATHS["browser_chrome"]),
+    ]:
+        for pattern in paths:
+            if username:
+                pattern = pattern.replace("{user}", username)
+            else:
+                pattern = pattern.replace("{user}/", "*/")
+
+            # Handle glob patterns
+            if "*" in pattern:
+                matches = list(artifacts_dir.glob(pattern))
+                if matches:
+                    found["browser_history"] = matches[0]
+                    found["browser_type"] = browser_type
+                    break
+            else:
+                candidate = artifacts_dir / pattern
+                if candidate.exists():
+                    found["browser_history"] = candidate
+                    found["browser_type"] = browser_type
+                    break
+```
+
+[`winforensics_mcp/orchestrators/user_activity_investigator.py:100-123`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L100-L123)
+
+[12] 모델이 준 경로 인자가 찾은 경로를 대신한다.
+
+```python
+    # Find artifact paths (auto-detect or use overrides)
+    found_paths = find_artifact_paths(artifacts_dir)
+
+    prefetch_dir = Path(prefetch_path) if prefetch_path else found_paths.get("prefetch")
+    amcache_file = Path(amcache_path) if amcache_path else found_paths.get("amcache")
+    srum_file = Path(srum_path) if srum_path else found_paths.get("srum")
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:495-500`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L495-L500)
+
+[13] 이름으로 고른 항목만 읽는다: [`winforensics_mcp/parsers/api_monitor/apmx_parser.py:789-842`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L789-L842).
+
+[14] 별표가 들어 있는 브라우저 경로는 첫 별표 앞부분의 부모 폴더 아래 폴더를 훑는다.
+
+```python
+    for artifact_type, patterns in IOC_ARTIFACT_PATHS.items():
+        if artifact_type == "browser":
+            # Browser paths can have wildcards, handle specially
+            for pattern in patterns:
+                if '*' in pattern:
+                    # Glob for user directories
+                    base_pattern = pattern.split('*')[0]
+                    base_path = artifacts_dir / base_pattern.rstrip('/')
+                    if base_path.parent.exists():
+                        for user_dir in base_path.parent.iterdir():
+                            if user_dir.is_dir():
+                                rest_pattern = pattern.split('*', 1)[1]
+                                full_path = user_dir / rest_pattern.lstrip('/')
+                                if full_path.exists():
+                                    found["browser"].append(full_path)
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:143-157`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L143-L157)
+
+[15] (실행 확인) `Users/alice/AppData/…` 아래에 Chrome `History`와 Firefox `places.sqlite`를 둔 폴더로 `_find_extended_artifact_paths`를 부르자 수집물 루트를 주었을 때는 빈 목록이, `Users` 폴더를 주었을 때는 Chrome 기록만 나왔다.
+
+[16] `hunt_ioc`는 찾은 브라우저 기록이 없으면 "No browser history found"를 싣는다: [`winforensics_mcp/orchestrators/ioc_hunter.py:960-1050`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L960-L1050).
+
+[17] `investigate_execution`은 찾았는지를 `artifacts_searched`에 담고 찾지 못한 출처를 오류로 싣는다.
+
+찾았는지 판정하고 오류를 싣는 흐름: [`winforensics_mcp/orchestrators/execution_tracker.py:502-540`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L502-L540).
+
+```python
+    return {
+        "target": target,
+        "target_type": "sha1" if _is_sha1(target) else "sha256" if _is_sha256(target) else "executable",
+        "artifacts_dir": str(artifacts_dir),
+        "execution_confirmed": execution_confirmed,
+        "confidence": confidence,
+        "sha1": sha1_hash,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": _generate_summary(target, execution_confirmed, confidence, evidence_results),
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:558-572`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L558-L572)
+
+[18] `investigate_user_activity`도 찾았는지를 `artifacts_searched`에 담는다.
+
+```python
+    # Track which artifacts were searched
+    artifacts_searched = {
+        "browser": browser_file is not None and browser_file.exists(),
+        "lnk_files": recent_dir is not None and recent_dir.exists(),
+        "shellbags": usrclass_file is not None and usrclass_file.exists(),
+        "recentdocs": ntuser_file is not None and ntuser_file.exists(),
+    }
+```
+
+[`winforensics_mcp/orchestrators/user_activity_investigator.py:694-700`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L694-L700)
+
+[19] `build_timeline`은 출처마다 경로와 상태를 `sources_info`에 싣는다.
+
+출처마다 상태를 정하는 흐름: [`winforensics_mcp/orchestrators/timeline_builder.py:606-698`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L606-L698).
+
+```python
+    return {
+        "artifacts_dir": str(artifacts_dir),
+        "sources_requested": sources,
+        "sources_info": sources_info,
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:725-728`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L725-L728)
+
+[20] `hunt_ioc_pack` 응답의 항목이다.
+
+```python
+
+    return {
+        "pack": {
+            "id": ioc_pack.get("id"),
+            "name": ioc_pack.get("name"),
+            "version": ioc_pack.get("version"),
+            "license": ioc_pack.get("license"),
+            "upstream": ioc_pack.get("upstream"),
+            "rule_count": len(ioc_pack.get("rules", [])),
+        },
+        "artifacts_dir": str(root),
+        "found": bool(findings),
+        "confidence": _confidence_from_score(total_score),
+        "score": total_score,
+        "matched_rules": len(findings),
+        "total_hits": sum(item["hit_count"] for item in findings),
+        "findings": findings[:limit],
+        "summary": (
+            f"Matched {len(findings)} rule(s) from {ioc_pack.get('id')} with "
+            f"{sum(item['hit_count'] for item in findings)} hit(s)"
+            if findings else f"No matches from {ioc_pack.get('id')}"
+        ),
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:250-271`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L250-L271)
+
+[21] 파서는 데이터베이스와 하이브 경로만 라이브러리에 넘긴다: [`winforensics_mcp/parsers/srum_parser.py:383-384`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/srum_parser.py#L383-L384), [`winforensics_mcp/parsers/ntds_parser.py:266-268`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L266-L268), [`winforensics_mcp/parsers/registry_parser.py:171`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L171).
+
+[22] NTDS 도구는 ESE 헤더와 예비 헤더의 상태 값을 읽는다.
+
+```python
+def _header(path):
+    with path.open('rb') as stream:
+        raw = stream.read(240)
+        if len(raw) < 240 or struct.unpack_from('<I', raw, 4)[0] != 0x89ABCDEF:
+            raise ValueError('Not a supported ESE database header')
+        version = struct.unpack_from('<I', raw, 8)[0]
+        page_size = struct.unpack_from('<I', raw, 236)[0]
+        if version != 0x620 or page_size not in (2048, 4096, 8192, 16384, 32768):
+            raise ValueError('Unsupported ESE format version or page size')
+        state = struct.unpack_from('<I', raw, 52)[0]
+        stream.seek(page_size)
+        backup = stream.read(240)
+    consistent = len(backup) == 240 and all(raw[a:b] == backup[a:b] for a, b in ((4, 12), (52, 56), (236, 240)))
+    names = {1: 'just_created', 2: 'dirty_shutdown', 3: 'clean_shutdown', 4: 'being_converted', 5: 'force_detach'}
+    return {'database_state': names.get(state, 'unknown'), 'database_state_code': state,
+            'database_clean': state == 3 and consistent, 'header_copies_consistent': consistent,
+            'header_checksum_verified': False, 'ese_version': version, 'page_size': page_size}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:103-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L103-L119)
+
+[23] SIDR 출력과 보고서 이름으로 dirty 상태를 정한다.
+
+```python
+        for raw_line in log:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            lower = line.lower()
+            if "not clean" in lower or "dirty database" in lower:
+                result["database_state"] = "dirty"
+            if any(marker in lower for marker in ("error", "failed", "panicked", "warning:")):
+                _diagnostic(result, line)
+                result["complete"] = False
+        if process.returncode:
+            raise ValueError(f"SIDR exited with status {process.returncode}; see diagnostics")
+    reports = {}
+    for kind, suffix in REPORTS.items():
+        paths = sorted(output.glob(f"*_{suffix}_*.json"))
+        if len(paths) != 1:
+            result["complete"] = False
+            _diagnostic(result, f"Expected one {suffix} JSONL report; found {len(paths)}")
+        reports[kind] = paths
+        if any("_dirty" in p.stem for p in paths):
+            result["database_state"] = "dirty"
+    if result["database_state"] == "dirty":
+        result["complete"] = False
+        _diagnostic(result, "Dirty ESE database: results may be inaccurate or incomplete.")
+    result["reports"] = {k: [p.name for p in paths] for k, paths in reports.items()}
+    if not any(reports.values()):
+        raise ValueError("SIDR produced no reports; exit status alone does not prove success")
+    if result["database_state"] == "unknown":
+        result["database_state"] = "no_dirty_warning"
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:145-171`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L145-L171)
+
+[24] 정상 종료가 아니면 진단을 더하고 결과를 불완전으로 둔다.
+
+```python
+    snapshot.update(_header(path))
+    if not snapshot['database_clean']:
+        _diag(snapshot, 'database_not_clean_or_header_disagreement', error=False)
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:263-265`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L263-L265)
+
+```python
+
+def _metadata(snapshot, diagnostic_limit):
+    exact = snapshot['scan_complete'] and snapshot['schema_complete'] and snapshot['database_clean'] and snapshot['parse_errors'] == 0
+    keys = ('source', 'scanned_records', 'total_records', 'scan_complete', 'scan_limit_hit', 'parse_errors', 'schema_complete',
+            'database_state', 'database_state_code', 'database_clean', 'header_copies_consistent', 'header_checksum_verified')
+    return {**{key: copy.deepcopy(snapshot[key]) for key in keys}, 'results_complete': exact,
+            'total_matched_exact': exact, 'match_count_exact': exact,
+            'diagnostics': copy.deepcopy(snapshot['diagnostics'][:diagnostic_limit]),
+            'diagnostic_count': snapshot['diagnostic_count'], 'diagnostics_truncated': snapshot['diagnostic_count'] > diagnostic_limit,
+            'sid_storage': 'ntds-final-subauthority-big-endian', 'schema_mappings': dict(snapshot['schema'])}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:396-405`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L396-L405)
+
+[25] NTDS 응답 글은 불완전한 결과에 문구를 붙인다.
+
+```python
+    exact = data.get("total_matched_exact", data.get("match_count_exact", data["results_complete"]))
+    if not exact:
+        summary += " Source/query is incomplete; inspect diagnostics."
+    return CallToolResult(content=[TextContent(type="text", text=summary)],
+                          structuredContent=data, isError=False)
+```
+
+[`winforensics_mcp/ntds_response.py:64-68`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ntds_response.py#L64-L68)
+
+[26] `ntds_get_trusts`의 도구 설명이다.
+
+```python
+        Tool(
+            name="ntds_get_trusts",
+            description="Read paginated offline trusted-domain metadata: partner, SID, direction/type/attributes, and provenance. Excludes trust authentication secrets; never replays logs or repairs the database.",
+            inputSchema=_ntds_schema("trusts"), outputSchema=NTDS_TRUST_SCHEMA,
+        ),
+```
+
+[`winforensics_mcp/server.py:507-511`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L507-L511)
+
+[27] `pyesedb` 대체 경로는 결과를 불완전으로 두고 긴 값과 압축 내용을 읽지 못한다는 진단을 더한다.
+
+```python
+def _fallback_rows(copied: Path, result: dict):
+    result["backend"] = "pyesedb"
+    result["complete"] = False
+    result["content_filter_complete"] = False
+    _diagnostic(
+        result,
+        "Partial PropertyStore fallback: long values and compressed Search "
+        "content are unsupported. Zero matches are not conclusive. Install SIDR.",
+    )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:189-197`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L189-L197)
+
+[28] (실행 확인) 체크포인트하지 않은 방문 기록이 `-wal`에만 있는 Chrome 형식 WAL 모드 DB를 `-shm`이 있는 경우와 없는 경우로 두고 `browser_get_history`를 부르자 두 경우 모두 그 방문 기록이 응답에 실렸다.

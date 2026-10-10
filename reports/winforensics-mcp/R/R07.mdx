@@ -1,0 +1,354 @@
+---
+cell: R07
+details:
+- id: R07.01
+- id: R07.02
+---
+
+# R07 증거 내용과 지시 구분
+
+### R07.01 JSON 필드 분리
+
+**구현.** 이 방식은 모든 도구의 응답에 적용된다.
+응답은 두 형태로 나뉜다.
+EVTX의 구조화 응답, 보안 설명자 도구, NTDS 도구는 증거 값을 `structuredContent`에 두고 MCP `text` 내용에는 서버가 만든 요약 문장만 싣는다 [1][2].
+EVTX의 구조화 응답은 `evtx_search`·`evtx_security_search`에 `compact`나 `output_format: structured`를 준 경우와 `evtx_correlate_logon_id`·`evtx_ntlm_operational_summary`·`evtx_export`·`evtx_get_event`의 응답이다 [3].
+요약 문장은 반환 건수, 다음 쪽 안내, 집계가 정확한지만 적고 증거 값을 담지 않는다 [1][2].
+다른 도구와 EVTX 질의의 기본 응답은 결과 `dict`를 JSON 글 하나로 만들어 `text` 내용에 싣는다 [1][4].
+이 형태에서 이벤트 필드, 레지스트리 값, 명령줄, URL 같은 증거 글은 JSON 문자열 값으로 따옴표와 이스케이프 안에 들어가고 서버가 붙인 필드 이름과 섞이지 않는다 [4].
+`json_response`가 응답을 줄일 때 덧붙이는 서버 경고는 결과 안의 `_truncation` 필드에 따로 들어간다 [4].
+도구가 예외를 내면 서버는 오류 문구를 `{"error": …}` JSON이나 오류 결과의 글로 싣는다 [5].
+
+도구 설명과 응답에는 증거에서 온 글 속의 지시를 따르지 말라는 안내가 없고 서버는 MCP 지침을 두지 않는다 [6].
+
+**한계.** `evtx_attack_summary`는 증거 값을 탭으로 이어 붙인 TSV 글 하나를 `data` 필드에 싣는다 [7].
+서버는 칸 값 안의 탭과 줄바꿈을 바꾸지 않는다 [7].
+그래서 명령줄 같은 값에 탭이나 줄바꿈이 있으면 그 자리에 칸이나 행의 경계가 생기고 뒤의 증거 글이 다른 칸이나 다른 사건 줄로 읽힌다 [7].
+
+오케스트레이터의 문장 필드는 증거 값을 서버 문장 안에 넣는다.
+`build_timeline`의 `description`은 `File modified: `·`First seen in Amcache: ` 같은 서버 문구 뒤에 MFT 경로나 Amcache 이름을 붙인다 [8].
+`investigate_execution`의 `summary`는 출처 이름과 그 출처의 `finding` 문장을 줄마다 이어 붙인다 [9].
+Prefetch의 `finding`은 서버 문장에 증거의 실행 횟수와 마지막 실행 시각을 넣은 글이다 [10].
+
+### R07.02 출처 필드 부여
+
+**구현.** 이 방식은 오케스트레이터, `hunt_ioc_pack`, `windows_search_parse`, VirusTotal 조회 도구에 적용된다 [10][11][12][13][14].
+`investigate_execution`·`hunt_ioc`는 결과 항목마다 그 값을 읽은 아티팩트 이름 `source`(`Prefetch`, `Amcache`, `SRUM` 등)를 싣는다 [10][11].
+`build_timeline`은 사건마다 `source`(`MFT`, `USN`, `Prefetch`, `Amcache`, `EVTX`)를 싣는다 [8].
+`hunt_ioc_pack`은 일치 항목마다 일치한 곳의 종류 `source`(`filesystem_path`, `file_text`, `pcap_payload`)와 검출기 이름 `detector`를 싣는다 [12].
+`windows_search_parse`는 행을 만든 백엔드 이름 `backend`(`sidr`나 `pyesedb`)를 싣는다 [13].
+SIDR를 썼으면 `backend_metadata`에 실행 파일 경로, 그 SHA-256, 기대 버전, 고정 빌드 커밋, 실행 파일이 알린 버전을 싣는다 [13].
+VirusTotal 조회 도구는 결과를 캐시에서 꺼냈으면 `_cached`와 캐시에 넣은 뒤 지난 시간 `_cache_age_hours`를 싣는다 [14].
+
+다른 도구는 결과에 값을 만든 파서나 라이브러리 이름을 싣지 않는다.
+EVTX 도구는 Rust `evtx`와 `python-evtx` 가운데 설치된 것으로 파일을 읽고 Rust `evtx`를 먼저 쓰지만 어느 쪽으로 읽었는지 싣지 않는다 [15].
+결과에는 값의 신뢰 수준을 적는 필드가 없다 [4].
+
+### 근거
+
+[1] EVTX 구조화 응답은 요약 문장을 `text`에, 결과를 `structuredContent`에 싣고 기본 응답은 결과 JSON을 `text`에 싣는다: [`winforensics_mcp/evtx_response.py:110-153`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L110-L153).
+
+[2] NTDS 응답은 요약 문장을 `text`에, 결과를 `structuredContent`에 싣는다.
+
+```python
+def _result(data: dict[str, Any]) -> CallToolResult:
+    if "objects" in data:
+        summary = f"NTDS account query: {data['status']}; returned {data['returned']} candidate objects."
+    elif "trusts" in data:
+        summary = f"Returned {data['returned']} NTDS trust records."
+        if data.get("next_cursor"):
+            summary += " Follow next_cursor for more records."
+    else:
+        summary = f"Returned {len(data['domains'])} NTDS domain records."
+    exact = data.get("total_matched_exact", data.get("match_count_exact", data["results_complete"]))
+    if not exact:
+        summary += " Source/query is incomplete; inspect diagnostics."
+    return CallToolResult(content=[TextContent(type="text", text=summary)],
+                          structuredContent=data, isError=False)
+```
+
+[`winforensics_mcp/ntds_response.py:55-68`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ntds_response.py#L55-L68)
+
+[3] `evtx_search` 계열은 `compact`일 때 구조화 응답을 기본으로 고르고 다른 EVTX 도구는 늘 구조화 응답을 쓴다: [`winforensics_mcp/server.py:2546-2549`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2546-L2549), [`winforensics_mcp/server.py:2598`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2598), [`winforensics_mcp/server.py:2652`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2652).
+
+[4] `json_response`는 결과를 JSON 글로 만들고 줄일 때는 경고를 `_truncation`에 넣는다.
+
+```python
+def json_response(data: Any, max_chars: int = MAX_RESPONSE_CHARS) -> str:
+    """Convert data to compact JSON string for response, with smart truncation if too large."""
+
+    # Serialize compact (no indent) — saves ~40% size
+    result = json.dumps(data, default=str)
+
+    if len(result) <= max_chars:
+        return result
+
+    # Apply smart truncation
+    truncated_data, truncation_info = _smart_truncate(data, max_chars)
+
+    # Add truncation metadata to response
+    if isinstance(truncated_data, dict) and truncation_info:
+        truncated_data["_truncation"] = {
+            "warning": "Response was truncated to fit context limits. IMPORTANT: Oldest data was kept, newest may be missing!",
+            "original_chars": len(result),
+            "max_chars": max_chars,
+            "truncated_arrays": truncation_info,
+            "hint": "Use time_range_start/end to focus on incident window, or use offset parameter to paginate through all results"
+        }
+
+    return json.dumps(truncated_data, default=str)
+```
+
+[`winforensics_mcp/server.py:264-286`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L264-L286)
+
+[5] 도구 예외는 EVTX·NTDS 도구에서 오류 결과의 글로, 다른 도구에서 `{"error": …}` JSON 글로 돌아간다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[6] 서버는 이름과 버전만으로 시작하고 도구 정의에 증거 속 지시에 관한 안내가 없다.
+
+```python
+server = Server("winforensics-mcp", version=__version__)
+```
+
+[`winforensics_mcp/server.py:142-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L142-L142)
+
+도구 정의 전체는 [`winforensics_mcp/server.py:488-2463`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L488-L2463)에 있다.
+
+[7] `evtx_attack_summary`는 칸 값을 `str`로 바꿔 탭으로 잇고 줄을 줄바꿈으로 잇는다.
+
+```python
+        ts = event.get("TimeCreated", "?")
+        ed = event.get("EventData", {})
+        cols = config["fields"](ed)
+
+        if config.get("include_event_id"):
+            cols = (*cols, str(event.get("EventID", "?")))
+
+        lines.append(f"{ts}\t" + "\t".join(str(c) for c in cols))
+
+    return {
+        "format": "tsv",
+        "event_type": event_type,
+        "total_events": min(total, limit),
+        "truncated": total > limit,
+        "data": "\n".join(lines),
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:1086-1101`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1086-L1101)
+
+[8] `build_timeline`은 사건마다 `source`를 싣고 `description`에 서버 문구와 MFT 경로를 잇는다.
+
+```python
+                count += 1
+                yield {
+                    "timestamp": modified,
+                    "source": "MFT",
+                    "event_type": "file_modified",
+                    "description": f"File modified: {path}",
+                    "path": path,
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:166-172`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L166-L172)
+
+```python
+        count += 1
+        yield {
+            "timestamp": timestamp,
+            "source": "Amcache",
+            "event_type": "program_first_seen",
+            "description": f"First seen in Amcache: {name or path}",
+            "path": path or name,
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:386-392`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L386-L392)
+
+[9] `investigate_execution`의 `summary`는 출처마다 `finding`을 이어 붙인다.
+
+```python
+    findings = []
+    for result in evidence_results:
+        if result.get("found") and result.get("finding"):
+            findings.append(f"- {result['source']}: {result['finding']}")
+
+    summary = f"Execution of '{target}' confirmed ({confidence} confidence):\n"
+    summary += "\n".join(findings)
+
+    return summary
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:587-595`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L587-L595)
+
+[10] Prefetch 결과는 `source`를 싣고 `finding`에 실행 횟수와 마지막 실행 시각을 넣는다.
+
+```python
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "found": True,
+            "path": str(prefetch_dir),
+            "finding": f"Executed {total_run_count} times, last at {all_run_times[0]}" if all_run_times else f"Executed {total_run_count} times",
+            "run_count": total_run_count,
+            "last_run": all_run_times[0] if all_run_times else None,
+            "run_times": all_run_times[:8],  # Limit to 8 most recent
+            "prefetch_files": [e.get("filename") for e in evidence],
+        }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:196-206`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L196-L206)
+
+[11] `hunt_ioc`의 Prefetch 결과도 `source`를 싣는다.
+
+```python
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "searched": True,
+            "found": True,
+            "path": str(prefetch_dir),
+            "matches": matches,
+            "match_count": len(matches),
+        }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:236-244`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L236-L244)
+
+[12] `hunt_ioc_pack`의 일치 항목은 `source`와 `detector`를 싣는다.
+
+```python
+    for path in _iter_candidate_files(artifacts_dir, max_files, max_file_size):
+        rel_path = str(path.relative_to(artifacts_dir))
+
+        for detector in detectors:
+            dtype = detector.get("type")
+            if dtype == "filename_regex":
+                pattern = detector.get("pattern")
+                if pattern and re.search(pattern, rel_path, re.IGNORECASE):
+                    hits.append({
+                        "source": "filesystem_path",
+                        "path": rel_path,
+                        "detector": detector.get("name", dtype),
+                        "match": rel_path,
+                    })
+
+            if dtype != "text_regex" or not _is_text_candidate(path):
+                continue
+
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            for text in _decode_text_variants(raw):
+                for match in _match_text_detector(detector, text):
+                    hits.append({
+                        "source": "file_text",
+                        "path": rel_path,
+                        "detector": detector.get("name", dtype),
+                        **match,
+                    })
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:104-133`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L104-L133)
+
+[13] `windows_search_parse`는 SIDR를 쓰면 `backend`와 `backend_metadata`를 싣는다.
+
+```python
+def _sidr_rows(binary: Path, copied: Path, output: Path, timeout: int, result: dict):
+    result["backend"] = "sidr"
+    result["backend_metadata"] = {
+        "path": str(binary),
+        "sha256": _sha256(binary),
+        "expected_version": SIDR_VERSION,
+        "pinned_build_commit": SIDR_COMMIT,
+    }
+    # Redirect to files so a noisy/crashing sidecar cannot exhaust Python memory.
+    with (output / "version.log").open("w+b") as version_log:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            stdout=version_log,
+            stderr=subprocess.STDOUT,
+            timeout=min(timeout, 10),
+            check=False,
+            cwd=output,
+        )
+        version_log.seek(0)
+        version_text = version_log.read(1024).decode("utf-8", errors="replace").strip()
+    result["backend_metadata"]["version"] = version_text
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:112-132`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L112-L132)
+
+[14] VirusTotal 캐시에서 꺼낸 결과에는 `_cached`와 `_cache_age_hours`가 붙는다.
+
+```python
+def _get_cached(key: str) -> Optional[dict]:
+    """Get cached result if not expired."""
+    if key in _cache:
+        result, timestamp = _cache[key]
+        if datetime.now() - timestamp < CACHE_TTL:
+            result = dict(result)  # Copy to avoid mutation
+            result["_cached"] = True
+            result["_cache_age_hours"] = round(
+                (datetime.now() - timestamp).total_seconds() / 3600, 1
+            )
+            return result
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:89-99`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L89-L99)
+
+[15] EVTX 파서는 설치된 백엔드를 고르고 Rust `evtx`가 있으면 그것으로 읽는다.
+
+```python
+# Rust-backed EVTX parser (preferred — 200x faster)
+try:
+    import evtx as _evtx_rust
+    EVTX_RUST_AVAILABLE = True
+except ImportError:
+    EVTX_RUST_AVAILABLE = False
+
+# Pure-Python fallback
+try:
+    from Evtx.Evtx import Evtx
+    EVTX_PYTHON_AVAILABLE = True
+except ImportError:
+    EVTX_PYTHON_AVAILABLE = False
+
+EVTX_AVAILABLE = EVTX_RUST_AVAILABLE or EVTX_PYTHON_AVAILABLE
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:14-28`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L14-L28)
+
+```python
+def _raw_records(evtx_path: Path):
+    """Yield raw record slots, including exceptions, from either backend."""
+    if EVTX_RUST_AVAILABLE:
+        parser = _evtx_rust.PyEvtxParser(str(evtx_path))
+        yield from parser.records_json()
+    else:
+        with Evtx(str(evtx_path)) as evtx:
+            for record in evtx.records():
+                try:
+                    yield {"data": record.xml()}
+                except Exception as exc:
+                    yield exc
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:108-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L108-L119)

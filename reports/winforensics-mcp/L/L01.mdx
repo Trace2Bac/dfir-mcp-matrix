@@ -1,0 +1,83 @@
+---
+cell: L01
+details:
+- id: L01.01
+---
+
+# L01 기록 방식
+
+### L01.01 공통 요청 처리 단계에서 기록
+
+**구현.** 이 방식은 모든 도구 호출이 지나는 `call_tool` 처리기에 적용된다 [1].
+`call_tool`은 `_execute_tool`을 부르고 거기서 예외가 올라오면 `logger.exception(f"Error executing tool {name}")`으로 항목 하나를 쓴다 [1].
+이 항목은 실패한 호출에만 남고 성공한 호출에는 남지 않는다 [1].
+서버는 모듈을 불러올 때 `logging.basicConfig(level=logging.INFO)`로 루트 로거를 설정하고 `winforensics-mcp` 로거를 만든다 [2].
+`basicConfig`는 파일 이름을 받지 않으면 표준 오류에 쓰는 `StreamHandler`를 붙인다 [3].
+그래서 항목은 파일이 아니라 서버 프로세스의 표준 오류로 나가고 그 출력을 어디에 남길지는 서버를 실행한 MCP 클라이언트가 정한다 [3].
+없는 하이브 경로로 `registry_get_key`를, 없는 파일로 `disk_parse_amcache`를 부르자 표준 오류에 `ERROR:winforensics-mcp:Error executing tool <도구 이름>`과 예외 추적 정보가 남았다 [4].
+
+MCP Python SDK 1.25.0의 요청 처리기도 같은 표준 오류에 줄을 남긴다 [5].
+요청마다 `Processing request of type CallToolRequest` 줄을 남기지만 이 줄에는 도구 이름과 인자가 없다 [5].
+목록에 없는 도구 이름이 오면 그 이름을 담은 `WARNING` 줄을 남긴다 [5].
+
+같은 저장소에는 MCP 도구 호출을 기록하는 클라이언트 코드, 훅, 사용자 CLI가 없다.
+서버는 호출 기록 파일을 만들지 않는다 [2].
+
+**한계.** 다음 호출은 `call_tool`까지 예외가 올라오지 않거나 처리기가 기록하지 않아 항목이 남지 않는다 [1][6][7].
+
+- EVTX·NTDS·보안 설명자 도구 12개는 예외가 나도 `logger.exception`을 부르지 않고 오류 결과만 돌려준다 [1].
+- `die_analyze_file`·`die_scan_directory`, `api_*`, `apmx_*` 분기는 모든 예외를 `_execute_tool` 안에서 처리해 오류 JSON을 돌려준다 [6].
+- `vt_*`·`pcap_*`·`hunt_ioc_pack` 분기는 정해 둔 예외만 `_execute_tool` 안에서 처리하므로 그 밖의 예외는 항목으로 남는다 [6].
+- `windows_search_parse`, `registry_get_persistence`, `hunt_ioc`의 출처별 검색처럼 예외를 처리 함수 안에서 처리하는 경로는 예외를 처리해 결과의 `error` 필드로 돌려준다 [7].
+- SDK가 `inputSchema` 검사에서 거부한 호출은 처리기에 오지 않는다 [8].
+
+없는 EVTX 파일로 `evtx_search`를, 없는 PCAP 파일로 `pcap_get_stats`를 부르거나 필수 인자 없이 `registry_get_key`를 부르자 오류 결과는 돌아왔지만 서버의 항목은 남지 않았다 [4].
+
+### 근거
+
+[1] `call_tool`은 EVTX·NTDS 계열 도구가 아닌 호출의 예외만 기록하고 오류 결과를 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[2] 서버는 모듈을 불러올 때 루트 로거를 설정하고 서버 로거를 만든다.
+
+```python
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("winforensics-mcp")
+
+server = Server("winforensics-mcp", version=__version__)
+```
+
+[`winforensics_mcp/server.py:139-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L139-L142)
+
+[3] CPython 3.12.15의 `basicConfig`는 파일 이름이 없으면 `StreamHandler`를 만들고 `StreamHandler`는 스트림을 받지 않으면 `sys.stderr`에 쓴다: [`Lib/logging/__init__.py:2110-2122`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L2110-L2122), [`Lib/logging/__init__.py:1117-1135`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1117-L1135).
+`pyproject.toml`은 Python 3.10 이상만 정하므로 실행 확인에 쓴 Python 3.12.15의 소스로 확인했다.
+
+[4] (실행 확인) MCP 클라이언트 세션으로 서버를 실행하고 표준 오류를 파일로 받았다.
+없는 경로로 `registry_get_key`·`disk_parse_amcache`를 부른 호출에는 `ERROR:winforensics-mcp:Error executing tool <도구 이름>`과 예외 추적 정보가 남았다.
+`evtx_list_files` 성공 호출, 없는 경로로 부른 `evtx_search`·`pcap_get_stats`, `key_path` 없이 부른 `registry_get_key`, 목록에 없는 도구 이름에는 서버 로거의 항목이 남지 않았다.
+
+[5] MCP Python SDK 1.25.0은 요청마다 요청 종류만 `INFO`로 남기고 목록에 없는 도구 이름은 `WARNING`으로 남긴다: [`src/mcp/server/lowlevel/server.py:713`](https://github.com/modelcontextprotocol/python-sdk/blob/ef96a31671cc4c702d5b73b34306180313aedfb9/src/mcp/server/lowlevel/server.py#L713), [`src/mcp/server/lowlevel/server.py:469-483`](https://github.com/modelcontextprotocol/python-sdk/blob/ef96a31671cc4c702d5b73b34306180313aedfb9/src/mcp/server/lowlevel/server.py#L469-L483).
+
+[6] 도구 분기 안에서 모든 예외나 정해 둔 예외를 처리해 오류 JSON을 돌려준다: [`winforensics_mcp/server.py:2815-2875`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2815-L2875), [`winforensics_mcp/server.py:2878-2955`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2878-L2955), [`winforensics_mcp/server.py:2958-3063`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2958-L3063), [`winforensics_mcp/server.py:3065-3182`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3065-L3182), [`winforensics_mcp/server.py:3293-3309`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3293-L3309).
+
+[7] 처리 함수가 예외를 처리해 결과의 `error` 필드에 담는다: [`winforensics_mcp/server.py:2724-2745`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2724-L2745), [`winforensics_mcp/parsers/windows_search_parser.py:423-426`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L423-L426), [`winforensics_mcp/orchestrators/ioc_hunter.py:245-254`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L245-L254).
+
+[8] MCP Python SDK 1.25.0은 목록에 있는 도구의 인자를 `inputSchema`로 검사하고 맞지 않으면 처리기를 부르지 않고 오류 결과를 돌려준다: [`src/mcp/server/lowlevel/server.py:514-527`](https://github.com/modelcontextprotocol/python-sdk/blob/ef96a31671cc4c702d5b73b34306180313aedfb9/src/mcp/server/lowlevel/server.py#L514-L527).

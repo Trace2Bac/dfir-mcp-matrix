@@ -1,0 +1,381 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.02
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 EVTX 질의 도구와 `evtx_attack_summary`의 `TimeCreated`, `windows_search_parse`의 행, `ingest_parsed_csv`의 일부 시각에 적용된다 [1][2][3][4][5].
+EVTX 파서는 레코드의 `SystemTime` 속성 문자열을 바꾸지 않고 `TimeCreated`에 싣는다 [1].
+Rust `evtx` 0.11.0으로 읽은 이 값은 `2016-07-08T18:12:51.681640Z` 꼴이다 [2].
+`evtx_attack_summary`도 TSV 줄마다 같은 `TimeCreated` 값을 싣는다 [3].
+`windows_search_parse`는 SIDR나 대체 경로가 만든 행의 시각 필드를 바꾸지 않고 싣는다 [4].
+`ingest_parsed_csv`는 정해 둔 꼴에 맞지 않는 시각 문자열을 원래 문자열 그대로 싣는다 [5].
+
+다른 도구는 시각을 바꾼 값만 싣고 원래 값을 함께 싣지 않는다.
+Prefetch, USN, SRUM, MFT, LNK, 브라우저, PCAP 도구와 `registry_get_users`·`registry_get_system_info`는 FILETIME, epoch, OLE 날짜 같은 원래 값을 ISO 8601 문자열로 바꾼 값만 싣는다 [6].
+`evtx_get_stats`의 기간도 `TimeCreated`를 바꾼 값만 싣는다 [7].
+
+### R08.02 정규화 시간과 변환 전 값 병기
+
+**구현.** 이 방식은 레지스트리 값을 싣는 도구와 EVTX 질의의 `timestamp_precision: both`에 적용된다 [8].
+레지스트리 도구는 `REG_QWORD` 값의 이름이 서버가 정해 둔 시각 값 이름 목록에 있으면 원래 정수 `data` 옆에 바꾼 값 `data_utc`를 싣는다 [8].
+`data_utc`는 FILETIME의 100나노초 자릿수 7자리를 남긴 UTC 문자열이다 [8][9].
+EVTX 질의에 `timestamp_precision`을 `both`로 주면 원래 `TimeCreated` 옆에 초 단위로 줄인 UTC 시각 `timestamp_second`를 싣는다 [10].
+
+**한계.** `data_utc`는 이름 목록에 있는 `REG_QWORD` 값에만 붙는다 [8].
+목록에 없는 시각 값과 이진 자료로 저장된 시각에는 바꾼 값이 없다 [8].
+`TimeCreated`를 읽지 못하면 `timestamp_second`는 `null`이 되고 읽지 못했다는 표시는 없다 [10].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 서버가 바꾼 시각은 대부분 UTC 오프셋 `+00:00`을 붙인 ISO 8601 문자열이다 [6][7].
+Prefetch, USN, SRUM, LNK, 브라우저 파서와 `registry_get_users`·`registry_get_system_info`, `evtx_get_stats`·`evtx_list_files`는 UTC 시간대를 붙인 `datetime`을 `isoformat()`으로 싣는다 [6][7].
+MFT 파서는 라이브러리가 시간대 없이 준 시각에 UTC를 붙여 싣는다 [11].
+`data_utc`는 필드 이름과 값 끝의 `+00:00`으로 UTC임을 밝힌다 [8].
+LNK 파서는 대상 파일 시각의 필드 이름에 `_utc`를 붙인다 [12].
+PCAP 도구는 `utcfromtimestamp`로 바꾼 값 끝에 `Z`를 붙인다 [13].
+VirusTotal 조회 도구는 `vt-py` 0.22.0이 UTC `datetime`으로 바꿔 준 날짜 속성을 `isoformat()`으로 실으므로 값 끝에 `+00:00`이 붙는다 [14].
+
+**한계.** 일부 시각은 시간대 표시 없이 실린다.
+레지스트리 키의 마지막 쓰기 시각 `timestamp`, Amcache의 `key_timestamp`, USB의 `first_connected`는 python-registry가 시간대 없이 돌려준 UTC 값을 `isoformat()`으로 그대로 싣는다 [15][2].
+`timestamp_second`는 UTC 값이지만 값과 필드 이름에 시간대가 없고 도구 설명에만 UTC라고 적는다 [10][16].
+`ingest_parsed_csv`는 CSV 시각을 시간대 없는 ISO 꼴로 바꾸어 싣는다 [5].
+
+`registry_get_usb_history`는 `first_connected`가 USBSTOR 키의 마지막 쓰기 시각이라는 것을 `first_connected_source`로 밝히지만 시간대는 밝히지 않는다 [15].
+`build_timeline`은 시간대 없는 Amcache 시각과 `+00:00`이 붙은 다른 출처의 시각을 한 목록에 두고 문자열 차례로 정렬한다 [17].
+
+같은 FILETIME이 도구마다 마지막 자리가 다르게 실린다.
+Prefetch, USN, SRUM은 FILETIME을 부동소수 초로 바꾸어 마이크로초로 반올림하고 레지스트리와 LNK 파서는 정수 나눗셈으로 마이크로초 아래를 버린다 [6][9].
+응답에는 어느 방식으로 줄였는지 표시가 없다 [9].
+Prefetch, USN, SRUM은 1970년 이전의 FILETIME을 `None`으로 바꾸므로 시각이 기록되지 않은 경우와 응답에서 같다 [6].
+
+### 근거
+
+[1] EVTX 파서는 `SystemTime` 속성 값을 그대로 `TimeCreated`에 넣는다.
+
+```python
+    # TimeCreated
+    time_created = system.get("TimeCreated", {})
+    if isinstance(time_created, dict):
+        result["TimeCreated"] = (
+            time_created.get("#attributes", {}).get("SystemTime")
+            or time_created.get("@attributes", {}).get("SystemTime")
+        )
+    else:
+        result["TimeCreated"] = time_created
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:425-433`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L425-L433)
+
+[2] (실행 확인) `evtx` 저장소의 표본 `samples/security.evtx`로 `evtx_search`를 `compact`, `timestamp_precision: both`로 불렀다.
+`TimeCreated`는 `2016-07-08T18:12:51.681640Z`, `timestamp_second`는 `2016-07-08 18:12:51`로 실렸다.
+regipy 저장소의 테스트 하이브로 레지스트리 도구를 불렀다.
+키 `timestamp`는 `2014-09-24T06:32:50.378042`, USB `first_connected`는 `2012-04-07T10:31:37.640871`, Amcache `key_timestamp`는 `2017-08-03T11:34:09.482560`처럼 시간대 없이 실렸다.
+SAM `last_login`과 `install_date`는 `+00:00`이 붙어 실렸다.
+
+[3] `evtx_attack_summary`는 줄마다 `TimeCreated` 값을 앞에 둔다.
+
+```python
+        ts = event.get("TimeCreated", "?")
+        ed = event.get("EventData", {})
+        cols = config["fields"](ed)
+
+        if config.get("include_event_id"):
+            cols = (*cols, str(event.get("EventID", "?")))
+
+        lines.append(f"{ts}\t" + "\t".join(str(c) for c in cols))
+
+    return {
+        "format": "tsv",
+        "event_type": event_type,
+        "total_events": min(total, limit),
+        "truncated": total > limit,
+        "data": "\n".join(lines),
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:1086-1101`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1086-L1101)
+
+[4] `windows_search_parse`는 백엔드 행을 그대로 옮겨 싣는다.
+
+```python
+                    row = dict(raw, report_type=kind)
+                    if fields is not None:
+                        row = {key: row[key] for key in fields if key in row}
+                    row = _bounded(row, result)
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:397-400`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L397-L400)
+
+[5] CSV 시각은 정해 둔 꼴이면 시간대 없는 ISO 문자열로, 아니면 원래 문자열로 싣는다.
+
+```python
+def _parse_timestamp(value: str) -> Optional[str]:
+    """Parse various timestamp formats to ISO format."""
+    if not value or value.strip() == "":
+        return None
+
+    # Try common formats
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %I:%M:%S %p",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(value.strip(), fmt)
+            return dt.isoformat()
+        except ValueError:
+            continue
+
+    # Return as-is if no format matches
+    return value.strip()
+```
+
+[`winforensics_mcp/parsers/csv_ingestor.py:138-161`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/csv_ingestor.py#L138-L161)
+
+[6] 파서마다 원래 시각 값을 UTC `datetime`으로 바꾸어 ISO 문자열만 싣는다: [`winforensics_mcp/parsers/prefetch_parser.py:24-37`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L24-L37), [`winforensics_mcp/parsers/usn_parser.py:64-77`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/usn_parser.py#L64-L77), [`winforensics_mcp/parsers/srum_parser.py:57-70`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/srum_parser.py#L57-L70), [`winforensics_mcp/parsers/browser_parser.py:25-56`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L25-L56), [`winforensics_mcp/parsers/lnk_parser.py:41-47`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L41-L47), [`winforensics_mcp/parsers/registry_parser.py:849-853`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L849-L853), [`winforensics_mcp/parsers/registry_parser.py:1002-1004`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L1002-L1004), [`winforensics_mcp/parsers/pcap_parser.py:51-53`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L51-L53).
+
+[7] `evtx_get_stats`는 기간을 바꾼 값으로, `evtx_list_files`는 파일 수정 시각을 UTC로 싣는다.
+
+```python
+        time_created = parse_evtx_timestamp(event.get("TimeCreated", ""))
+        if time_created:
+            if earliest is None or time_created < earliest:
+                earliest = time_created
+            if latest is None or time_created > latest:
+                latest = time_created
+    
+    # Convert sets to lists for JSON serialization
+    stats["providers"] = sorted(stats["providers"])
+    
+    # Sort event ID counts by count descending
+    stats["event_id_counts"] = dict(
+        sorted(stats["event_id_counts"].items(), key=lambda x: x[1], reverse=True)
+    )
+    
+    if earliest:
+        stats["time_range"]["earliest"] = earliest.isoformat()
+    if latest:
+        stats["time_range"]["latest"] = latest.isoformat()
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:911-929`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L911-L929)
+
+```python
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:860-860`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L860-L860)
+
+[8] 레지스트리 파서는 이름 목록에 있는 `REG_QWORD` 값에만 `data_utc`를 붙이고 7자리 소수로 UTC 문자열을 만든다.
+
+```python
+FILETIME_VALUE_NAMES = frozenset({
+    "lastusedtimestart", "lastusedtimestop", "lastarrivaldate", "lastremovaldate",
+    "installdate", "firstinstalldate", "lastarrivaltime", "lastremovaltime",
+    "installtime", "firstinstalltime", "devpkey_device_lastarrivaldate",
+    "devpkey_device_lastremovaldate", "devpkey_device_installdate",
+    "devpkey_device_firstinstalldate",
+})
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:20-26`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L20-L26)
+
+```python
+def filetime_to_datetime(filetime: int) -> Optional[datetime]:
+    """Convert Windows FILETIME to datetime"""
+    if filetime <= 0:
+        return None
+    try:
+        # Integer arithmetic avoids loss of precision from a float Unix timestamp.
+        return FILETIME_EPOCH + timedelta(microseconds=filetime // 10)
+    except (ValueError, OverflowError):
+        return None
+
+
+def filetime_to_utc(filetime: int) -> str | None:
+    """Render FILETIME in UTC, retaining its full 100-nanosecond precision."""
+    timestamp = filetime_to_datetime(filetime)
+    if timestamp is None:
+        return None
+    whole_seconds = timestamp.replace(microsecond=0).isoformat().removesuffix("+00:00")
+    return f"{whole_seconds}.{filetime % 10_000_000:07d}+00:00"
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:40-57`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L40-L57)
+
+```python
+        elif isinstance(data, int):
+            result["data"] = data
+            if value.value_type() == 11 and value.name().casefold() in FILETIME_VALUE_NAMES:
+                result["data_utc"] = filetime_to_utc(data)
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:139-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L139-L142)
+
+[9] (실행 확인) FILETIME `133000000001234567`을 변환 함수에 넣었다.
+`filetime_to_utc`는 `2022-06-18T04:26:40.1234567+00:00`, 레지스트리 `filetime_to_datetime`은 `…40.123456+00:00`, Prefetch·USN 변환은 `…40.123457+00:00`을 돌려주었다.
+
+[10] `timestamp_precision`이 `both`이면 `TimeCreated`를 읽어 초 단위 UTC 문자열을 붙인다.
+
+```python
+            event = copy.deepcopy(self.cached.events[i])
+            event["event_ref"] = _event_ref(self.source, self.cached.ordinals[i])
+            if self.precision == "both":
+                when = parse_evtx_timestamp(event.get("TimeCreated"))
+                event["timestamp_second"] = when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if when else None
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:624-628`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L624-L628)
+
+[11] MFT 파서는 시간대 없는 시각에 UTC를 붙인다.
+
+```python
+def _parse_timestamp(ts) -> Optional[str]:
+    """Convert MFT timestamp to ISO format string"""
+    if ts is None:
+        return None
+    try:
+        # mft library returns datetime objects
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts.isoformat()
+        return str(ts)
+    except Exception:
+        return None
+```
+
+[`winforensics_mcp/parsers/mft_parser.py:30-42`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L30-L42)
+
+[12] LNK 헤더의 시각은 `_utc`가 붙은 필드에 실린다.
+
+```python
+def _filetime_to_utc_iso(filetime: int) -> Optional[str]:
+    """Convert a raw Windows FILETIME integer directly to UTC."""
+    if not filetime:
+        return None
+    try:
+        microseconds = filetime // 10
+        return (_FILETIME_EPOCH + timedelta(microseconds=microseconds)).isoformat()
+```
+
+[`winforensics_mcp/parsers/lnk_parser.py:41-47`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L41-L47)
+
+```python
+    creation, access, modification = struct.unpack_from("<QQQ", header, 0x1C)
+    return {
+        "creation_time_utc": _filetime_to_utc_iso(creation),
+        "access_time_utc": _filetime_to_utc_iso(access),
+        "modification_time_utc": _filetime_to_utc_iso(modification),
+    }
+```
+
+[`winforensics_mcp/parsers/lnk_parser.py:65-70`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L65-L70)
+
+[13] PCAP 결과의 시각은 `utcfromtimestamp` 값에 `Z`를 붙인다.
+
+```python
+def _format_timestamp(ts: float) -> str:
+    """Format Unix timestamp to ISO format."""
+    return datetime.utcfromtimestamp(ts).isoformat() + "Z"
+```
+
+[`winforensics_mcp/parsers/pcap_parser.py:51-53`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L51-L53)
+
+[14] VirusTotal 결과의 날짜는 `datetime`이면 `isoformat()`으로 싣는다.
+
+```python
+    first_submission = None
+    if hasattr(file_obj, "first_submission_date"):
+        ts = file_obj.first_submission_date
+        if isinstance(ts, (int, float)):
+            first_submission = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+        elif isinstance(ts, datetime):
+            first_submission = ts.isoformat()
+
+    last_analysis = None
+    if hasattr(file_obj, "last_analysis_date"):
+        ts = file_obj.last_analysis_date
+        if isinstance(ts, (int, float)):
+            last_analysis = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+        elif isinstance(ts, datetime):
+            last_analysis = ts.isoformat()
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:213-227`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L213-L227)
+
+`vt-py` 0.22.0의 `Object`는 이름이 `_date`로 끝나는 속성을 UTC 시간대가 붙은 `datetime`으로 바꿔 돌려준다: [`vt/object.py:79-84`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/object.py#L79-L84), [`vt/object.py:158-164`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/object.py#L158-L164).
+
+[15] 키 시각, Amcache 키 시각, USB `first_connected`는 python-registry의 `timestamp()`를 그대로 `isoformat()`으로 싣는다.
+
+```python
+    # Get key timestamp
+    try:
+        timestamp = key.timestamp()
+        if timestamp:
+            result["timestamp"] = timestamp.isoformat()
+    except Exception:
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:80-85`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L80-L85)
+
+```python
+    # Key timestamp (first seen in Amcache)
+    try:
+        ts = entry_key.timestamp()
+        if ts:
+            result["key_timestamp"] = ts.isoformat()
+    except Exception:
+        pass
+```
+
+[`winforensics_mcp/parsers/amcache_parser.py:100-106`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/amcache_parser.py#L100-L106)
+
+```python
+                    "first_connected": device.timestamp().isoformat() if device.timestamp() else None,
+                    "first_connected_source": "usb_stor_key_last_write",
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:730-731`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L730-L731)
+
+[16] 도구 설명은 `timestamp_second`가 UTC라고 적는다.
+
+```python
+        "timestamp_precision": {"type": "string", "enum": ["full", "both"], "default": "full",
+                                "description": "both adds timestamp_second in UTC without changing TimeCreated."},
+```
+
+[`winforensics_mcp/server.py:339-340`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L339-L340)
+
+[17] `build_timeline`은 Amcache `key_timestamp`를 그대로 사건 시각으로 쓰고 모든 사건을 시각 문자열로 정렬한다.
+
+```python
+        timestamp = entry.get("key_timestamp")
+        if not timestamp:
+            continue
+
+        count += 1
+        yield {
+            "timestamp": timestamp,
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:382-388`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L382-L388)
+
+```python
+    # Sort events by timestamp (most recent first)
+    all_events.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:700-701`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L700-L701)

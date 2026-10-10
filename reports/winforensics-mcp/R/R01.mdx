@@ -1,0 +1,576 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `remote_get_system_info`와, `diec` 출력을 JSON으로 읽지 못한 `die_analyze_file`에 적용된다 [1][2].
+`remote_get_system_info`는 원격 호스트에서 PowerShell `ConvertTo-Json`이 만든 시스템 정보를 `json.loads`로 읽어 키를 바꾸지 않고 돌려준다 [1].
+`die_analyze_file`은 `diec -j`의 표준 출력을 JSON으로 읽지 못하면 그 출력을 `raw_output`에 그대로 싣고 `error`를 함께 싣는다 [2].
+나머지 도구는 서버 안 파서가 만든 결과를 돌려준다.
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 증거 파일을 서버 안 파서로 읽는 도구 전체에 적용된다 [3].
+EVTX 파서는 레코드마다 `EventRecordID`·`EventID`·`TimeCreated`·`Computer`·`Channel`·`Provider`·`EventData`·`UserData` 키를 가진 `dict`를 만든다 [3].
+레지스트리 값을 읽는 `parse_registry_value`는 이진 값(`bytes`)을 먼저 UTF-16LE로, 실패하면 UTF-8로 풀어 문자열로 싣는다 [4].
+두 방식이 모두 실패할 때만 16진 문자열로 싣고 `data_raw`를 참으로 둔다 [4].
+그래서 UTF-16LE로 풀리는 이진 값은 원래 바이트가 아니라 풀어 쓴 문자열로 실리고 `data_raw`는 `None`으로 남는다 [4].
+레지스트리, Prefetch, Amcache, SRUM, MFT, USN, 브라우저 기록, LNK, ShellBags, PCAP, APMX 도구도 각 파서가 레코드를 필드로 나눈 결과를 돌려준다.
+
+서버가 정해 둔 목록으로 필드를 고르는 곳이 있다.
+`compact`를 켠 EVTX 질의는 모델이 `fields`를 주지 않으면 시스템 필드 4개와 `_COMPACT_DATA_FIELDS`에 이름이 있는 `EventData`·`UserData` 필드만 싣는다 [5].
+`evtx_attack_summary`는 사건 종류마다 정해 둔 열만 고른다 [6].
+프로세스 생성 사건이면 사용자, 부모 프로세스 이름, 명령 줄을 고른다 [6].
+`build_timeline`은 EVTX 사건의 `EventData`에서 정해 둔 필드 가운데 값이 있는 앞 5개만 싣는다 [7].
+`hunt_ioc`는 원천마다 일치 항목에서 이름, 경로, 해시, 시각 같은 몇 개 필드만 골라 싣는다 [8].
+
+**한계.** `hunt_ioc`와 `build_timeline`의 EVTX 경로는 EVTX 파서가 만들지 않는 키를 읽는다 [3][9][10].
+`hunt_ioc`의 EVTX 일치 항목은 `event_id`·`timestamp`·`provider`를 읽으므로 세 값이 늘 `null`이다 [9][11].
+`build_timeline`의 EVTX 사건 생성기는 `event_id`를 읽으므로 모든 사건을 중요 사건 목록에 없는 것으로 보고 건너뛴다 [10][11].
+시간 범위를 주면 이 생성기는 `iter_evtx_events`에 `datetime`이 아니라 ISO 문자열을 넘긴다 [10].
+`iter_evtx_events`는 이 값에 예외를 내고 생성기는 예외가 나면 그 파일을 건너뛴다 [10][12].
+그래서 `build_timeline`의 응답에는 시간 범위와 관계없이 EVTX 사건이 실리지 않는다 [11].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 건수와 합계를 계산하는 도구와 형식을 바꾸는 도구에 적용된다.
+`evtx_attack_summary`는 고른 열을 탭으로 이은 TSV 글 하나를 `data`에 싣는다 [6].
+`evtx_get_stats`는 사건 ID별 건수, 제공자 목록, 가장 이른 시각과 늦은 시각을 계산한다 [13].
+`evtx_ntlm_operational_summary`는 같은 모양의 사건을 묶어 `count`를 싣고 컴퓨터·도메인·프로세스·사용자 조합의 빈도 `pair_frequency`와 상위 프로세스·사용자 목록을 계산한다 [14].
+`build_timeline`은 MFT·USN·Prefetch·Amcache·EVTX 사건을 `timestamp`·`source`·`event_type`·`description` 형식으로 맞춰 한 목록으로 합친다 [15].
+원천별·종류별 건수는 중복을 빼고 전체 상한으로 자른 뒤의 목록에서 센다 [15].
+`investigate_execution`은 Prefetch 실행 횟수를 더하고 SRUM 기록의 송수신 바이트, 디스크 입출력, 포그라운드 cycle time을 더한 뒤 그 값으로 `finding` 문장을 만든다 [16].
+
+**한계.** `evtx_get_stats`는 `MAX_SCAN_EVENTS`(100,000개)까지 읽은 사건만 센다 [13].
+응답에는 읽기를 멈췄는지 알리는 필드가 없다 [13].
+사건이 100,010개인 파일에서 `total_events`가 100,000으로 나왔다 [17].
+`investigate_execution`은 SRUM cycle time의 합을 10,000,000으로 나눠 초로 바꾸고 `Foreground time`으로 적는다 [16].
+코드 주석은 이 값을 대략적인 추정이라고 적는다 [16].
+`disk_parse_srum`의 설명은 자원 카운터를 실행 시간으로 해석하지 않는다고 적는다 [18].
+응답의 `finding`에는 이 값이 추정이라는 표시가 없다 [16].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 결과를 만든 원천이나 파서를 응답에 적는 도구에 적용된다.
+`windows_search_parse`는 SIDR를 썼는지 `pyesedb` 대체 파서를 썼는지 `backend`에 적는다 [19].
+SIDR를 쓰면 실행 파일 경로, SHA-256, 기대 버전, 빌드 커밋, 실행 파일이 알린 버전을 `backend_metadata`에 싣는다 [19].
+`hunt_ioc`는 일치가 있는 원천, 검색했지만 일치가 없는 원천, 쓸 수 없는 원천을 나눠 싣는다 [20].
+원천마다 검색한 경로나 파일을 `path`·`logs_searched`·`browsers_searched`에 싣는다 [8][9].
+`investigate_execution`은 원천마다 파일을 찾았는지를 `artifacts_searched`에, 읽은 경로를 `evidence` 항목의 `path`에 싣는다 [21].
+`build_timeline`은 원천마다 읽은 경로와 처리 상태를 `sources_info`에 싣는다 [15].
+`evtx_ntlm_operational_summary`는 빈도를 센 기준을 `rarity_basis`에, 상위 목록을 센 범위를 `overview.scope`에 적는다 [14].
+EVTX 질의 도구는 읽은 파일의 경로, 크기, 수정 시각을 `source`에 싣는다 [22].
+
+**한계.** `hunt_ioc`의 EVTX 원천은 읽다가 예외가 난 파일을 `logs_searched`에서 빼고 그 사실을 싣지 않는다 [9].
+`build_timeline`은 EVTX 원천에서 사건을 하나도 만들지 못해도 그 원천의 상태를 `processed`로 적는다 [10][11][15].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `registry_get_persistence`의 서비스 목록과 `build_timeline`의 사건 목록에 적용된다 [23][24].
+`registry_get_persistence`는 `include_microsoft_services`가 거짓(기본값)이면 정해 둔 경로 규칙으로 서비스를 뺀다 [23].
+빼는 조건은 두 가지를 모두 만족하는 경우다 [23].
+하나는 이미지 경로에 `microsoft`가 있거나 `\`로 나눈 앞 두 조각 가운데 하나가 `windows`인 것이다 [23].
+다른 하나는 이미지 경로에 `system32`가 있는 것이다 [23].
+이 규칙은 경로만 보므로 `C:\Windows\System32` 아래 실행 파일을 가리키는 서비스는 이름이나 서명과 관계없이 빠진다 [23].
+응답에는 뺀 서비스의 수나 이름이 없다 [25].
+`build_timeline`은 시각·원천·종류·경로를 이은 문자열의 MD5 앞 12자가 같은 사건을 하나만 남긴다 [24].
+그래서 같은 시각에 같은 경로에서 생긴 같은 종류의 사건이 둘 이상이면 하나만 실린다 [24].
+응답에는 중복으로 뺀 사건의 수가 없다 [15].
+
+### 근거
+
+[1] `remote_get_system_info`는 WinRM 수집기가 읽은 JSON을 그대로 응답으로 만든다.
+
+```python
+    elif name == "remote_get_system_info":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        return json_response(collector.get_system_info())
+```
+
+[`winforensics_mcp/server.py:3480-3493`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3480-L3493)
+
+```python
+    def get_system_info(self) -> dict[str, Any]:
+        ps_script = '''
+        @{
+            ComputerName = $env:COMPUTERNAME
+            Domain = (Get-WmiObject Win32_ComputerSystem).Domain
+            OS = (Get-WmiObject Win32_OperatingSystem).Caption
+            Version = (Get-WmiObject Win32_OperatingSystem).Version
+            Architecture = (Get-WmiObject Win32_OperatingSystem).OSArchitecture
+            LastBoot = (Get-WmiObject Win32_OperatingSystem).LastBootUpTime
+            Users = (Get-WmiObject Win32_UserAccount | Select-Object Name, SID, Disabled)
+        } | ConvertTo-Json
+        '''
+        stdout, stderr, exit_code = self.run_command(ps_script)
+        
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to get system info: {stderr}")
+
+        return json.loads(stdout)
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:232-249`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L232-L249)
+
+[2] `die_analyze_file`은 JSON으로 읽지 못한 `diec` 출력을 `raw_output`에 싣는다.
+
+```python
+    except json.JSONDecodeError:
+        # If JSON parsing fails, return raw output
+        return {
+            "file": str(file_path),
+            "raw_output": result.stdout,
+            "error": "Failed to parse diec JSON output",
+        }
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:170-176`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L170-L176)
+
+[3] EVTX 파서가 만드는 사건 `dict`의 키다.
+
+```python
+    result: dict[str, Any] = {
+        "EventRecordID": None,
+        "EventID": None,
+        "TimeCreated": None,
+        "Computer": None,
+        "Channel": None,
+        "Provider": None,
+        "EventData": {},
+        "UserData": {},
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:399-408`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L399-L408)
+
+[4] `parse_registry_value`는 `bytes` 값을 UTF-16LE, UTF-8, 16진 문자열 차례로 바꿔 싣는다.
+
+```python
+    try:
+        data = value.value()
+        
+        # Handle different value types
+        if isinstance(data, bytes):
+            # Try to decode as string, otherwise hex encode
+            try:
+                result["data"] = data.decode("utf-16-le").rstrip("\x00")
+            except UnicodeDecodeError:
+                try:
+                    result["data"] = data.decode("utf-8").rstrip("\x00")
+                except UnicodeDecodeError:
+                    result["data"] = data.hex()
+                    result["data_raw"] = True
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:125-138`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L125-L138)
+
+[5] `compact` 질의의 기본 필드 목록을 서버가 정한다.
+
+```python
+def _resolve_fields(fields, cached, compact):
+    known = set(_SYSTEM_FIELDS) | {"EventData", "UserData", "_raw_xml", "event_ref", "timestamp_second"}
+    for event in cached.events:
+        known.update(_paths(event))
+    if fields is None:
+        if not compact:
+            return None
+        default_fields = list(_SYSTEM_FIELDS[:4]) + sorted(
+            path for path in known if path.startswith(("EventData.", "UserData."))
+            and path.rsplit(".", 1)[-1] in _COMPACT_DATA_FIELDS)
+        return [(field, field) for field in default_fields]
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:558-568`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L558-L568)
+
+[6] `evtx_attack_summary`가 사건 종류마다 열을 고르고 TSV 글을 만든다: [`winforensics_mcp/parsers/evtx_parser.py:1021-1101`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1021-L1101).
+
+[7] `build_timeline`은 정해 둔 필드 가운데 앞 5개만 싣는다.
+
+```python
+def _summarize_event_data(event_data: dict, max_fields: int = 5) -> dict:
+    """Summarize event data to essential fields"""
+    important_fields = [
+        "TargetUserName", "SubjectUserName", "TargetDomainName",
+        "LogonType", "IpAddress", "WorkstationName",
+        "ProcessName", "NewProcessName", "CommandLine", "ParentProcessName",
+        "ServiceName", "ImagePath",
+        "Image", "DestinationIp", "DestinationPort", "TargetFilename",
+    ]
+
+    result = {}
+    for field in important_fields:
+        if field in event_data and event_data[field]:
+            result[field] = event_data[field]
+            if len(result) >= max_fields:
+                break
+
+    return result
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:524-541`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L524-L541)
+
+[8] `hunt_ioc`의 원천별 검색 함수가 일치 항목의 필드를 고른다: [`winforensics_mcp/orchestrators/ioc_hunter.py:228-245`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L228-L245), [`winforensics_mcp/orchestrators/ioc_hunter.py:306-323`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L306-L323), [`winforensics_mcp/orchestrators/ioc_hunter.py:454-496`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L454-L496).
+
+[9] `hunt_ioc`의 EVTX 원천은 `event_id`·`timestamp`·`provider` 키를 읽고 예외가 난 파일을 건너뛴다.
+
+```python
+        for evtx_file in evtx_files:
+            try:
+                result = get_evtx_events(
+                    str(evtx_file),
+                    contains=[ioc],
+                    limit=10,
+                )
+
+                searched_files.append(evtx_file.name)
+                events = result.get("events", [])
+
+                for event in events:
+                    all_matches.append({
+                        "log_file": evtx_file.name,
+                        "event_id": event.get("event_id"),
+                        "timestamp": event.get("timestamp"),
+                        "provider": event.get("provider"),
+                    })
+
+            except Exception:
+                continue
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:836-856`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L836-L856)
+
+[10] `build_timeline`의 EVTX 생성기는 시간 범위를 ISO 문자열로 넘기고 `event_id` 키를 읽으며 예외가 나면 파일을 건너뛴다.
+
+```python
+    for evtx_file in evtx_files[:5]:  # Limit files to process
+        if count >= limit:
+            break
+
+        try:
+            for event in iter_evtx_events(
+                str(evtx_file),
+                start_time=time_range_start.isoformat() if time_range_start else None,
+                end_time=time_range_end.isoformat() if time_range_end else None,
+            ):
+                if count >= limit:
+                    break
+
+                event_id = event.get("event_id")
+                if event_id not in important_event_ids:
+                    continue
+
+                # Apply keyword filter to event data
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:445-462`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L445-L462)
+
+```python
+                }
+
+        except Exception:
+            continue
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:488-491`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L488-L491)
+
+[11] (실행 확인) 가짜 EVTX 레코드 30개(사건 ID 4688, 명령 줄에 `mimi.exe`)를 둔 `Security.evtx`로 `hunt_ioc`와 `build_timeline`을 불렀다.
+`hunt_ioc`의 EVTX 일치 항목 10개는 모두 `event_id`·`timestamp`·`provider`가 `null`이었다.
+`build_timeline`(`sources: ["evtx"]`)은 시간 범위가 없을 때와 `time_range_start`를 줄 때 모두 `total_events`가 0이었고 EVTX 원천의 상태는 `processed`였다.
+
+[12] `iter_evtx_events`가 부르는 `_validate_times`는 `datetime`이 아닌 시각에 예외를 낸다.
+
+```python
+def _validate_times(start_time, end_time):
+    normalized = []
+    for name, value in (("start_time", start_time), ("end_time", end_time)):
+        if value is not None:
+            if not isinstance(value, datetime):
+                raise ValueError(f"{name} must be a datetime")
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must include a timezone")
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:596-603`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L596-L603)
+
+[13] `evtx_get_stats`는 `MAX_SCAN_EVENTS`까지 읽은 사건을 세고 읽기를 멈췄는지 싣지 않는다: [`winforensics_mcp/parsers/evtx_parser.py:868-925`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L868-L925).
+
+[14] `evtx_ntlm_operational_summary`가 사건을 묶어 세고 빈도 기준과 범위를 적는다.
+
+```python
+    if aggregate:
+        groups = {}
+        for index, row, when in selected:
+            key = tuple(row[field] for field in _GROUP_FIELDS)
+            groups.setdefault(key, []).append((index, row, when))
+        summarized = []
+        for group in groups.values():
+            representative = group[0][1]
+            bounds = _bounds(group, scope_complete)
+            row = {field: representative[field] for field in _GROUP_FIELDS}
+            row.update({"status_outcome": representative["status_outcome"], "count": len(group),
+                        "event_ref": representative["event_ref"],
+                        "pair_frequency": representative["pair_frequency"], **bounds})
+            first_valid = min((entry[2] for entry in group if entry[2] is not None), default=None)
+            summarized.append((group[0][0], row, first_valid))
+    else:
+        summarized = selected
+    summarized.sort(key=lambda entry: (
+        *((entry[1]["pair_frequency"],) if order == "rare_first" else ()),
+        entry[2] is None, entry[2] or _MIN_TIME, entry[0],
+    ))
+    summary_metadata = {
+        **metadata, "query_ref": query_ref, "total_matched": len(summarized),
+        "matched_events": len(entries), "aggregate": aggregate, "order": order,
+        "unusual_only": unusual_only, "rarity_threshold": rarity_threshold,
+        "rarity_exact": scope_complete,
+        "rarity_basis": "exact (Computer, domain, process, user) frequency over filtered events before unusual_only",
+        "rarity_note": "Rarity is a triage signal, not an attack verdict.",
+        "timestamp_errors": overview["timestamp_errors"], "overview": overview,
+    }
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:238-267`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L238-L267)
+
+[15] `build_timeline`이 원천별 사건을 합치고 중복을 빼고 상한으로 자른 뒤 건수를 센다: [`winforensics_mcp/orchestrators/timeline_builder.py:605-737`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L605-L737).
+
+[16] `investigate_execution`의 SRUM 검색은 값을 더하고 cycle time을 초로 바꿔 `finding`을 만든다.
+
+```python
+
+        for entry in app_entries:
+            fg_time = entry.get("foreground_cycle_time") or 0
+            bg_time = entry.get("background_cycle_time") or 0
+            total_foreground_time += fg_time
+            total_background_time += bg_time
+
+            total_bytes_read += (entry.get("foreground_bytes_read") or 0) + (entry.get("background_bytes_read") or 0)
+            total_bytes_written += (entry.get("foreground_bytes_written") or 0) + (entry.get("background_bytes_written") or 0)
+
+        # Calculate network totals
+        total_bytes_sent = sum(e.get("bytes_sent") or 0 for e in net_entries)
+        total_bytes_recv = sum(e.get("bytes_received") or 0 for e in net_entries)
+
+        # Build finding string
+        finding_parts = []
+        if total_bytes_sent or total_bytes_recv:
+            sent_mb = total_bytes_sent / (1024 * 1024)
+            recv_mb = total_bytes_recv / (1024 * 1024)
+            finding_parts.append(f"Network activity: {sent_mb:.1f} MB sent, {recv_mb:.1f} MB received")
+
+        # Convert cycle time to approximate seconds (very rough estimate)
+        # Cycle time is in 100-nanosecond intervals
+        if total_foreground_time:
+            runtime_sec = total_foreground_time / 10_000_000
+            if runtime_sec > 3600:
+                finding_parts.append(f"Foreground time: {runtime_sec/3600:.1f} hours")
+            elif runtime_sec > 60:
+                finding_parts.append(f"Foreground time: {runtime_sec/60:.1f} minutes")
+            else:
+                finding_parts.append(f"Foreground time: {runtime_sec:.0f} seconds")
+
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:340-371`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L340-L371)
+
+[17] (실행 확인) 가짜 EVTX 레코드 100,010개를 둔 파일로 `evtx_get_stats`를 불렀다.
+`total_events`는 100,000이었고 응답의 키는 `event_id_counts`·`name`·`path`·`providers`·`size_bytes`·`time_range`·`total_events`뿐이었다.
+
+[18] `disk_parse_srum`의 설명은 자원 카운터를 실행 시간으로 해석하지 않는다고 적는다.
+
+```python
+            Tool(
+                name="disk_parse_srum",
+                description=(
+                    "Parse SRUDB.dat for raw application resource counters and network bytes "
+                    "sent/received. Supports application and UTC time filters, derived MB/MiB, "
+                    "and optional network aggregation. Resource counters are not interpreted "
+                    "as elapsed runtime."
+```
+
+[`winforensics_mcp/server.py:1749-1755`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1749-L1755)
+
+[19] `windows_search_parse`가 쓴 백엔드와 SIDR 실행 파일 정보를 싣는다.
+
+```python
+def _sidr_rows(binary: Path, copied: Path, output: Path, timeout: int, result: dict):
+    result["backend"] = "sidr"
+    result["backend_metadata"] = {
+        "path": str(binary),
+        "sha256": _sha256(binary),
+        "expected_version": SIDR_VERSION,
+        "pinned_build_commit": SIDR_COMMIT,
+    }
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:112-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L112-L119)
+
+```python
+def _fallback_rows(copied: Path, result: dict):
+    result["backend"] = "pyesedb"
+    result["complete"] = False
+    result["content_filter_complete"] = False
+    _diagnostic(
+        result,
+        "Partial PropertyStore fallback: long values and compressed Search "
+        "content are unsupported. Zero matches are not conclusive. Install SIDR.",
+    )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:189-197`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L189-L197)
+
+[20] `hunt_ioc`가 원천을 일치 여부와 사용 가능 여부로 나눠 싣는다.
+
+```python
+    found_sources = [r["source"] for r in results if r.get("found")]
+    not_found_sources = [r["source"] for r in results if r.get("searched") and not r.get("found")]
+    unavailable_sources = [r["source"] for r in results if not r.get("available", True)]
+
+    if found_sources:
+        summary = f"IOC '{ioc}' ({final_type}) found in {len(found_sources)} source(s): {', '.join(found_sources)}"
+    else:
+        searched = [r["source"] for r in results if r.get("searched")]
+        summary = f"IOC '{ioc}' ({final_type}) not found in any of the {len(searched)} sources searched"
+
+    return {
+        "ioc": ioc,
+        "ioc_type": final_type,
+        "ioc_type_detected": detected_type,
+        "artifacts_dir": str(artifacts_dir),
+        "found": len(found_sources) > 0,
+        "confidence": confidence,
+        "total_matches": total_matches,
+        "sources_with_matches": found_sources,
+        "sources_searched_no_match": not_found_sources,
+        "sources_unavailable": unavailable_sources,
+        "artifacts_searched": artifacts_searched,
+        "results": results,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:1055-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1055-L1079)
+
+[21] `investigate_execution`이 원천별 검색 여부와 근거 목록을 싣는다.
+
+```python
+    artifacts_searched = {
+        "prefetch": prefetch_dir is not None and prefetch_dir.exists(),
+        "amcache": amcache_file is not None and amcache_file.exists(),
+        "srum": srum_file is not None and srum_file.exists(),
+    }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:503-507`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L503-L507)
+
+```python
+    return {
+        "target": target,
+        "target_type": "sha1" if _is_sha1(target) else "sha256" if _is_sha256(target) else "executable",
+        "artifacts_dir": str(artifacts_dir),
+        "execution_confirmed": execution_confirmed,
+        "confidence": confidence,
+        "sha1": sha1_hash,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": _generate_summary(target, execution_confirmed, confidence, evidence_results),
+    }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:558-573`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L558-L573)
+
+[22] EVTX 질의의 메타데이터에 읽은 파일의 경로·크기·수정 시각이 들어간다.
+
+```python
+    metadata = {
+        "total_matched": len(matched), "query_ref": query_ref,
+        "source": {"path": source[0], "size_bytes": source[1], "mtime_ns": source[2]},
+        "scan_complete": cached.scan_complete,
+        "scan_limit_hit": not cached.scan_complete and cached.scanned_records == max_scan,
+        "scanned_records": cached.scanned_records, "parse_errors": cached.parse_errors,
+        "time_filter_errors": diagnostics["time_filter_errors"],
+        "total_matched_exact": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+        "result_set_complete": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:688-697`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L688-L697)
+
+[23] `get_services`는 `include_microsoft`가 거짓이면 경로 규칙으로 서비스를 뺀다.
+
+```python
+            
+            # Filter Microsoft services if requested
+            if not include_microsoft:
+                image_path = (service_info.get("image_path") or "").lower()
+                if "microsoft" in image_path or "windows" in image_path.split("\\")[0:2]:
+                    if not service_info["image_path"] or "system32" in image_path:
+                        continue
+            
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:626-633`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L626-L633)
+
+[24] `build_timeline`의 중복 판정 값이다.
+
+```python
+def _event_hash(event: dict) -> str:
+    """Generate hash for deduplication"""
+    key = f"{event.get('timestamp')}|{event.get('source')}|{event.get('event_type')}|{event.get('path', '')}"
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:113-116`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L113-L116)
+
+[25] `registry_get_persistence`의 응답은 `run_keys`·`services`·`winlogon`과 오류 필드만 싣는다.
+
+```python
+    elif name == "registry_get_persistence":
+        result = {"run_keys": [], "services": [], "winlogon": None}
+        if args.get("software_hive"):
+            try:
+                result["run_keys"].extend(get_run_keys(args["software_hive"]))
+            except Exception as e:
+                result["software_error"] = str(e)
+            try:
+                result["winlogon"] = get_winlogon_persistence(args["software_hive"])
+            except Exception as e:
+                result["winlogon_error"] = str(e)
+        if args.get("ntuser_hive"):
+            try:
+                result["run_keys"].extend(get_run_keys(args["ntuser_hive"]))
+            except Exception as e:
+                result["ntuser_error"] = str(e)
+        if args.get("system_hive"):
+            try:
+                result["services"] = get_services(args["system_hive"], args.get("include_microsoft_services", False))
+            except Exception as e:
+                result["system_error"] = str(e)
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:2724-2745`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2724-L2745)

@@ -1,0 +1,150 @@
+---
+cell: I04
+details:
+- id: I04.01
+- id: I04.02
+---
+
+# I04 서버 자격증명 처리
+
+### I04.01 환경변수·설정 파일에 분리 보관
+
+**구현.** 이 방식은 VirusTotal 조회 도구 다섯 개의 API 키에 적용된다 [1].
+서버는 조회할 때마다 환경변수 `VIRUSTOTAL_API_KEY`를 먼저 읽고 값이 없으면 `~/.config/winforensics-mcp/vt_api_key` 파일을 읽는다 [1].
+코드와 저장소 파일에는 키 값이 없다 [1].
+서버는 키 파일의 소유자와 권한을 검사하지 않는다 [1].
+키는 `vt-py` 0.22.0이 요청 헤더 `X-Apikey`에만 넣는다 [2].
+
+WinRM 원격 수집 도구의 비밀번호와 NTLM 해시는 환경변수나 설정 파일에서 읽지 않고 호출 인자로 받는다 [3].
+
+### I04.02 도구 인자 수신 금지
+
+**구현.** 이 방식은 VirusTotal 조회 도구 다섯 개에 적용된다 [4].
+다섯 도구의 입력 스키마에는 API 키 인자가 없고 서버가 키를 직접 읽는다 [1][4].
+조회 응답은 조회 결과 필드만 담고 키는 담지 않는다 [5].
+VirusTotal 오류는 `VirusTotal API error: …` 문구로 응답의 `error`에 싣는다 [5].
+
+WinRM 원격 수집 도구 `remote_collect_artifacts`·`remote_get_system_info`에는 이 방식이 없다 [3].
+두 도구는 `password`나 `ntlm_hash`를 호출 인자로 받으므로 모델이 자격증명 값을 보고 넘긴다 [3].
+`ntlm_hash`에 NT 해시만 주면 서버는 앞에 0으로 채운 LM 해시 32자를 붙여 `pywinrm`에 비밀번호 자리로 넘긴다 [6].
+`remote_collect_artifacts`의 응답은 수집 항목마다 이름, 성공 여부, 저장 경로, 크기, 오류만 담는다 [7].
+도구 처리 중 예외가 나면 서버는 예외 문구를 `{"error": …}` 응답에 싣고 `logger.exception`으로 표준 오류에 traceback을 남긴다 [8].
+서버는 이 문구에서 자격증명을 찾아 지우는 처리를 하지 않는다 [8].
+
+### 근거
+
+[1] API 키를 환경변수와 키 파일에서 읽는다.
+
+```python
+def get_api_key() -> Optional[str]:
+    """
+    Get VirusTotal API key from (in order):
+    1. Environment variable: VIRUSTOTAL_API_KEY
+    2. Config file: ~/.config/winforensics-mcp/vt_api_key
+    3. None (functions will raise error)
+    """
+    # Environment variable
+    if key := os.environ.get("VIRUSTOTAL_API_KEY"):
+        return key.strip()
+
+    # Config file
+    config_file = Path.home() / ".config" / "winforensics-mcp" / "vt_api_key"
+    if config_file.exists():
+        return config_file.read_text().strip()
+
+    return None
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:48-64`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L48-L64)
+
+[2] `vt-py` 0.22.0은 세션 헤더 `X-Apikey`에 키를 넣는다: [`vt/client.py:264-282`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/client.py#L264-L282).
+
+[3] 원격 수집 도구는 `password`·`ntlm_hash`를 인자로 받고 그 값으로 `WinRMCollector`를 만든다: [`winforensics_mcp/server.py:2428-2461`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2428-L2461).
+
+```python
+    elif name == "remote_get_system_info":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        return json_response(collector.get_system_info())
+```
+
+[`winforensics_mcp/server.py:3480-3493`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3480-L3493)
+
+[4] VirusTotal 도구 다섯 개의 입력 스키마는 해시·경로·IP 주소·도메인·`triage_dir`·`limit`만 받는다: [`winforensics_mcp/server.py:927-1027`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L927-L1027).
+
+[5] (실행 확인) `VIRUSTOTAL_API_KEY`에 시험 값을 두고 가짜 `vt.Client`로 `vt_lookup_hash`·`vt_lookup_ip`·`vt_lookup_file`·`vt_lookup_domain`을 불렀다.
+네 응답 어디에도 키 값이 없었다.
+가짜 클라이언트가 `APIError`를 내게 하면 응답은 `{"error": "VirusTotal API error: ('QuotaExceededError', 'quota')"}`였다.
+
+[6] NT 해시만 받으면 LM 자리를 0으로 채워 비밀번호 자리에 넣는다.
+
+```python
+        if ntlm_hash:
+            if ":" in ntlm_hash:
+                auth_password = ntlm_hash
+            else:
+                auth_password = f"00000000000000000000000000000000:{ntlm_hash}"
+            self.password = auth_password
+            self.using_pth = True
+        else:
+            self.password = password
+            self.using_pth = False
+
+        protocol = "https" if use_ssl else "http"
+        self.url = f"{protocol}://{host}:{port}/wsman"
+
+        self.session = winrm.Session(
+            self.url,
+            auth=(username, self.password),
+            transport=transport,
+            server_cert_validation="ignore" if use_ssl else None,
+        )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:99-118`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L99-L118)
+
+[7] (실행 확인) 가짜 `winrm.Session`으로 `remote_get_system_info`와 `remote_collect_artifacts`를 불렀다.
+`Session`은 인자의 비밀번호, 또는 `00000000000000000000000000000000:<NT 해시>`를 인증 값으로 받았다.
+두 응답에 비밀번호는 없었다.
+`remote_collect_artifacts` 응답 필드는 다음 코드가 정한다.
+
+```python
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3474-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3474-L3478)
+
+[8] 도구 처리 중 예외는 문구를 그대로 `error`에 싣고 traceback을 기록한다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)

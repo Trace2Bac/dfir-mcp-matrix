@@ -1,0 +1,579 @@
+---
+cell: P01
+details:
+- id: P01.01
+- id: P01.02
+- id: P01.03
+- id: P01.04
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 이 방식은 오케스트레이터 4개의 자료 찾기, IoC 묶음 검색의 파일 고르기, 파일 하나와 폴더를 함께 받는 파서 도구 몇 개에 적용된다.
+`investigate_execution`은 `find_artifact_paths`로 `artifacts_dir` 아래 정해 둔 상대 경로(`Windows/Prefetch`, `Amcache.hve`, `SRUDB.dat` 등)를 차례로 확인해 Prefetch 폴더, Amcache 하이브, SRUM DB를 정한다 [1].
+`hunt_ioc`는 이 경로 표에 `$MFT`, `$UsnJrnl_$J`, 브라우저 기록 경로, `winevt/Logs` 같은 경로를 더한 `IOC_ARTIFACT_PATHS`로 같은 일을 한다 [2].
+`build_timeline`은 `TIMELINE_ARTIFACT_PATHS`로, `investigate_user_activity`는 사용자 이름을 끼우는 `USER_ARTIFACT_PATHS`로 자료를 정한다 [3][4].
+네 도구 모두 경로마다 그 이름의 파일이나 폴더가 있는지만 본다 [1][3][4].
+`hunt_ioc`는 EVTX 폴더 안에서도 `Security.evtx`, Sysmon, PowerShell, DNS-Client 로그 이름을 먼저 고른다 [5].
+
+`hunt_ioc_pack`은 확장자가 `TEXT_EXTENSIONS`에 있는 파일만 글로 읽어 정규식을 맞춘다 [6].
+`hunt_ioc_pack`은 확장자가 `.pcap`·`.pcapng`·`.cap`인 파일만 패킷 검색으로 넘긴다 [6].
+`die_scan_directory`는 확장자가 `.exe`·`.dll`·`.sys`·`.ocx`·`.scr`·`.drv`·`.cpl`인 파일만 Detect It Easy로 넘긴다 [7].
+`disk_parse_prefetch`는 파일 하나를 받으면 확장자가 `.pf`가 아닐 때 거부한다 [8].
+`user_parse_lnk_files`는 받은 경로가 확장자 `.lnk`인 파일이면 LNK 파일 하나로 읽는다 [9].
+`user_parse_shellbags`는 받은 하이브의 파일 이름이 `NTUSER`로 시작하면 NTUSER.DAT의 BagMRU 키를, 아니면 UsrClass.dat의 BagMRU 키를 읽는다 [10].
+APMX 파서는 확장자가 `.apmx86`이면 호출 위치 표의 포인터 크기를 4바이트로, 그 밖이면 8바이트로 정하고 확장자로 32비트·64비트 표시를 정한다 [11].
+
+**한계.** `hunt_ioc`의 브라우저 기록 찾기는 `Users/*/…` 경로에서 `*` 앞부분의 부모 폴더인 `artifacts_dir` 바로 아래 폴더를 사용자 폴더로 본다 [12].
+그래서 `artifacts_dir/Users/<사용자>/AppData/…/History`처럼 놓인 Chrome·Edge 기록은 찾지 못하고 `artifacts_dir/<폴더>/AppData/…/History`에 놓인 기록만 찾는다 [12][13].
+Firefox 경로는 `Profiles/*/places.sqlite`의 두 번째 `*`를 글자 그대로 경로로 붙이므로 찾지 못한다 [12].
+찾지 못한 브라우저 기록은 `No browser history found`로 응답에 실린다 [13].
+`investigate_user_activity`는 `username`을 주지 않으면 `Users/*/…` 경로에서 처음 찾은 사용자의 자료 하나만 쓴다 [4][14].
+`user_parse_shellbags`는 하이브 파일 이름만 보고 읽을 키를 정하므로 이름을 바꾼 NTUSER.DAT는 UsrClass.dat로 읽는다 [10].
+APMX 파서는 확장자가 `.apmx64`가 아니어도 `.apmx86`만 아니면 8바이트 포인터로 읽는다 [11].
+
+### P01.02 메타데이터 조회
+
+**구현.** 이 방식은 경로의 종류나 함께 있는 파일로 처리 방법을 고르는 도구 3개에 적용된다.
+`disk_parse_prefetch`는 받은 경로가 파일이면 Prefetch 파일 하나로, 폴더면 그 안의 Prefetch 파일 목록으로 읽는다 [8].
+`user_parse_lnk_files`는 받은 경로가 폴더이고 그 안에 `AppData` 폴더가 있으면 사용자 프로필로 보고 `Recent` 폴더의 최근 파일을 읽는다 [9].
+`AppData`가 없는 폴더는 LNK 파일을 담은 폴더로 보고 하위 폴더까지 읽는다 [9].
+`user_parse_shellbags`는 UsrClass.dat를 받고 `ntuser_path`가 없으면 UsrClass.dat가 있는 폴더의 상위 폴더 다섯 개에서 `NTUSER.DAT`를 찾아 함께 읽는다 [15].
+찾은 하이브와 읽지 못한 하이브는 응답의 `hives_parsed`와 `warnings`에 실린다 [16].
+서버가 증거의 OS 버전이나 파티션을 판별해 방법을 고르는 코드는 없다.
+
+### P01.03 내용·헤더 검사
+
+**구현.** 이 방식은 브라우저 기록, CSV 가져오기, NTDS, APMX 파서에 적용된다.
+`browser_get_history`는 `browser`가 `auto`이면 SQLite DB의 표 이름을 읽어 `moz_places`가 있으면 Firefox로, `urls`와 `visits`가 있으면 Chromium 계열로 본다 [17].
+Chromium 계열에서는 `edge_urls` 표가 있으면 Edge로 본다 [17].
+판별하지 못하면 `unknown`이 되고 파서는 지원하지 않는 형식이라는 오류를 낸다 [18].
+`ingest_parsed_csv`는 `csv_type`이 `auto`이면 CSV 머리 줄의 열 이름을 `CSV_SIGNATURES`의 필수 열과 맞춰 MFTECmd·PECmd·AmcacheParser·SrumECmd 출력 가운데 하나로 정한다 [19].
+맞는 유형이 없으면 읽지 않고 찾은 열 이름과 지원 유형을 돌려준다 [20].
+NTDS 도구는 파일 앞 240바이트를 읽어 ESE 서명 `0x89ABCDEF`, 형식 버전 `0x620`, 페이지 크기를 확인하고 맞지 않으면 읽지 않는다 [21].
+이어서 `datatable` 표와 스키마 판별에 쓰는 열이 있는지 확인하고 없으면 지원하지 않는 NTDS 스키마라는 오류를 낸다 [22].
+APMX 파서는 파일에서 ZIP 서명 `PK\x03\x04`를 찾지 못하면 APMX 파일이 아니라는 오류를 낸다 [23].
+
+**한계.** `browser`나 `csv_type`을 호출자가 정해 주면 표 이름이나 열 이름을 확인하지 않고 그 형식의 파서를 쓴다 [18][20].
+APMX 파서는 파일 어디에서든 처음 나오는 ZIP 서명부터 ZIP으로 연다 [23].
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** 이 방식은 NTDS 도구 4개에 적용된다.
+NTDS 파서는 읽을 메타데이터 속성마다 물리 열 이름을 `_ATTRS`에 정해 둔다 [24].
+스키마 레코드를 읽을 때 그 속성의 `attributeID`가 정해 둔 열 번호와 같고 그 열이 표에 있을 때만 그 속성을 읽을 대상에 넣는다 [25].
+다르면 그 스키마 레코드를 오류로 세고 그 속성은 읽지 않는다 [25].
+읽을 대상에 넣지 못한 속성은 `metadata_schema_incomplete` 진단으로 응답에 실리고 `schema_complete`가 거짓이 된다 [25].
+코드 주석은 손상된 스키마가 메타데이터 속성을 자격증명 열로 바꿔 가리키지 못하게 하려는 것이라고 적는다 [24].
+
+다른 도구는 고른 방법을 입력과 대조하지 않는다.
+`browser`나 `csv_type`을 호출자가 정하면 그 값과 판별 결과를 비교하지 않는다 [18][20].
+`user_parse_shellbags`는 이름으로 고른 키가 그 하이브에 맞는지 확인하지 않는다 [10].
+
+### 근거
+
+[1] `find_artifact_paths`는 정해 둔 상대 경로가 있는지만 보고 처음 찾은 것을 쓴다: [`winforensics_mcp/orchestrators/execution_tracker.py:33-57`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L33-L57), [`winforensics_mcp/orchestrators/execution_tracker.py:84-116`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L84-L116), [`winforensics_mcp/orchestrators/execution_tracker.py:495-506`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L495-L506).
+
+[2] `hunt_ioc`의 경로 표는 MFT, USN, 브라우저, EVTX 경로를 더한다.
+
+```python
+# Extended artifact paths for IOC hunting
+IOC_ARTIFACT_PATHS = {
+    **ARTIFACT_PATHS,
+    "mft": [
+        "$MFT",
+        "C/$MFT",
+        "Windows/$MFT",
+    ],
+    "usn": [
+        "$Extend/$UsnJrnl_$J",
+        "$UsnJrnl_$J",
+        "$J",
+        "C/$Extend/$UsnJrnl_$J",
+    ],
+    "browser": [
+        # Edge
+        "Users/*/AppData/Local/Microsoft/Edge/User Data/Default/History",
+        # Chrome
+        "Users/*/AppData/Local/Google/Chrome/User Data/Default/History",
+        # Firefox
+        "Users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/places.sqlite",
+    ],
+    "evtx": [
+        "Windows/System32/winevt/Logs",
+        "Windows/System32/winevt/logs",
+        "C/Windows/System32/winevt/Logs",
+        "C/Windows/System32/winevt/logs",
+        "winevt/Logs",
+        "winevt/logs",
+    ],
+}
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:49-79`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L49-L79)
+
+[3] `build_timeline`의 경로 표와 경로 찾기: [`winforensics_mcp/orchestrators/timeline_builder.py:23-83`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L23-L83).
+
+[4] `investigate_user_activity`의 경로 표와 경로 찾기는 `username`이 없으면 `*`로 바꿔 처음 찾은 것을 쓴다: [`winforensics_mcp/orchestrators/user_activity_investigator.py:41-72`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L41-L72), [`winforensics_mcp/orchestrators/user_activity_investigator.py:75-196`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L75-L196).
+
+[5] `hunt_ioc`의 EVTX 검색은 정해 둔 로그 이름을 먼저 고른다.
+
+```python
+        searched_files = []
+
+        # Priority EVTX files for IOC hunting
+        priority_logs = [
+            "Security.evtx",
+            "Microsoft-Windows-Sysmon%4Operational.evtx",
+            "Microsoft-Windows-PowerShell%4Operational.evtx",
+            "Microsoft-Windows-DNS-Client%4Operational.evtx",
+        ]
+
+        # Find EVTX files
+        evtx_files = []
+        for log in priority_logs:
+            log_path = evtx_dir / log
+            if log_path.exists():
+                evtx_files.append(log_path)
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:815-830`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L815-L830)
+
+[6] `hunt_ioc_pack`은 확장자로 글 파일과 패킷 파일을 고른다: [`winforensics_mcp/ioc_packs/behavior_hunter.py:11-37`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L11-L37), [`winforensics_mcp/ioc_packs/behavior_hunter.py:119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L119), [`winforensics_mcp/ioc_packs/behavior_hunter.py:160-163`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L160-L163).
+
+[7] `die_scan_directory`는 실행 파일 확장자로 파일을 고른다.
+
+```python
+    # Default extensions for Windows executables
+    if extensions is None:
+        extensions = [".exe", ".dll", ".sys", ".ocx", ".scr", ".drv", ".cpl"]
+
+    extensions = [ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in extensions]
+
+    # Find files
+    if recursive:
+        files = [f for f in dir_path.rglob("*") if f.is_file() and f.suffix.lower() in extensions]
+    else:
+        files = [f for f in dir_path.glob("*") if f.is_file() and f.suffix.lower() in extensions]
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:346-356`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L346-L356)
+
+[8] `disk_parse_prefetch`는 경로가 파일인지 폴더인지로 처리를 나누고 파일은 `.pf` 확장자를 요구한다.
+
+```python
+    elif name == "disk_parse_prefetch":
+        if not PYSCCA_AVAILABLE:
+            return json_response({"error": "libscca-python library not installed. Install with: pip install libscca-python"})
+
+        path = Path(args["path"])
+        include_loaded = args.get("include_loaded_files", False)
+
+        if path.is_file():
+            # Parse single prefetch file
+            result = parse_prefetch_file(
+                path,
+                include_loaded_files=include_loaded,
+            )
+        elif path.is_dir():
+            # Parse directory of prefetch files
+            result = parse_prefetch_directory(
+                path,
+                executable_filter=args.get("executable_filter"),
+                include_loaded_files=include_loaded,
+                limit=args.get("limit", MAX_PREFETCH_RESULTS),
+                offset=args.get("offset", 0),
+            )
+        else:
+            return json_response({"error": f"Path not found: {path}"})
+
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:3184-3209`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3184-L3209)
+
+```python
+    if not file_path.suffix.lower() == ".pf":
+        raise ValueError(f"Not a prefetch file (expected .pf extension): {file_path}")
+```
+
+[`winforensics_mcp/parsers/prefetch_parser.py:64-65`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L64-L65)
+
+[9] `user_parse_lnk_files`는 확장자와 `AppData` 폴더로 처리를 나눈다.
+
+```python
+    elif name == "user_parse_lnk_files":
+        if not PYLNK_AVAILABLE:
+            return json_response({"error": "pylnk3 library not installed. Install with: pip install pylnk3"})
+
+        path = Path(args["path"])
+        recent_only = args.get("recent_only", False)
+
+        if path.is_file() and path.suffix.lower() == '.lnk':
+            # Parse single LNK file
+            result = parse_lnk_file(path)
+        elif recent_only or (path.is_dir() and (path / "AppData").exists()):
+            # Parse Recent folder from user profile
+            result = get_recent_files(
+                user_profile_path=path,
+                extension_filter=args.get("extension_filter"),
+                limit=args.get("limit", MAX_PREFETCH_RESULTS),
+            )
+        else:
+            # Parse directory of LNK files
+            result = parse_lnk_directory(
+                directory=path,
+                recursive=args.get("recursive", True),
+                target_filter=args.get("target_filter"),
+                limit=args.get("limit", MAX_PREFETCH_RESULTS),
+            )
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:3409-3434`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3409-L3434)
+
+[10] `user_parse_shellbags`는 하이브 파일 이름으로 읽을 키를 정한다.
+
+```python
+    hives: list[tuple[Path, str, str, str]] = []
+    is_ntuser = usrclass_path.name.upper().startswith("NTUSER")
+
+    if is_ntuser:
+        hives.append((usrclass_path, NTUSER_BAGMRU, NTUSER_BAGS, "NTUSER.DAT"))
+    else:
+        hives.append((usrclass_path, USRCLASS_BAGMRU, USRCLASS_BAGS, "UsrClass.dat"))
+
+        if include_ntuser:
+            resolved_ntuser = Path(ntuser_path) if ntuser_path else _find_ntuser(usrclass_path)
+            if resolved_ntuser and resolved_ntuser.exists():
+                hives.append((resolved_ntuser, NTUSER_BAGMRU, NTUSER_BAGS, "NTUSER.DAT"))
+```
+
+[`winforensics_mcp/parsers/shellbags_parser.py:628-639`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L628-L639)
+
+[11] APMX 파서는 확장자로 포인터 크기와 32비트·64비트 표시를 정한다.
+
+```python
+def _pointer_size(file_path: str | Path) -> int:
+    """Return the capture's call-offset/header pointer size."""
+    return 4 if Path(file_path).suffix.lower() == ".apmx86" else 8
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:61-63`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L61-L63)
+
+```python
+    # Determine bitness from filename or version
+    file_path = Path(file_path)
+    if file_path.suffix.lower() == ".apmx64":
+        result["architecture"] = "64-bit"
+    elif file_path.suffix.lower() == ".apmx86":
+        result["architecture"] = "32-bit"
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:802-807`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L802-L807)
+
+[12] 브라우저 기록 찾기는 `*` 앞부분의 부모 폴더 아래 폴더마다 나머지 경로를 붙여 본다.
+
+```python
+    for artifact_type, patterns in IOC_ARTIFACT_PATHS.items():
+        if artifact_type == "browser":
+            # Browser paths can have wildcards, handle specially
+            for pattern in patterns:
+                if '*' in pattern:
+                    # Glob for user directories
+                    base_pattern = pattern.split('*')[0]
+                    base_path = artifacts_dir / base_pattern.rstrip('/')
+                    if base_path.parent.exists():
+                        for user_dir in base_path.parent.iterdir():
+                            if user_dir.is_dir():
+                                rest_pattern = pattern.split('*', 1)[1]
+                                full_path = user_dir / rest_pattern.lstrip('/')
+                                if full_path.exists():
+                                    found["browser"].append(full_path)
+                else:
+                    candidate = artifacts_dir / pattern
+                    if candidate.exists():
+                        found["browser"].append(candidate)
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:143-161`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L143-L161)
+
+[13] (실행 확인) `artifacts_dir/Users/alice/AppData/Local/Google/Chrome/User Data/Default/History`와 `bob`의 같은 파일을 두고 `_find_extended_artifact_paths`와 `hunt_ioc`를 부르면 브라우저 기록을 찾지 못하고 `No browser history found`를 싣는다.
+같은 파일을 `artifacts_dir/alice/AppData/…/History`로 두면 찾는다.
+
+[14] (실행 확인) `Users/alice/NTUSER.DAT`와 `Users/bob/NTUSER.DAT`를 두고 `username` 없이 `investigate_user_activity`를 부르면 `alice`의 파일만 읽고 `bob`의 파일은 응답에 나오지 않는다.
+
+[15] `_find_ntuser`는 UsrClass.dat가 있는 폴더의 상위 폴더 다섯 개에서 `NTUSER.DAT`를 찾는다.
+
+```python
+def _find_ntuser(usrclass_path: Path) -> Optional[Path]:
+    """
+    Locate the NTUSER.DAT belonging to the same profile as a UsrClass.dat.
+
+    UsrClass.dat sits at <profile>/AppData/Local/Microsoft/Windows/UsrClass.dat,
+    so the profile root is five levels up.
+    """
+    if usrclass_path.name.upper().startswith("NTUSER"):
+        return None
+
+    candidates = []
+    profile = usrclass_path.parent
+    for _ in range(5):
+        profile = profile.parent
+        candidates.append(profile / "NTUSER.DAT")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+```
+
+[`winforensics_mcp/parsers/shellbags_parser.py:539-558`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L539-L558)
+
+[16] 읽은 하이브와 경고를 응답에 싣는다.
+
+```python
+    all_results: list[dict[str, Any]] = []
+    hives_parsed: list[str] = []
+    warnings: list[str] = []
+
+    for hive, bagmru_root, bags_root, source in hives:
+        entries, error = _parse_one_hive(
+            hive, bagmru_root, bags_root, source,
+            path_filter, include_timestamps, limit,
+        )
+        if error:
+            warnings.append(error)
+        else:
+            hives_parsed.append(str(hive))
+        all_results.extend(entries)
+
+    if not hives_parsed and warnings:
+        return {
+            "usrclass_path": str(usrclass_path),
+            "error": "; ".join(warnings),
+            "folders": [],
+        }
+
+    # Most recently interacted first; undated entries last.
+    dated = [r for r in all_results if r.get("last_viewed")]
+    undated = [r for r in all_results if not r.get("last_viewed")]
+    dated.sort(key=lambda x: x["last_viewed"], reverse=True)
+    sorted_results = dated + undated
+
+    result: dict[str, Any] = {
+        "usrclass_path": str(usrclass_path),
+        "hives_parsed": hives_parsed,
+        "total_folders": len(sorted_results),
+        "folders": sorted_results,
+    }
+    if warnings:
+        result["warnings"] = warnings
+```
+
+[`winforensics_mcp/parsers/shellbags_parser.py:641-676`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L641-L676)
+
+[17] `_detect_browser_type`은 SQLite 표 이름으로 브라우저를 정한다.
+
+```python
+def _detect_browser_type(db_path: Path) -> str:
+    """Detect browser type from database schema"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        # Check for Chromium-specific tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+        conn.close()
+
+        # Firefox has 'moz_places' and 'moz_historyvisits'
+        if 'moz_places' in tables:
+            return 'firefox'
+        # Chromium has 'urls' and 'visits'
+        elif 'urls' in tables and 'visits' in tables:
+            # Check if Edge-specific tables exist
+            if 'edge_urls' in tables:
+                return 'edge'
+            return 'chrome'
+
+        return 'unknown'
+    except Exception:
+        return 'unknown'
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:59-82`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L59-L82)
+
+[18] `auto`일 때만 판별하고 판별하지 못한 형식은 오류로 끝낸다.
+
+```python
+    # Detect browser type
+    if browser == "auto":
+        browser = _detect_browser_type(history_path)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:510-512`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L510-L512)
+
+```python
+    else:
+        raise ValueError(f"Unknown or unsupported browser type: {browser}")
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:557-558`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L557-L558)
+
+[19] `_detect_csv_type`은 머리 줄의 필수 열로 CSV 유형을 정한다.
+
+```python
+def _detect_csv_type(headers: list[str]) -> Optional[str]:
+    """
+    Detect CSV type based on column headers.
+
+    Returns the detected type or None if unknown.
+    """
+    headers_lower = [h.lower() for h in headers]
+    headers_set = set(headers)
+
+    for csv_type, signature in CSV_SIGNATURES.items():
+        required = signature["required"]
+        # Check if all required columns are present (case-insensitive)
+        if all(any(r.lower() == h for h in headers_lower) for r in required):
+            # For amcache_alt, map to amcache
+            if csv_type == "amcache_alt":
+                return "amcache"
+            if csv_type == "srumemd_network":
+                return "srumemd"
+            return csv_type
+
+    return None
+```
+
+[`winforensics_mcp/parsers/csv_ingestor.py:107-127`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/csv_ingestor.py#L107-L127)
+
+[20] `csv_type`을 주면 판별 결과를 쓰지 않고 판별하지 못하면 열 이름과 지원 유형을 돌려준다.
+
+```python
+
+            # Auto-detect CSV type if not specified
+            detected_type = _detect_csv_type(headers)
+
+            if csv_type and csv_type != "auto":
+                final_type = csv_type
+            elif detected_type:
+                final_type = detected_type
+            else:
+                return {
+                    "error": "Could not detect CSV type. Please specify csv_type.",
+                    "headers_found": headers[:20],
+                    "supported_types": list(CSV_SIGNATURES.keys()),
+                }
+
+```
+
+[`winforensics_mcp/parsers/csv_ingestor.py:309-323`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/csv_ingestor.py#L309-L323)
+
+[21] `_header`는 ESE 헤더의 서명, 버전, 페이지 크기를 확인한다.
+
+```python
+def _header(path):
+    with path.open('rb') as stream:
+        raw = stream.read(240)
+        if len(raw) < 240 or struct.unpack_from('<I', raw, 4)[0] != 0x89ABCDEF:
+            raise ValueError('Not a supported ESE database header')
+        version = struct.unpack_from('<I', raw, 8)[0]
+        page_size = struct.unpack_from('<I', raw, 236)[0]
+        if version != 0x620 or page_size not in (2048, 4096, 8192, 16384, 32768):
+            raise ValueError('Unsupported ESE format version or page size')
+        state = struct.unpack_from('<I', raw, 52)[0]
+        stream.seek(page_size)
+        backup = stream.read(240)
+    consistent = len(backup) == 240 and all(raw[a:b] == backup[a:b] for a, b in ((4, 12), (52, 56), (236, 240)))
+    names = {1: 'just_created', 2: 'dirty_shutdown', 3: 'clean_shutdown', 4: 'being_converted', 5: 'force_detach'}
+    return {'database_state': names.get(state, 'unknown'), 'database_state_code': state,
+            'database_clean': state == 3 and consistent, 'header_copies_consistent': consistent,
+            'header_checksum_verified': False, 'ese_version': version, 'page_size': page_size}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:103-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L103-L119)
+
+[22] `datatable`과 스키마 판별 열이 없으면 지원하지 않는 스키마로 끝낸다.
+
+```python
+        table = db.get_table_by_name('datatable')
+        if table is None:
+            raise ValueError('Unsupported NTDS schema: datatable missing')
+        columns = _columns(table)
+        if any(name not in columns for name in _BOOTSTRAP + _STRUCTURAL):
+            raise ValueError('Unsupported NTDS schema: bootstrap metadata columns missing')
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:269-274`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L269-L274)
+
+[23] APMX 파서는 ZIP 서명을 찾아 그 위치부터 연다.
+
+```python
+def _open_apmx_zip(file_path: str | Path) -> zipfile.ZipFile:
+    """Open an APMX file, skipping past the custom header to the ZIP data."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"APMX file not found: {file_path}")
+
+    data = file_path.read_bytes()
+    pk_offset = data.find(b"PK\x03\x04")
+    if pk_offset == -1:
+        raise ValueError(f"Not a valid APMX file (no ZIP signature found): {file_path}")
+
+    return zipfile.ZipFile(io.BytesIO(data[pk_offset:]))
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:47-58`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L47-L58)
+
+[24] 읽을 속성마다 물리 열 이름을 정해 둔다.
+
+```python
+# The fixed physical allowlist prevents a corrupt schema from redirecting a
+# logical metadata attribute to a credential-bearing ATT column.
+_ATTRS = {
+    'name': 'ATTm589825', 'sAMAccountName': 'ATTm590045', 'objectSid': 'ATTr589970',
+    'objectClass': 'ATTc0', 'isDeleted': 'ATTi131120', 'isRecycled': 'ATTi591882',
+    'trustPartner': 'ATTm589957', 'trustDirection': 'ATTj589956', 'trustType': 'ATTj589960',
+    'trustAttributes': 'ATTj590294', 'securityIdentifier': 'ATTr589945', 'flatName': 'ATTm590335',
+    'nCName': 'ATTb131088', 'dnsRoot': 'ATTm589852', 'nETBIOSName': 'ATTm589911',
+    'systemFlags': 'ATTj590199', 'trustParent': 'ATTb590295', 'rootTrust': 'ATTb590498', 'Enabled': 'ATTi131629',
+}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:30-39`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L30-L39)
+
+[25] 스키마 레코드의 `attributeID`를 정해 둔 열과 대조하고 맞지 않으면 그 속성을 읽지 않는다.
+
+```python
+                governs = _read(record, columns, _BOOTSTRAP[2])
+                if attribute is not None:
+                    previous = snapshot['attribute_names'].get(attribute)
+                    if previous is not None and previous != name:
+                        raise ValueError('Conflicting schema attribute')
+                    snapshot['attribute_names'][attribute] = name
+                    if name in _ATTRS:
+                        expected = _ATTRS[name]
+                        if int(expected[4:]) != attribute or expected not in columns:
+                            raise ValueError('Unsupported or mismatched ATT metadata mapping')
+                        snapshot['schema'][name] = expected
+                    if name == 'msDS-HasDomainNCs':
+                        snapshot['domain_link_id'] = _read(record, columns, 'ATTj131122')
+                if governs is not None:
+                    previous = snapshot['classes'].get(governs)
+                    if previous is not None and previous != name:
+                        raise ValueError('Conflicting schema class')
+                    snapshot['classes'][governs] = name
+            except (ValueError, OSError, UnicodeError, RuntimeError):
+                snapshot['schema_errors'] += 1
+                _diag(snapshot, 'schema_record_error', row=index)
+        missing = set(_ATTRS) - set(snapshot['schema'])
+        if missing:
+            _diag(snapshot, 'metadata_schema_incomplete', field=','.join(sorted(missing)), error=False)
+        snapshot['schema_complete'] = snapshot['scan_complete'] and not snapshot['schema_errors'] and not missing
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:286-310`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L286-L310)

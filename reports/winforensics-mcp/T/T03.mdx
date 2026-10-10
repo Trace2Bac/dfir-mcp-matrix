@@ -1,0 +1,131 @@
+---
+cell: T03
+details:
+- id: T03.12
+---
+
+# T03 실행 조건 확인
+
+### T03.12 외부 서비스 요청 간격 유지
+
+**구현.** 이 방식은 VirusTotal에 요청하는 `vt_lookup_hash`·`vt_lookup_behavior`·`vt_lookup_ip`·`vt_lookup_domain`·`vt_lookup_file`에 적용된다 [1].
+요청 함수는 VirusTotal에 요청하기 직전에 `_rate_limit`을 부른다 [1].
+`vt_lookup_file`은 파일의 SHA-256을 계산한 뒤 해시 조회 함수로 요청하므로 같은 간격이 적용된다 [2].
+`_rate_limit`은 마지막 요청 시각에서 15초(`MIN_REQUEST_INTERVAL`)가 지나지 않았으면 남은 시간만큼 기다린 뒤 요청 시각을 갱신한다 [3].
+코드 주석은 이 간격을 무료 등급의 분당 4회 한도에 맞춘 값으로 적는다 [3].
+`vt_lookup_behavior`를 뺀 조회는 24시간 안에 같은 해시·IP·도메인을 조회한 결과가 서버 메모리에 있으면 기다리지 않고 그 결과를 돌려준다 [4].
+서버는 이 도구들을 `asyncio.to_thread`로 별도 스레드에서 실행하므로 기다리는 동안에도 다른 도구 호출을 처리한다 [5].
+간격과 마지막 요청 시각은 서버 프로세스의 전역 값이고 설정이나 인자로 바꿀 수 없다 [3].
+
+서버에는 이 밖에 앞선 호출의 결과, 조사 단계, 승인, 호출자 신원, 메모리·디스크 같은 실행 자원 상태로 호출을 막거나 미루는 코드가 없다.
+서버는 stdio로만 실행되고 호출자를 인증하지 않는다 [6].
+
+**한계.** `_rate_limit`은 마지막 요청 시각을 잠금 없이 읽고 쓰므로 동시에 들어온 조회는 같은 시각을 읽고 함께 요청한다 [3].
+간격을 3초로 바꾸고 해시 조회 3개를 동시에 부르자 둘째와 셋째 요청이 같은 시각에 나갔다 [7].
+서버를 다시 시작하면 마지막 요청 시각이 0으로 돌아가므로 앞 프로세스의 마지막 요청 뒤 15초가 지나지 않았어도 첫 요청은 기다리지 않는다 [3].
+
+### 근거
+
+[1] 해시 조회는 캐시를 본 뒤 `_rate_limit`을 부르고 요청한다.
+
+```python
+
+    # Check cache
+    cache_key = f"hash:{file_hash}"
+    if cached := _get_cached(cache_key):
+        return cached
+
+    _rate_limit()
+
+    try:
+        with vt.Client(api_key) as client:
+            file_obj = client.get_object(f"/files/{file_hash}")
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:159-169`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L159-L169)
+
+다른 조회 함수도 요청 전에 `_rate_limit`을 부른다: [`winforensics_mcp/parsers/virustotal_client.py:272`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L272), [`winforensics_mcp/parsers/virustotal_client.py:383`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L383), [`winforensics_mcp/parsers/virustotal_client.py:477`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L477).
+
+[2] `vt_lookup_file`은 계산한 SHA-256으로 해시 조회 함수를 부른다.
+
+```python
+    # Look up using SHA256 (most reliable)
+    result = lookup_hash(local_hashes["sha256"])
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:578-579`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L578-L579)
+
+[3] 요청 간격 값과 기다리는 함수다.
+
+```python
+# Rate limiting for free tier (4 requests/minute = 15 seconds between requests)
+_last_request_time: float = 0
+MIN_REQUEST_INTERVAL: float = 15.0  # seconds
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:35-37`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L35-L37)
+
+```python
+def _rate_limit() -> None:
+    """Enforce rate limiting between requests."""
+    global _last_request_time
+    elapsed = time.time() - _last_request_time
+    if elapsed < MIN_REQUEST_INTERVAL:
+        sleep_time = MIN_REQUEST_INTERVAL - elapsed
+        time.sleep(sleep_time)
+    _last_request_time = time.time()
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:79-86`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L79-L86)
+
+[4] 캐시 유효 시간과 캐시 조회다.
+
+```python
+# Cache: key -> (result, timestamp)
+_cache: dict[str, tuple[dict, datetime]] = {}
+CACHE_TTL = timedelta(hours=24)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:31-33`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L31-L33)
+
+```python
+def _get_cached(key: str) -> Optional[dict]:
+    """Get cached result if not expired."""
+    if key in _cache:
+        result, timestamp = _cache[key]
+        if datetime.now() - timestamp < CACHE_TTL:
+            result = dict(result)  # Copy to avoid mutation
+            result["_cached"] = True
+            result["_cache_age_hours"] = round(
+                (datetime.now() - timestamp).total_seconds() / 3600, 1
+            )
+            return result
+        else:
+            # Expired, remove from cache
+            del _cache[key]
+    return None
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:89-103`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L89-L103)
+
+[5] VirusTotal 도구는 별도 스레드에서 실행한다: [`winforensics_mcp/server.py:2819`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2819), [`winforensics_mcp/server.py:2832`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2832), [`winforensics_mcp/server.py:2846`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2846), [`winforensics_mcp/server.py:2857`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2857), [`winforensics_mcp/server.py:2868`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2868).
+
+[6] 서버는 stdio 전송으로만 실행된다.
+
+```python
+def main():
+    """Main entry point"""
+    import asyncio
+    
+    async def run():
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    
+    asyncio.run(run())
+```
+
+[`winforensics_mcp/server.py:3498-3506`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3498-L3506)
+
+[7] (실행 확인) `vt.Client`를 요청 시각을 적는 가짜 객체로 바꾸고 `MIN_REQUEST_INTERVAL`을 3초로 바꾼 뒤 `_execute_tool`로 `vt_lookup_hash`를 불렀다.
+차례로 부른 두 요청은 0초와 3초에 나갔다.
+3.5초 기다린 뒤 서로 다른 해시 3개를 동시에 부르자 요청이 6.51초, 9.51초, 9.51초에 나갔다.

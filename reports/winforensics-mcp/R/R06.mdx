@@ -1,0 +1,157 @@
+---
+cell: R06
+details:
+- id: R06.01
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### R06.01 값 가림·필드 제외
+
+**구현.** 이 방식은 NTDS 도구 4개 `ntds_get_object_by_sam`·`ntds_get_object_sid`·`ntds_get_domain_info`·`ntds_get_trusts`에 적용된다 [1].
+NTDS 파서는 읽을 속성을 논리 이름과 물리 열 이름의 짝으로 고정한 허용 목록 `_ATTRS`로 정한다 [1].
+이 목록에는 이름, SAM 계정 이름, SID, 객체 클래스, 삭제 여부, 도메인·신뢰 관계 속성만 있고 비밀번호 해시나 신뢰 인증 비밀을 담는 열은 없다 [1].
+코드 주석은 손상된 스키마가 논리 속성을 자격증명 열로 바꾸어 가리키지 못하게 물리 열 이름을 고정했다고 적는다 [1].
+스키마 레코드가 목록과 다른 열 번호를 알리면 서버는 그 레코드를 스키마 오류로 세고 그 속성을 읽을 목록에 넣지 않는다 [2].
+레코드를 읽을 때는 이 목록과 구조 열만 읽고 행 전체를 꺼내지 않는다 [3].
+`ntds_get_object_by_sam`의 `fields`는 `dnt`·`dn`·`name`·`sam_account_name`·`object_sid`·`object_classes`·`deleted`·`recycled` 가운데에서만 고를 수 있다 [4].
+도구 설명은 자격증명 속성을 내보내지 않고 신뢰 인증 비밀을 빼고 싣는다고 적는다 [5].
+
+이 제외는 NTDS 도구에만 적용된다.
+레지스트리 도구는 키의 값을 이름, 형식, 자료 그대로 싣고 가리는 처리를 두지 않는다 [6].
+`registry_get_key`로 SAM 하이브의 사용자 키를 읽으면 암호화된 비밀번호 해시를 담은 `V` 값이 16진 문자열로 실린다 [7].
+같은 도구로 SECURITY 하이브의 `Policy\Secrets` 아래를 읽으면 LSA secret의 `CurrVal` 값도 실린다 [7].
+`registry_get_users`는 SAM 사용자 키의 `F` 값에서 시각, 로그인 횟수, 계정 플래그만 꺼내고 `V` 값을 읽지 않는다 [8].
+
+### 근거
+
+[1] NTDS 파서가 읽을 속성과 물리 열을 고정한 허용 목록이다.
+
+```python
+# The fixed physical allowlist prevents a corrupt schema from redirecting a
+# logical metadata attribute to a credential-bearing ATT column.
+_ATTRS = {
+    'name': 'ATTm589825', 'sAMAccountName': 'ATTm590045', 'objectSid': 'ATTr589970',
+    'objectClass': 'ATTc0', 'isDeleted': 'ATTi131120', 'isRecycled': 'ATTi591882',
+    'trustPartner': 'ATTm589957', 'trustDirection': 'ATTj589956', 'trustType': 'ATTj589960',
+    'trustAttributes': 'ATTj590294', 'securityIdentifier': 'ATTr589945', 'flatName': 'ATTm590335',
+    'nCName': 'ATTb131088', 'dnsRoot': 'ATTm589852', 'nETBIOSName': 'ATTm589911',
+    'systemFlags': 'ATTj590199', 'trustParent': 'ATTb590295', 'rootTrust': 'ATTb590498', 'Enabled': 'ATTi131629',
+}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:30-39`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L30-L39)
+
+[2] 스키마 레코드의 ATT 번호가 허용 목록과 다르면 예외로 처리해 스키마 오류로 세고 그 속성을 `schema`에 넣지 않는다.
+
+```python
+                    if name in _ATTRS:
+                        expected = _ATTRS[name]
+                        if int(expected[4:]) != attribute or expected not in columns:
+                            raise ValueError('Unsupported or mismatched ATT metadata mapping')
+                        snapshot['schema'][name] = expected
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:292-296`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L292-L296)
+
+```python
+            except (ValueError, OSError, UnicodeError, RuntimeError):
+                snapshot['schema_errors'] += 1
+                _diag(snapshot, 'schema_record_error', row=index)
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:304-306`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L304-L306)
+
+[3] 레코드마다 구조 열과 `schema`에 들어 있는 속성 열만 읽는다.
+
+```python
+        # Read allowlisted decoded metadata only. Never materialize a full row.
+        for index in range(count):
+            try:
+                record = table.get_record(index)
+                structural = {field: _read(record, columns, field) for field in _STRUCTURAL}
+                dnt = structural['DNT_col']
+                if dnt is None or dnt in snapshot['nodes']:
+                    raise ValueError('Missing or duplicate DNT')
+                node = {'dnt': dnt, 'parent': structural['PDNT_col'], 'rdn_type': structural['RDNtyp_col'],
+                        'object_present': structural['OBJ_col'], 'record_index': index}
+                values = {}
+                failed_fields = set()
+                for logical, physical in snapshot['schema'].items():
+                    try:
+                        values[logical] = _read(record, columns, physical)
+                    except (ValueError, OSError, UnicodeError, RuntimeError):
+                        values[logical] = None
+                        failed_fields.add(logical)
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:311-328`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L311-L328)
+
+[4] `fields`는 허용 목록 8개 가운데에서만 고른다.
+
+```python
+        if kind == "object":
+            properties["fields"] = {
+                "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True,
+                "items": {"type": "string", "enum": [
+                    "dnt", "dn", "name", "sam_account_name", "object_sid", "object_classes", "deleted", "recycled",
+                ]},
+                "description": "Allowlisted metadata projection. Credential attributes are not exposed.",
+            }
+```
+
+[`winforensics_mcp/server.py:470-477`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L470-L477)
+
+```python
+    if fields is None:
+        fields = OBJECT_FIELDS
+    if not isinstance(fields, (list, tuple)) or not fields or any(field not in OBJECT_FIELDS for field in fields):
+        raise ValueError('fields must be a nonempty list drawn from: ' + ', '.join(OBJECT_FIELDS))
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:428-431`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L428-L431)
+
+[5] NTDS 도구 설명이 자격증명과 신뢰 인증 비밀을 내보내지 않는다고 적는다.
+
+```python
+        Tool(
+            name="ntds_get_object_by_sam",
+            description="Read allowlisted offline NTDS metadata for one exact SAM name. Retained deleted/recycled matches are flagged; duplicate matches are explicit. Does not decrypt credentials or require SYSTEM.",
+            inputSchema=_ntds_schema("object"), outputSchema=NTDS_OBJECT_SCHEMA,
+        ),
+        Tool(
+            name="ntds_get_object_sid",
+            description="Resolve an exact SAM selector to offline NTDS SID metadata. Reports not-found, ambiguity, and incomplete evidence explicitly; never selects an arbitrary duplicate.",
+            inputSchema=_ntds_schema("sid"), outputSchema=NTDS_OBJECT_SCHEMA,
+        ),
+        Tool(
+            name="ntds_get_domain_info",
+            description="Read domain metadata and evidence-backed forest-root identification from offline NTDS. Local-domain attribution retains relationship/liveness uncertainty; no SID-prefix guessing or credential extraction.",
+            inputSchema=_ntds_schema("domain"), outputSchema=NTDS_DOMAIN_SCHEMA,
+        ),
+        Tool(
+            name="ntds_get_trusts",
+            description="Read paginated offline trusted-domain metadata: partner, SID, direction/type/attributes, and provenance. Excludes trust authentication secrets; never replays logs or repairs the database.",
+            inputSchema=_ntds_schema("trusts"), outputSchema=NTDS_TRUST_SCHEMA,
+        ),
+```
+
+[`winforensics_mcp/server.py:492-511`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L492-L511)
+
+[6] 레지스트리 값은 자료를 문자열이나 16진 문자열로 바꿔 그대로 싣는다: [`winforensics_mcp/parsers/registry_parser.py:108-152`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L108-L152).
+
+[7] (실행 확인) regipy 저장소의 테스트 하이브 `SAM`과 `SECURITY`로 `registry_get_key`를 불렀다.
+`SAM\Domains\Account\Users\000001F4`의 결과에 `V` 값이 16진 문자열로 실렸다.
+`Policy\Secrets\DefaultPassword\CurrVal`의 결과에 그 키의 기본값 자료가 실렸다.
+
+[8] `registry_get_users`는 사용자 키의 값 가운데 `F`만 읽는다.
+
+```python
+                # Parse F value for account metadata
+                for value in subkey.values():
+                    if value.name() == "F":
+                        try:
+                            f_data = value.value()
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:842-846`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L842-L846)

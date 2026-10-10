@@ -1,0 +1,133 @@
+---
+cell: F06
+details:
+- id: not_applicable
+---
+
+# F06 보고 산출물 구성
+
+### 비적용
+
+**판단.** 서버에는 사건 단위가 없고 보고 산출물을 만들거나 내보내는 도구도 없다.
+도구는 호출마다 증거 파일이나 폴더 경로를 인자로 받고 사건이나 조사 세션을 가리키는 식별자를 받거나 만들지 않는다 [1].
+서버는 호출 사이에 발견사항이나 호출 기록을 모아 두지 않는다 [2].
+
+파일을 쓰는 도구는 세 개이고 어느 것도 조사의 범위, 방법, 결과, 한계, 판단의 확정 상태를 싣지 않는다.
+
+- `evtx_export`는 조건에 맞는 EVTX 레코드만 JSONL 파일에 쓴다 [3].
+- `vt_lookup_behavior`는 `triage_dir`을 주면 VirusTotal 행위 분석 응답을 그대로 JSON 파일로 쓴다 [4].
+- `remote_collect_artifacts`는 원격 호스트의 이벤트 로그와 레지스트리 하이브를 `output_dir`에 복사한다 [5].
+
+`evtx_export`는 파일의 SHA-256, 행 수, 스캔 완료 여부, 원본 파일의 경로·크기·수정 시각, 질의 조건을 파일이 아니라 응답에만 싣는다 [6].
+
+같은 저장소에는 서버 응답을 가공해 보고 산출물을 만드는 사용자 CLI나 클라이언트 코드가 없다.
+패키지의 실행 진입점은 서버 시작 `main` 하나다 [7].
+
+### 근거
+
+[1] 도구 정의는 호출마다 증거 경로를 받는다: [`winforensics_mcp/server.py:488-2463`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L488-L2463).
+
+[2] 도구 이름별 처리는 받은 인자로 파서를 부르고 결과를 돌려준다: [`winforensics_mcp/server.py:2482-3495`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2482-L3495).
+
+[3] `evtx_export`는 레코드를 한 줄씩 JSONL로 쓴다.
+
+```python
+        with stream:
+            for event in events:
+                # Read at most one extra projected row to distinguish an exact
+                # boundary from an actual export cap. Never write that row.
+                if max_rows is not None and exported_rows >= max_rows:
+                    export_limit_hit = True
+                    break
+                encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"),
+                                      allow_nan=False) + "\n").encode("utf-8")
+                written = stream.write(encoded)
+                if written != len(encoded):
+                    raise OSError("Short write while exporting EVTX records")
+                digest.update(encoded)
+                exported_bytes += len(encoded)
+                exported_rows += 1
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:145-159`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L145-L159)
+
+[4] `vt_lookup_behavior`는 `triage_dir`이 있으면 응답을 파일로 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[5] 원격 수집은 정해 둔 이벤트 로그와 하이브를 `output_dir` 아래에 쓴다.
+
+```python
+    results = []
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_evtx:
+        evtx_dir = output_dir / "evtx"
+        evtx_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["evtx"].items():
+            local_path = evtx_dir / f"{name}.evtx"
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+            results.append(result)
+
+    if include_registry:
+        reg_dir = output_dir / "registry"
+        reg_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["registry"].items():
+            local_path = reg_dir / name
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:393-422`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L393-L422)
+
+[6] 내보내기의 해시, 완료 여부, 원본 정보, 질의 조건은 응답 `dict`에 담는다.
+
+```python
+        result = {
+            "format": "jsonl",
+            "sha256": digest.hexdigest(), "exported_rows": exported_rows,
+            "exported_bytes": exported_bytes,
+            "export_complete": bool(metadata["scan_complete"] and metadata["total_matched_exact"]
+                                    and metadata["parse_errors"] == 0
+                                    and metadata.get("time_filter_errors", 0) == 0 and not export_limit_hit),
+            "scan_complete": metadata["scan_complete"], "scan_limit_hit": metadata["scan_limit_hit"],
+            "parse_errors": metadata["parse_errors"], "total_matched": metadata["total_matched"],
+            "time_filter_errors": metadata.get("time_filter_errors", 0),
+            "total_matched_exact": metadata["total_matched_exact"],
+            "export_limit_hit": export_limit_hit,
+            "source": {"path": identity[0], "size": identity[1], "mtime_ns": identity[2]},
+            "query_ref": query_ref, "query": query, "preview": preview,
+        }
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:173-187`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L173-L187)
+
+[7] 패키지의 실행 진입점은 서버 시작 하나다.
+
+```toml
+[project.scripts]
+winforensics-mcp = "winforensics_mcp.server:main"
+```
+
+[`pyproject.toml:57-58`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/pyproject.toml#L57-L58)

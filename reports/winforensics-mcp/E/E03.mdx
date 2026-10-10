@@ -1,0 +1,298 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 증거 파일을 직접 여는 경로에 적용된다.
+이 경로에서 서버 코드는 증거를 읽기 모드로만 연다.
+브라우저 기록 도구는 SQLite DB를 `mode=ro` URI로 연다 [1].
+NTDS 도구는 ESE 헤더를 `rb`로 읽는다 [2].
+`windows_search_parse`는 원본을 `rb`로 읽어 해시하고 `shutil.copyfile`로 사본을 만든다 [3].
+USN 저널, LNK 헤더, PE, APMX, CSV를 읽는 코드와 IoC 묶음 검색, `vt_lookup_file`의 해시 계산도 `rb`·`r`나 `read_bytes`로 읽는다 [4].
+증거를 읽는 이 경로들에는 파일을 쓰는 호출이 없다 [4].
+
+파일을 쓰는 도구는 `evtx_export`, `remote_collect_artifacts`, `triage_dir`를 받은 `vt_lookup_behavior`다 [5][6][7].
+세 도구 모두 출력 폴더가 증거 폴더와 겹치는지 확인하지 않는다 [5][6][7].
+`evtx_export`는 같은 폴더에 임시 파일을 만든 뒤 새 이름에 링크를 거는 방식으로 내므로 이미 있는 파일을 덮어쓰지 않는다 [5].
+`remote_collect_artifacts`는 `output_dir` 아래 `evtx/Security.evtx`, `registry/SYSTEM` 같은 정해 둔 이름에 `write_bytes`로 써서 같은 이름의 파일을 덮어쓴다 [6].
+`vt_lookup_behavior`는 `triage_dir` 아래 `vt-behavior-<해시 앞 12자>.json`에 `write_text`로 써서 같은 이름의 파일을 덮어쓴다 [7].
+
+`remote_collect_artifacts`가 읽는 원격 대상의 파일에는 변경을 막는 장치가 없다 [8].
+이 도구는 대상에서 PowerShell로 파일을 `ReadAllBytes`로 읽는다 [8].
+읽기에 실패하면 대상의 `C:\` 볼륨에 VSS 섀도 복사본을 만들고 설치 시각이 가장 늦은 섀도 복사본에서 파일을 읽은 뒤 그 섀도 복사본을 지운다 [8].
+스크립트는 섀도 복사본 만들기의 결과를 확인하지 않는다 [8].
+그래서 만들기가 실패하면 대상에 이미 있던 가장 최근 섀도 복사본을 읽고 지우는 흐름이 된다 [8].
+이 수집 경로는 실행해 확인하지 않았다.
+
+**한계.** 브라우저 기록 도구는 `browser`가 기본값 `auto`이면 종류를 판별하려고 사본이 아닌 원본 DB를 `mode=ro`로 연다 [1][9].
+실행 확인에서 WAL 모드 DB를 이렇게 열자 원본 폴더의 `-shm` 파일 내용이 바뀌었다 [10].
+`-shm`이 없던 경우에는 원본 폴더에 새 `-shm` 파일이 생겼다 [10].
+DB 파일과 `-wal` 파일은 바뀌지 않았다 [10].
+`browser`를 `chrome`으로 지정한 호출에서는 원본 폴더의 파일이 바뀌지 않았다 [10].
+`hunt_ioc`는 찾은 브라우저 기록을 늘 `browser="auto"`로 넘긴다 [11].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 증거 파일 경로를 파서 라이브러리나 외부 실행 파일에 넘기는 도구에 적용된다.
+이 도구들의 서버 코드는 원본을 직접 열지 않고 경로를 넘긴다 [12].
+원본을 지키는 것은 서버 개요의 버전 기준대로 설치된 라이브러리가 파일을 읽기 모드로 연다는 동작이다.
+
+레지스트리·Amcache·ShellBags 도구는 `python-registry` 1.3.1의 `Registry.Registry`에 경로를 넘긴다 [12].
+이 라이브러리는 파일을 `rb`로 열어 내용 전체를 메모리로 읽는다 [13].
+EVTX 도구는 `evtx` 0.11.0의 `PyEvtxParser`에, `disk_parse_mft`는 `mft` 0.7.0의 `PyMftParser`에 경로를 넘긴다 [12].
+두 Rust 바인딩은 경로를 받으면 읽기 전용인 `File::open`으로 연다 [14].
+Prefetch 도구는 `libscca-python`의 `pyscca`에, SRUM·NTDS 도구는 `libesedb-python`의 `pyesedb`에 경로를 넘긴다 [12].
+두 바인딩의 `open`은 모드를 주지 않으면 `'r'`로 연다 [15].
+PE 도구는 `pefile` 2024.8.26에 경로를 넘기고 `pefile`은 `rb`로 연 파일을 메모리에 매핑한다 [12][16].
+Unix에서는 `MAP_PRIVATE`로, Windows에서는 `ACCESS_READ`로 매핑하므로 메모리의 변경이 파일에 쓰이지 않는다 [16].
+LNK 도구는 `pylnk3` 0.4.3에, pcap 도구는 `scapy` 2.7.0의 `PcapNgReader`·`PcapReader`에 경로를 넘기고 두 라이브러리는 `rb`로 연다 [12][16].
+YARA 도구는 `yara-python` 4.5.4의 `match`에 경로를 넘기고 libyara는 파일을 `O_RDONLY`로 열어 매핑한다 [12][16].
+DiE 도구는 `diec` 명령에 경로를 인자로 넘긴다 [17].
+`windows_search_parse`는 SIDR에 원본이 아니라 임시 폴더의 사본이 들어 있는 폴더를 넘긴다 [18].
+
+증거를 읽기 전용으로 마운트하거나 서버를 읽기 전용 환경에서 실행하는 경로는 저장소에 없다.
+
+**한계.** `pyscca`와 `pyesedb`는 바인딩의 기본 모드가 `'r'`인 것까지 확인했고 libyal C 라이브러리가 그 모드로 파일을 여는 코드는 소스로 확인하지 않았다 [15].
+Detect It Easy 3.21의 `diec`가 파일을 읽기 모드로 여는지는 소스로 확인하지 못했다 [17].
+그래서 `die_analyze_file`·`die_scan_directory` 경로의 실제 보호는 확인하지 못했다(실제 보호 미확인) [17].
+
+### 근거
+
+[1] 브라우저 종류 판별은 원본 DB를, 기록 읽기는 사본을 `mode=ro`로 연다.
+
+```python
+def _detect_browser_type(db_path: Path) -> str:
+    """Detect browser type from database schema"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:59-62`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L59-L62)
+
+```python
+    # Copy to temp to avoid locking
+    temp_path = _copy_to_temp(db_path)
+
+    try:
+        conn = sqlite3.connect(f"file:{temp_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:115-120`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L115-L120)
+
+[2] NTDS 도구는 ESE 헤더를 `rb`로 읽는다.
+
+```python
+def _header(path):
+    with path.open('rb') as stream:
+        raw = stream.read(240)
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:103-105`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L103-L105)
+
+[3] `windows_search_parse`는 원본을 `rb`로 해시하고 사본을 만든다.
+
+```python
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:40-45`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L40-L45)
+
+```python
+        before = _sha256(source)
+        result["evidence_sha256_before"] = before
+        try:
+            with tempfile.TemporaryDirectory(prefix="winforensics-search-") as temp:
+                root = Path(temp)
+                input_dir, output = root / "input", root / "output"
+                input_dir.mkdir()
+                output.mkdir()
+                copied = input_dir / "Windows.edb"
+                shutil.copyfile(source, copied)
+                if _sha256(copied) != before:
+                    raise ValueError("Evidence changed while copying; retry from a stable copy")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:341-352`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L341-L352)
+
+[4] 서버 코드가 증거를 읽기 모드로 여는 곳이다: [`winforensics_mcp/parsers/usn_parser.py:168`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/usn_parser.py#L168), [`winforensics_mcp/parsers/lnk_parser.py:55`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L55), [`winforensics_mcp/parsers/pe_analyzer.py:94`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L94), [`winforensics_mcp/parsers/pe_analyzer.py:166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L166), [`winforensics_mcp/parsers/api_monitor/apmx_parser.py:53`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L53), [`winforensics_mcp/parsers/csv_ingestor.py:306`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/csv_ingestor.py#L306), [`winforensics_mcp/ioc_packs/behavior_hunter.py:123`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L123), [`winforensics_mcp/parsers/virustotal_client.py:566`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L566).
+
+[5] `evtx_export`는 출력 폴더에 임시 파일을 만들고 `os.link`로 새 이름에 내며 이름이 있으면 다른 이름을 고른다.
+
+```python
+    directory = Path(output_dir).absolute()
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = published = None
+    owned_identity = None
+    publication_candidates: list[Path] = []
+    complete = False
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=".evtx-export-", suffix=".part", dir=directory)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:124-131`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L124-L131)
+
+```python
+    publication_candidates: list[Path],
+) -> Path:
+    # link() is atomic and fails if the target exists, including a symlink.
+    # Both paths are in the same directory/filesystem. Do not use replace().
+    for _ in range(10):
+        destination = directory / f"evtx-export-{uuid.uuid4().hex}.jsonl"
+        # The caller retains ownership information even if interruption occurs
+        # between this helper returning and its result being assigned.
+        publication_candidates.append(destination)
+        result["path"] = str(destination)
+        if validate_result is not None:
+            validate_result(copy.deepcopy(result))
+        try:
+            os.link(temporary, destination)
+            return destination
+        except FileExistsError:
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:50-65`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L50-L65)
+
+[6] 수집한 파일을 받은 경로에 `write_bytes`로 쓴다.
+
+```python
+            content = base64.b64decode(stdout.strip())
+
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(content)
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:189-192`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L189-L192)
+
+`collect_triage_package`가 그 경로를 `output_dir` 아래 정해 둔 이름으로 정한다: [`winforensics_mcp/collectors/artifact_collector.py:386-425`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L386-L425).
+
+[7] `vt_lookup_behavior`는 `triage_dir`에 해시 이름의 JSON 파일을 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[8] WinRM 수집 스크립트는 직접 읽기에 실패하면 섀도 복사본을 만들고 가장 최근 것을 골라 읽은 뒤 지운다.
+
+```python
+                # Try to read directly first
+                try {{
+                    $content = [System.IO.File]::ReadAllBytes($shadowPath)
+                    [Convert]::ToBase64String($content)
+                }} catch {{
+                    # If locked, try VSS
+                    $vss = (Get-WmiObject -List Win32_ShadowCopy).Create("C:\\", "ClientAccessible")
+                    $shadow = Get-WmiObject Win32_ShadowCopy | Sort-Object InstallDate -Descending | Select-Object -First 1
+                    $shadowRoot = $shadow.DeviceObject + "\\"
+                    
+                    $relativePath = $shadowPath -replace "^C:\\\\", ""
+                    $vssPath = $shadowRoot + $relativePath
+                    
+                    $content = [System.IO.File]::ReadAllBytes($vssPath)
+                    
+                    # Clean up shadow copy
+                    $shadow.Delete()
+                    
+                    [Convert]::ToBase64String($content)
+                }}
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:147-166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L147-L166)
+
+[9] `browser`가 `auto`이면 판별 함수를 부른다.
+
+```python
+    # Detect browser type
+    if browser == "auto":
+        browser = _detect_browser_type(history_path)
+```
+
+[`winforensics_mcp/parsers/browser_parser.py:510-512`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/browser_parser.py#L510-L512)
+
+[10] (실행 확인) 체크포인트하지 않은 행이 `-wal`에만 있는 Chrome 형식 WAL 모드 DB를 두 경우(`-shm` 있음, 없음)로 증거 폴더에 두고 `browser_get_history`를 불러 호출 전후 파일의 SHA-256을 비교했다.
+`browser` 기본값에서는 `-shm`의 해시가 바뀌거나 `-shm`이 새로 생겼다.
+`browser: "chrome"`에서는 폴더의 파일이 그대로였다.
+두 경우 모두 DB와 `-wal`의 해시는 그대로였다.
+Python 3.12.15에 묶인 SQLite는 3.53.1이다.
+
+[11] `hunt_ioc`는 브라우저 기록을 `auto`로 읽는다.
+
+```python
+        for browser_path in browser_paths:
+            try:
+                result = parse_browser_history(
+                    browser_path,
+                    browser="auto",
+                    include_downloads=True,
+                    url_filter=ioc,
+                    limit=20,
+                )
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:601-609`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L601-L609)
+
+[12] 파서가 경로를 라이브러리에 넘기는 곳이다: [`winforensics_mcp/parsers/registry_parser.py:171`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L171), [`winforensics_mcp/parsers/amcache_parser.py:154`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/amcache_parser.py#L154), [`winforensics_mcp/parsers/shellbags_parser.py:572`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L572), [`winforensics_mcp/parsers/evtx_parser.py:111`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L111), [`winforensics_mcp/parsers/mft_parser.py:322`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L322), [`winforensics_mcp/parsers/prefetch_parser.py:72-74`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L72-L74), [`winforensics_mcp/parsers/srum_parser.py:383-384`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/srum_parser.py#L383-L384), [`winforensics_mcp/parsers/ntds_parser.py:266-268`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L266-L268), [`winforensics_mcp/parsers/pe_analyzer.py:557`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L557), [`winforensics_mcp/parsers/lnk_parser.py:135`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L135), [`winforensics_mcp/parsers/pcap_parser.py:73-80`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L73-L80), [`winforensics_mcp/parsers/yara_scanner.py:212`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L212).
+
+[13] `python-registry` 1.3.1의 `Registry`는 경로를 받으면 `rb`로 열어 전부 읽는다: [`Registry/Registry.py:384-389`](https://github.com/williballenthin/python-registry/blob/de2d7704623493aeda31c47c953a87ed6cb5b73e/Registry/Registry.py#L384-L389).
+
+[14] Rust 바인딩은 경로를 `File::open`으로 연다: `evtx` 0.11.0 [`src/parser.rs:122-123`](https://github.com/omerbenamram/pyevtx-rs/blob/3c7c0554df121ad217365bf45c39f871b69a6976/src/parser.rs#L122-L123), `mft` 0.7.0 [`src/lib.rs:62-64`](https://github.com/omerbenamram/pymft-rs/blob/3266a8726a404947e799fd3e3c51042a8794f987/src/lib.rs#L62-L64).
+
+[15] (실행 확인) 서버 개요의 버전 기준으로 설치한 `pyesedb` 20240420과 `pyscca` 20250915에서 `file.open`의 설명은 둘 다 `open(filename, mode='r')`였다.
+
+[16] 라이브러리가 파일을 읽기 모드로 여는 곳이다: `pefile` 2024.8.26 [`pefile.py:3026-3033`](https://github.com/erocarrera/pefile/blob/4b3b1e2e568a88d4f1897d694d684f23d9e270c4/pefile.py#L3026-L3033), `pylnk3` 0.4.3 [`pylnk3.py:1477-1485`](https://github.com/strayge/pylnk/blob/7927b22fe8ba60863db0416331a68b6d0a9d2116/pylnk3.py#L1477-L1485), `scapy` 2.7.0 [`scapy/utils.py:1382-1388`](https://github.com/secdev/scapy/blob/40fc5ecf9e69e9bd76664d63ae133d4973fcf81b/scapy/utils.py#L1382-L1388), libyara v4.5.4 [`libyara/filemap.c:293-327`](https://github.com/VirusTotal/yara/blob/7ff39042be5c63682a037e13a75221d59393cf8b/libyara/filemap.c#L293-L327).
+
+[17] DiE 도구는 `diec` 명령에 파일 경로를 붙여 실행한다.
+
+```python
+    # Build command
+    cmd = [_DIEC_PATH, "-j"]  # JSON output
+
+    if deep_scan:
+        cmd.append("-d")  # Deep scan
+
+    cmd.append(str(file_path))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,  # 1 minute timeout
+        )
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:128-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L128-L142)
+
+[18] SIDR에는 사본이 들어 있는 임시 폴더를 넘긴다.
+
+```python
+    with (output / "sidr.log").open("w+b") as log:
+        process = subprocess.run(
+            [str(binary), "-f", "json", "-r", "to-file", "-o", str(output), str(copied.parent)],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+            cwd=output,
+        )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:135-143`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L135-L143)

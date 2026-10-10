@@ -1,0 +1,742 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.03
+- id: R02.05
+- id: R02.06
+- id: R02.07
+- id: R02.09
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 모든 도구의 응답에 적용된다.
+서버는 응답 처리기 세 갈래에서 응답의 글자 수를 제한하고 도구마다 항목 수 상한을 둔다.
+EVTX·NTDS·보안 설명자 도구 12개를 뺀 도구는 공통 처리기 `json_response`로 응답을 만든다 [1].
+`json_response`는 직렬화한 JSON이 `MAX_RESPONSE_CHARS`(40,000자)를 넘으면 `_smart_truncate`로 줄인다 [1][2].
+`_smart_truncate`는 `events`·`entries`·`results` 같은 정해 둔 배열 키 18개만 줄인다 [2].
+먼저 각 항목 안의 `loaded_files`·`volumes`·`files`·`references` 배열을 20개로 줄이고 그래도 넘으면 최상위 배열의 뒤쪽 항목을 뺀다 [2].
+최상위 배열은 앞에서부터 `TRUNCATE_KEEP_ITEMS`(10개) 이상을 남긴다 [2][3].
+
+EVTX 질의·NTDS·보안 설명자 도구는 모델이 1,024~40,000 사이로 정하는 `max_chars`를 글자 상한으로 쓴다 [4].
+기본값은 `compact` 질의와 상관·내보내기·NTLM 요약·NTDS·보안 설명자 도구가 12,000자, 나머지 EVTX 질의가 40,000자다 [4][5].
+이 상한은 `CallToolResult` 전체를 JSON으로 바꾼 글자 수로 재고 행 단위로만 줄인다 [6].
+`registry_query`는 40,000자를 넘으면 마지막 행부터 하나씩 뺀다 [7].
+`windows_search_parse`는 한 페이지에 싣는 행의 JSON을 24,000자(`PAGE_BYTES`)까지만 담는다 [8].
+
+항목 수 상한은 도구마다 `limit` 인자의 기본값으로 정한다 [3].
+EVTX 질의 도구와 `registry_query`·`windows_search_parse`는 `limit`의 최댓값을 1,000으로 둔다 [4][9].
+`evtx_attack_summary`·`registry_search`·`disk_parse_amcache`·`disk_parse_mft`·`build_timeline`을 비롯한 다른 도구는 `limit`에 최댓값을 두지 않는다 [9].
+`disk_parse_amcache`·`disk_parse_mft`·`disk_parse_usn_journal`은 파일 차례로 읽다가 조건에 맞는 항목이 `limit`개가 되면 읽기를 멈추고 모은 항목을 시각 내림차순으로 정렬한다 [10].
+오케스트레이터는 원천마다 상한을 따로 둔다.
+`hunt_ioc`는 원천마다 일치 항목을 10개나 15개까지 싣고 EVTX는 파일마다 10건까지만 찾는다 [11].
+`build_timeline`은 원천마다 `limit`을 원천 수로 나눈 값과 100 가운데 큰 값까지 사건을 모으고 EVTX 파일은 5개까지 읽는다 [12].
+
+**한계.** `json_response`는 결과가 `dict`가 아니면 자르지 못하고 경고를 만들어도 응답에 붙이지 않는다 [1][2].
+`evtx_list_files`처럼 `list`를 돌려주는 도구는 40,000자를 넘어도 그대로 나간다 [13].
+EVTX 파일 400개가 있는 폴더에서 `evtx_list_files` 응답은 118,800자였다 [14].
+정해 둔 배열 키가 없는 `dict`도 자르지 못하고 잘림 정보도 붙지 않는다 [2].
+`evtx_attack_summary`는 TSV 글을 문자열 하나로 싣으므로 `limit`을 키우면 상한 없이 길어진다 [15].
+2,000줄을 요청한 `evtx_attack_summary` 응답은 333,032자였고 `_truncation`이 없었다 [14].
+최상위 배열을 10개까지 줄여도 40,000자를 넘으면 그 길이로 나간다 [2].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 페이지를 나누는 도구의 응답과 공통 처리기가 배열을 줄인 응답에 적용된다.
+EVTX 질의는 일치 수 `total_matched`, 반환 수 `returned`, 시작 위치 `offset`, 일치 수가 정확한지를 뜻하는 `total_matched_exact`를 싣는다 [16].
+일치 수가 정확하지 않은 경우는 읽기 상한 `max_scan`에 닿았거나(`scan_limit_hit`), 파싱 오류가 있었거나, 시각을 읽지 못해 시간 조건에서 뺀 사건이 있을 때다 [16].
+구조화 응답의 첫 글 블록은 반환한 수를 적고 일치 수가 정확하지 않으면 그 수가 하한이라고 적는다 [17].
+예산으로 행을 줄인 응답은 `payload_clipped`를 참으로 두고 줄이기 전과 뒤의 글자 수를 `serialized_chars`·`returned_chars`에 싣는다 [6].
+`registry_query`는 `total_matched`·`returned`와, 읽기 오류가 없었는지를 뜻하는 `total_matched_complete`를 싣는다 [18].
+`disk_parse_prefetch`는 폴더의 파일 수, 일치 수, 반환 수를 싣는다 [19].
+`windows_search_parse`는 읽은 행 수, 일치 수, 반환 수, 보고서 종류별 건수를 싣는다 [8].
+`evtx_export`는 파일로 내보낸 행 수 `exported_rows`와 응답에 실은 미리 보기 행 수 `preview_returned`를 따로 싣는다 [20].
+`ntds_get_object_by_sam`은 일치 수 `matched_count`와 반환 수를 싣고 후보를 10개로 자르면 `candidates_truncated`를 참으로 둔다 [21].
+`json_response`가 배열을 줄이면 `_truncation.truncated_arrays`에 배열마다 원래 개수와 남긴 개수를 싣는다 [1][2].
+
+**한계.** `_truncation`의 경고 문구는 오래된 자료를 남겼고 최신 자료가 빠졌을 수 있다고 적는다 [1].
+`_smart_truncate`는 배열의 앞쪽을 남길 뿐 시각을 보지 않는다 [2].
+`disk_parse_mft`·`disk_parse_usn_journal`·`build_timeline`처럼 시각 내림차순으로 정렬한 배열에서는 최신 항목이 남고 오래된 항목이 빠진다 [10][12].
+시각 내림차순 배열 400개를 줄인 실행에서 남은 117개는 가장 최근 항목이었고 경고 문구는 위와 같았다 [14].
+`_truncation.hint`는 `offset`으로 나머지를 읽으라고 적지만 `build_timeline`·`hunt_ioc`·`disk_parse_mft`처럼 `offset` 인자가 없는 도구에도 같은 문구가 붙는다 [1][9].
+
+`disk_parse_amcache`·`disk_parse_mft`·`disk_parse_usn_journal`은 전체 일치 수를 싣지 않는다 [10].
+대신 싣는 `total_entries`·`total_scanned`는 상한에 닿아 멈출 때까지 읽은 레코드 수다 [10].
+`hunt_ioc`의 원천별 `match_count`는 상한으로 자른 수다 [11].
+Amcache는 `parse_amcache`가 30개에서 멈춘 수이고 EVTX는 파일마다 10건으로 자른 수의 합이다 [11].
+응답에는 이 수가 상한에 닿았는지 표시가 없다 [11].
+
+### R02.03 페이지·커서 조회
+
+**구현.** 이 방식은 EVTX 질의 4개, `ntds_get_trusts`, `registry_query`, Prefetch 폴더를 읽는 `disk_parse_prefetch`, `windows_search_parse`, APMX 호출 목록 도구에 적용된다 [7][8][16][19][22][23].
+EVTX 질의 도구(`evtx_search`·`evtx_security_search`·`evtx_correlate_logon_id`·`evtx_ntlm_operational_summary`)는 남은 일치가 있으면 `next_offset`과 `next_cursor`를 싣는다 [16].
+`next_cursor`는 질의 조건과 파일의 경로·크기·시각에서 만든 `query_ref`와 다음 위치를 담는다 [24].
+서버는 다른 질의나 바뀐 파일에 쓴 커서를 거부한다 [24].
+예산으로 행을 줄인 응답은 마지막으로 실은 행 다음 위치로 `next_cursor`를 다시 만든다 [6].
+`ntds_get_trusts`도 같은 방식의 커서를 쓴다 [22].
+`registry_query`는 행을 빼서 예산에 맞추면 `next_offset`을 그만큼 앞당긴다 [7].
+`disk_parse_prefetch`와 `windows_search_parse`는 `offset` 인자를 받고 남은 결과가 있으면 `next_offset`을 싣는다 [8][19].
+`apmx_get_calls`·`apmx_get_call_details`는 `offset` 인자를 받고 전체 호출 수를 함께 싣는다 [23].
+
+**한계.** EVTX 질의가 `max_scan`에 닿으면 이어 읽기는 이미 읽은 범위 안에서만 된다 [16].
+그 범위의 일치를 모두 돌려준 뒤에는 `next_cursor`가 없고 나머지 레코드는 `max_scan`을 키운 새 질의로만 읽는다 [16].
+`disk_parse_amcache`·`disk_parse_mft`·`disk_parse_usn_journal`·`build_timeline`·`hunt_ioc`는 `offset`이나 커서 인자가 없어 상한 뒤의 항목을 이어 읽는 길이 없다 [9].
+
+### R02.05 상한 초과 시 거부
+
+**구현.** 이 방식은 줄일 수 없는 결과를 돌려주는 EVTX·NTDS·보안 설명자 도구와 `registry_query`에 적용된다 [7][25][22][26].
+`evtx_get_event`는 사건 하나와 메타데이터가 `max_chars`를 넘으면 자르지 않고 오류를 낸다 [25].
+보안 설명자 두 도구는 해석 결과가 `max_chars`를 넘으면 오류를 내고 `max_aces`를 줄이라고 적는다 [26].
+`ntds_get_object_by_sam`·`ntds_get_object_sid`·`ntds_get_domain_info`는 결과가 `max_chars`를 넘으면 오류를 낸다 [22].
+EVTX 질의와 `ntds_get_trusts`는 첫 행 하나와 메타데이터만으로 `max_chars`를 넘으면 오류를 낸다 [6][22].
+`registry_query`는 한 행만 남겨도 40,000자를 넘으면 오류를 내고 `fields`로 필드를 줄이라고 적는다 [7].
+EVTX·NTDS·보안 설명자 도구의 이 오류는 `isError`가 참인 MCP 결과로, `registry_query`의 오류는 `{"error": …}` 글로 나간다 [27].
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 `windows_search_parse`, `evtx_attack_summary`, `vt_lookup_behavior`의 값에 적용된다 [28][15][29].
+`windows_search_parse`는 문자열 값을 2,048자(`MAX_VALUE`)에서 자르고 끝에 `…`를 붙인다 [28].
+같은 함수는 `list`와 `dict`를 64개 항목까지, 깊이 3단계까지만 싣고 더 깊은 값은 `[nested value omitted]`로 바꾼다 [28].
+자른 값의 수는 `values_truncated`에 센다 [28].
+`evtx_attack_summary`는 예약 작업 사건의 `TaskContent`를 120자에서 표시 없이 자른다 [15].
+`vt_lookup_behavior`는 행위 보고서의 도메인과 하위 항목 값을 512자, URL을 1,024자에서 표시 없이 자르고 항목마다 키를 8개까지 싣는다 [29].
+
+### R02.07 건수 없는 잘림 표시
+
+**구현.** 이 방식은 `evtx_attack_summary`, `yara_scan_directory`, `windows_search_parse`에 적용된다 [15][30][8].
+`evtx_attack_summary`는 `limit`보다 많은 사건이 있으면 `truncated`를 참으로 두지만 `total_events`에는 반환한 줄 수(`limit`)를 싣는다 [15].
+사건 수가 `limit`과 같으면 `truncated`는 거짓이다 [15].
+`yara_scan_directory`는 검사한 파일 수가 `limit`에 닿으면 `truncated`를 참으로 두고 검사하지 않은 파일 수는 싣지 않는다 [30].
+`windows_search_parse`는 한 행이 24,000자를 넘으면 그 행을 `report_type`·`WorkId`와 `_truncated` 문구만 남긴 행으로 바꾼다 [8].
+
+### R02.09 항목 참조값으로 전체 내용 재조회
+
+**구현.** 이 방식은 EVTX 질의와 APMX 호출 목록에 적용된다 [31][32].
+EVTX 질의 도구는 `compact`나 `fields`로 필드를 줄인 행에도 `event_ref`를 싣는다 [31].
+`event_ref`를 `evtx_get_event`에 주면 서버는 그 EVTX 파일의 식별값이 `event_ref`와 같은지 확인하고 그 레코드의 사건 전체를 돌려준다 [33].
+서버는 질의 결과를 따로 보관하지 않는다.
+메모리에 남은 파싱 결과에 그 레코드가 없으면 원본 파일을 그 레코드까지 다시 읽는다 [33].
+`evtx_get_event`는 사건을 줄이지 않고 상한을 넘으면 오류를 낸다 [25].
+`apmx_get_calls`는 호출마다 레코드 번호 `call_index`와 API 이름, 안쪽 호출 수만 싣는다 [32].
+`apmx_get_call_details`에 `call_indices`로 그 번호를 주면 캡처 파일에서 그 레코드를 다시 읽어 분석한 결과를 돌려준다 [34].
+
+**한계.** `evtx_get_event`는 파일의 앞 1,000,000개 레코드 안에 있는 사건만 다시 읽는다 [33].
+원본 파일의 식별값이 바뀌면 앞서 받은 `event_ref`는 거부된다 [33].
+
+### 근거
+
+[1] 공통 처리기 `json_response`는 상한을 넘으면 `_smart_truncate`를 부르고 결과가 `dict`일 때만 `_truncation`을 붙인다.
+
+```python
+def json_response(data: Any, max_chars: int = MAX_RESPONSE_CHARS) -> str:
+    """Convert data to compact JSON string for response, with smart truncation if too large."""
+
+    # Serialize compact (no indent) — saves ~40% size
+    result = json.dumps(data, default=str)
+
+    if len(result) <= max_chars:
+        return result
+
+    # Apply smart truncation
+    truncated_data, truncation_info = _smart_truncate(data, max_chars)
+
+    # Add truncation metadata to response
+    if isinstance(truncated_data, dict) and truncation_info:
+        truncated_data["_truncation"] = {
+            "warning": "Response was truncated to fit context limits. IMPORTANT: Oldest data was kept, newest may be missing!",
+            "original_chars": len(result),
+            "max_chars": max_chars,
+            "truncated_arrays": truncation_info,
+            "hint": "Use time_range_start/end to focus on incident window, or use offset parameter to paginate through all results"
+        }
+
+    return json.dumps(truncated_data, default=str)
+```
+
+[`winforensics_mcp/server.py:264-286`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L264-L286)
+
+[2] `_smart_truncate`는 정해 둔 배열 키만 줄이고 `dict`가 아니면 경고만 만든다: [`winforensics_mcp/server.py:166-261`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L166-L261).
+
+[3] 응답 상한과 도구별 기본 항목 수다.
+
+```python
+# Limits for query results to avoid overwhelming LLM context
+MAX_EVTX_RESULTS = 40
+MAX_REGISTRY_RESULTS = 50
+MAX_SCAN_EVENTS = 100000  # Max events to scan in a single file (Rust parser handles this trivially)
+MAX_PREFETCH_RESULTS = 20
+MAX_AMCACHE_RESULTS = 30
+MAX_TIMELINE_RESULTS = 50
+MAX_MFT_RESULTS = 30
+MAX_USN_RESULTS = 30
+
+# Response size limits (characters) - prevents token overflow
+# ~4 chars per token, so 40000 chars ≈ 10k tokens
+MAX_RESPONSE_CHARS = 40000
+# When truncating arrays, keep this many items for context
+TRUNCATE_KEEP_ITEMS = 10
+```
+
+[`winforensics_mcp/config.py:5-19`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/config.py#L5-L19)
+
+[4] EVTX 질의 도구의 공통 입력 스키마가 `max_chars`·`limit`·`max_scan`의 범위를 정한다.
+
+```python
+        "max_chars": {"type": "integer", "minimum": 1024, "maximum": MAX_RESPONSE_CHARS,
+                      "description": "MCP result JSON character budget, including metadata; default 12000 compact, otherwise 40000."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": MAX_EVTX_RESULTS},
+        "offset": {"type": "integer", "minimum": 0, "default": 0},
+        "cursor": {"type": "string", "minLength": 1, "maxLength": 4096,
+                   "description": "Continuation bound to the same source and query. Do not combine with offset."},
+        "max_scan": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": MAX_SCAN_EVENTS,
+                     "description": "Maximum source records examined. A capped result reports an inexact total."},
+```
+
+[`winforensics_mcp/server.py:341-348`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L341-L348)
+
+[5] 호출 처리에서 `compact` 여부로 기본 `max_chars`를 고른다.
+
+```python
+        compact = args.get("compact", False)
+        max_chars = args.get("max_chars", COMPACT_RESPONSE_CHARS if compact else MAX_RESPONSE_CHARS)
+        validate_budget(max_chars)
+        output_format = args.get("output_format", "structured" if compact else "text")
+```
+
+[`winforensics_mcp/server.py:2546-2549`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2546-L2549)
+
+[6] EVTX 질의 응답을 행 단위로 줄이고 다음 위치의 커서를 다시 만든다: [`winforensics_mcp/evtx_response.py:174-218`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L174-L218).
+
+[7] `registry_query_response`는 행을 빼고 `next_offset`을 고치며 한 행도 맞지 않으면 오류를 낸다.
+
+```python
+def registry_query_response(data: dict[str, Any], max_chars: int = MAX_RESPONSE_CHARS) -> str:
+    """Fit whole query rows to the response budget without invalidating pagination."""
+    page = {**data, "results": list(data["results"])}
+    while True:
+        encoded = json.dumps(page, default=str)
+        if len(encoded) <= max_chars:
+            return encoded
+        if len(page["results"]) <= 1:
+            raise ValueError(
+                "A registry query row exceeds the response size limit; "
+                "use fields to project smaller values (for example name and key_path)"
+            )
+        page["results"].pop()
+        page["returned"] = len(page["results"])
+        page["next_offset"] = page["offset"] + page["returned"]
+        page["truncated"] = True
+        page["response_size_limited"] = True
+```
+
+[`winforensics_mcp/server.py:289-305`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L289-L305)
+
+[8] `windows_search_parse`의 페이지 예산, 건수, 행 바꾸기, 다음 위치다: [`winforensics_mcp/parsers/windows_search_parser.py:276-298`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L276-L298), [`winforensics_mcp/parsers/windows_search_parser.py:396-415`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L396-L415), [`winforensics_mcp/parsers/windows_search_parser.py:426-431`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L426-L431).
+
+[9] 도구 정의의 `limit` 인자다.
+EVTX 질의·`registry_query`·`windows_search_parse`만 `maximum`을 두고 나머지는 기본값만 둔다: [`winforensics_mcp/server.py:343`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L343), [`winforensics_mcp/server.py:702-705`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L702-L705), [`winforensics_mcp/server.py:633`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L633), [`winforensics_mcp/server.py:673`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L673), [`winforensics_mcp/server.py:1694`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1694), [`winforensics_mcp/server.py:1895`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1895), [`winforensics_mcp/server.py:2223`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2223).
+
+[10] Amcache·MFT·USN 파서는 상한에 닿으면 멈추고 시각 내림차순으로 정렬하며 읽은 레코드 수를 싣는다: [`winforensics_mcp/parsers/amcache_parser.py:218-233`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/amcache_parser.py#L218-L233), [`winforensics_mcp/parsers/mft_parser.py:444-466`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L444-L466), [`winforensics_mcp/parsers/usn_parser.py:358-370`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/usn_parser.py#L358-L370).
+
+[11] `hunt_ioc`의 원천별 상한과 `match_count` 계산이다: [`winforensics_mcp/orchestrators/ioc_hunter.py:279-323`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L279-L323), [`winforensics_mcp/orchestrators/ioc_hunter.py:836-875`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L836-L875), [`winforensics_mcp/orchestrators/ioc_hunter.py:1050-1052`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1050-L1052).
+
+[12] `build_timeline`의 원천별 상한, EVTX 파일 수 상한, 정렬, 전체 상한이다: [`winforensics_mcp/orchestrators/timeline_builder.py:611-612`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L611-L612), [`winforensics_mcp/orchestrators/timeline_builder.py:445`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L445), [`winforensics_mcp/orchestrators/timeline_builder.py:700-704`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L700-L704).
+
+[13] `evtx_list_files`는 `list`를 돌려준다.
+
+```python
+    files = []
+    
+    for evtx_path in directory.glob(pattern):
+        try:
+            stat = evtx_path.stat()
+            files.append({
+                "path": str(evtx_path),
+                "name": evtx_path.name,
+                "size_bytes": stat.st_size,
+                "size_human": _human_readable_size(stat.st_size),
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+        except OSError:
+            continue
+    
+    return sorted(files, key=lambda x: x["name"])
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:850-865`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L850-L865)
+
+[14] (실행 확인) 이름이 긴 빈 EVTX 파일 400개를 둔 폴더로 `evtx_list_files`를 부르자 응답은 118,800자였고 `_truncation`이 없었다.
+가짜 예약 작업 사건 2,000개로 `evtx_attack_summary`(`limit` 2,000)를 부르자 응답은 333,032자였고 `_truncation`이 없었으며 `truncated`는 거짓이었다.
+시각 내림차순으로 정렬한 300자짜리 항목 400개를 `json_response`에 넘기자 앞의 117개(가장 최근 항목부터)가 남았고 경고 문구는 "Oldest data was kept, newest may be missing!"였다.
+
+[15] `evtx_attack_summary`는 `TaskContent`를 120자에서 자르고 `total_events`에 `min(total, limit)`을 싣는다.
+
+```python
+            "event_ids": [4698, 4699, 4700, 4701, 4702],
+            "header": "Timestamp\tTaskName\tAction\tEventID",
+            "fields": lambda ed: (
+                ed.get("TaskName", "?"),
+                (ed.get("TaskContent") or ed.get("Data_0") or "")[:120],
+            ),
+            "include_event_id": True,
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:1049-1055`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1049-L1055)
+
+```python
+    total = 0
+
+    for event in iter_evtx_events(
+        evtx_path,
+        event_ids=config["event_ids"],
+        contains=contains,
+        not_contains=not_contains,
+    ):
+        total += 1
+        if total > limit:
+            break
+
+        ts = event.get("TimeCreated", "?")
+        ed = event.get("EventData", {})
+        cols = config["fields"](ed)
+
+        if config.get("include_event_id"):
+            cols = (*cols, str(event.get("EventID", "?")))
+
+        lines.append(f"{ts}\t" + "\t".join(str(c) for c in cols))
+
+    return {
+        "format": "tsv",
+        "event_type": event_type,
+        "total_events": min(total, limit),
+        "truncated": total > limit,
+        "data": "\n".join(lines),
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:1074-1101`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1074-L1101)
+
+[16] EVTX 질의의 일치 수, 정확도, 다음 위치를 만든다: [`winforensics_mcp/parsers/evtx_parser.py:685-697`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L685-L697), [`winforensics_mcp/parsers/evtx_parser.py:782-792`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L782-L792), [`winforensics_mcp/parsers/evtx_parser.py:754-756`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L754-L756).
+
+[17] 구조화 응답의 첫 글 블록이 반환 수와 하한 여부를 적는다.
+
+```python
+def _result(data: dict[str, Any], structured: bool) -> CallToolResult:
+    if structured:
+        if "events" in data:
+            kind = data.get("result_kind")
+            if kind == "ntlm_summary":
+                label = "NTLM groups" if data.get("aggregate") else "NTLM events"
+            else:
+                label = "logon-ID matches" if kind == "logon_correlation" else "EVTX events"
+            summary = f"Returned {data['returned']} {label}."
+            if data["payload_clipped"]:
+                summary += " Response budget reached; follow next_cursor."
+            elif data.get("next_cursor"):
+                summary += " Follow next_cursor for more events."
+            if not data.get("total_matched_exact", True):
+                if kind == "ntlm_summary":
+                    # A prefix singleton can cease to be rare after more records
+                    # are scanned, so unusual_only totals are not lower bounds.
+                    summary += " Match count is inexact; inspect scan diagnostics."
+                else:
+                    summary += " Match count is a lower bound; inspect scan diagnostics."
+        elif "exported_rows" in data:
+```
+
+[`winforensics_mcp/evtx_response.py:110-130`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L110-L130)
+
+[18] `registry_query`의 건수와 다음 위치 필드다.
+
+```python
+    returned = len(results)
+    has_more = offset + returned < total_matched
+    return {
+        "results": results,
+        "total_matched": total_matched,
+        "returned": returned,
+        "offset": offset,
+        "limit": limit,
+        "next_offset": offset + returned if has_more else None,
+        "truncated": has_more,
+        "total_matched_complete": read_errors == 0,
+        "read_errors": read_errors,
+        "diagnostics": diagnostics,
+        "diagnostics_truncated": read_errors > len(diagnostics),
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:425-438`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L425-L438)
+
+[19] `disk_parse_prefetch`의 폴더 결과는 일치 수와 다음 위치를 싣는다.
+
+```python
+            matched_count += 1
+
+            # Skip for pagination offset
+            if skipped < offset:
+                skipped += 1
+                continue
+
+            # Check limit
+            if len(results) >= limit:
+                truncated = True
+                continue  # Keep counting matches
+
+            results.append(parsed)
+
+        except Exception as e:
+            errors.append({
+                "file": str(pf_path),
+                "error": str(e),
+            })
+
+    return {
+        "directory": str(directory),
+        "total_files": len(pf_files),
+        "total_matched": matched_count,
+        "parsed_count": len(results),
+        "offset": offset,
+        "truncated": truncated,
+        "next_offset": offset + len(results) if truncated else None,
+        "prefetch_entries": results,
+        "errors": errors if errors else None,
+```
+
+[`winforensics_mcp/parsers/prefetch_parser.py:201-230`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L201-L230)
+
+[20] `evtx_export`가 내보낸 행 수와 미리 보기 행 수를 따로 싣는다.
+
+```python
+        result = {
+            "format": "jsonl",
+            "sha256": digest.hexdigest(), "exported_rows": exported_rows,
+            "exported_bytes": exported_bytes,
+            "export_complete": bool(metadata["scan_complete"] and metadata["total_matched_exact"]
+                                    and metadata["parse_errors"] == 0
+                                    and metadata.get("time_filter_errors", 0) == 0 and not export_limit_hit),
+            "scan_complete": metadata["scan_complete"], "scan_limit_hit": metadata["scan_limit_hit"],
+            "parse_errors": metadata["parse_errors"], "total_matched": metadata["total_matched"],
+            "time_filter_errors": metadata.get("time_filter_errors", 0),
+            "total_matched_exact": metadata["total_matched_exact"],
+            "export_limit_hit": export_limit_hit,
+            "source": {"path": identity[0], "size": identity[1], "mtime_ns": identity[2]},
+            "query_ref": query_ref, "query": query, "preview": preview,
+        }
+        def validate_candidate(candidate: dict[str, Any]) -> None:
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:173-188`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L173-L188)
+
+```python
+def evtx_export_response(data: dict[str, Any], *, max_chars: int = COMPACT_RESPONSE_CHARS) -> CallToolResult:
+    """Budget only a preview; validate before the exporter publishes its file."""
+    validate_budget(max_chars)
+    result_data = {
+        **data, "preview": list(data["preview"]),
+        "preview_available": len(data["preview"]), "preview_returned": len(data["preview"]),
+        "preview_clipped": False, "payload_clipped": False,
+        "serialized_chars": 0, "returned_chars": 0,
+    }
+    result = _measure(result_data, True, original=True)
+    if result_data["returned_chars"] <= max_chars:
+        return result
+    original_chars = result_data["serialized_chars"]
+    while result_data["preview"]:
+        result_data["preview"].pop()
+        result_data["preview_returned"] = len(result_data["preview"])
+        result_data["preview_clipped"] = result_data["payload_clipped"] = True
+        result_data["serialized_chars"] = original_chars
+        result = _measure(result_data, True)
+        if result_data["returned_chars"] <= max_chars:
+            return result
+    raise ValueError(
+        "Export metadata exceeds max_chars; increase max_chars or shorten query/path metadata. "
+        "No export file was published."
+    )
+```
+
+[`winforensics_mcp/evtx_response.py:233-257`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L233-L257)
+
+[21] NTDS 계정 조회는 후보를 10개까지 싣고 일치 수와 잘림 여부를 싣는다.
+
+```python
+    status = 'ambiguous' if len(matched) > 1 else ('found' if matched else 'not_found') if metadata['results_complete'] else 'incomplete'
+    objects = [{field: copy.deepcopy(node.get(field)) for field in fields} for node in matched[:10]]
+    return {**metadata, 'status': status, 'objects': objects, 'matched_count': len(matched), 'returned': len(objects),
+            'candidates_truncated': len(matched) > len(objects), 'sam_account_name': sam_account_name, 'domain_dn': domain_dn,
+            'results_complete': metadata['results_complete'] and len(matched) == len(objects)}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:436-440`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L436-L440)
+
+[22] NTDS 응답은 신뢰 관계 목록만 행 단위로 줄이고 나머지는 상한을 넘으면 오류를 낸다: [`winforensics_mcp/ntds_response.py:85-126`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ntds_response.py#L85-L126).
+
+[23] `apmx_get_calls`는 `offset`과 전체 레코드 수를 싣는다.
+
+```python
+    return {
+        "total_records": num_records,
+        "returned": len(records),
+        "offset": offset,
+        "filter": api_filter,
+        "time_range_start": time_range_start,
+        "time_range_end": time_range_end,
+        "calls": records,
+    }
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:961-969`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L961-L969)
+
+[24] 커서는 `query_ref`와 위치를 담고 다른 질의의 커서는 거부된다.
+
+```python
+def make_evtx_cursor(query_ref: str, offset: int) -> str:
+    """Encode a versioned query-bound continuation (not an authorization token)."""
+    if not isinstance(query_ref, str) or not re.fullmatch(r"[0-9a-f]{64}", query_ref):
+        raise ValueError("Invalid query_ref")
+    _validate_integer(offset, "offset", 0)
+    return _encode_token({"v": 1, "q": query_ref, "o": offset})
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:90-95`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L90-L95)
+
+```python
+def _cursor_offset(cursor, query_ref, offset):
+    if cursor is None:
+        return offset
+    decoded = _decode_token(cursor, "cursor")
+    if set(decoded) != {"v", "q", "o"} or decoded["q"] != query_ref:
+        raise ValueError("Cursor source or query changed; restart without a cursor")
+    _validate_integer(decoded["o"], "cursor offset", 0)
+    if offset not in (0, decoded["o"]):
+        raise ValueError("offset conflicts with cursor")
+    return decoded["o"]
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:770-779`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L770-L779)
+
+[25] `evtx_detail_response`는 사건 전체를 싣고 상한을 넘으면 자르지 않고 오류를 낸다.
+
+```python
+def evtx_detail_response(event: dict[str, Any], *, max_chars: int = MAX_RESPONSE_CHARS) -> CallToolResult:
+    validate_budget(max_chars)
+    data = {"event": event, "payload_clipped": False, "serialized_chars": 0, "returned_chars": 0}
+    result = _measure(data, True, original=True)
+    if data["returned_chars"] > max_chars:
+        raise ValueError(
+            "Full EVTX event exceeds max_chars; increase max_chars or use a projected "
+            "evtx_search. The event was not shortened."
+        )
+    return result
+```
+
+[`winforensics_mcp/evtx_response.py:221-230`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L221-L230)
+
+[26] 보안 설명자 응답은 상한을 넘으면 오류를 낸다.
+
+```python
+def security_descriptor_response(data: dict[str, Any], *, max_chars: int = COMPACT_RESPONSE_CHARS) -> CallToolResult:
+    """Do not silently change a decoder's ACE projection or parse diagnostics."""
+    validate_budget(max_chars)
+    result_data = {**data, "payload_clipped": False, "serialized_chars": 0, "returned_chars": 0}
+    result = _measure(result_data, True, original=True)
+    if result_data["returned_chars"] > max_chars:
+        raise ValueError(
+            "Security-descriptor description exceeds max_chars; reduce max_aces or increase "
+            "max_chars. No decoded fields were silently shortened."
+        )
+    return result
+```
+
+[`winforensics_mcp/evtx_response.py:260-270`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L260-L270)
+
+[27] EVTX·NTDS·보안 설명자 도구의 예외는 `isError` 결과로, 다른 도구의 예외는 `{"error": …}` 글로 나간다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[28] `windows_search_parse`의 값 자르기 함수다.
+
+```python
+def _bounded(value: Any, result: dict, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        if len(value) > MAX_VALUE:
+            result["values_truncated"] += 1
+            return value[:MAX_VALUE] + "…"
+        return value
+    if isinstance(value, bytes):
+        return _bounded(value.hex(), result)
+    if isinstance(value, (list, dict)):
+        if depth >= 3:
+            result["values_truncated"] += 1
+            return "[nested value omitted]"
+        if len(value) > 64:
+            result["values_truncated"] += 1
+        if isinstance(value, dict):
+            return {
+                str(k)[:128]: _bounded(v, result, depth + 1) for k, v in list(value.items())[:64]
+            }
+        return [_bounded(v, result, depth + 1) for v in value[:64]]
+    return value
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:90-109`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L90-L109)
+
+[29] `vt_lookup_behavior`가 보고서 값을 자른다.
+
+```python
+    def bounded(name: str) -> list:
+        value = full.get(name)
+        if not isinstance(value, list):
+            return []
+        compact = []
+        for item in value[:limit]:
+            if isinstance(item, dict):
+                compact.append({
+                    str(key): str(field)[:512]
+                    for key, field in list(item.items())[:8]
+                })
+            else:
+                compact.append(str(item)[:512])
+        return compact
+
+    projected = {
+        "hash": file_hash,
+        "found": True,
+        "domains": [str(value)[:512] for value in domains[:limit]],
+        "urls": [str(value)[:1024] for value in urls[:limit]],
+        "command_executions": bounded("command_executions"),
+        "registry_keys_set": bounded("registry_keys_set"),
+        "files_written": bounded("files_written"),
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:308-330`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L308-L330)
+
+[30] `yara_scan_directory`는 검사한 파일 수가 `limit`에 닿으면 `truncated`를 참으로 둔다.
+
+```python
+    return {
+        "directory": str(directory),
+        "pattern": file_pattern,
+        "recursive": recursive,
+        "files_scanned": scanned,
+        "files_matched": len(results),
+        "matches": results,
+        "errors": errors[:10],  # Limit error output
+        "truncated": scanned >= limit,
+    }
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:367-376`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L367-L376)
+
+[31] 질의 결과의 행은 필드를 줄여도 `event_ref`를 싣는다.
+
+```python
+    def rows(self, offset=0, limit=None):
+        end = None if limit is None else offset + limit
+        if _cache_key(self.path) != self.source:
+            raise ValueError("EVTX source changed before query consumption; retry the query")
+        for i in self.matched[offset:end]:
+            event = copy.deepcopy(self.cached.events[i])
+            event["event_ref"] = _event_ref(self.source, self.cached.ordinals[i])
+            if self.precision == "both":
+                when = parse_evtx_timestamp(event.get("TimeCreated"))
+                event["timestamp_second"] = when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if when else None
+            if self.projection is not None:
+                event["_raw_xml"] = self.cached.raw_strings[i]
+                projected = {}
+                for field, canonical in self.projection:
+                    value = _field_value(event, canonical)
+                    if value is not _MISSING:
+                        projected[field] = value
+                projected["event_ref"] = event["event_ref"]
+                if self.precision == "both":
+                    projected["timestamp_second"] = event["timestamp_second"]
+                event = projected
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:619-639`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L619-L639)
+
+[32] `get_apmx_calls`는 호출마다 레코드 번호와 API 이름을 싣는다.
+
+```python
+        records.append({
+            "call_index": i,
+            "top_api": top_api,
+            "all_apis": all_names,
+            "nested_count": len(all_names) - 1,
+        })
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:951-956`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L951-L956)
+
+[33] `get_evtx_event`는 `event_ref`의 식별값을 원본과 대조하고 그 레코드의 사건을 돌려준다.
+
+```python
+    path = Path(evtx_path)
+    source = _cache_key(path)
+    decoded = _decode_token(event_ref, "event_ref")
+    if set(decoded) != {"v", "s", "r"} or decoded["s"] != _digest(source):
+        raise ValueError("event_ref belongs to a different or changed source")
+    _validate_integer(decoded["r"], "event_ref record", 1)
+    ordinal = decoded["r"]
+    if ordinal > 1_000_000:
+        raise ValueError("event_ref record exceeds the detail lookup limit of 1000000")
+    # Prefer an existing scan; on a cache miss, stop at the referenced record.
+    cached = next((entry for key, entry in reversed(_evtx_cache.items())
+                   if key[:-2] == source and key[-1] == EVTX_RUST_AVAILABLE
+                   and ordinal in entry.ordinals), None)
+    if cached is None:
+        cached = _get_cached(path, ordinal)
+    try:
+        index = cached.ordinals.index(ordinal)
+    except ValueError as exc:
+        raise ValueError("event_ref does not identify a readable record") from exc
+    if _cache_key(path) != source:
+        raise ValueError("EVTX source changed during lookup; retry the query")
+    event = copy.deepcopy(cached.events[index])
+    event["event_ref"] = event_ref
+    if include_raw:
+        event["_raw_xml"] = cached.raw_strings[index]
+    return event
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:803-828`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L803-L828)
+
+[34] `get_apmx_call_details`는 `call_indices`의 레코드를 다시 읽어 분석한다.
+
+```python
+    if call_indices is not None:
+        # Direct index lookup
+        for idx in call_indices:
+            if 0 <= idx < num_records:
+                off = offsets_arr[idx]
+                next_off = offsets_arr[idx + 1] if idx + 1 < num_records else len(api_data)
+                rec = api_data[off:next_off]
+                parsed = _parse_call_record(
+                    rec, idx, defs_blob=defs_blob, pointer_size=pointer_size
+                )
+                records.append(parsed)
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1237-1247`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1237-L1247)

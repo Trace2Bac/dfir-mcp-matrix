@@ -1,0 +1,1168 @@
+---
+cell: F02
+details:
+- id: F02.01
+- id: F02.02
+- id: F02.03
+- id: F02.05
+- id: F02.06
+- id: F02.08
+- id: F02.09
+---
+
+# F02 발견사항·결론 도출
+
+### F02.01 규칙·키 기반 판정·상관
+
+**구현.** 이 방식은 여러 아티팩트를 묶어 판정하는 오케스트레이터 4개(`investigate_execution`, `hunt_ioc`, `investigate_user_activity`, `hunt_ioc_pack`)와, 파서 결과에 정해 둔 규칙을 대어 의심 항목을 고르는 도구들에 적용된다 [1][2][3][4].
+
+오케스트레이터는 대상 이름이나 해시를 공유 키로 출처마다 찾고 찾은 출처를 묶어 판정한다.
+
+- `investigate_execution`은 대상을 Prefetch, Amcache, SRUM에서 찾고 한 출처라도 찾으면 `execution_confirmed`를 참으로 둔다 [1].
+- `investigate_execution`은 대상이 SHA1이면 Amcache를 해시로, 아니면 `.exe`를 뺀 이름을 이름 필터로 찾는다 [5].
+- `hunt_ioc`는 값의 모양으로 IOC 종류를 정한다 [6].
+- 32·40·64자리 16진수는 해시로, 점으로 나뉜 숫자 넷은 IP로, 정해 둔 최상위 도메인 26개로 끝나는 값은 도메인으로, 나머지는 파일 이름으로 본다 [6].
+- `hunt_ioc`는 그 종류로 출처 7곳과 요청하면 YARA까지 찾고 하나라도 일치하면 `found`를 참으로 두며 일치한 출처와 일치하지 않은 출처를 나눠 싣는다 [2].
+- `investigate_user_activity`는 브라우저 기록, ShellBags, LNK, RecentDocs에서 활동을 찾고 LNK 대상을 확장자로 실행 파일, 문서, 기타로 나눈다 [3].
+- `hunt_ioc_pack`은 IoC 묶음의 규칙마다 파일 경로 정규식, 텍스트 파일 내용 정규식, PCAP payload 정규식을 맞춰 일치한 규칙을 싣는다 [4].
+
+파서 도구는 결과 항목 하나에 정해 둔 규칙을 대어 의심 표시를 붙인다.
+
+- `disk_parse_mft`는 항목마다 `$STANDARD_INFORMATION`과 `$FILE_NAME`의 생성 시각을 비교한다 [7].
+- SI 생성 시각이 FN보다 이르거나, 365일 넘게 이르거나, 시·분·초·마이크로초가 모두 0이면 timestomping의 `detected`를 참으로 둔다 [7].
+- `pcap_find_suspicious`는 정해 둔 TCP 포트 24개, User-Agent 정규식 7개, 40자를 넘는 DNS 레이블, 대상별 송신량 1MB 초과로 의심 항목을 고른다 [8].
+- `file_analyze_pe`는 section마다 엔트로피 7.0 초과, 실행·쓰기 동시 허용, 원본 크기 0, packer section 이름을 표시한다 [9].
+- `file_analyze_pe`는 packer section 이름, API 범주별 import, 버전 정보 없음, 2000년 이전이나 현재보다 뒤인 컴파일 시각을 `suspicious_indicators`에 싣는다 [10][11].
+- `api_detect_patterns`·`api_analyze_imports`는 PE import를, `apmx_detect_patterns`는 API Monitor 캡처에서 실제로 불린 API를 같은 패턴 표 17개에 맞춘다 [12][13].
+- 패턴마다 필수 API 가운데 `min_match`개 이상이 있으면 그 패턴을 싣는다 [12].
+- `apmx_correlate_handles`는 핸들을 만드는 API의 반환값을 키로, 그 값을 앞 세 인자에 가진 API 호출을 이어 핸들 연결을 만든다 [14].
+- `apmx_injection_info`는 그 가운데 `OpenProcess`에서 시작해 원격 메모리 할당이나 쓰기 API로 이어진 연결만 주입 연결로 고른다 [15].
+- `user_parse_shellbags`는 `suspicious_only`가 참이면 네트워크 공유, 압축 파일 내부, C가 아닌 드라이브, 정해 둔 경로 문자열 19개에 해당하는 폴더를 `reason`과 함께 고른다 [16].
+- `evtx_security_search`는 `lateral_movement`를 이벤트 ID 4624·4648·4778·4779로, `credential_access`를 4768·4769·4771·4776으로 정해 둔다 [17].
+- `lateral_movement`는 로그온 유형을 가리지 않고 모든 4624 이벤트를 포함한다 [17].
+- `registry_get_persistence`는 `include_microsoft_services`가 거짓이면 이미지 경로로 Microsoft 서비스를 가려 뺀다 [18].
+- 이미지 경로에 `microsoft`가 있거나 앞 두 경로 요소에 `windows`가 있으면서 `system32`가 포함된 서비스가 빠지고 뺀 수는 응답에 싣지 않는다 [18].
+
+패턴 표와 의심 표시 규칙에는 서명이나 알려진 정상 파일을 빼는 조건이 없다 [12][10].
+Windows 11의 `taskmgr.exe`는 `credential_dumping`·`keylogging`을 포함한 8개 패턴과 `risk_level` `high`로, `notepad.exe`는 4개 패턴과 `medium`으로 나온다 [19].
+
+**한계.** `investigate_execution`은 Amcache 항목만 찾아도 `execution_confirmed`를 참으로 두고 요약에 "confirmed"로 적는다 [1][20].
+같은 응답의 시간선은 그 Amcache 항목을 실행 또는 설치 기록으로 적는다 [21].
+`hunt_ioc`는 `time_range_start`·`time_range_end`를 받지만 어느 출처 검색에도 넘기지 않는다 [22].
+그래서 시간 범위를 주어도 일치 여부와 등급은 전체 기간으로 정해진다 [23].
+`hunt_ioc`의 EVTX 검색은 우선 로그 4개 가운데 하나라도 있으면 그 로그만, 없으면 폴더의 `.evtx` 파일 5개까지만 찾는다 [24].
+파일마다 일치 이벤트를 10건까지만 가져온다 [24].
+읽지 못한 EVTX 파일은 알리지 않고 건너뛴다 [24].
+`disk_parse_mft`는 `detect_timestomping`을 받지만 판정에 쓰지 않아 거짓으로 주어도 timestomping 판정이 실린다 [25].
+그 인자의 설명은 SI 시각이 FN보다 이른 파일을 표시한다고 적지만 코드는 365일 차이와 0시 조건으로도 표시한다 [25][7].
+`file_analyze_pe`의 API 범주 검사는 DLL마다 앞 20개 함수만 본다 [26].
+`apmx_correlate_handles`는 같은 핸들 값이 다시 만들어지면 뒤의 생성 호출로 앞의 것을 덮어쓰고 사용 호출을 시각 차례와 관계없이 그 값에 잇는다 [27][14].
+`pcap_find_suspicious`는 출발지 주소가 `10.`·`192.168.`·`172.`로 시작하면 내부 주소로 보아 송신량을 센다 [8].
+`172.16.0.0/12` 밖의 `172.` 주소도 내부 주소로 세어진다 [8].
+`user_parse_shellbags`의 `suspicious_only`는 `limit`의 10배까지 읽은 폴더만 판정하고 `ntuser_path`를 쓰지 않는다 [28][16].
+`hunt_ioc_pack`은 규칙마다 파일을 `max_files`개까지만 보고 `max_file_size`를 넘는 파일을 알리지 않고 건너뛴다 [29].
+텍스트 내용 규칙은 정해 둔 확장자의 파일에만 적용된다 [29].
+
+### F02.02 시각·위치 근접 연결
+
+**구현.** 이 방식은 API Monitor 캡처의 레코드 번호를 위치로 쓰는 두 판정에 적용된다.
+`apmx_detect_patterns`는 TLS 콜백 패턴을 FLS·TLS API가 캡처의 처음 200개 레코드 안에서 처음 나오고 원격 메모리 할당·쓰기 API가 캡처에 있을 때만 싣는다 [30].
+`apmx_injection_info`는 `Process32` 호출 인자에서 `szExeFile`을 가진 구조를 읽지 못하면 `Process32` 호출 레코드 범위의 앞 5건부터 뒤 10건까지를 본다 [31].
+그 레코드들의 인자 문자열 가운데 `.exe`로 끝나는 것을 세어 가장 많이 나온 이름을 `target_process`로 둔다 [31][32].
+
+**한계.** `target_process`의 대체 이름은 주입 연결의 대상 PID와 대조하지 않고 모든 주입 연결에 같은 이름으로 붙으며 추정 값이라는 표시가 없다 [32].
+`api_detect_patterns`·`api_analyze_imports`는 같은 TLS 콜백 패턴을 레코드 위치 조건 없이 PE import에 맞춘다 [33][12].
+Bandizip의 `Arkview.x64.exe`는 이 경로에서 `tls_callback_execution`을 포함한 7개 패턴과 `risk_level` `high`로 나온다 [34].
+
+### F02.03 통계·점수 산정
+
+**구현.** 이 방식은 오케스트레이터 4개의 확신 등급, NTLM 요약의 빈도, PCAP beaconing 판정, 패턴 탐지의 전체 위험도에 적용된다.
+`investigate_execution`은 찾은 출처가 3곳이면 `HIGH`, 2곳이면 `MEDIUM`, 1곳이면 `LOW`, 없으면 `NONE`으로 정한다 [35].
+`hunt_ioc`와 `investigate_user_activity`는 찾은 출처가 4곳 이상이면 `HIGH`, 2곳 이상이면 `MEDIUM`, 1곳이면 `LOW`로 정한다 [35].
+세 도구는 출처 안의 일치 건수나 내용을 등급에 쓰지 않는다 [35].
+`hunt_ioc_pack`은 일치한 규칙마다 묶음 자료의 `weight`에 일치 수(최대 3)를 곱해 더한다 [36].
+합계가 8 이상이면 `HIGH`, 4 이상이면 `MEDIUM`, 1 이상이면 `LOW`로 정하고 일치한 규칙을 `weight`와 일치 수 차례로 정렬한다 [36][37].
+`weight`가 4인 규칙 하나가 파일 2개에서 일치하면 합계 8로 `HIGH`가 된다 [38].
+`evtx_ntlm_operational_summary`는 걸러 낸 이벤트에서 (Computer, domain, process, user) 조합의 빈도를 세어 `pair_frequency`로 싣는다 [39].
+`rare_first` 차례면 빈도가 낮은 조합부터 정렬하고 `unusual_only`가 참이면 빈도가 `rarity_threshold` 이하인 것만 남긴다 [39][40].
+`pcap_find_suspicious`는 출발지·목적지·목적지 포트마다 패킷 시각 간격의 평균과 분산을 계산한다 [41].
+평균이 1초를 넘고 분산이 평균의 0.3배를 제곱한 값보다 작으면 `potential_beaconing`에 싣는다 [41].
+패턴 탐지는 탐지한 패턴의 `risk` 가운데 가장 높은 값을 전체 `risk_level`로 싣는다 [12].
+
+### F02.05 사용 근거·변환 기록
+
+**구현.** 이 방식은 판정을 내는 도구의 응답에 적용된다.
+실행·IOC·사용자 활동 오케스트레이터는 출처마다 읽은 파일이나 폴더의 `path`와 출처별 검색 여부 `artifacts_searched`를 싣는다 [42][2].
+`hunt_ioc`는 EVTX 출처에 실제로 읽은 로그 이름 `logs_searched`를, YARA 출처에 검사한 파일 `file_scanned`를 싣는다 [24][43].
+`pcap_find_suspicious`와 `user_parse_shellbags`는 고른 항목마다 적용한 규칙을 `reason` 문장으로 싣는다 [8][16].
+`disk_parse_mft`는 맞은 조건을 `indicators`에 적고 비교한 두 생성 시각과 차이 일수를 함께 싣는다 [7].
+패턴 탐지는 패턴마다 일치한 필수 API, 빠진 필수 API, 문턱 `min_required`를 싣는다 [12].
+`apmx_detect_patterns`는 일치한 API마다 처음 나온 레코드 번호를 싣는다 [13][44].
+`hunt_ioc_pack`은 규칙의 `id`와 출처 `reference`, 일치마다 파일 경로, 탐지기 이름, 정규식, 앞뒤 글을 싣는다 [4][45].
+`evtx_ntlm_operational_summary`는 빈도 기준을 `rarity_basis`로 적고 행마다 원래 이벤트를 다시 여는 `event_ref`를 싣는다 [46].
+
+**한계.** 오케스트레이터 4개는 확신 등급을 정한 문턱을 응답에 싣지 않는다 [35][37].
+`hunt_ioc`의 EVTX 일치 항목은 `event_id`·`timestamp`·`provider` 키를 읽지만 EVTX 파서가 돌려주는 사건의 키는 `EventID`·`TimeCreated`·`Provider`다 [47][48].
+그래서 일치 항목에는 로그 파일 이름만 값이 있고 사건 ID, 시각, 제공자는 `None`으로 실린다 [47][48].
+`investigate_execution`의 Amcache 출처는 일치 항목 수 `match_count`만 싣고 해시와 경로는 첫 항목의 값만 싣는다 [49].
+
+### F02.06 규칙 기반 공격 단계 분류·흐름 서술
+
+**구현.** 이 방식은 API Monitor 캡처의 호출을 레코드 차례로 늘어놓는 `apmx_detect_patterns`와 `apmx_injection_info`에 적용된다 [44][50].
+`apmx_detect_patterns`는 탐지한 패턴의 API를 캡처에서 처음 나온 레코드 차례로 늘어놓은 `suspicious_call_timeline`을 싣는다 [44].
+`apmx_injection_info`는 주입 연결마다 `OpenProcess`부터 이어진 API 호출을 레코드 번호와 함께 `chain`으로 싣는다 [50].
+같은 도구는 캡처에서 탐지한 패턴으로 `injection_technique`를 정한다 [50].
+`Thread Local Storage (TLS Callback)`, `Classic Process Injection`, `APC Queue Injection`, `Process Hollowing` 차례로 고르고 해당하는 것이 없으면 `Unknown`으로 둔다 [50].
+패턴 표는 패턴 17개마다 ATT&CK 기법 ID를 정해 두고 탐지한 패턴에 `mitre_id`를 싣는다 [51][12].
+기법 ID를 tactic이나 킬체인 단계로 묶거나 흐름 문장을 만드는 코드는 없다 [51].
+PE import를 패턴 표에 맞추는 `api_detect_patterns`·`api_analyze_imports`는 기법 ID만 싣고 호출 차례 표를 싣지 않는다 [12].
+
+**한계.** `injection_technique`는 연결마다가 아니라 캡처 전체의 패턴 결과로 정해서 한 캡처의 모든 주입 연결이 같은 기법 이름을 받는다 [52][50].
+
+### F02.08 확신 수준·추정 범위 표시
+
+**구현.** 이 방식은 오케스트레이터 4개의 `confidence`와 `evtx_ntlm_operational_summary`의 상태 값·빈도 정확도 표시에 적용된다 [42][2][37][53].
+오케스트레이터 4개는 판정에 `HIGH`·`MEDIUM`·`LOW`·`NONE` 가운데 하나를 `confidence`로 싣는다 [42][2][37].
+`hunt_ioc_pack`은 일치한 규칙마다 묶음 자료가 정한 `confidence`도 함께 옮긴다 [45].
+`evtx_ntlm_operational_summary`는 상태 코드가 0이면 `success`, `0xC000006D`이면 `failure`로 두고 그 밖의 값은 `unknown`으로 둔다 [53].
+스캔이 상한에 닿는 등으로 걸러 낸 이벤트 수가 정확하지 않으면 `rarity_exact`를 거짓으로 둔다 [46].
+그때 응답 요약은 일치 수가 정확하지 않으니 스캔 진단을 보라고 적는다 [54].
+
+**한계.** 오케스트레이터의 출처 검색이 오류로 끝나면 그 출처는 `found`가 거짓인 채 검색한 출처로 남는다 [55][23].
+일치한 출처가 없으면 등급은 `NONE`이 되고 요약은 오류 난 출처까지 포함해 찾지 못했다고 적으며 판단 보류로 표시하지 않는다 [20][2][23].
+
+### F02.09 판정 제외 조건의 공개
+
+**구현.** 이 방식은 `evtx_ntlm_operational_summary`의 `unusual_only`에 적용된다 [46].
+응답은 드문 조합만 남기기 전의 이벤트 수 `matched_events`와 남긴 뒤의 행 수 `total_matched`, 문턱 `rarity_threshold`, 빈도 기준 `rarity_basis`를 함께 싣는다 [46].
+개요 `overview`는 드문 조합을 고르기 전의 이벤트를 범위로 하고 드문 조합 예시마다 `unusual` 여부를 싣는다 [56].
+
+다른 판정 도구는 뺀 항목의 수나 기준을 싣지 않는다.
+`registry_get_persistence`는 Microsoft 서비스로 보아 뺀 서비스 수를 싣지 않는다 [18].
+`user_parse_shellbags`의 `suspicious_only`는 고른 폴더 수 `total_suspicious`만 싣고 판정한 전체 폴더 수는 싣지 않는다 [16].
+
+### 근거
+
+[1] `investigate_execution`은 한 출처라도 찾으면 실행을 참으로 두고 등급을 계산한다.
+
+```python
+    # Determine if execution was confirmed
+    execution_confirmed = any(r.get("found") for r in evidence_results)
+
+    # Calculate confidence
+    confidence = _calculate_confidence(evidence_results)
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:542-546`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L542-L546)
+
+[2] `hunt_ioc`는 일치한 출처로 `found`, 요약, 출처 목록을 만든다.
+
+```python
+    # Generate summary
+    found_sources = [r["source"] for r in results if r.get("found")]
+    not_found_sources = [r["source"] for r in results if r.get("searched") and not r.get("found")]
+    unavailable_sources = [r["source"] for r in results if not r.get("available", True)]
+
+    if found_sources:
+        summary = f"IOC '{ioc}' ({final_type}) found in {len(found_sources)} source(s): {', '.join(found_sources)}"
+    else:
+        searched = [r["source"] for r in results if r.get("searched")]
+        summary = f"IOC '{ioc}' ({final_type}) not found in any of the {len(searched)} sources searched"
+
+    return {
+        "ioc": ioc,
+        "ioc_type": final_type,
+        "ioc_type_detected": detected_type,
+        "artifacts_dir": str(artifacts_dir),
+        "found": len(found_sources) > 0,
+        "confidence": confidence,
+        "total_matches": total_matches,
+        "sources_with_matches": found_sources,
+        "sources_searched_no_match": not_found_sources,
+        "sources_unavailable": unavailable_sources,
+        "artifacts_searched": artifacts_searched,
+        "results": results,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:1054-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1054-L1079)
+
+[3] LNK 대상은 확장자로 나눈다.
+
+```python
+        # Categorize by file type
+        exe_targets = []
+        doc_targets = []
+        other_targets = []
+
+        for lnk in lnk_files:
+            target = lnk.get("target_path", "").lower()
+            if target.endswith((".exe", ".msi", ".bat", ".cmd", ".ps1", ".vbs")):
+                exe_targets.append(lnk)
+            elif target.endswith((".doc", ".docx", ".xls", ".xlsx", ".pdf", ".txt", ".csv")):
+                doc_targets.append(lnk)
+            else:
+                other_targets.append(lnk)
+```
+
+[`winforensics_mcp/orchestrators/user_activity_investigator.py:370-382`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L370-L382)
+
+[4] IoC 묶음 규칙의 탐지기를 파일 경로와 텍스트 내용에 맞춘다: [`winforensics_mcp/ioc_packs/behavior_hunter.py:94-140`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L94-L140), [`winforensics_mcp/ioc_packs/behavior_hunter.py:143-192`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L143-L192).
+
+[5] Amcache는 SHA1이면 해시로, 아니면 `.exe`를 뺀 이름으로 찾는다.
+
+```python
+        # Determine search method based on target type
+        if _is_sha1(target):
+            result = search_amcache_by_sha1(amcache_path, target)
+            matches = result.get("matches", [])
+        else:
+            exe_name = _extract_executable_name(target)
+            result = parse_amcache(
+                amcache_path,
+                name_filter=exe_name.replace(".exe", ""),  # Match without extension
+                time_range_start=time_range_start.isoformat() if time_range_start else None,
+                time_range_end=time_range_end.isoformat() if time_range_end else None,
+                limit=50,
+            )
+            matches = result.get("entries", [])
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:232-245`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L232-L245)
+
+[6] IOC 종류는 값의 모양과 최상위 도메인 목록으로 정한다: [`winforensics_mcp/orchestrators/ioc_hunter.py:82-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L82-L119).
+
+```python
+    # Domain (contains dots, no spaces, no path separators)
+    if '.' in ioc and ' ' not in ioc and '\\' not in ioc and '/' not in ioc:
+        # Check if it looks like a domain (not just a filename with extension)
+        parts = ioc.split('.')
+        if len(parts) >= 2:
+            tld = parts[-1].lower()
+            # Common TLDs
+            if tld in ('com', 'net', 'org', 'io', 'co', 'gov', 'edu', 'ru', 'cn',
+                       'uk', 'de', 'fr', 'jp', 'br', 'au', 'in', 'it', 'es', 'nl',
+                       'xyz', 'top', 'info', 'biz', 'online', 'site', 'club'):
+                return "domain"
+
+    # Default to filename
+    return "filename"
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:106-119`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L106-L119)
+
+[7] timestomping 조건은 SI·FN 생성 시각 비교, 365일 차이, 0시다.
+
+```python
+    indicators = []
+
+    # Check if SI created is before FN created (definite timestomping)
+    if si_created < fn_created:
+        indicators.append("$SI.Created before $FN.Created (impossible normally)")
+
+    # Check if SI is significantly older than FN
+    diff = fn_created - si_created
+    if diff.days > threshold_days:
+        indicators.append(f"$SI.Created is {diff.days} days older than $FN.Created")
+
+    # Check for suspicious patterns (all zeros in time portion)
+    if si_created.hour == 0 and si_created.minute == 0 and si_created.second == 0:
+        if si_created.microsecond == 0:
+            indicators.append("$SI.Created has zeroed time components (suspicious)")
+
+    return {
+        "detected": len(indicators) > 0,
+        "indicators": indicators if indicators else None,
+        "si_created": si_created.isoformat(),
+        "fn_created": fn_created.isoformat(),
+        "difference_days": diff.days if diff.days != 0 else None,
+    }
+```
+
+[`winforensics_mcp/parsers/mft_parser.py:166-188`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L166-L188)
+
+[8] 의심 포트와 User-Agent 목록, 내부 주소 판단, DNS 레이블 길이, 송신량 기준: [`winforensics_mcp/parsers/pcap_parser.py:784-805`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L784-L805), [`winforensics_mcp/parsers/pcap_parser.py:832-848`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L832-L848), [`winforensics_mcp/parsers/pcap_parser.py:891-901`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L891-L901), [`winforensics_mcp/parsers/pcap_parser.py:929-938`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L929-L938).
+
+[9] section 의심 표시 규칙.
+
+```python
+        # Flag suspicious characteristics
+        suspicious = []
+
+        # High entropy (>7.0) suggests encryption/packing
+        if entropy > 7.0:
+            suspicious.append("high_entropy")
+
+        # Executable + Writable is suspicious
+        if (section.Characteristics & 0x20000000) and (section.Characteristics & 0x80000000):
+            suspicious.append("exec_writable")
+
+        # Raw size is 0 but virtual size is not (unpacking stub)
+        if section.SizeOfRawData == 0 and section.Misc_VirtualSize > 0:
+            suspicious.append("empty_raw_section")
+
+        # Common packer section names
+        packer_sections = ["UPX", ".packed", ".MPRESS", "ASPack", ".nsp", ".enigma"]
+        if any(ps.lower() in name.lower() for ps in packer_sections):
+            suspicious.append("packer_section_name")
+
+        if suspicious:
+            section_info["suspicious"] = suspicious
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:252-273`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L252-L273)
+
+[10] `suspicious_indicators`를 모은다.
+
+```python
+        # Suspicious indicators
+        suspicious = []
+
+        if check_signatures:
+            packers = detect_packer_signatures(pe)
+            suspicious.extend(packers)
+            result["authenticode"] = get_authenticode_info(file_path, pe)
+
+        if detail_level in ["standard", "verbose"]:
+            api_suspicious = detect_suspicious_imports(imports)
+            suspicious.extend(api_suspicious)
+
+        # Check for no version info (common in malware)
+        if not version_info:
+            suspicious.append("No version info")
+
+        # Check for suspicious compile time
+        compile_time = get_compile_timestamp(pe)
+        if compile_time:
+            try:
+                ct = datetime.fromisoformat(compile_time.replace("Z", "+00:00"))
+                if ct.year < 2000 or ct > datetime.now(timezone.utc):
+                    suspicious.append(f"Suspicious compile time: {compile_time}")
+            except Exception:
+                pass
+
+        if suspicious:
+            result["suspicious_indicators"] = suspicious
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:608-635`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L608-L635)
+
+[11] API 범주별 import 규칙: [`winforensics_mcp/parsers/pe_analyzer.py:335-395`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L335-L395).
+
+```python
+    # Check for suspicious patterns
+    for category, apis in suspicious_apis.items():
+        found = [api for api in apis if api in all_imports]
+        if found:
+            if category == "process_injection" and len(found) >= 2:
+                suspicious.append(f"Process injection APIs detected: {', '.join(found[:3])}")
+            elif category == "code_injection" and len(found) >= 2:
+                suspicious.append(f"Code injection APIs detected: {', '.join(found[:3])}")
+            elif category == "credential_theft":
+                suspicious.append(f"Credential access APIs detected: {', '.join(found[:3])}")
+            elif category == "evasion":
+                suspicious.append(f"Anti-debugging/evasion APIs detected: {', '.join(found[:3])}")
+            elif category == "keylogging" and len(found) >= 2:
+                suspicious.append(f"Keylogging APIs detected: {', '.join(found[:3])}")
+
+    return suspicious
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:380-395`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L380-L395)
+
+[12] 패턴마다 필수 API 일치 수를 `min_match`와 비교하고 전체 위험도를 정한다: [`winforensics_mcp/parsers/api_monitor/patterns.py:175-231`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/patterns.py#L175-L231).
+
+```python
+    for pattern_id, pattern in PATTERNS.items():
+        all_pattern_apis = pattern["required"] | pattern.get("optional", set())
+        matched = all_apis & all_pattern_apis
+        required_matched = all_apis & pattern["required"]
+
+        if len(required_matched) >= pattern["min_match"]:
+            missing_required = pattern["required"] - all_apis
+            optional_matched = all_apis & pattern.get("optional", set())
+            detected.append({
+                "pattern_name": pattern["name"],
+                "pattern_id": pattern_id,
+                "apis_matched": sorted(matched),
+                "apis_missing": sorted(missing_required) if missing_required else [],
+                "match_count": len(matched),
+                "required_match_count": len(required_matched),
+                "required_apis_matched": sorted(required_matched),
+                "optional_apis_matched": sorted(optional_matched),
+                "min_required": pattern["min_match"],
+                "description": pattern["description"],
+                "mitre_id": pattern["mitre_id"],
+                "risk": pattern["risk"],
+            })
+            risk_levels.append(pattern["risk"])
+
+    # Overall risk is the highest detected
+    if "high" in risk_levels:
+        overall_risk = "high"
+    elif "medium" in risk_levels:
+        overall_risk = "medium"
+    elif "low" in risk_levels:
+        overall_risk = "low"
+    else:
+        overall_risk = "none"
+```
+
+[`winforensics_mcp/parsers/api_monitor/patterns.py:194-226`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/patterns.py#L194-L226)
+
+[13] APMX 캡처의 API 이름에 같은 패턴 표를 맞춘다: [`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1042-1158`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1042-L1158).
+
+[14] 사용 호출의 앞 세 인자를 핸들 값과 대조해 잇는다.
+
+```python
+        api_name = parsed.get("api_name", "")
+        if api_name not in HANDLE_CONSUMERS:
+            continue
+
+        params = parsed.get("parameters", [])
+        # Check first few parameter values for known handles
+        for p in params[:3]:
+            val = p.get("pre_value")
+            if val is not None and val in handle_sources:
+                handle_sources[val]["consumers"].append({
+                    "api": api_name,
+                    "record": parsed["call_index"],
+                    "timestamp": parsed.get("timestamp"),
+                })
+                break
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1420-1434`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1420-L1434)
+
+[15] 주입 연결은 `OpenProcess`에서 시작해 메모리 할당·쓰기 API로 이어진 연결만 고른다.
+
+```python
+    for chain in handle_result.get("handle_chains", []):
+        if chain["producer_api"] != "OpenProcess":
+            continue
+
+        consumer_apis = {c["api"] for c in chain["consumers"]}
+        # Must have at least VirtualAllocEx or WriteProcessMemory
+        if not (consumer_apis & {"VirtualAllocEx", "WriteProcessMemory", "NtAllocateVirtualMemory"}):
+            continue
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1535-1542`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1535-L1542)
+
+[16] ShellBags 의심 폴더 규칙과 서버 분기를 확인한다.
+
+의심 폴더 규칙: [`winforensics_mcp/parsers/shellbags_parser.py:755-817`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L755-L817).
+
+```python
+    elif name == "user_parse_shellbags":
+        usrclass_path = args["usrclass_path"]
+        suspicious_only = args.get("suspicious_only", False)
+
+        if suspicious_only:
+            result = find_suspicious_folders(
+                usrclass_path=usrclass_path,
+                limit=args.get("limit", MAX_REGISTRY_RESULTS),
+            )
+        else:
+            result = parse_shellbags(
+                usrclass_path=usrclass_path,
+                path_filter=args.get("path_filter"),
+                include_timestamps=True,
+                limit=args.get("limit", MAX_REGISTRY_RESULTS),
+                ntuser_path=args.get("ntuser_path"),
+                include_ntuser=args.get("include_ntuser", True),
+            )
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:3436-3454`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3436-L3454)
+
+[17] 이름 붙인 Security 이벤트 종류는 이벤트 ID 목록으로 정한다.
+
+```python
+    event_type_map = {
+        "logon": [4624],
+        "failed_logon": [4625],
+        "logoff": [4634],
+        "process_creation": [4688],
+        "service_installed": [4697, 7045],
+        "account_created": [4720],
+        "account_modified": [4738],
+        "privilege_use": [4672],
+        "log_cleared": [1102, 104],
+        "scheduled_task": [4698, 4699, 4700, 4701, 4702],
+        "kerberos": [4768, 4769, 4770, 4771],
+        "lateral_movement": [4624, 4648, 4778, 4779],
+        "credential_access": [4768, 4769, 4771, 4776],
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:971-985`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L971-L985)
+
+[18] Microsoft 서비스를 이미지 경로로 가려 뺀다.
+
+```python
+            # Filter Microsoft services if requested
+            if not include_microsoft:
+                image_path = (service_info.get("image_path") or "").lower()
+                if "microsoft" in image_path or "windows" in image_path.split("\\")[0:2]:
+                    if not service_info["image_path"] or "system32" in image_path:
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:627-631`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L627-L631)
+
+[19] (실행 확인) Windows 11의 `C:\Windows\System32`에 있는 `taskmgr.exe`, `notepad.exe`, `cmd.exe`, `msiexec.exe`에 `api_detect_patterns`를 실행했다.
+`taskmgr.exe`는 `credential_dumping`, `token_manipulation`, `registry_persistence`, `service_persistence`, `anti_debug`, `screen_capture`, `keylogging`, `process_creation`과 `high`, `notepad.exe`는 `registry_persistence`, `anti_debug`, `wmi_execution`, `process_creation`과 `medium`으로 나왔다.
+
+[20] 실행 여부 요약은 찾은 출처가 없으면 사용 가능한 출처를 나열하고 찾은 출처가 있으면 "confirmed"로 적는다.
+
+```python
+def _generate_summary(
+    target: str,
+    execution_confirmed: bool,
+    confidence: str,
+    evidence_results: list[dict],
+) -> str:
+    """Generate human-readable summary"""
+    if not execution_confirmed:
+        sources_searched = [r["source"] for r in evidence_results if r.get("available", True)]
+        return f"No execution evidence found for '{target}' in {', '.join(sources_searched)}"
+
+    findings = []
+    for result in evidence_results:
+        if result.get("found") and result.get("finding"):
+            findings.append(f"- {result['source']}: {result['finding']}")
+
+    summary = f"Execution of '{target}' confirmed ({confidence} confidence):\n"
+    summary += "\n".join(findings)
+
+    return summary
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:576-595`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L576-L595)
+
+[21] Amcache 항목은 시간선에 실행 또는 설치 기록으로 들어간다.
+
+```python
+        elif source == "Amcache":
+            first_seen = result.get("first_seen")
+            if first_seen:
+                timeline.append({
+                    "time": first_seen,
+                    "source": "Amcache",
+                    "event": "First recorded in Amcache (execution/installation)",
+                })
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:425-432`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L425-L432)
+
+[22] `hunt_ioc`의 본문은 `time_range_start`·`time_range_end`를 출처 검색 함수에 넘기지 않는다: [`winforensics_mcp/orchestrators/ioc_hunter.py:902-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L902-L1079).
+
+[23] (실행 확인) `Windows/AppCompat/Programs/Amcache.hve` 자리에 하이브가 아닌 파일만 둔 폴더로 `investigate_execution`과 `hunt_ioc`를 실행했다.
+Amcache 출처는 `available` 참, `found` 거짓, 오류 "Registry Parse Exception (Invalid REGF ID)"로 남았다.
+두 도구 모두 `confidence`가 `NONE`이었고 요약은 "No execution evidence found for 'mimikatz.exe' in Amcache"와 "not found in any of the 1 sources searched"였다.
+`hunt_ioc`에 `time_range_start`를 2030-01-01로 주어도 같은 결과가 나왔다.
+
+[24] EVTX 출처는 우선 로그나 파일 5개만 찾고 파일마다 10건까지 가져오며 실패한 파일은 건너뛴다.
+
+```python
+        for log in priority_logs:
+            log_path = evtx_dir / log
+            if log_path.exists():
+                evtx_files.append(log_path)
+
+        # Also check for any .evtx files if priority logs not found
+        if not evtx_files:
+            evtx_files = list(evtx_dir.glob("*.evtx"))[:5]  # Limit to 5 files
+
+        for evtx_file in evtx_files:
+            try:
+                result = get_evtx_events(
+                    str(evtx_file),
+                    contains=[ioc],
+                    limit=10,
+                )
+
+                searched_files.append(evtx_file.name)
+                events = result.get("events", [])
+
+                for event in events:
+                    all_matches.append({
+                        "log_file": evtx_file.name,
+                        "event_id": event.get("event_id"),
+                        "timestamp": event.get("timestamp"),
+                        "provider": event.get("provider"),
+                    })
+
+            except Exception:
+                continue
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:827-856`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L827-L856)
+
+[25] `parse_mft`는 `detect_timestomping`을 받지만 본문에서 쓰지 않는다: [`winforensics_mcp/parsers/mft_parser.py:343-466`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L343-L466), [`winforensics_mcp/parsers/mft_parser.py:288-293`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L288-L293).
+
+```python
+                        "detect_timestomping": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Flag files where $SI timestamps are earlier than $FN timestamps",
+                        },
+```
+
+[`winforensics_mcp/server.py:2194-2198`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2194-L2198)
+
+[26] import 요약은 DLL마다 앞 20개 함수만 담고 의심 import 검사는 이 요약을 쓴다.
+
+```python
+        # Limit functions per DLL to avoid huge output
+        if len(functions) > max_per_dll:
+            imports[dll_name] = functions[:max_per_dll] + [f"... and {len(functions) - max_per_dll} more"]
+        else:
+            imports[dll_name] = functions
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:304-308`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L304-L308)
+
+```python
+        # Imports
+        imports = get_imports_summary(pe)
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:584-585`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L584-L585)
+
+[27] 핸들 값이 같으면 뒤의 생성 호출이 앞 항목을 덮어쓴다.
+
+```python
+        # Record as handle producer if it has a non-zero/non-error return
+        if api_name in HANDLE_PRODUCERS and ret_val is not None:
+            if ret_val != 0 and ret_val != 0xFFFFFFFF and ret_val != 0xFFFFFFFFFFFFFFFF:
+                handle_sources[ret_val] = {
+                    "handle": ret_val,
+                    "handle_hex": f"0x{ret_val:x}",
+                    "producer_api": api_name,
+                    "producer_record": i,
+                    "timestamp": parsed.get("timestamp"),
+                    "consumers": [],
+                }
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1406-1416`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1406-L1416)
+
+[28] 의심 폴더 판정은 `limit`의 10배까지 읽은 폴더만 본다.
+
+```python
+    result = parse_shellbags(usrclass_path, include_timestamps=True, limit=limit * 10)
+```
+
+[`winforensics_mcp/parsers/shellbags_parser.py:777-777`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/shellbags_parser.py#L777-L777)
+
+[29] 파일 수 상한과 크기 상한, 텍스트 확장자 조건.
+
+```python
+TEXT_EXTENSIONS = {
+    ".csv", ".json", ".jsonl", ".log", ".txt", ".xml", ".yaml", ".yml",
+    ".md", ".ps1", ".bat", ".cmd", ".vbs", ".evtx.txt",
+}
+
+PCAP_EXTENSIONS = {".pcap", ".pcapng", ".cap"}
+
+
+def _iter_candidate_files(root: Path, max_files: int, max_file_size: int):
+    count = 0
+    for path in root.rglob("*"):
+        if count >= max_files:
+            break
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > max_file_size:
+                continue
+        except OSError:
+            continue
+        count += 1
+        yield path
+
+
+def _is_text_candidate(path: Path) -> bool:
+    suffixes = "".join(path.suffixes).lower()
+    return path.suffix.lower() in TEXT_EXTENSIONS or suffixes.endswith(".evtx.txt")
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:11-37`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L11-L37)
+
+[30] TLS 콜백 패턴은 처음 200개 레코드 조건과 주입 API 조건을 둔다.
+
+```python
+            # Temporal check for tls_callback_execution:
+            # Only flag if FLS/TLS APIs appear in the first 200 records AND
+            # an injection chain pattern is also present.
+            if pattern.get("_requires_temporal_check") and pattern_id == "tls_callback_execution":
+                fls_tls_apis = {"FlsAlloc", "FlsSetValue", "TlsAlloc", "TlsSetValue",
+                                "FlsFree", "TlsFree", "FlsGetValue", "TlsGetValue"}
+                early_fls = any(
+                    api_first_seen.get(api, 999999) < 200
+                    for api in (matched & fls_tls_apis)
+                )
+                has_injection = any(
+                    api in all_apis
+                    for api in ("VirtualAllocEx", "WriteProcessMemory",
+                                "NtAllocateVirtualMemory", "NtWriteVirtualMemory")
+                )
+                if not (early_fls and has_injection):
+                    continue
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1116-1132`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1116-L1132)
+
+[31] `Process32` 호출 범위 앞뒤 레코드의 `.exe` 문자열을 센다.
+
+```python
+    # Fallback: scan for .exe strings near Process32 calls
+    if not toolhelp_entries and p32_range:
+        ctx_start = max(0, p32_range[0] - 5)
+        ctx_end = p32_range[1] + 10
+        ctx_indices = list(range(ctx_start, ctx_end + 1))
+        ctx_details = get_apmx_call_details(
+            file_path, process_index=process_index,
+            call_indices=ctx_indices, limit=len(ctx_indices),
+        )
+        for c in ctx_details.get("calls", []):
+            for p in c.get("parameters", []):
+                for s in p.get("strings", []):
+                    low = s.strip().lower()
+                    if low.endswith(".exe") and len(s) < 50:
+                        toolhelp_exe_strings[s.strip()] += 1
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1516-1530`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1516-L1530)
+
+[32] PID로 찾지 못하면 가장 많이 나온 이름을 모든 연결에 붙인다.
+
+```python
+        # Look up target process name from Toolhelp entries
+        target_pid = chain_info.get("target_pid")
+        if target_pid and toolhelp_entries:
+            for te in toolhelp_entries:
+                if te.get("th32ProcessID") == target_pid:
+                    chain_info["target_process"] = te.get("szExeFile")
+                    break
+
+        # Fallback: most-common .exe string near Process32 calls
+        if "target_process" not in chain_info and toolhelp_exe_strings:
+            most_common = toolhelp_exe_strings.most_common(1)[0][0]
+            chain_info["target_process"] = most_common
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1562-1573`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1562-L1573)
+
+[33] TLS 콜백 패턴 정의.
+
+```python
+    "tls_callback_execution": {
+        "name": "TLS Callback Execution (Heuristic)",
+        "description": "Early TLS/FLS activity combined with injection chain and self-termination "
+                       "suggests code execution via TLS callbacks before main().",
+        "mitre_id": "T1055.001",
+        "required": {"FlsAlloc", "FlsSetValue", "ExitProcess"},
+        "optional": {"TlsAlloc", "TlsSetValue", "FlsFree", "TlsFree", "FlsGetValue", "TlsGetValue"},
+        "min_match": 2,
+        "risk": "high",
+        # Custom flag: detect_apmx_patterns applies a temporal check for this pattern.
+        "_requires_temporal_check": True,
+    },
+```
+
+[`winforensics_mcp/parsers/api_monitor/patterns.py:160-171`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/patterns.py#L160-L171)
+
+[34] (실행 확인) `C:\Program Files` 아래 실행 파일에 `analyze_pe_imports_detailed`를 실행했다.
+Bandizip `Arkview.x64.exe`는 `registry_persistence`, `anti_debug`, `shellcode_execution`, `wmi_execution`, `screen_capture`, `process_creation`, `tls_callback_execution`과 `high`로 나왔다.
+
+[35] 오케스트레이터의 등급 규칙: [`winforensics_mcp/orchestrators/execution_tracker.py:442-456`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L442-L456), [`winforensics_mcp/orchestrators/ioc_hunter.py:887-899`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L887-L899), [`winforensics_mcp/orchestrators/user_activity_investigator.py:598-610`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L598-L610).
+
+[36] 규칙 점수는 `weight`와 일치 수(최대 3)의 곱이다.
+
+```python
+    for rule in ioc_pack.get("rules", []):
+        rule_hits = []
+        if scan_files:
+            rule_hits.extend(_scan_files_for_rule(root, rule, max_files, max_file_size, limit))
+        if scan_pcap:
+            rule_hits.extend(_scan_pcaps_for_rule(root, rule, max_files, max_file_size, limit))
+
+        if not rule_hits:
+            continue
+
+        score = int(rule.get("weight", 1)) * min(len(rule_hits), 3)
+        total_score += score
+        findings.append({
+            "id": rule.get("id"),
+            "name": rule.get("name"),
+            "confidence": rule.get("confidence", "low"),
+            "weight": rule.get("weight", 1),
+            "surfaces": rule.get("surfaces", []),
+            "tags": rule.get("tags", []),
+            "reference": rule.get("reference"),
+            "hit_count": len(rule_hits),
+            "hits": rule_hits[:limit],
+        })
+
+    findings.sort(key=lambda item: (item["weight"], item["hit_count"]), reverse=True)
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:225-249`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L225-L249)
+
+[37] 합계 점수로 등급을 정한다.
+
+```python
+def _confidence_from_score(score: int) -> str:
+    if score >= 8:
+        return "HIGH"
+    if score >= 4:
+        return "MEDIUM"
+    if score > 0:
+        return "LOW"
+    return "NONE"
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:195-202`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L195-L202)
+
+[38] (실행 확인) 임시 폴더에 `\\RemCom_stdout`과 `\\RemCom_stdin`이 들어 있는 로그 파일 2개를 두고 `hunt_ioc_pack`을 실행했다.
+`impacket.psexec.remcom_pipes`(`weight` 4)가 2건 일치했고 `score` 8, `confidence` `HIGH`가 나왔다.
+
+[39] 조합 빈도를 세고 `unusual_only`면 문턱 이하만 남긴다.
+
+```python
+    scope_complete = metadata["total_matched_exact"]
+    pairs = Counter(tuple(row[field] for field in _PAIR_FIELDS) for _, row, _ in entries)
+    overview = _overview(entries, pairs, overview_limit, rarity_threshold, scope_complete)
+    selected = []
+    for entry in entries:
+        row = entry[1]
+        frequency = pairs[tuple(row[field] for field in _PAIR_FIELDS)]
+        row["pair_frequency"] = frequency
+        if not unusual_only or frequency <= rarity_threshold:
+            selected.append(entry)
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:228-237`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L228-L237)
+
+[40] `rare_first`면 빈도를 첫 정렬 키로 쓴다.
+
+```python
+    summarized.sort(key=lambda entry: (
+        *((entry[1]["pair_frequency"],) if order == "rare_first" else ()),
+        entry[2] is None, entry[2] or _MIN_TIME, entry[0],
+    ))
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:255-258`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L255-L258)
+
+[41] beaconing은 시각 간격의 평균과 분산으로 판정한다.
+
+```python
+    # Analyze beaconing (regular intervals)
+    for conn_key, times in connection_times.items():
+        if len(times) < 5:
+            continue
+
+        times.sort()
+        intervals = [times[i+1] - times[i] for i in range(len(times)-1)]
+
+        if len(intervals) >= 4:
+            avg_interval = sum(intervals) / len(intervals)
+            variance = sum((i - avg_interval) ** 2 for i in intervals) / len(intervals)
+
+            # Low variance in intervals = potential beaconing
+            if avg_interval > 1 and variance < (avg_interval * 0.3) ** 2:
+                if len(findings["potential_beaconing"]) < limit:
+                    findings["potential_beaconing"].append({
+                        "src_ip": conn_key[0],
+                        "dst_ip": conn_key[1],
+                        "dst_port": conn_key[2],
+                        "connection_count": len(times),
+                        "avg_interval_seconds": round(avg_interval, 2),
+                        "reason": f"Regular connection interval (~{round(avg_interval)}s)",
+                    })
+```
+
+[`winforensics_mcp/parsers/pcap_parser.py:905-927`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L905-L927)
+
+[42] `investigate_execution` 응답은 출처별 검색 여부, 출처 결과, 등급을 담는다.
+
+```python
+    return {
+        "target": target,
+        "target_type": "sha1" if _is_sha1(target) else "sha256" if _is_sha256(target) else "executable",
+        "artifacts_dir": str(artifacts_dir),
+        "execution_confirmed": execution_confirmed,
+        "confidence": confidence,
+        "sha1": sha1_hash,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": _generate_summary(target, execution_confirmed, confidence, evidence_results),
+    }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:558-573`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L558-L573)
+
+[43] YARA 출처는 검사한 파일 경로를 싣는다.
+
+```python
+        return {
+            "source": "YARA",
+            "available": True,
+            "searched": True,
+            "found": True,
+            "file_scanned": str(file_path),
+            "file_size": result.get("file_size"),
+            "scan_time_ms": result.get("scan_time_ms"),
+            "matches": formatted_matches,
+            "match_count": len(matches),
+        }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:771-781`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L771-L781)
+
+[44] 탐지한 패턴의 API를 처음 나온 레코드 차례로 늘어놓는다.
+
+```python
+    # Build suspicious call timeline (ordered by record index)
+    suspicious_timeline = []
+    suspicious_api_set = set()
+    for det in detected:
+        for api in det["apis_matched"]:
+            suspicious_api_set.add(api)
+
+    for api in sorted(suspicious_api_set, key=lambda a: api_first_seen.get(a, 0)):
+        suspicious_timeline.append({
+            "record_index": api_first_seen[api],
+            "api": api,
+        })
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1169-1180`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1169-L1180)
+
+[45] 규칙마다 묶음 자료의 `confidence`·`reference`와 일치 목록을 싣는다.
+
+```python
+        findings.append({
+            "id": rule.get("id"),
+            "name": rule.get("name"),
+            "confidence": rule.get("confidence", "low"),
+            "weight": rule.get("weight", 1),
+            "surfaces": rule.get("surfaces", []),
+            "tags": rule.get("tags", []),
+            "reference": rule.get("reference"),
+            "hit_count": len(rule_hits),
+            "hits": rule_hits[:limit],
+        })
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:237-247`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L237-L247)
+
+[46] NTLM 요약 메타데이터는 빈도 정확 여부, 기준, 걸러 내기 전후 수를 싣는다.
+
+```python
+    summary_metadata = {
+        **metadata, "query_ref": query_ref, "total_matched": len(summarized),
+        "matched_events": len(entries), "aggregate": aggregate, "order": order,
+        "unusual_only": unusual_only, "rarity_threshold": rarity_threshold,
+        "rarity_exact": scope_complete,
+        "rarity_basis": "exact (Computer, domain, process, user) frequency over filtered events before unusual_only",
+        "rarity_note": "Rarity is a triage signal, not an attack verdict.",
+        "timestamp_errors": overview["timestamp_errors"], "overview": overview,
+    }
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:259-267`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L259-L267)
+
+[47] `hunt_ioc`의 EVTX 일치 항목은 소문자 키로 사건 값을 읽는다.
+
+```python
+                events = result.get("events", [])
+
+                for event in events:
+                    all_matches.append({
+                        "log_file": evtx_file.name,
+                        "event_id": event.get("event_id"),
+                        "timestamp": event.get("timestamp"),
+                        "provider": event.get("provider"),
+                    })
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:845-853`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L845-L853)
+
+[48] EVTX 파서가 만드는 사건 `dict`의 키를 확인한다.
+
+```python
+
+
+def extract_event_data(event_dict: dict) -> dict[str, Any]:
+    """Extract and flatten event data for easier querying"""
+    result = {
+        "EventRecordID": None,
+        "EventID": None,
+        "TimeCreated": None,
+        "Computer": None,
+        "Channel": None,
+        "Provider": None,
+        "EventData": {},
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:280-291`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L280-L291)
+
+[49] Amcache 출처는 첫 일치 항목의 값과 일치 수를 싣는다.
+
+```python
+        # Extract key findings
+        first_match = matches[0]
+        sha1 = first_match.get("sha1")
+        first_seen = first_match.get("key_timestamp")
+        file_path = first_match.get("path")
+
+        finding_parts = []
+        if sha1:
+            finding_parts.append(f"SHA1: {sha1}")
+        if first_seen:
+            finding_parts.append(f"First seen: {first_seen}")
+
+        return {
+            "source": "Amcache",
+            "available": True,
+            "found": True,
+            "path": str(amcache_path),
+            "finding": ", ".join(finding_parts) if finding_parts else "Entry found",
+            "sha1": sha1,
+            "first_seen": first_seen,
+            "file_path": file_path,
+            "product_name": first_match.get("product_name"),
+            "publisher": first_match.get("publisher"),
+            "version": first_match.get("version"),
+            "match_count": len(matches),
+        }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:255-280`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L255-L280)
+
+[50] 주입 기법 이름과 호출 연결을 만든다.
+
+```python
+        # Injection technique label
+        if "tls_callback_execution" in pattern_ids:
+            chain_info["injection_technique"] = "Thread Local Storage (TLS Callback)"
+        elif "classic_injection" in pattern_ids:
+            chain_info["injection_technique"] = "Classic Process Injection"
+        elif "apc_injection" in pattern_ids:
+            chain_info["injection_technique"] = "APC Queue Injection"
+        elif "process_hollowing" in pattern_ids:
+            chain_info["injection_technique"] = "Process Hollowing"
+        else:
+            chain_info["injection_technique"] = "Unknown"
+
+        # Consumer summary
+        chain_info["chain"] = [
+            {"api": chain["producer_api"], "record": chain["producer_record"]},
+        ] + [
+            {"api": c["api"], "record": c["record"]} for c in chain["consumers"]
+        ]
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1644-1661`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1644-L1661)
+
+[51] 패턴 표는 패턴마다 `mitre_id`를 둔다: [`winforensics_mcp/parsers/api_monitor/patterns.py:15-171`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/patterns.py#L15-L171).
+
+[52] 기법 이름에 쓰는 패턴 결과는 캡처 전체에 대해 한 번 계산한다.
+
+```python
+    # Get pattern detection for technique labeling
+    pattern_result = detect_apmx_patterns(file_path, process_index=process_index)
+    pattern_ids = {d["pattern_id"] for d in pattern_result.get("details", [])}
+```
+
+[`winforensics_mcp/parsers/api_monitor/apmx_parser.py:1497-1499`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/apmx_parser.py#L1497-L1499)
+
+[53] 상태 코드는 확인한 두 값만 성공·실패로 해석한다.
+
+```python
+def _status_outcome(raw):
+    """Interpret only verified values; other NTSTATUS/HRESULT values stay unknown.
+
+    MS-ERREF lists 0 as STATUS_SUCCESS and 0xc000006d as STATUS_LOGON_FAILURE:
+    https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+    """
+    if type(raw) is int:
+        number = raw
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if re.fullmatch(r"0[xX][0-9a-fA-F]{1,8}", value):
+            number = int(value, 16)
+        elif re.fullmatch(r"[0-9]{1,10}", value, flags=re.ASCII):
+            number = int(value, 10)
+        else:
+            return "unknown"
+    else:
+        return "unknown"
+    return {0: "success", 0xC000006D: "failure"}.get(number, "unknown")
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:35-53`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L35-L53)
+
+[54] 일치 수가 정확하지 않으면 요약에 진단을 보라는 문장을 붙인다.
+
+```python
+            if not data.get("total_matched_exact", True):
+                if kind == "ntlm_summary":
+                    # A prefix singleton can cease to be rare after more records
+                    # are scanned, so unusual_only totals are not lower bounds.
+                    summary += " Match count is inexact; inspect scan diagnostics."
+                else:
+                    summary += " Match count is a lower bound; inspect scan diagnostics."
+```
+
+[`winforensics_mcp/evtx_response.py:123-129`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L123-L129)
+
+[55] 출처 검색이 예외로 끝나면 `searched` 참, `found` 거짓으로 남긴다.
+
+```python
+    except Exception as e:
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "searched": True,
+            "found": False,
+            "error": str(e),
+        }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:246-253`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L246-L253)
+
+[56] 개요는 드문 조합을 고르기 전의 이벤트 범위로 만들고 예시마다 `unusual`을 붙인다.
+
+```python
+    rare_pairs = sorted(
+        representatives.items(),
+        key=lambda item: (pair_counts[item[0]], item[1][2] is None, item[1][2] or _MIN_TIME, item[1][0]),
+    )
+    examples = [
+        {**dict(zip(_PAIR_FIELDS, pair)), "count": pair_counts[pair],
+         "unusual": pair_counts[pair] <= threshold,
+         "TimeCreated": entry[1]["TimeCreated"], "event_ref": entry[1]["event_ref"]}
+        for pair, entry in rare_pairs[:limit]
+    ]
+    return {
+        "scope": "filtered_events_before_rarity_filter",
+        "event_id_counts": dict(Counter(str(row["EventID"]) for _, row, _ in entries)),
+        "top_processes": top(process_fields), "top_users": top(user_fields),
+        "rare_process_user_examples": examples,
+        **_bounds(entries, scope_complete),
+    }
+```
+
+[`winforensics_mcp/parsers/ntlm_summary.py:124-140`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntlm_summary.py#L124-L140)

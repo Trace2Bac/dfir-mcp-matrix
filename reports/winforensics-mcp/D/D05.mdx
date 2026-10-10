@@ -1,0 +1,307 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.02
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 `evtx_export`, `triage_dir`을 준 `vt_lookup_behavior`, `remote_collect_artifacts`의 파일 쓰기에 적용된다 [1][2][3].
+
+`evtx_export`는 폴더 만들기, 임시 파일 만들기와 쓰기, `fsync`, 게시에서 난 예외를 처리하지 않고 호출한 쪽으로 넘긴다 [1][4].
+쓴 바이트 수가 쓰려던 길이보다 짧으면 `OSError`를 일으킨다 [1].
+실패하면 이 호출이 만든 임시 파일과 게시하려던 이름만 inode를 대조해 지운다 [4].
+`call_tool`은 `evtx_export`에서 난 예외를 `isError`가 참인 결과로 바꿔 돌려준다 [5].
+
+`vt_lookup_behavior`는 `triage_dir` 폴더 만들기와 파일 쓰기에서 난 `OSError`를 처리하지 않는다 [2].
+도구 분기는 `ValueError`·`RuntimeError`만 처리하므로 `OSError`는 `call_tool`까지 올라간다 [6].
+`call_tool`은 이 예외를 `{"error": …}` 한 칸짜리 JSON 글로 돌려주고 `isError`는 세우지 않는다 [5].
+이때 요약 결과를 담은 응답은 나가지 않는다 [7].
+
+`remote_collect_artifacts`는 아티팩트마다 원격 명령 실패, base64 풀기, 로컬 파일 쓰기에서 난 예외를 처리해 그 아티팩트의 `success`를 거짓으로, `error`에 예외 문구를 담는다 [3].
+응답은 아티팩트마다 이 두 값을 담은 목록이다 [8].
+`output_dir`과 그 아래 폴더를 만들다 난 예외는 처리하지 않아 호출 전체가 `{"error": …}` 글로 끝난다 [9][5][7].
+
+**한계.** `vt_lookup_behavior`와 `remote_collect_artifacts`는 목적지 파일에 바로 쓰고 실패했을 때 쓰다 만 파일을 지우지 않는다 [2][3].
+`write_text`와 `write_bytes`는 파일을 쓰기 모드로 열어 기존 내용을 먼저 비우므로 쓰기 도중 실패하면 그 이름에 있던 앞 파일도 남지 않는다 [2][3][10].
+`remote_collect_artifacts`는 일부 아티팩트를 쓰지 못해도 `isError`를 세우지 않는다 [8][5].
+
+### D05.02 저장 확인·검증
+
+**구현.** 이 방식은 `evtx_export`에 적용된다 [4].
+`evtx_export`는 행을 `.part` 임시 파일에 다 쓰고 `flush`·`fsync`한 뒤에야 게시 이름을 붙인다 [1][4].
+게시하기 전에 쓴 행 수가 쿼리가 고른 행 수와 같은지, 원본 EVTX의 식별값이 쓰기 전과 같은지 확인하고 다르면 게시하지 않는다 [11].
+게시하기 전에 응답을 미리 만들어 출력 스키마로 검사한다 [12].
+응답이 크기 상한에 맞지 않거나 검사에 실패하면 게시하지 않는다 [12][13].
+게시 이름을 붙인 뒤 원본 식별값이 바뀐 것을 알면 게시한 이름도 지우고 오류로 끝낸다 [4].
+응답의 `path`는 게시가 끝난 뒤에만 나간다 [4].
+쓴 파일을 다시 읽어 해시를 대조하지는 않는다 [1].
+
+### 근거
+
+[1] 내보내기는 짧은 쓰기를 오류로 보고 쓰기를 마치면 `flush`·`fsync`한다.
+
+```python
+        with stream:
+            for event in events:
+                # Read at most one extra projected row to distinguish an exact
+                # boundary from an actual export cap. Never write that row.
+                if max_rows is not None and exported_rows >= max_rows:
+                    export_limit_hit = True
+                    break
+                encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"),
+                                      allow_nan=False) + "\n").encode("utf-8")
+                written = stream.write(encoded)
+                if written != len(encoded):
+                    raise OSError("Short write while exporting EVTX records")
+                digest.update(encoded)
+                exported_bytes += len(encoded)
+                exported_rows += 1
+                if len(preview) < preview_rows:
+                    preview.append(copy.deepcopy(event))
+            stream.flush()
+            os.fsync(stream.fileno())
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:145-163`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L145-L163)
+
+[2] 행동 요약 파일은 예외 처리 없이 `mkdir`·`write_text`로 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[3] WinRM 수집기는 쓰기 예외를 처리해 실패 결과로 돌려준다.
+
+```python
+            stdout, stderr, exit_code = self.run_command(ps_script)
+            
+            if exit_code != 0:
+                return CollectionResult(
+                    success=False,
+                    artifact_name=artifact_name,
+                    remote_path=remote_path,
+                    error=stderr or f"Exit code: {exit_code}",
+                )
+            
+            content = base64.b64decode(stdout.strip())
+
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(content)
+            
+            return CollectionResult(
+                success=True,
+                artifact_name=artifact_name,
+                local_path=local_path,
+                remote_path=remote_path,
+                size_bytes=len(content),
+            )
+            
+        except Exception as e:
+            return CollectionResult(
+                success=False,
+                artifact_name=artifact_name,
+                remote_path=remote_path,
+                error=str(e),
+            )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:179-208`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L179-L208)
+
+[4] 게시 뒤에도 원본을 다시 확인하며 끝나지 않은 호출은 자기가 만든 파일만 지운다.
+
+```python
+        published = _publish_without_overwrite(temporary, directory, result, validate_candidate,
+                                               publication_candidates)
+        _assert_unchanged(source_path, identity)
+        temporary.unlink()
+        temporary = None
+        result["path"] = str(published)
+        complete = True
+        return result
+    finally:
+        # Cleanup never masks a parse, disk-full, permission, or interruption
+        # exception. Only paths allocated by this call may be removed.
+        if temporary is not None:
+            _remove_owned_file(temporary, owned_identity)
+        if not complete:
+            for candidate in publication_candidates:
+                _remove_owned_file(candidate, owned_identity)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:193-208`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L193-L208)
+
+[5] `call_tool`은 이름 목록에 둔 EVTX·NTDS·보안 설명자 도구의 예외만 `isError` 결과로 바꾸고 나머지는 `error` 글로 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[6] `vt_lookup_behavior` 분기는 `ValueError`·`RuntimeError`만 처리한다.
+
+```python
+    elif name == "vt_lookup_behavior":
+        if not VT_AVAILABLE:
+            return json_response({
+                "error": "vt-py library not installed. Install with: pip install vt-py"
+            })
+        try:
+            result = await asyncio.to_thread(
+                vt_lookup_behavior,
+                args["file_hash"],
+                args.get("triage_dir"),
+                args.get("limit", 10),
+            )
+            return json_response(result)
+        except (ValueError, RuntimeError) as e:
+            return json_response({"error": str(e)})
+```
+
+[`winforensics_mcp/server.py:2826-2840`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2826-L2840)
+
+[7] (실행 확인) 쓰기 실패를 만들어 세 도구의 응답을 확인했다.
+`output_dir`에 일반 파일 경로를 준 `evtx_export`는 `isError`가 참이고 `[Errno 17] File exists`를 담은 결과를 돌려주었다.
+`os.link`가 `ENOSPC`로 실패하게 바꾼 `evtx_export`도 `isError`가 참인 결과를 돌려주었고 `output_dir`에는 파일이 남지 않았다.
+`triage_dir`에 일반 파일 경로를 준 `vt_lookup_behavior`와 `output_dir`에 일반 파일 경로를 준 `remote_collect_artifacts`는 `isError` 없이 `{"error": "[Errno 17] File exists: …"}` 글만 돌려주었다.
+`registry/SAM` 자리에 폴더를 둔 `remote_collect_artifacts`는 그 항목만 `success`가 거짓이고 `error`가 `[Errno 21] Is a directory`인 목록을 돌려주었다.
+
+[8] `remote_collect_artifacts` 응답은 아티팩트별 결과 목록이다.
+
+```python
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3469-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3469-L3478)
+
+[9] 수집 폴더 만들기는 `try` 밖에 있다.
+
+```python
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_evtx:
+        evtx_dir = output_dir / "evtx"
+        evtx_dir.mkdir(exist_ok=True)
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:394-399`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L394-L399)
+
+[10] 실행 환경의 CPython 3.12.15 `pathlib`은 `write_bytes`를 `wb`, `write_text`를 `w` 모드로 연다: [`Lib/pathlib.py:1030-1048`](https://github.com/python/cpython/blob/f9e83c56c657be0a74ede2b5c523de4f9191d117/Lib/pathlib.py#L1030-L1048).
+
+[11] 게시 전에 행 수와 원본 식별값을 확인한다.
+
+```python
+        if not export_limit_hit and exported_rows != metadata["total_matched"]:
+            raise ValueError("EVTX export iterator did not match the prepared query count")
+        _assert_unchanged(source_path, identity)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:164-166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L164-L166)
+
+```python
+        def validate_candidate(candidate: dict[str, Any]) -> None:
+            if validate_result is not None:
+                validate_result(candidate)
+            _assert_unchanged(source_path, identity)
+
+        published = _publish_without_overwrite(temporary, directory, result, validate_candidate,
+                                               publication_candidates)
+        _assert_unchanged(source_path, identity)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:188-195`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L188-L195)
+
+[12] 서버는 내보내기 함수에 응답을 미리 만들고 출력 스키마로 검사하는 함수를 넘긴다.
+
+```python
+        prepared_response = None
+
+        def prepare_response(data):
+            nonlocal prepared_response
+            prepared_response = evtx_export_response(data, max_chars=max_chars)
+            validate_json_schema(prepared_response.structuredContent, EVTX_EXPORT_SCHEMA)
+
+        export_evtx_events(
+            args["evtx_path"], args["output_dir"],
+            start_time=datetime.fromisoformat(args["start_time"].replace("Z", "+00:00")) if args.get("start_time") else None,
+            end_time=datetime.fromisoformat(args["end_time"].replace("Z", "+00:00")) if args.get("end_time") else None,
+            event_ids=args.get("event_ids"), contains=args.get("contains"),
+            not_contains=args.get("not_contains"), provider=args.get("provider"),
+            where=args.get("where"), where_case_sensitive=args.get("where_case_sensitive", True),
+            fields=args.get("fields"), compact=args.get("compact", False),
+            timestamp_precision=args.get("timestamp_precision", "full"),
+            max_scan=args.get("max_scan", MAX_SCAN_EVENTS), max_rows=args.get("max_rows"),
+            preview_rows=args.get("preview_rows", 10), validate_result=prepare_response,
+        )
+        if prepared_response is None:
+            raise RuntimeError("Exporter did not validate a response before publishing")
+        return prepared_response
+```
+
+[`winforensics_mcp/server.py:2608-2629`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2608-L2629)
+
+[13] 응답이 미리보기를 다 빼도 크기 상한을 넘으면 오류를 일으켜 게시를 막는다.
+
+```python
+def evtx_export_response(data: dict[str, Any], *, max_chars: int = COMPACT_RESPONSE_CHARS) -> CallToolResult:
+    """Budget only a preview; validate before the exporter publishes its file."""
+    validate_budget(max_chars)
+    result_data = {
+        **data, "preview": list(data["preview"]),
+        "preview_available": len(data["preview"]), "preview_returned": len(data["preview"]),
+        "preview_clipped": False, "payload_clipped": False,
+        "serialized_chars": 0, "returned_chars": 0,
+    }
+    result = _measure(result_data, True, original=True)
+    if result_data["returned_chars"] <= max_chars:
+        return result
+    original_chars = result_data["serialized_chars"]
+    while result_data["preview"]:
+        result_data["preview"].pop()
+        result_data["preview_returned"] = len(result_data["preview"])
+        result_data["preview_clipped"] = result_data["payload_clipped"] = True
+        result_data["serialized_chars"] = original_chars
+        result = _measure(result_data, True)
+        if result_data["returned_chars"] <= max_chars:
+            return result
+    raise ValueError(
+        "Export metadata exceeds max_chars; increase max_chars or shorten query/path metadata. "
+        "No export file was published."
+    )
+```
+
+[`winforensics_mcp/evtx_response.py:233-257`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L233-L257)

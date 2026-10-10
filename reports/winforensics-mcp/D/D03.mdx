@@ -1,0 +1,149 @@
+---
+cell: D03
+details:
+- id: D03.01
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 `evtx_export`의 JSON Lines 파일에 적용된다 [1].
+`evtx_export`는 행을 임시 파일에 쓰면서 쓴 바이트를 그대로 SHA-256에 넣는다 [1].
+기준값은 파일 내용 전체의 SHA-256과 바이트 수, 행 수다 [1][2].
+서버는 이 값을 응답의 `sha256`·`exported_bytes`·`exported_rows`에만 싣고 파일이나 다른 저장소에 남기지 않는다 [2][3].
+응답 스키마는 `sha256`을 소문자 16진수 64자로 정한다 [3].
+
+`vt_lookup_behavior`의 행동 요약 파일과 `remote_collect_artifacts`의 수집 파일에는 기준값을 계산하지 않는다 [4][5].
+`remote_collect_artifacts`는 수집 파일마다 크기만 응답에 싣는다 [5][6].
+내보낸 파일이나 수집 파일을 다시 읽어 기준값과 대조하는 도구는 없다.
+
+### 근거
+
+[1] 내보내기 함수는 파일에 쓰는 바이트와 같은 바이트로 해시를 갱신한다.
+
+```python
+        with stream:
+            for event in events:
+                # Read at most one extra projected row to distinguish an exact
+                # boundary from an actual export cap. Never write that row.
+                if max_rows is not None and exported_rows >= max_rows:
+                    export_limit_hit = True
+                    break
+                encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":"),
+                                      allow_nan=False) + "\n").encode("utf-8")
+                written = stream.write(encoded)
+                if written != len(encoded):
+                    raise OSError("Short write while exporting EVTX records")
+                digest.update(encoded)
+                exported_bytes += len(encoded)
+                exported_rows += 1
+                if len(preview) < preview_rows:
+                    preview.append(copy.deepcopy(event))
+            stream.flush()
+            os.fsync(stream.fileno())
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:145-163`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L145-L163)
+
+[2] 해시와 바이트 수는 함수가 돌려주는 `result`에만 담긴다.
+
+```python
+        result = {
+            "format": "jsonl",
+            "sha256": digest.hexdigest(), "exported_rows": exported_rows,
+            "exported_bytes": exported_bytes,
+            "export_complete": bool(metadata["scan_complete"] and metadata["total_matched_exact"]
+                                    and metadata["parse_errors"] == 0
+                                    and metadata.get("time_filter_errors", 0) == 0 and not export_limit_hit),
+            "scan_complete": metadata["scan_complete"], "scan_limit_hit": metadata["scan_limit_hit"],
+            "parse_errors": metadata["parse_errors"], "total_matched": metadata["total_matched"],
+            "time_filter_errors": metadata.get("time_filter_errors", 0),
+            "total_matched_exact": metadata["total_matched_exact"],
+            "export_limit_hit": export_limit_hit,
+            "source": {"path": identity[0], "size": identity[1], "mtime_ns": identity[2]},
+            "query_ref": query_ref, "query": query, "preview": preview,
+        }
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:173-187`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L173-L187)
+
+[3] 내보내기 응답 스키마는 `sha256`을 필수 칸으로 둔다.
+
+```python
+EVTX_EXPORT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "path", "sha256", "exported_rows", "exported_bytes", "export_complete",
+        "scan_complete", "export_limit_hit", "preview", "preview_returned",
+        "preview_clipped", "payload_clipped", "serialized_chars", "returned_chars",
+    ],
+    "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "exported_rows": {"type": "integer", "minimum": 0},
+        "exported_bytes": {"type": "integer", "minimum": 0},
+        "export_complete": {"type": "boolean"},
+        "scan_complete": {"type": "boolean"},
+        "time_filter_errors": {"type": "integer", "minimum": 0},
+        "export_limit_hit": {"type": "boolean"},
+        "preview": {"type": "array", "items": {"type": "object"}},
+        "preview_returned": {"type": "integer", "minimum": 0},
+        "preview_clipped": {"type": "boolean"},
+        "payload_clipped": {"type": "boolean"},
+        "serialized_chars": {"type": "integer", "minimum": 0},
+        "returned_chars": {"type": "integer", "minimum": 0},
+    },
+}
+```
+
+[`winforensics_mcp/evtx_response.py:48-71`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L48-L71)
+
+[4] 행동 요약 파일은 해시 계산 없이 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[5] 수집 파일은 쓰고 나서 크기만 결과에 담는다.
+
+```python
+            content = base64.b64decode(stdout.strip())
+
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(content)
+            
+            return CollectionResult(
+                success=True,
+                artifact_name=artifact_name,
+                local_path=local_path,
+                remote_path=remote_path,
+                size_bytes=len(content),
+            )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:189-200`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L189-L200)
+
+[6] `remote_collect_artifacts` 응답은 `size_bytes`만 싣는다.
+
+```python
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3469-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3469-L3478)

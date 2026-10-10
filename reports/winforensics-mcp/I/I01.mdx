@@ -1,0 +1,262 @@
+---
+cell: I01
+details:
+- id: I01.02
+- id: I01.03
+- id: I01.05
+- id: I01.08
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.02 자격증명 존재로 활성화
+
+**구현.** 이 방식은 VirusTotal 조회 도구 `vt_lookup_hash`·`vt_lookup_behavior`·`vt_lookup_ip`·`vt_lookup_domain`·`vt_lookup_file`에 적용된다 [1].
+다섯 도구는 `vt-py`를 불러올 수 있으면 API 키가 없어도 도구 목록에 오른다 [1].
+조회 함수는 요청 전에 `check_api_key`로 API 키를 읽는다 [2].
+키는 환경변수 `VIRUSTOTAL_API_KEY`에서 먼저 찾고 없으면 `~/.config/winforensics-mcp/vt_api_key` 파일에서 찾는다 [2].
+둘 다 없으면 `ValueError`를 내고 VirusTotal에 요청하지 않는다 [2].
+서버는 이 예외를 키 설정 방법을 적은 `error` 응답으로 돌려준다 [3].
+키는 조회할 때마다 다시 읽는다 [2].
+환경변수가 없을 때 키 파일을 고치면 서버를 다시 시작하지 않아도 다음 조회부터 바뀐 키를 쓴다 [2].
+`vt_lookup_behavior`를 뺀 네 도구의 설명은 `VIRUSTOTAL_API_KEY` 환경변수가 필요하다고 적고 키 파일은 적지 않는다 [1].
+`vt_lookup_behavior`의 설명에는 키가 필요하다는 문구가 없다 [1].
+
+### I01.03 기본 활성화
+
+**구현.** 이 방식은 WinRM 원격 수집 도구 `remote_collect_artifacts`·`remote_get_system_info`에 적용된다 [4].
+두 도구는 `pywinrm`을 불러올 수 있으면 도구 목록에 오르고 연결을 켜는 서버 설정은 없다 [4][5].
+`pywinrm`은 `pyproject.toml`의 선택 의존성 `remote`에 있다 [6].
+접속할 호스트와 사용자 이름, 비밀번호나 NTLM 해시는 모두 호출 인자로 받는다 [4].
+서버는 비밀번호와 NTLM 해시가 모두 없을 때만 연결하지 않고 오류를 돌려준다 [7].
+
+저장소에는 SSH(`paramiko`)와 SMB(`smbprotocol`)로 파일을 받는 수집 클래스 `SSHCollector`·`SMBCollector`도 있다 [8].
+MCP 도구는 이 두 클래스를 쓰지 않고 `WinRMCollector`만 만든다 [7][9].
+
+### I01.05 고정 목적지
+
+**구현.** 이 방식은 VirusTotal 조회 도구 다섯 개에 적용된다 [10].
+조회 함수는 `vt.Client`에 API 키만 넘기고 접속 주소를 넘기지 않는다 [10].
+`vt-py` 0.22.0의 `Client`는 `host`를 받지 않으면 `https://www.virustotal.com`을 쓴다 [11].
+`trust_env`의 기본값이 거짓이어서 `HTTP_PROXY`·`HTTPS_PROXY` 환경변수의 프록시도 쓰지 않는다 [11].
+접속 주소를 바꾸는 서버 설정, 환경변수, 도구 인자는 없다 [1][10].
+해시·IP 주소·도메인 인자는 이 주소의 경로에만 들어간다 [10].
+
+### I01.08 호출자가 목적지 지정
+
+**구현.** 이 방식은 WinRM 원격 수집 도구 `remote_collect_artifacts`·`remote_get_system_info`에 적용된다 [4].
+두 도구는 접속할 호스트를 인자 `host`로 받는다 [4].
+`WinRMCollector`는 이 값으로 `http://{host}:5985/wsman` 주소를 만들어 `winrm.Session`에 넘긴다 [12].
+서버는 이 값을 허용 목록이나 형식과 대조하지 않는다 [7][12].
+도구에는 포트와 TLS를 고르는 인자가 없어 서버는 늘 `use_ssl` 기본값 거짓으로 http 5985번 포트에 NTLM 인증으로 접속한다 [12].
+`pywinrm` 0.5.0은 http 주소에서 NTLM 인증을 쓰면 WinRM 메시지 암호화를 켠다 [13].
+`pywinrm` 0.5.0의 `Session`은 받은 주소를 다시 해석해 호스트 뒤의 포트를 읽는다 [14].
+그래서 `host`에 `evil.example:8080`을 주면 서버가 붙인 5985 대신 8080번 포트로 접속하는 주소가 만들어진다 [15].
+
+### 근거
+
+[1] VirusTotal 도구 다섯 개는 `VT_AVAILABLE`일 때 목록에 오르고 네 도구의 설명이 `VIRUSTOTAL_API_KEY`가 필요하다고 적는다: [`winforensics_mcp/server.py:927-1027`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L927-L1027).
+`VT_AVAILABLE`은 `vt`를 불러올 수 있는지로 정한다.
+
+```python
+try:
+    import vt
+    VT_AVAILABLE = True
+except ImportError:
+    VT_AVAILABLE = False
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:24-28`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L24-L28)
+
+[2] API 키를 환경변수와 키 파일에서 읽고 없으면 `ValueError`를 낸다.
+
+```python
+def get_api_key() -> Optional[str]:
+    """
+    Get VirusTotal API key from (in order):
+    1. Environment variable: VIRUSTOTAL_API_KEY
+    2. Config file: ~/.config/winforensics-mcp/vt_api_key
+    3. None (functions will raise error)
+    """
+    # Environment variable
+    if key := os.environ.get("VIRUSTOTAL_API_KEY"):
+        return key.strip()
+
+    # Config file
+    config_file = Path.home() / ".config" / "winforensics-mcp" / "vt_api_key"
+    if config_file.exists():
+        return config_file.read_text().strip()
+
+    return None
+
+
+def check_api_key() -> str:
+    """Get API key or raise error if not configured."""
+    key = get_api_key()
+    if not key:
+        raise ValueError(
+            "VirusTotal API key not configured. Either:\n"
+            "1. Set VIRUSTOTAL_API_KEY environment variable\n"
+            "2. Create ~/.config/winforensics-mcp/vt_api_key with your key"
+        )
+    return key
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:48-76`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L48-L76)
+
+[3] (실행 확인) `VIRUSTOTAL_API_KEY`가 없고 키 파일도 없을 때 `vt_lookup_ip`는 `vt.Client`를 만들지 않고 `{"error": "VirusTotal API key not configured. …"}`를 돌려준다.
+환경변수를 지우고 키 파일에 값을 둔 뒤 `vt_lookup_domain`을 부르면 `vt.Client`가 그 파일의 값을 키로 받는다.
+
+[4] 원격 수집 도구 두 개는 `WINRM_AVAILABLE`일 때 목록에 오르고 호스트·사용자·비밀번호·NTLM 해시를 인자로 받는다: [`winforensics_mcp/server.py:2428-2461`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2428-L2461).
+
+[5] `WINRM_AVAILABLE`은 `winrm`을 불러올 수 있는지로 정한다.
+
+```python
+# Optional imports for remote collection
+try:
+    import winrm
+    WINRM_AVAILABLE = True
+except ImportError:
+    WINRM_AVAILABLE = False
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:10-15`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L10-L15)
+
+[6] `pywinrm`·`paramiko`·`smbprotocol`은 선택 의존성 `remote`에 있다.
+
+```toml
+[project.optional-dependencies]
+remote = [
+    "pywinrm>=0.4.3",
+    "paramiko>=3.4.0",
+    "smbprotocol>=1.12.0",
+]
+```
+
+[`pyproject.toml:33-38`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/pyproject.toml#L33-L38)
+
+[7] 원격 수집 도구 처리는 비밀번호나 NTLM 해시가 있는지만 확인하고 `WinRMCollector`를 만든다.
+
+```python
+    elif name == "remote_collect_artifacts":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3456-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3456-L3478)
+
+```python
+    elif name == "remote_get_system_info":
+        if not WINRM_AVAILABLE:
+            return json_response({"error": "pywinrm not installed"})
+        password = args.get("password")
+        ntlm_hash = args.get("ntlm_hash")
+        if not password and not ntlm_hash:
+            return json_response({"error": "Either password or ntlm_hash must be provided"})
+        collector = WinRMCollector(
+            host=args["host"],
+            username=args["username"],
+            password=password,
+            ntlm_hash=ntlm_hash,
+        )
+        return json_response(collector.get_system_info())
+```
+
+[`winforensics_mcp/server.py:3480-3493`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3480-L3493)
+
+[8] `SSHCollector`·`SMBCollector`는 수집 모듈에 정의되어 있다: [`winforensics_mcp/collectors/artifact_collector.py:252-383`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L252-L383).
+
+[9] 서버는 수집 모듈에서 `WinRMCollector`·`collect_triage_package`·`WINRM_AVAILABLE`만 불러온다.
+
+```python
+from .collectors import (
+    WinRMCollector,
+    collect_triage_package,
+    WINRM_AVAILABLE,
+)
+```
+
+[`winforensics_mcp/server.py:118-122`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L118-L122)
+
+[10] 조회 함수는 `vt.Client`에 API 키만 넘기고 값을 고정 경로에 넣는다: [`winforensics_mcp/parsers/virustotal_client.py:167-169`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L167-L169), [`winforensics_mcp/parsers/virustotal_client.py:273-275`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L273-L275), [`winforensics_mcp/parsers/virustotal_client.py:385-387`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L385-L387), [`winforensics_mcp/parsers/virustotal_client.py:479-481`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L479-L481).
+
+[11] `vt-py` 0.22.0의 `Client`는 `host`가 없으면 `_API_HOST`를 쓰고 `trust_env` 기본값은 거짓이다: [`vt/client.py:37`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/client.py#L37), [`vt/client.py:209-229`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/client.py#L209-L229), [`vt/client.py:277-281`](https://github.com/VirusTotal/vt-py/blob/09a98c8f36d7b1cf04236b9f0fa4853c5b3325c1/vt/client.py#L277-L281).
+
+[12] `WinRMCollector`는 `host`로 http 5985번 주소를 만들고 NTLM 인증으로 `winrm.Session`을 만든다.
+
+```python
+class WinRMCollector:
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: Optional[str] = None,
+        ntlm_hash: Optional[str] = None,
+        port: int = 5985,
+        use_ssl: bool = False,
+        transport: str = "ntlm",
+    ):
+        if not WINRM_AVAILABLE:
+            raise ImportError("pywinrm not installed. Install with: pip install pywinrm")
+
+        if not password and not ntlm_hash:
+            raise ValueError("Either password or ntlm_hash must be provided")
+
+        if password and ntlm_hash:
+            raise ValueError("Cannot use both password and ntlm_hash - choose one")
+
+        self.host = host
+        self.username = username
+        self.port = port
+        self.use_ssl = use_ssl
+
+        if ntlm_hash:
+            if ":" in ntlm_hash:
+                auth_password = ntlm_hash
+            else:
+                auth_password = f"00000000000000000000000000000000:{ntlm_hash}"
+            self.password = auth_password
+            self.using_pth = True
+        else:
+            self.password = password
+            self.using_pth = False
+
+        protocol = "https" if use_ssl else "http"
+        self.url = f"{protocol}://{host}:{port}/wsman"
+
+        self.session = winrm.Session(
+            self.url,
+            auth=(username, self.password),
+            transport=transport,
+            server_cert_validation="ignore" if use_ssl else None,
+        )
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:74-118`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L74-L118)
+
+[13] `pywinrm` 0.5.0은 `message_encryption`이 `auto`이고 주소가 https가 아니면 암호화를 켠다: [`winrm/transport.py:298-305`](https://github.com/diyan/pywinrm/blob/bf01aac15512caa00f07858ce09168f2a4e11847/winrm/transport.py#L298-L305).
+
+[14] `pywinrm` 0.5.0의 `Session`은 받은 주소에서 스킴·호스트·포트·경로를 다시 읽는다: [`winrm/__init__.py:37-40`](https://github.com/diyan/pywinrm/blob/bf01aac15512caa00f07858ce09168f2a4e11847/winrm/__init__.py#L37-L40), [`winrm/__init__.py:107-124`](https://github.com/diyan/pywinrm/blob/bf01aac15512caa00f07858ce09168f2a4e11847/winrm/__init__.py#L107-L124).
+
+[15] (실행 확인) `WinRMCollector(host=…)`가 만든 `winrm.Session`의 주소는 `10.0.0.5`에서 `http://10.0.0.5:5985/wsman`, `evil.example:8080`에서 `http://evil.example:8080/wsman`, `attacker.example:80/x?`에서 `http://attacker.example:80/`이다.
+세 경우 모두 인증 방식은 `ntlm`, `message_encryption`은 `auto`다.

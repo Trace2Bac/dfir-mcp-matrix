@@ -1,0 +1,194 @@
+---
+cell: I03
+details:
+- id: I03.01
+- id: I03.02
+---
+
+# I03 외부 전송 범위 구성
+
+### I03.01 해시 전송
+
+**구현.** 이 방식은 `vt_lookup_hash`·`vt_lookup_behavior`·`vt_lookup_file`에 적용된다 [1][2][3].
+`vt_lookup_hash`는 받은 해시를 소문자로 바꾸고 앞뒤 공백을 지운 뒤 VirusTotal 파일 조회 경로 `/files/<해시>`에 넣어 보낸다 [1].
+`vt_lookup_behavior`는 같은 해시를 행위 요약 경로 `/files/<해시>/behaviour_summary`에 넣어 보낸다 [2].
+`vt_lookup_file`은 서버에서 파일의 MD5·SHA-1·SHA-256을 계산하고 SHA-256만 `vt_lookup_hash`와 같은 경로로 보낸다 [3][4].
+파일 내용은 올리지 않는다 [3][4].
+`vt_lookup_behavior`의 도구 설명도 표본을 올리지 않는다고 적는다 [5].
+
+**한계.** `vt_lookup_hash`·`vt_lookup_behavior`는 해시 길이가 32·40·64자인지만 검사하고 16진수인지는 검사하지 않는다 [1].
+그래서 해시가 아닌 32자 문자열도 VirusTotal로 나간다 [4].
+
+### I03.02 메타데이터·추출 값 전송
+
+**구현.** 이 방식은 `vt_lookup_ip`·`vt_lookup_domain`에 적용된다 [6].
+`vt_lookup_ip`는 받은 IP 주소의 앞뒤 공백만 지우고 `/ip_addresses/<값>` 경로에 넣어 보낸다 [6].
+`vt_lookup_domain`은 받은 도메인을 소문자로 바꾸고 앞뒤 공백을 지운 뒤 `/domains/<값>` 경로에 넣어 보낸다 [6].
+값은 모델이 인자로 준다.
+서버는 보내기 전에 내부 주소나 사설 도메인을 빼거나 가리지 않는다 [6].
+
+WinRM 원격 수집 도구는 원격 호스트에 코드에 정해 둔 PowerShell 스크립트를 보낸다 [7].
+스크립트에 넣는 값은 코드에 정해 둔 이벤트 로그·레지스트리 하이브 경로뿐이고 증거에서 뽑은 값은 넣지 않는다 [7].
+
+**한계.** 두 도구는 값이 IP 주소나 도메인 형식인지 검사하지 않는다 [6].
+그래서 `not an ip/../x` 같은 문자열도 그대로 VirusTotal 요청 경로에 들어간다 [4].
+
+### 근거
+
+[1] `vt_lookup_hash`는 해시를 정규화해 길이로 종류를 정하고 `/files/<해시>`를 조회한다.
+
+```python
+def _normalize_hash(file_hash: str) -> tuple[str, str]:
+    """Normalize hash and determine type."""
+    file_hash = file_hash.lower().strip()
+    hash_types = {32: "md5", 40: "sha1", 64: "sha256"}
+    hash_type = hash_types.get(len(file_hash), "unknown")
+    return file_hash, hash_type
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:111-116`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L111-L116)
+
+```python
+    check_vt_available()
+    api_key = check_api_key()
+
+    file_hash, hash_type = _normalize_hash(file_hash)
+
+    if hash_type == "unknown":
+        return {
+            "hash": file_hash,
+            "hash_type": "unknown",
+            "found": False,
+            "error": f"Invalid hash length ({len(file_hash)}). Expected 32 (MD5), 40 (SHA1), or 64 (SHA256).",
+        }
+
+    # Check cache
+    cache_key = f"hash:{file_hash}"
+    if cached := _get_cached(cache_key):
+        return cached
+
+    _rate_limit()
+
+    try:
+        with vt.Client(api_key) as client:
+            file_obj = client.get_object(f"/files/{file_hash}")
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:147-169`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L147-L169)
+
+[2] `vt_lookup_behavior`는 같은 정규화 뒤 행위 요약 경로를 조회한다.
+
+```python
+    check_vt_available()
+    api_key = check_api_key()
+    file_hash, hash_type = _normalize_hash(file_hash)
+    if hash_type == "unknown":
+        return {
+            "hash": file_hash,
+            "found": False,
+            "error": f"Invalid hash length ({len(file_hash)})",
+        }
+    limit = max(1, min(int(limit), 25))
+    _rate_limit()
+    try:
+        with vt.Client(api_key) as client:
+            response = client.get_json(f"/files/{file_hash}/behaviour_summary")
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:262-275`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L262-L275)
+
+[3] `vt_lookup_file`은 파일 해시를 계산하고 SHA-256으로 `lookup_hash`를 부른다.
+
+```python
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Calculate all hashes
+    md5 = hashlib.md5()
+    sha1 = hashlib.sha1()
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            md5.update(chunk)
+            sha1.update(chunk)
+            sha256.update(chunk)
+
+    local_hashes = {
+        "md5": md5.hexdigest(),
+        "sha1": sha1.hexdigest(),
+        "sha256": sha256.hexdigest(),
+    }
+
+    # Look up using SHA256 (most reliable)
+    result = lookup_hash(local_hashes["sha256"])
+    result["file_path"] = str(file_path)
+    result["local_hashes"] = local_hashes
+    result["file_size_local"] = file_path.stat().st_size
+
+    return result
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:557-584`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L557-L584)
+
+[4] (실행 확인) `vt.Client`를 요청을 기록하는 가짜 클라이언트로 바꾸고 도구를 불렀다.
+`vt_lookup_file`은 `/files/<SHA-256>` 한 번만 요청했다.
+`vt_lookup_hash`에 `z` 32자를 주면 `/files/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz`를 요청했다.
+3자 값을 주면 요청 없이 길이 오류를 돌려줬다.
+`vt_lookup_ip`에 `not an ip/../x`를 주면 `/ip_addresses/not an ip/../x`를 요청했다.
+
+[5] `vt_lookup_behavior` 도구 설명은 표본을 올리지 않는다고 적는다.
+
+```python
+                description="Return bounded VirusTotal sandbox behavior for a file hash. "
+                           "Projects domains, URLs, commands, registry writes, and file writes; "
+                           "optionally persists the full response under a supplied triage directory. "
+                           "Never uploads a sample.",
+```
+
+[`winforensics_mcp/server.py:949-952`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L949-L952)
+
+[6] `vt_lookup_ip`·`vt_lookup_domain`은 값을 정리만 하고 경로에 넣는다.
+
+```python
+    check_vt_available()
+    api_key = check_api_key()
+
+    ip_address = ip_address.strip()
+
+    # Check cache
+    cache_key = f"ip:{ip_address}"
+    if cached := _get_cached(cache_key):
+        return cached
+
+    _rate_limit()
+
+    try:
+        with vt.Client(api_key) as client:
+            ip_obj = client.get_object(f"/ip_addresses/{ip_address}")
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:373-387`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L373-L387)
+
+```python
+    check_vt_available()
+    api_key = check_api_key()
+
+    domain = domain.strip().lower()
+
+    # Check cache
+    cache_key = f"domain:{domain}"
+    if cached := _get_cached(cache_key):
+        return cached
+
+    _rate_limit()
+
+    try:
+        with vt.Client(api_key) as client:
+            domain_obj = client.get_object(f"/domains/{domain}")
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:467-481`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L467-L481)
+
+[7] 원격 수집은 정해 둔 경로 목록을 PowerShell 스크립트에 넣어 보낸다: [`winforensics_mcp/collectors/artifact_collector.py:32-56`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L32-L56), [`winforensics_mcp/collectors/artifact_collector.py:136-179`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L136-L179), [`winforensics_mcp/collectors/artifact_collector.py:386-425`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L386-L425).

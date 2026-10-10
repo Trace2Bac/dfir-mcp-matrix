@@ -1,0 +1,501 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.03
+- id: T07.04
+- id: T07.05
+- id: T07.06
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 방식은 선택 의존성 라이브러리, Detect It Easy 실행 파일 `diec`, SIDR 실행 파일, Windows API 정의 DB, 저장소에 들어 있는 YARA 규칙을 쓰는 도구에 적용된다 [1][2][3][4][5].
+파서 모듈은 불러올 때 `pefile`·`yara`·`vt`·`scapy`·`pyscca`·`pyesedb`·`mft`·`pylnk3`·`winrm`을 `import`로 시험하고 결과를 `*_AVAILABLE` 플래그에 둔다 [1].
+`list_tools`는 플래그가 거짓인 라이브러리를 쓰는 도구를 목록에 올리지 않는다 [6].
+`_execute_tool`은 그 도구가 불리면 플래그를 다시 보고 실행하지 않는다 [7].
+`diec`는 모듈을 불러올 때 `PATH`와 정해 둔 설치 경로 6곳에서 찾고 찾지 못하면 `DIE_AVAILABLE`을 거짓으로 둔다 [2].
+`windows_search_parse`는 SIDR 후보 경로마다 실행 권한이 있는 파일인지 확인한다 [3].
+고른 실행 파일은 `--version`으로 시험 실행하고 종료 코드가 0이 아니거나 출력에 `0.9.2`가 없으면 분석을 실행하지 않는다 [8].
+`api_lookup`·`api_search_category`는 API 정의 DB 파일 `data/api_definitions.db`가 있는지 먼저 확인한다 [4].
+`yara_scan_file`·`yara_scan_directory`는 규칙 경로를 받지 않으면 패키지의 `rules` 폴더에 `.yar` 파일이 있는지 확인한다 [5].
+`investigate_execution`·`hunt_ioc`·`investigate_user_activity`는 아티팩트 출처마다 그 출처를 읽는 라이브러리의 플래그를 보고 플래그가 거짓이면 그 출처를 읽지 않는다 [9].
+
+**한계.** 다음 경로는 라이브러리나 참조 자료가 없을 때 그 단계를 실행하지 않고 그 사실을 응답에 싣지 않는다.
+
+- `hunt_ioc_pack`은 `scapy`가 없으면 `scan_pcap`이 참이어도 PCAP 검사를 건너뛰고 그 규칙의 PCAP 결과를 빈 목록으로 둔다 [10].
+- `build_timeline`은 `mft`, `pyscca`, `evtx` 라이브러리가 없으면 그 출처에서 사건을 만들지 않고 출처 상태를 `processed`로 둔다 [11].
+- `api_analyze_imports`는 `enrich_from_db`가 참이어도 DB 파일이 없으면 보강 단계를 빼고 `enrichment` 필드 없이 응답한다 [12].
+
+`diec` 확인은 모듈을 불러올 때 한 번만 한다 [2].
+서버가 실행되는 중에 `diec`가 지워지면 `die_analyze_file`은 실행 파일을 찾지 못한 예외를 `Failed to run diec` 문구로 돌려준다 [13].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 방식은 선택 의존성이 필요한 도구, `diec`를 쓰는 도구, SIDR을 명시하거나 대체 라이브러리도 없는 `windows_search_parse`, API 정의 DB를 쓰는 도구에 적용된다 [7][14][15][4].
+라이브러리가 없으면 `_execute_tool`은 다른 경로로 바꾸지 않고 `pefile library not installed. Install with: pip install pefile`처럼 라이브러리 이름과 설치 명령을 적은 `error`를 돌려준다 [7].
+`diec`가 없으면 `diec (Detect It Easy CLI) not found`와 내려받을 주소를 적은 `error`를 돌려준다 [14].
+실행 확인에서 `diec`가 없는 환경으로 `die_analyze_file`을 부르면 목록에 없는 도구인데도 이 문구가 응답으로 왔다 [16].
+`windows_search_parse`는 사용자가 `sidr_path`를 주었는데 그 파일이 없거나, 찾은 SIDR이 없고 `pyesedb`도 없으면 분석하지 않는다 [15].
+이때 응답의 `error`는 확인한 경로, `scripts/build_sidr.sh`로 빌드하거나 `WINFORENSICS_SIDR_PATH`를 정하라는 안내, `No backend was run` 문장을 싣는다 [15][16].
+SIDR 버전이 다르면 `SIDR 0.9.2 is required; observed …` 문구로 실패를 알린다 [8][16].
+`api_lookup`·`api_search_category`는 DB 파일이 없으면 그 경로와 DB를 먼저 만들라는 안내를 `error`로 돌려준다 [4].
+`investigate_execution`·`hunt_ioc`·`investigate_user_activity`는 라이브러리가 없는 출처를 `available: false`와 `libscca-python not installed` 같은 `error`로 응답의 출처 목록에 싣는다 [9].
+
+**한계.** 이 알림들은 MCP 오류 결과가 아니라 `isError`가 거짓인 정상 응답 글이다 [16].
+EVTX 라이브러리가 없을 때의 문구는 `python-evtx library not installed. Install with: pip install evtx`이다 [17].
+서버가 먼저 쓰는 라이브러리는 `evtx`이고 `python-evtx`는 그 라이브러리가 없을 때 쓰는 다른 라이브러리이므로 문구의 이름과 설치 명령이 가리키는 라이브러리가 다르다 [17].
+
+### T07.03 알림 없는 대체 실행
+
+**구현.** 이 방식은 EVTX를 읽는 모든 도구에 적용된다 [17].
+EVTX 파서 모듈은 불러올 때 Rust로 만든 `evtx` 라이브러리를 먼저 시험하고 없으면 순수 Python 라이브러리 `python-evtx`의 `Evtx`를 시험한다 [17].
+레코드를 읽을 때 `evtx`가 있으면 그 라이브러리의 JSON 출력을, 없으면 `Evtx`의 XML 출력을 사건으로 바꾼다 [18].
+EVTX 도구의 응답과 사건에는 어느 라이브러리로 읽었는지 적는 필드가 없다 [18].
+`pyproject.toml`의 필수 의존성에는 `evtx`가 있고 `python-evtx`는 없다 [19].
+그래서 이 대체는 `evtx`가 설치되지 않고 `python-evtx`가 따로 설치된 환경에서만 일어난다 [17][19].
+
+### T07.04 실행 환경별 경로 분기
+
+**구현.** 이 방식은 `windows_search_parse`의 SIDR 선택과 DiE 도구의 `diec` 선택에 적용된다 [3][2].
+`windows_search_parse`는 `sidr_path`를 받으면 그 경로만 본다 [3].
+받지 않으면 환경변수 `WINFORENSICS_SIDR_PATH`, 저장소의 `.tools/sidr`(ARM64)나 `.tools/sidr_x86`(x86_64), `PATH`의 `sidr` 차례로 보고 실행 권한이 있는 첫 파일을 쓴다 [3].
+저장소의 실행 파일은 `platform.machine()`이 `aarch64`·`arm64`이면 `sidr`, `x86_64`·`amd64`이면 `sidr_x86`을 고르고 그 밖의 아키텍처에서는 후보에서 빠진다 [3].
+응답은 확인한 경로 목록을 `checked_sidr_locations`에, 실행한 파일의 경로와 SHA-256을 `backend_metadata`에 싣는다 [15][20].
+실행 확인에서 x86_64 WSL로 경로를 주지 않고 부르면 `.tools/sidr_x86`이 골라지고 그 경로가 두 필드에 실렸다 [16].
+`diec`는 `PATH`를 먼저 보고 없으면 `/usr/bin/diec`, `/usr/local/bin/diec`, `/opt/die/diec`, `/opt/detect-it-easy/diec`, `~/.local/bin/diec`, `~/DIE/diec` 차례로 실행 파일을 찾는다 [2].
+DiE 도구의 응답에는 고른 `diec`의 경로가 없다 [21].
+
+### T07.05 대체 사실을 응답·기록에 표시
+
+**구현.** 이 방식은 `windows_search_parse`에 적용된다 [15].
+`sidr_path`를 받지 않았고 SIDR 후보 경로에 실행 파일이 없으며 `pyesedb`가 있으면 서버는 `pyesedb`로 `PropertyStore` 표를 직접 읽는다 [15][22].
+이때 응답의 `backend`는 `pyesedb`이고 SIDR로 읽으면 `sidr`이다 [22][20].
+`checked_sidr_locations`에는 SIDR을 찾으려고 확인한 경로가 남는다 [15].
+도구 설명도 SIDR이 없으면 부분 대체 경로를 쓴다고 적는다 [23].
+
+**한계.** 실행 확인에서 대체 경로가 ESE 형식이 아닌 파일을 읽으면 응답의 `error`에 여는 단계의 오류가 아니라 `pyesedb_file_close: unable to close file` 문구가 실렸다 [16].
+`_fallback_rows`는 `open`이 실패해도 `finally`에서 `close`를 부르고 `close`가 낸 예외가 앞선 예외를 대신한다 [22].
+
+### T07.06 대체에 따른 검증·입력 범위 변화 표시
+
+**구현.** 이 방식은 `windows_search_parse`의 `pyesedb` 대체 경로에 적용된다 [22].
+대체 경로는 시작할 때 `complete`와 `content_filter_complete`를 거짓으로 둔다 [22].
+진단 목록 `diagnostics`의 첫 줄에 긴 값과 압축된 검색 내용을 읽지 못하고 일치 0건이 결론이 되지 않는다는 문장을 싣는다 [22].
+읽지 못한 긴 값의 수는 `unsupported_long_values`에 센다 [22].
+`System_Search_AutoSummary` 열은 압축되어 있을 수 있어 대체 경로가 읽지 않는다 [22].
+실행 확인에서 대체 경로로 실행하면 `complete`와 `content_filter_complete`가 모두 거짓이었고 위 문장이 진단 첫 줄에 실렸다 [16].
+
+### 근거
+
+[1] 파서 모듈은 선택 의존성을 `import`로 시험해 플래그에 둔다: [`winforensics_mcp/parsers/pe_analyzer.py:11-15`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L11-L15), [`winforensics_mcp/parsers/yara_scanner.py:18-22`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L18-L22), [`winforensics_mcp/parsers/virustotal_client.py:24-28`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L24-L28), [`winforensics_mcp/parsers/pcap_parser.py:24-40`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L24-L40), [`winforensics_mcp/parsers/prefetch_parser.py:7-11`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L7-L11), [`winforensics_mcp/parsers/srum_parser.py:12-16`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/srum_parser.py#L12-L16), [`winforensics_mcp/parsers/mft_parser.py:13-17`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/mft_parser.py#L13-L17), [`winforensics_mcp/parsers/lnk_parser.py:14-18`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/lnk_parser.py#L14-L18), [`winforensics_mcp/collectors/artifact_collector.py:11-15`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L11-L15).
+
+[2] `diec`는 모듈을 불러올 때 `PATH`와 정해 둔 경로에서 한 번 찾는다.
+
+```python
+def _find_diec() -> Optional[str]:
+    """Find diec executable in PATH or common locations."""
+    # Check PATH first
+    diec_path = shutil.which("diec")
+    if diec_path:
+        return diec_path
+
+    # Check common installation locations
+    common_paths = [
+        "/usr/bin/diec",
+        "/usr/local/bin/diec",
+        "/opt/die/diec",
+        "/opt/detect-it-easy/diec",
+        os.path.expanduser("~/.local/bin/diec"),
+        os.path.expanduser("~/DIE/diec"),
+    ]
+
+    for path in common_paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    return None
+
+
+# Check if diec is available
+_DIEC_PATH = _find_diec()
+DIE_AVAILABLE = _DIEC_PATH is not None
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:27-53`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L27-L53)
+
+[3] SIDR 후보 경로를 정해 둔 차례로 보고 실행 권한이 있는 첫 파일을 고른다.
+
+```python
+def _resolve_sidr(explicit: str | None) -> tuple[Path | None, list[str]]:
+    machine = platform.machine().casefold()
+    bundled_name = None
+    if machine in {"aarch64", "arm64"}:
+        bundled_name = "sidr"
+    elif machine in {"x86_64", "amd64"}:
+        bundled_name = "sidr_x86"
+    candidates = (
+        [explicit]
+        if explicit
+        else [
+            os.environ.get("WINFORENSICS_SIDR_PATH"),
+            str(REPO_ROOT / ".tools" / bundled_name) if bundled_name else None,
+            shutil.which("sidr"),
+        ]
+    )
+    checked = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser().resolve()
+        checked.append(str(path))
+        if path.is_file() and os.access(path, os.X_OK):
+            return path, checked
+    return None, checked
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:54-78`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L54-L78)
+
+[4] API 정의 DB가 없으면 조회하지 않고 안내를 돌려준다.
+
+```python
+    elif name == "api_lookup":
+        db_path = Path(__file__).parent / "data" / "api_definitions.db"
+        if not db_path.exists():
+            return json_response({
+                "error": f"API database not found at {db_path}. "
+                        "Build it first by providing XML dir path to build_api_database()."
+            })
+```
+
+[`winforensics_mcp/server.py:3017-3023`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3017-L3023)
+
+[5] 규칙 경로를 받지 않으면 패키지의 `rules` 폴더를 확인한다.
+
+```python
+def get_default_rules_path() -> Optional[Path]:
+    """Get path to bundled YARA rules if available."""
+    # Check for bundled rules in package
+    package_dir = Path(__file__).parent.parent
+    rules_dir = package_dir / "rules"
+
+    if rules_dir.exists() and any(rules_dir.glob("*.yar")):
+        return rules_dir
+
+    return None
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:139-148`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L139-L148)
+
+[6] `list_tools`는 플래그가 참일 때만 그 도구들을 목록에 더한다: [`winforensics_mcp/server.py:809`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L809), [`winforensics_mcp/server.py:846`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L846), [`winforensics_mcp/server.py:927`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L927), [`winforensics_mcp/server.py:1030`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1030), [`winforensics_mcp/server.py:1198`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1198), [`winforensics_mcp/server.py:1625`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1625), [`winforensics_mcp/server.py:1747`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1747), [`winforensics_mcp/server.py:2165`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2165), [`winforensics_mcp/server.py:2346`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2346), [`winforensics_mcp/server.py:2428`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2428).
+
+[7] 처리 분기는 플래그를 다시 보고 라이브러리 이름과 설치 명령을 돌려준다.
+
+```python
+    elif name == "file_analyze_pe":
+        if not PEFILE_AVAILABLE:
+            return json_response({"error": "pefile library not installed. Install with: pip install pefile"})
+        result = analyze_pe(
+            args["file_path"],
+            calculate_hashes=args.get("calculate_hashes", True),
+            extract_strings_flag=args.get("extract_strings", False),
+            check_signatures=args.get("check_signatures", True),
+            detail_level=args.get("detail_level", "standard"),
+        )
+        return json_response(result)
+
+    elif name == "yara_scan_file":
+        if not YARA_AVAILABLE:
+            return json_response({"error": "yara-python library not installed. Install with: pip install yara-python"})
+```
+
+[`winforensics_mcp/server.py:2773-2787`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2773-L2787)
+
+[8] SIDR을 `--version`으로 시험 실행하고 0.9.2가 아니면 실패로 정한다.
+
+```python
+def _sidr_rows(binary: Path, copied: Path, output: Path, timeout: int, result: dict):
+    result["backend"] = "sidr"
+    result["backend_metadata"] = {
+        "path": str(binary),
+        "sha256": _sha256(binary),
+        "expected_version": SIDR_VERSION,
+        "pinned_build_commit": SIDR_COMMIT,
+    }
+    # Redirect to files so a noisy/crashing sidecar cannot exhaust Python memory.
+    with (output / "version.log").open("w+b") as version_log:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            stdout=version_log,
+            stderr=subprocess.STDOUT,
+            timeout=min(timeout, 10),
+            check=False,
+            cwd=output,
+        )
+        version_log.seek(0)
+        version_text = version_log.read(1024).decode("utf-8", errors="replace").strip()
+    result["backend_metadata"]["version"] = version_text
+    if version.returncode or not re.search(r"\b0\.9\.2\b", version_text):
+        raise ValueError(f"SIDR {SIDR_VERSION} is required; observed {version_text!r}")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:112-134`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L112-L134)
+
+[9] 상관 분석 도구는 출처마다 라이브러리 플래그를 보고 없으면 `available: false`와 오류 문구를 싣는다: [`winforensics_mcp/orchestrators/execution_tracker.py:126-131`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L126-L131), [`winforensics_mcp/orchestrators/ioc_hunter.py:178-183`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L178-L183), [`winforensics_mcp/orchestrators/ioc_hunter.py:707-712`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L707-L712), [`winforensics_mcp/orchestrators/user_activity_investigator.py:347-352`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L347-L352).
+
+[10] `hunt_ioc_pack`의 PCAP 검사는 `scapy`가 없으면 빈 목록을 돌려준다.
+
+```python
+def _scan_pcaps_for_rule(
+    artifacts_dir: Path,
+    rule: dict[str, Any],
+    max_files: int,
+    max_file_size: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    from ..parsers.pcap_parser import SCAPY_AVAILABLE, search_pcap
+
+    if not SCAPY_AVAILABLE:
+        return []
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:143-153`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L143-L153)
+
+[11] `build_timeline`의 출처 함수는 라이브러리가 없으면 사건 없이 끝나고 출처 상태는 먼저 `processed`로 정해진다: [`winforensics_mcp/orchestrators/timeline_builder.py:127-130`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L127-L130), [`winforensics_mcp/orchestrators/timeline_builder.py:305-308`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L305-L308), [`winforensics_mcp/orchestrators/timeline_builder.py:410-413`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L410-L413), [`winforensics_mcp/orchestrators/timeline_builder.py:614-627`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L614-L627).
+
+[12] DB 파일이 없으면 보강용 경로를 넘기지 않는다.
+
+```python
+    elif name == "api_analyze_imports":
+        db_path = Path(__file__).parent / "data" / "api_definitions.db"
+        enrich = args.get("enrich_from_db", False)
+        try:
+            result = analyze_pe_imports_detailed(
+                file_path=args["file_path"],
+                db_path=str(db_path) if enrich and db_path.exists() else None,
+            )
+            if not args.get("detect_patterns", True) and "patterns" in result:
+                del result["patterns"]
+            return json_response(result)
+```
+
+[`winforensics_mcp/server.py:3001-3011`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3001-L3011)
+
+보강 결과는 DB 경로가 있을 때만 응답에 더한다.
+
+```python
+        # Optional enrichment from API knowledge base
+        if db_path and Path(db_path).exists():
+            from .definitions_db import lookup_api
+
+            enriched_count = 0
+            for dll_info in dll_summary:
+                for func_name in dll_info["functions"]:
+                    if func_name.startswith("ordinal_"):
+                        continue
+                    api_info = lookup_api(db_path, func_name, include_params=False)
+                    if api_info["count"] > 0:
+                        enriched_count += 1
+            result["enrichment"] = {
+                "db_path": str(db_path),
+                "apis_found_in_db": enriched_count,
+                "coverage_pct": round(
+                    enriched_count / max(result["total_imports"], 1) * 100, 1
+                ),
+            }
+```
+
+[`winforensics_mcp/parsers/api_monitor/patterns.py:303-321`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/api_monitor/patterns.py#L303-L321)
+
+[13] `diec` 실행이 예외로 끝나면 실행 실패 문구를 돌려준다.
+
+```python
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,  # 1 minute timeout
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "file": str(file_path),
+            "error": "Analysis timed out (>60 seconds)",
+        }
+    except Exception as e:
+        return {
+            "file": str(file_path),
+            "error": f"Failed to run diec: {e}",
+        }
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:136-152`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L136-L152)
+
+[14] `diec`가 없으면 내려받을 주소를 적은 오류를 돌려준다.
+
+```python
+    elif name == "die_analyze_file":
+        if not DIE_AVAILABLE:
+            return json_response({
+                "error": "diec (Detect It Easy CLI) not found. Install from: "
+                        "https://github.com/horsicq/DIE-engine/releases"
+            })
+```
+
+[`winforensics_mcp/server.py:2958-2963`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2958-L2963)
+
+[15] 실행 파일이 없을 때 분석하지 않는 조건과 대체 경로로 가는 조건을 정한다.
+
+```python
+        binary, checked = _resolve_sidr(sidr_path)
+        result["checked_sidr_locations"] = checked
+        if binary is None and (sidr_path or pyesedb is None):
+            raise ValueError(
+                "SIDR executable unavailable. Checked: "
+                + ", ".join(checked)
+                + "; PATH: sidr. Build pinned SIDR with scripts/build_sidr.sh "
+                "or set WINFORENSICS_SIDR_PATH. No backend was run."
+            )
+        before = _sha256(source)
+        result["evidence_sha256_before"] = before
+        try:
+            with tempfile.TemporaryDirectory(prefix="winforensics-search-") as temp:
+                root = Path(temp)
+                input_dir, output = root / "input", root / "output"
+                input_dir.mkdir()
+                output.mkdir()
+                copied = input_dir / "Windows.edb"
+                shutil.copyfile(source, copied)
+                if _sha256(copied) != before:
+                    raise ValueError("Evidence changed while copying; retry from a stable copy")
+                rows = (
+                    _sidr_rows(binary, copied, output, timeout, result)
+                    if binary
+                    else _fallback_rows(copied, result)
+                )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:332-357`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L332-L357)
+
+[16] (실행 확인) WSL에서 MCP 클라이언트 세션으로 `diec`가 없는 환경의 `die_analyze_file`을 부르고 가짜 SIDR 실행 파일과 저장소의 `.tools/sidr_x86`으로 `parse_windows_search`의 경로 선택·버전 확인·경로 지정 실패·`pyesedb` 대체를 실행했다.
+
+[17] EVTX 라이브러리는 `evtx`를 먼저 시험하고 없으면 `python-evtx`를 시험한다.
+
+```python
+# Rust-backed EVTX parser (preferred — 200x faster)
+try:
+    import evtx as _evtx_rust
+    EVTX_RUST_AVAILABLE = True
+except ImportError:
+    EVTX_RUST_AVAILABLE = False
+
+# Pure-Python fallback
+try:
+    from Evtx.Evtx import Evtx
+    EVTX_PYTHON_AVAILABLE = True
+except ImportError:
+    EVTX_PYTHON_AVAILABLE = False
+
+EVTX_AVAILABLE = EVTX_RUST_AVAILABLE or EVTX_PYTHON_AVAILABLE
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:14-28`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L14-L28)
+
+없을 때의 오류 문구는 `python-evtx`를 이름으로 적는다.
+
+```python
+def check_evtx_available() -> None:
+    """Raise error if evtx library not available"""
+    if not EVTX_AVAILABLE:
+        raise ImportError(
+            "python-evtx library not installed. Install with: pip install evtx"
+        )
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:187-192`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L187-L192)
+
+[18] 레코드를 읽는 라이브러리와 사건으로 바꾸는 함수가 플래그에 따라 갈린다.
+
+```python
+def _raw_records(evtx_path: Path):
+    """Yield raw record slots, including exceptions, from either backend."""
+    if EVTX_RUST_AVAILABLE:
+        parser = _evtx_rust.PyEvtxParser(str(evtx_path))
+        yield from parser.records_json()
+    else:
+        with Evtx(str(evtx_path)) as evtx:
+            for record in evtx.records():
+                try:
+                    yield {"data": record.xml()}
+                except Exception as exc:
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:108-118`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L108-L118)
+
+```python
+                if EVTX_RUST_AVAILABLE:
+                    event = extract_event_data_json(json.loads(raw))
+                else:
+                    event = extract_event_data(xml_to_dict(ET.fromstring(raw)))
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:143-146`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L143-L146)
+
+[19] 필수 의존성 목록에 EVTX 라이브러리는 `evtx`만 있다.
+
+```toml
+dependencies = [
+    "mcp>=1.25.0",
+    "evtx>=0.8.0",
+    "python-registry>=1.3.0",
+    "python-dateutil>=2.8.2",
+    "pefile>=2023.2.7",
+    "libscca-python>=20240427",
+    "libesedb-python>=20240420",
+    "mft>=0.7.0",
+    "pylnk3>=0.4.3",
+    "libfwsi-python>=20240417",
+]
+```
+
+[`pyproject.toml:20-31`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/pyproject.toml#L20-L31)
+
+[20] SIDR 경로는 실행 파일 경로·SHA-256·버전을 `backend_metadata`에 싣는다: [`winforensics_mcp/parsers/windows_search_parser.py:112-120`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L112-L120).
+
+[21] DiE 분석 결과에는 `diec` 경로가 없다.
+
+```python
+    return {
+        "file": str(file_path),
+        "file_size": file_size,
+        "file_type": file_type,
+        "arch": arch,
+        "mode": mode,
+        "endianness": endianness,
+        "detects": detects,
+        "detect_count": len(detects),
+        "is_packed": is_packed,
+        "is_dotnet": is_dotnet,
+        "is_installer": is_installer,
+    }
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:247-259`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L247-L259)
+
+[22] `pyesedb` 대체 경로는 `backend`와 완전성 필드, 진단 문장을 정하고 `finally`에서 파일을 닫는다: [`winforensics_mcp/parsers/windows_search_parser.py:189-250`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L189-L250).
+
+[23] `windows_search_parse`의 도구 설명은 SIDR이 없으면 부분 대체 경로를 쓴다고 적는다.
+
+```python
+            name="windows_search_parse",
+            description=(
+                "Parse an explicit Windows Search EDB using SIDR 0.9.2. Returns file, internet "
+                "history, and activity history reports with extraction completeness and evidence "
+                "hashes. Uses a partial PropertyStore fallback if SIDR is absent. Text filters "
+                "are case-insensitive substrings combined with AND. Time bounds are inclusive "
+```
+
+[`winforensics_mcp/server.py:1707-1712`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L1707-L1712)

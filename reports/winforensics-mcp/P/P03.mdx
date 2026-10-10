@@ -1,0 +1,291 @@
+---
+cell: P03
+details:
+- id: P03.03
+---
+
+# P03 조사 진척 판단
+
+### P03.03 미조사 범위·생략 사유 보고
+
+**구현.** 이 방식은 오케스트레이터 도구 `investigate_execution`, `investigate_user_activity`, `hunt_ioc`, `build_timeline`에 적용된다 [1][2][3][4].
+네 도구는 출처마다 찾았는지를 `artifacts_searched`나 `sources_info`에 싣는다 [1][2][3][4].
+`investigate_execution`과 `investigate_user_activity`는 찾지 못한 출처를 `available`이 거짓인 항목으로 `evidence`에 넣고 `Prefetch directory not found`처럼 찾지 못한 자료를 `error`에 적는다 [1][2].
+`hunt_ioc`는 출처를 찾지 못한 경우와 IOC 유형 때문에 검색하지 않은 경우를 나눠 적는다 [3].
+찾지 못한 출처는 `sources_unavailable`에 모인다 [3].
+검색하지 않은 출처는 `searched`가 거짓인 항목에 `Prefetch does not contain file hashes`나 `YARA scanning disabled` 같은 사유를 `note`로 적는다 [3][5].
+`build_timeline`은 요청한 출처마다 `processed`, `not found`, `error: …` 가운데 하나를 `sources_info`의 `status`에 적는다 [4].
+`hunt_ioc_pack`은 일치한 규칙만 응답에 싣고 읽지 않은 파일이나 건너뛴 검사를 알리지 않는다 [6].
+서버에 수행할 작업 목록이나 완료 조건을 두는 도구, 모델이 진행 기록을 적는 도구는 없다.
+
+**한계.** `investigate_execution`과 `investigate_user_activity`는 파싱이 실패한 출처를 `available`이 참인 항목으로 남긴다 [7][8].
+그래서 응답의 `summary`는 그 출처를 검색했지만 흔적이 없는 출처로 적는다 [8].
+`hunt_ioc`도 파싱이 실패한 출처를 `searched`가 참인 항목으로 남겨 `sources_searched_no_match`에 넣는다 [9][3].
+오류 문구는 출처 항목의 `error`에만 남는다 [7][9].
+`investigate_user_activity`는 `username`을 주지 않으면 처음 찾은 사용자 한 명의 자료만 읽고 다른 사용자의 자료가 있다는 사실을 알리지 않는다 [10][11].
+`hunt_ioc`는 `artifacts_dir/Users/<사용자>/…`에 놓인 브라우저 기록이 있어도 `No browser history found`로 적는다 [12].
+`build_timeline`은 출처마다 사건 수 상한을 두고 상한에 닿아 읽지 않은 사건이 있어도 그 출처의 `status`를 `processed`로 적는다 [4][13].
+
+### 근거
+
+[1] `investigate_execution`은 출처별 탐지 여부와 찾지 못한 사유를 싣는다.
+
+```python
+    if prefetch_dir and prefetch_dir.exists():
+        prefetch_result = _search_prefetch(prefetch_dir, target, start_dt, end_dt)
+        evidence_results.append(prefetch_result)
+    else:
+        evidence_results.append({
+            "source": "Prefetch",
+            "available": False,
+            "error": "Prefetch directory not found",
+        })
+
+    if amcache_file and amcache_file.exists():
+        amcache_result = _search_amcache(amcache_file, target, start_dt, end_dt)
+        evidence_results.append(amcache_result)
+    else:
+        evidence_results.append({
+            "source": "Amcache",
+            "available": False,
+            "error": "Amcache.hve not found",
+        })
+
+    if srum_file and srum_file.exists():
+        srum_result = _search_srum(srum_file, target, start_dt, end_dt)
+        evidence_results.append(srum_result)
+    else:
+        evidence_results.append({
+            "source": "SRUM",
+            "available": False,
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:512-538`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L512-L538)
+
+```python
+
+    return {
+        "target": target,
+        "target_type": "sha1" if _is_sha1(target) else "sha256" if _is_sha256(target) else "executable",
+        "artifacts_dir": str(artifacts_dir),
+        "execution_confirmed": execution_confirmed,
+        "confidence": confidence,
+        "sha1": sha1_hash,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": _generate_summary(target, execution_confirmed, confidence, evidence_results),
+    }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:557-573`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L557-L573)
+
+[2] `investigate_user_activity`는 출처별 탐지 여부와 찾지 못한 사유를 싣는다: [`winforensics_mcp/orchestrators/user_activity_investigator.py:694-746`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L694-L746).
+
+```python
+        "artifacts_dir": str(artifacts_dir),
+        "username": username,
+        "keyword": keyword,
+        "activity_found": activity_found,
+        "confidence": confidence,
+        "time_range": {
+            "start": time_range_start,
+            "end": time_range_end,
+        } if time_range_start or time_range_end else None,
+        "artifacts_searched": artifacts_searched,
+        "evidence": evidence_results,
+        "timeline": timeline if timeline else None,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/user_activity_investigator.py:762-775`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L762-L775)
+
+[3] `hunt_ioc`는 일치한 출처, 일치하지 않은 출처, 찾지 못한 출처를 나눠 싣는다.
+
+```python
+    found_sources = [r["source"] for r in results if r.get("found")]
+    not_found_sources = [r["source"] for r in results if r.get("searched") and not r.get("found")]
+    unavailable_sources = [r["source"] for r in results if not r.get("available", True)]
+
+    if found_sources:
+        summary = f"IOC '{ioc}' ({final_type}) found in {len(found_sources)} source(s): {', '.join(found_sources)}"
+    else:
+        searched = [r["source"] for r in results if r.get("searched")]
+        summary = f"IOC '{ioc}' ({final_type}) not found in any of the {len(searched)} sources searched"
+
+    return {
+        "ioc": ioc,
+        "ioc_type": final_type,
+        "ioc_type_detected": detected_type,
+        "artifacts_dir": str(artifacts_dir),
+        "found": len(found_sources) > 0,
+        "confidence": confidence,
+        "total_matches": total_matches,
+        "sources_with_matches": found_sources,
+        "sources_searched_no_match": not_found_sources,
+        "sources_unavailable": unavailable_sources,
+        "artifacts_searched": artifacts_searched,
+        "results": results,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:1055-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1055-L1079)
+
+[4] `build_timeline`은 출처마다 `status`를 적고 출처별 상한을 둔다: [`winforensics_mcp/orchestrators/timeline_builder.py:611-700`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L611-L700).
+
+```python
+    return {
+        "artifacts_dir": str(artifacts_dir),
+        "sources_requested": sources,
+        "sources_info": sources_info,
+        "filters": {
+            "time_range_start": time_range_start,
+            "time_range_end": time_range_end,
+            "keyword_filter": keyword_filter,
+        },
+        "statistics": {
+            "total_events": len(all_events),
+            "by_source": source_counts,
+            "by_event_type": event_type_counts,
+            "time_range": time_range_result,
+        },
+        "events": all_events,
+    }
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:725-741`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L725-L741)
+
+[5] IOC 유형이 맞지 않는 출처는 검색하지 않고 사유를 적는다.
+
+```python
+    # Prefetch only supports filename search
+    if ioc_type not in ("filename", "md5", "sha1", "sha256"):
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "searched": False,
+            "note": f"Prefetch does not support {ioc_type} search",
+        }
+
+    # For hashes, we can't search Prefetch directly
+    if ioc_type in ("md5", "sha1", "sha256"):
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "searched": False,
+            "note": "Prefetch does not contain file hashes",
+        }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:185-201`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L185-L201)
+
+[6] `hunt_ioc_pack`의 응답은 일치한 규칙과 점수만 싣는다.
+
+```python
+    return {
+        "pack": {
+            "id": ioc_pack.get("id"),
+            "name": ioc_pack.get("name"),
+            "version": ioc_pack.get("version"),
+            "license": ioc_pack.get("license"),
+            "upstream": ioc_pack.get("upstream"),
+            "rule_count": len(ioc_pack.get("rules", [])),
+        },
+        "artifacts_dir": str(root),
+        "found": bool(findings),
+        "confidence": _confidence_from_score(total_score),
+        "score": total_score,
+        "matched_rules": len(findings),
+        "total_hits": sum(item["hit_count"] for item in findings),
+        "findings": findings[:limit],
+        "summary": (
+            f"Matched {len(findings)} rule(s) from {ioc_pack.get('id')} with "
+            f"{sum(item['hit_count'] for item in findings)} hit(s)"
+            if findings else f"No matches from {ioc_pack.get('id')}"
+        ),
+    }
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:251-272`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L251-L272)
+
+[7] 파싱 중 예외가 나면 `available`을 참으로 두고 `error`만 적는다.
+
+```python
+    except Exception as e:
+        return {
+            "source": "Amcache",
+            "available": True,
+            "found": False,
+            "error": str(e),
+        }
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:282-288`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L282-L288)
+
+[8] (실행 확인) 내용이 하이브가 아닌 `Amcache.hve`만 둔 폴더로 `investigate_execution`을 부르면 Amcache 항목은 `available`이 참, `error`가 `Registry Parse Exception (Invalid REGF ID)`이고 `summary`는 `No execution evidence found for 'evil.exe' in Amcache`, `confidence`는 `NONE`이고 내용이 하이브가 아닌 `Users/alice/NTUSER.DAT`를 두고 `investigate_user_activity`를 부르면 RecentDocs 항목의 `error`가 같은 문구이고 `summary`는 `No user activity found in RecentDocs`다.
+
+[9] `hunt_ioc`의 출처 검색은 예외가 나면 `searched`를 참으로 둔다.
+
+```python
+    except Exception as e:
+        return {
+            "source": "Prefetch",
+            "available": True,
+            "searched": True,
+            "found": False,
+            "error": str(e),
+        }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:246-253`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L246-L253)
+
+[10] `username`이 없으면 `Users/*/…` 경로에서 처음 찾은 것을 쓴다.
+
+```python
+    # Find NTUSER.DAT
+    for pattern in USER_ARTIFACT_PATHS["ntuser"]:
+        if username:
+            pattern = pattern.replace("{user}", username)
+        else:
+            pattern = pattern.replace("{user}/", "*/")
+
+        if "*" in pattern:
+            matches = list(artifacts_dir.glob(pattern))
+            if matches:
+                found["ntuser"] = matches[0]
+                break
+        else:
+            candidate = artifacts_dir / pattern
+            if candidate.exists():
+                found["ntuser"] = candidate
+                break
+```
+
+[`winforensics_mcp/orchestrators/user_activity_investigator.py:178-194`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/user_activity_investigator.py#L178-L194)
+
+[11] (실행 확인) `Users/alice/NTUSER.DAT`와 `Users/bob/NTUSER.DAT`를 두고 `username` 없이 `investigate_user_activity`를 부르면 RecentDocs 항목은 `alice`의 파일만 가리키고 응답 어디에도 `bob`이 나오지 않는다.
+
+[12] (실행 확인) `artifacts_dir/Users/alice/AppData/Local/Google/Chrome/User Data/Default/History`를 두고 `hunt_ioc`를 부르면 브라우저 항목이 `No browser history found`이고 `sources_unavailable`에 `Browser History`가 포함된다.
+
+[13] 출처별 상한에 닿으면 그 출처 읽기를 멈춘다.
+
+```python
+    count = 0
+
+    for entry in iter_mft_entries(
+        mft_path,
+        file_path_filter=keyword_filter,
+        allocated_only=True,
+        files_only=True,
+    ):
+        if count >= limit:
+            break
+```
+
+[`winforensics_mcp/orchestrators/timeline_builder.py:132-141`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L132-L141)

@@ -1,0 +1,426 @@
+---
+cell: E02
+details:
+- id: E02.01
+- id: E02.03
+- id: E02.05
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 `windows_search_parse`와 EVTX·NTDS 파일을 읽는 도구에 적용된다 [1][2][3].
+`windows_search_parse`는 받은 `Windows.edb`를 복사하기 전에 모델의 요청 없이 파일 전체의 SHA-256을 계산한다 [1].
+이 값은 응답의 `evidence_sha256_before`에 실리고 서버에 따로 보관하지 않는다 [1][4].
+
+EVTX·NTDS 파일을 읽는 도구는 파일을 읽기 전에 상태 값 묶음을 계산한다 [2][3].
+묶음은 실제 경로, 크기, 수정 시각 `st_mtime_ns`, 장치 번호, inode, 변경 시각 `st_ctime_ns`이고 내용 해시는 들어 있지 않다 [2][3].
+서버는 이 묶음을 파싱 결과 캐시의 키로 쓴다 [5].
+묶음의 SHA-256은 사건 참조 `event_ref`와 이어 읽기 커서 안의 `query_ref`에 들어간다 [2][6].
+NTDS 응답과 `evtx_describe_security_descriptor` 응답은 같은 SHA-256을 `source_ref`로 싣는다 [3][7].
+EVTX 조회 응답의 `source`에는 경로, 크기, 수정 시각만 실린다 [6].
+
+`file_analyze_pe`와 `vt_lookup_file`은 받은 파일의 MD5·SHA1·SHA256을 계산해 응답에 싣는다 [8][9].
+서버는 이 값을 보관하거나 다시 대조하지 않는다.
+
+**한계.** 두 기준값 모두 도구를 부를 때마다 그 시점의 파일에서 새로 계산한다 [1][2].
+그래서 서버가 읽기 전에 바뀐 증거는 바뀐 상태가 기준값이 된다.
+EVTX·NTDS 도구를 커서나 `event_ref` 없이 새로 부르면 그때의 상태 값 묶음이 새 기준값이 된다 [6].
+`windows_search_parse`의 SHA-256은 그 호출 안에서만 쓰이고 다음 호출과 대조하지 않는다 [1].
+
+### E02.03 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 EVTX 파일을 읽는 도구, NTDS 도구, `windows_search_parse`에 적용된다 [5][10][11].
+EVTX 파일을 읽는 도구는 모두 파싱 결과 캐시를 거친다 [5].
+캐시를 채운 뒤에는 상태 값 묶음을 다시 읽어 읽기 전 값과 비교한다 [5].
+조회 도구는 결과 행을 꺼내기 전과 꺼낸 뒤에도 같은 비교를 한다 [12].
+이어 읽기 커서와 `event_ref`를 받으면 그 안의 값을 지금 파일의 묶음에서 만든 값과 비교한다 [6][13].
+`evtx_export`는 질의를 준비한 뒤, 파일을 다 쓴 뒤, 파일을 새 이름으로 내기 직전과 낸 뒤에 묶음을 비교한다 [14].
+`evtx_describe_security_descriptor`는 사건 값을 읽기 전후에 비교한다 [7].
+NTDS 도구는 데이터베이스를 다 읽은 뒤와 캐시에서 꺼낸 뒤에 비교한다 [3][10].
+`ntds_get_trusts`의 커서는 묶음을 담은 `query_ref`로 비교한다 [10].
+
+`windows_search_parse`는 복사본의 SHA-256을 복사 전 값과 비교한다 [1].
+파싱을 마치면 원본의 SHA-256을 다시 계산해 복사 전 값과 비교하고 결과를 `evidence_sha256_after`와 `evidence_unchanged`에 싣는다 [11].
+
+레지스트리 하이브, MFT, USN 저널, Prefetch, Amcache, SRUM, 브라우저 기록, LNK, PE, pcap을 읽는 도구는 증거를 기준값과 비교하지 않는다.
+
+실행 확인에서 EVTX 파일의 수정 시각만 바꾸자 앞서 받은 커서와 `event_ref`가 모두 거부되었다 [15].
+내용 1바이트를 바꾼 뒤 수정 시각을 되돌린 파일도 변경 시각이 달라져 커서가 거부되었다 [15].
+
+**한계.** EVTX·NTDS 도구의 비교는 상태 값만 보고 내용을 다시 해시하지 않는다 [2][3].
+그래서 상태 값 묶음이 같은 채 내용이 바뀌면 알아채지 못한다.
+상태 값 묶음이 캐시 키와 같으면 파일을 다시 읽지 않고 앞서 파싱한 결과를 쓴다 [5].
+
+### E02.05 불일치 시 중단·경고
+
+**구현.** 이 방식은 위의 비교가 어긋날 때 적용된다.
+EVTX·NTDS 도구는 `ValueError`를 내고 그 호출을 끝낸다 [5][6][13].
+문구는 "EVTX source changed during scan; retry the query", "Cursor source or query changed; restart without a cursor", "event_ref belongs to a different or changed source" 같은 것이다 [5][6][13].
+`call_tool`은 EVTX 조회·내보내기·보안 설명자 도구와 NTDS 도구 12개의 예외를 `isError`가 참인 응답으로 돌려준다 [16][17].
+`evtx_get_stats`와 `evtx_attack_summary`의 같은 예외는 `isError` 없이 `{"error": …}` 글로 돌아간다 [16].
+`evtx_export`는 비교가 어긋나면 임시 파일과 이미 낸 파일을 지우고 결과 파일을 남기지 않는다 [14].
+
+`windows_search_parse`는 복사본 해시가 다르면 기록을 읽지 않고 응답의 `error`에 "Evidence changed while copying; retry from a stable copy"를 싣는다 [1][18].
+파싱 뒤 원본 해시가 다르면 `complete`를 거짓으로 두고 진단에 "Evidence hash changed during parsing; results are unreliable"을 더한다 [11].
+이 응답은 `isError` 없는 일반 응답이고 이미 고른 기록도 그대로 싣는다 [11][18].
+
+불일치는 응답으로만 알린다.
+서버는 불일치를 기억하지 않으므로 커서 없이 다시 부르면 그때 상태를 기준으로 조회가 실행된다 [6].
+
+### 근거
+
+[1] `windows_search_parse`는 원본의 SHA-256을 계산해 응답에 싣고 복사본과 비교한다.
+
+```python
+        before = _sha256(source)
+        result["evidence_sha256_before"] = before
+        try:
+            with tempfile.TemporaryDirectory(prefix="winforensics-search-") as temp:
+                root = Path(temp)
+                input_dir, output = root / "input", root / "output"
+                input_dir.mkdir()
+                output.mkdir()
+                copied = input_dir / "Windows.edb"
+                shutil.copyfile(source, copied)
+                if _sha256(copied) != before:
+                    raise ValueError("Evidence changed while copying; retry from a stable copy")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:341-352`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L341-L352)
+
+[2] EVTX 상태 값 묶음과 그 SHA-256을 만들고 `event_ref`에 넣는다.
+
+```python
+def _cache_key(evtx_path: Path) -> tuple:
+    stat = evtx_path.stat()
+    return (str(evtx_path.resolve()), stat.st_size, stat.st_mtime_ns,
+            stat.st_dev, stat.st_ino, stat.st_ctime_ns)
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=True).encode()).hexdigest()
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:61-69`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L61-L69)
+
+```python
+def _event_ref(source: tuple, ordinal: int) -> str:
+    return _encode_token({"v": 1, "s": _digest(source), "r": ordinal})
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:98-99`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L98-L99)
+
+[3] NTDS 상태 값 묶음을 만든다.
+다 읽은 뒤에는 `source_ref`를 붙이고 다시 비교한다.
+
+```python
+def _identity(path):
+    stat = path.stat()
+    return (str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino, stat.st_ctime_ns)
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:60-66`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L60-L66)
+
+```python
+        snapshot['source'] = {'path': source[0], 'size_bytes': source[1], 'mtime_ns': source[2], 'source_ref': _digest(source)}
+        snapshot['source_identity'] = source
+    finally:
+        db.close()
+    if _identity(path) != source:
+        raise ValueError('NTDS source changed during scan; retry')
+    return snapshot
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:370-376`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L370-L376)
+
+[4] (실행 확인) 내용이 0인 8 KiB 파일을 `Windows.edb`로 넘긴 `windows_search_parse` 응답에 `evidence_sha256_before`·`evidence_sha256_after`·`evidence_unchanged`가 실렸다.
+SIDR가 형식 오류로 끝난 사실은 `error`와 `diagnostics`에 실렸다.
+
+[5] EVTX 파싱 결과 캐시는 묶음을 키로 두고 캐시를 채운 뒤 다시 비교한다.
+
+```python
+def _get_cached(evtx_path: Path, max_scan: int = MAX_SCAN_EVENTS) -> _EvtxCacheEntry:
+    source = _cache_key(evtx_path)
+    key = source + (max_scan, EVTX_RUST_AVAILABLE)
+    if key not in _evtx_cache:
+        entry = _populate_cache(evtx_path, max_scan)
+        if _cache_key(evtx_path) != source:
+            raise ValueError("EVTX source changed during scan; retry the query")
+        _evtx_cache[key] = entry
+    _evtx_cache.move_to_end(key)
+    while len(_evtx_cache) > MAX_CACHE_FILES:
+        _evtx_cache.popitem(last=False)
+    return _evtx_cache[key]
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:168-179`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L168-L179)
+
+[6] 조회는 묶음을 `query_ref`에 넣고 커서를 그 값과 비교하며 응답 `source`에 경로·크기·수정 시각을 싣는다.
+
+```python
+    source = _cache_key(path)
+    query_ref = _digest({"source": source, "start": start_time.isoformat() if start_time else None,
+                         "end": end_time.isoformat() if end_time else None,
+                         "ids": sorted(set(event_ids)) if event_ids else None,
+                         "contains": sorted(set(contains)) if contains else None,
+                         "not_contains": sorted(set(not_contains)) if not_contains else None,
+                         "provider": provider, "fields": fields, "compact": compact,
+                         "precision": timestamp_precision, "order": "file-record-v1", "max_scan": max_scan,
+                         "where": where or {}, "where_case_sensitive": where_case_sensitive})
+    cached = _get_cached(path, max_scan)
+    if _cache_key(path) != source:
+        raise ValueError("EVTX source changed during scan; retry the query")
+    projection = _resolve_fields(fields, cached, compact)
+    predicate = compile_where(where, where_case_sensitive, cached)
+    diagnostics = {"time_filter_errors": 0}
+    matched = [i for i in _filtered_indices(cached, start_time, end_time, event_ids, contains, not_contains, provider, diagnostics)
+               if predicate(cached.events[i])]
+    metadata = {
+        "total_matched": len(matched), "query_ref": query_ref,
+        "source": {"path": source[0], "size_bytes": source[1], "mtime_ns": source[2]},
+        "scan_complete": cached.scan_complete,
+        "scan_limit_hit": not cached.scan_complete and cached.scanned_records == max_scan,
+        "scanned_records": cached.scanned_records, "parse_errors": cached.parse_errors,
+        "time_filter_errors": diagnostics["time_filter_errors"],
+        "total_matched_exact": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+        "result_set_complete": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+    }
+    if _cache_key(path) != source:
+        raise ValueError("EVTX source changed during query; retry the query")
+    return _PreparedEvtxQuery(path, source, cached, matched, projection, timestamp_precision, metadata)
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:671-700`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L671-L700)
+
+```python
+def _cursor_offset(cursor, query_ref, offset):
+    if cursor is None:
+        return offset
+    decoded = _decode_token(cursor, "cursor")
+    if set(decoded) != {"v", "q", "o"} or decoded["q"] != query_ref:
+        raise ValueError("Cursor source or query changed; restart without a cursor")
+    _validate_integer(decoded["o"], "cursor offset", 0)
+    if offset not in (0, decoded["o"]):
+        raise ValueError("offset conflicts with cursor")
+    return decoded["o"]
+
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:770-780`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L770-L780)
+
+[7] `evtx_describe_security_descriptor`는 사건 값을 읽기 전후에 묶음을 비교하고 `source_ref`를 싣는다.
+
+```python
+    path = Path(evtx_path)
+    fingerprint = evtx_parser._cache_key(path)
+    event = evtx_parser.get_evtx_event(path, event_ref)
+    value = evtx_parser._field_value(event, field)
+    if value is evtx_parser._MISSING or not isinstance(value, str):
+        result = _result(encoding, None)
+        _diagnostic(result, "missing_source_value" if value is evtx_parser._MISSING else "source_value_type",
+                    field, None, "Selected source field is absent or does not contain a string")
+        result.update(parse_status="invalid", parse_complete=False)
+    else:
+        result = decode_security_descriptor(value, encoding, max_aces=max_aces)
+    if evtx_parser._cache_key(path) != fingerprint:
+        raise ValueError("EVTX source changed during descriptor lookup; retry the query")
+    result.update(source={"path": fingerprint[0], "size_bytes": fingerprint[1], "mtime_ns": fingerprint[2],
+                          "source_ref": evtx_parser._digest(fingerprint)},
+                  event_ref=event_ref, field=field,
+                  event={key: event.get(key) for key in ("EventRecordID", "EventID", "TimeCreated", "Computer")},
+                  raw_value_length=result["input_length"], raw_value_sha256=result["input_sha256"])
+    return result
+```
+
+[`winforensics_mcp/parsers/security_descriptor.py:348-366`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/security_descriptor.py#L348-L366)
+
+[8] `file_analyze_pe`가 쓰는 해시 함수다.
+
+```python
+def get_file_hashes(file_path: Path) -> dict[str, str]:
+    """Calculate MD5, SHA1, SHA256 hashes of a file"""
+    md5 = hashlib.md5()
+    sha1 = hashlib.sha1()
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as f:
+        while chunk := f.read(65536):
+            md5.update(chunk)
+            sha1.update(chunk)
+            sha256.update(chunk)
+
+    return {
+        "md5": md5.hexdigest(),
+        "sha1": sha1.hexdigest(),
+        "sha256": sha256.hexdigest(),
+    }
+```
+
+[`winforensics_mcp/parsers/pe_analyzer.py:160-176`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pe_analyzer.py#L160-L176)
+
+[9] `vt_lookup_file`은 조회 전에 받은 파일의 세 해시를 계산한다.
+
+```python
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    # Calculate all hashes
+    md5 = hashlib.md5()
+    sha1 = hashlib.sha1()
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            md5.update(chunk)
+            sha1.update(chunk)
+            sha256.update(chunk)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:558-570`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L558-L570)
+
+[10] NTDS 캐시에서 꺼낸 뒤 비교하고 커서를 `query_ref`와 비교한다: [`winforensics_mcp/parsers/ntds_parser.py:76-92`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L76-L92), [`winforensics_mcp/parsers/ntds_parser.py:384-393`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L384-L393), [`winforensics_mcp/parsers/ntds_parser.py:557-563`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L557-L563).
+
+[11] 파싱을 마치면 원본 해시를 다시 계산해 비교하고 어긋나면 결과를 불완전으로 표시한다.
+
+```python
+        finally:
+            after = _sha256(source)
+            result["evidence_sha256_after"] = after
+            result["evidence_unchanged"] = after == before
+            if after != before:
+                result["complete"] = False
+                _diagnostic(result, "Evidence hash changed during parsing; results are unreliable")
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        result["error"] = str(exc)[:1024]
+        result["complete"] = False
+        _diagnostic(result, str(exc))
+    result["content_filter_complete"] = result["content_filter_complete"] and result["complete"]
+    result["returned_records"] = len(result["records"])
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:416-428`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L416-L428)
+
+[12] 조회 결과 행을 꺼내기 전후에 묶음을 비교한다.
+
+```python
+    def rows(self, offset=0, limit=None):
+        end = None if limit is None else offset + limit
+        if _cache_key(self.path) != self.source:
+            raise ValueError("EVTX source changed before query consumption; retry the query")
+        for i in self.matched[offset:end]:
+            event = copy.deepcopy(self.cached.events[i])
+            event["event_ref"] = _event_ref(self.source, self.cached.ordinals[i])
+            if self.precision == "both":
+                when = parse_evtx_timestamp(event.get("TimeCreated"))
+                event["timestamp_second"] = when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if when else None
+            if self.projection is not None:
+                event["_raw_xml"] = self.cached.raw_strings[i]
+                projected = {}
+                for field, canonical in self.projection:
+                    value = _field_value(event, canonical)
+                    if value is not _MISSING:
+                        projected[field] = value
+                projected["event_ref"] = event["event_ref"]
+                if self.precision == "both":
+                    projected["timestamp_second"] = event["timestamp_second"]
+                event = projected
+            yield event
+        if _cache_key(self.path) != self.source:
+            raise ValueError("EVTX source changed during query; retry the query")
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:619-642`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L619-L642)
+
+[13] `evtx_get_event`는 `event_ref`의 값과 지금 묶음을 비교하고 읽은 뒤 다시 비교한다.
+
+```python
+def get_evtx_event(evtx_path: str | Path, event_ref: str, include_raw: bool = False) -> dict[str, Any]:
+    """Return a normalized event within the first 1,000,000 physical records.
+
+    Backend raw text is included only when include_raw is explicitly true.
+    """
+    check_evtx_available()
+    if type(include_raw) is not bool:
+        raise ValueError("include_raw must be a boolean")
+    path = Path(evtx_path)
+    source = _cache_key(path)
+    decoded = _decode_token(event_ref, "event_ref")
+    if set(decoded) != {"v", "s", "r"} or decoded["s"] != _digest(source):
+        raise ValueError("event_ref belongs to a different or changed source")
+    _validate_integer(decoded["r"], "event_ref record", 1)
+    ordinal = decoded["r"]
+    if ordinal > 1_000_000:
+        raise ValueError("event_ref record exceeds the detail lookup limit of 1000000")
+    # Prefer an existing scan; on a cache miss, stop at the referenced record.
+    cached = next((entry for key, entry in reversed(_evtx_cache.items())
+                   if key[:-2] == source and key[-1] == EVTX_RUST_AVAILABLE
+                   and ordinal in entry.ordinals), None)
+    if cached is None:
+        cached = _get_cached(path, ordinal)
+    try:
+        index = cached.ordinals.index(ordinal)
+    except ValueError as exc:
+        raise ValueError("event_ref does not identify a readable record") from exc
+    if _cache_key(path) != source:
+        raise ValueError("EVTX source changed during lookup; retry the query")
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:795-823`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L795-L823)
+
+[14] `evtx_export`는 준비 뒤, 쓰기 뒤, 새 이름으로 내기 직전과 낸 뒤에 묶음을 비교하고 끝나지 않은 호출의 파일을 지운다: [`winforensics_mcp/parsers/evtx_export.py:23-35`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L23-L35), [`winforensics_mcp/parsers/evtx_export.py:112-122`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L112-L122), [`winforensics_mcp/parsers/evtx_export.py:166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L166), [`winforensics_mcp/parsers/evtx_export.py:188-208`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L188-L208).
+
+[15] (실행 확인) 공개 표본 EVTX(2,166,784바이트)로 `evtx_search`를 부른 뒤 수정 시각만 바꾸자 커서는 "Cursor source or query changed; restart without a cursor", `event_ref`는 "event_ref belongs to a different or changed source"로 `isError` 응답을 받았다.
+1바이트를 바꾸고 수정 시각을 되돌린 파일은 크기와 수정 시각이 같고 변경 시각이 달랐으며 커서가 같은 문구로 거부되었다.
+
+[16] `call_tool`은 이름을 정한 12개 도구의 예외만 `evtx_error_response`로, 나머지는 `{"error": …}` 글로 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[17] `evtx_error_response`는 `isError`가 참인 응답을 만든다.
+
+```python
+def evtx_error_response(message: str) -> CallToolResult:
+    """Keep server-side errors within even the smallest supported budget."""
+    preview = message[:800]
+    while True:
+        result = CallToolResult(content=[TextContent(type="text", text=preview)], isError=True)
+        if len(result.model_dump_json(by_alias=True, exclude_none=True)) <= MIN_RESPONSE_CHARS:
+            return result
+        preview = preview[:len(preview) // 2] + "…"
+```
+
+[`winforensics_mcp/evtx_response.py:100-107`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L100-L107)
+
+[18] `windows_search_parse` 처리기는 결과를 `json_response`로 돌려준다.
+
+```python
+    elif name == "windows_search_parse":
+        result = parse_windows_search(**args)
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:3223-3225`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3223-L3225)

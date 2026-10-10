@@ -1,0 +1,481 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+- id: R03.04
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 서버 호출 처리기 `call_tool`과 MCP Python SDK 1.25.0의 입력 검사에 적용된다 [1][2].
+`call_tool`은 EVTX·NTDS·보안 설명자 도구 12개에서 예외가 나면 `evtx_error_response`로 `isError`가 참인 결과를 돌려준다 [1][3].
+이 결과의 글은 예외 문구를 800자 안에서 줄인 것이다 [3].
+나머지 도구에서 예외가 나면 `call_tool`은 `{"error": "<예외 문구>"}` 글 블록 하나를 돌려준다 [1].
+SDK는 목록에 오른 도구의 인자를 `inputSchema`로 검사하고 맞지 않으면 도구를 부르지 않고 `isError`가 참인 결과를 돌려준다 [2].
+SDK는 서버 처리기가 돌려준 `CallToolResult`는 그대로, 글 블록 목록은 `isError`가 거짓인 결과로 내보낸다 [2].
+
+여러 파서와 처리 분기도 실패를 결과 `dict`의 `error` 필드에 싣는다 [4].
+선택 라이브러리가 없을 때, `diec`가 60초 안에 끝나지 않을 때, VirusTotal 조회가 실패할 때가 그런 경우다 [4].
+NTDS 도구는 결과의 상태를 `status` 필드에 싣는다 [5].
+
+**한계.** `isError`는 EVTX·NTDS·보안 설명자 도구 12개의 예외와 SDK 입력 검사 실패에만 쓰인다 [1][2].
+나머지 62개 도구의 실패는 `isError`가 거짓인 결과로 나가고 `error` 필드로만 성공과 갈린다 [1][6].
+목록에 없는 도구 이름도 SDK가 검사하지 않고 처리기로 넘기며 처리기는 `{"error": "Unknown tool: …"}`를 `isError`가 거짓인 결과로 돌려준다 [2][6][7].
+`error` 필드는 문구만 담고 실패 종류를 가르는 값은 없다 [1][4].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 NTDS 도구, EVTX 질의, 오케스트레이터의 원천별 결과에 적용된다.
+NTDS 계정·도메인 조회는 `status`를 `found`·`not_found`·`ambiguous`·`incomplete` 가운데 하나로 싣는다 [5].
+읽기가 끝까지 되지 않았거나 스키마·데이터베이스 상태를 확인하지 못하면 찾지 못했더라도 `not_found`가 아니라 `incomplete`가 된다 [5][8].
+EVTX 질의는 일치가 없으면 `events`가 빈 정상 결과를 돌려주고 파일을 읽지 못하면 `isError`가 참인 결과를 돌려준다 [1][9].
+`hunt_ioc`는 원천마다 쓸 수 없음(`available` 거짓), 검색하지 않음(`searched` 거짓), 일치 없음(`found` 거짓), 예외(`error`)를 필드로 나눠 싣는다 [10].
+`windows_search_parse`는 일치 0건을 `matched_records` 0으로, 실패를 `error`와 `complete` 거짓으로 싣는다 [11].
+`registry_get_network`는 인터페이스 키를 열거나 읽다가 예외가 나면 그때까지 모은 목록을 오류 표시 없이 돌려준다 [12].
+
+**한계.** `hunt_ioc`의 요약 목록과 요약 문장은 예외가 난 원천을 일치가 없는 원천과 같이 다룬다 [13].
+예외 결과도 `searched`가 참이고 `found`가 거짓이므로 `sources_searched_no_match`에 들어간다 [10][13].
+`investigate_execution`의 요약 문장도 예외가 난 원천을 "증거를 찾지 못한" 원천으로 적는다 [14].
+손상된 `Amcache.hve`로 두 도구를 부르자 원천 항목에는 `error`가 실렸지만 요약은 `hunt_ioc`가 "not found in any of the 1 sources searched", `investigate_execution`이 "No execution evidence found … in Amcache"였다 [15].
+`hunt_ioc`의 EVTX 원천은 파일을 읽다가 예외가 나면 그 파일을 건너뛰고 오류를 싣지 않는다 [16].
+그래서 EVTX 파일을 모두 읽지 못한 경우도 일치 없음과 같은 결과가 된다 [16].
+`build_timeline`의 EVTX 원천은 늘 사건을 0건 만들고 상태를 `processed`로 적으므로 일치 없음과 처리 실패가 갈리지 않는다 [17][18].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 여러 원천이나 입력을 한 번에 처리하는 도구에 적용된다.
+`hunt_ioc`는 원천마다 결과 항목을 싣고 일치가 있는 원천·검색했지만 일치가 없는 원천·쓸 수 없는 원천을 이름 목록으로 나눠 싣는다 [10][13].
+검색하지 않은 원천(YARA를 켜지 않은 경우, 그 원천이 지원하지 않는 IOC 종류)은 `searched` 거짓과 `note`로 표시한다 [10].
+`investigate_execution`은 Prefetch·Amcache·SRUM마다 `available`·`found`·`error`를 싣는다 [14].
+`build_timeline`은 원천마다 `processed`·`not found`·`error: …` 상태를 `sources_info`에 싣는다 [17].
+`remote_collect_artifacts`는 수집한 아티팩트마다 `success`·`local_path`·`size_bytes`·`error`를 싣는다 [19].
+`disk_parse_prefetch`의 폴더 결과는 파싱하지 못한 파일마다 경로와 오류를 `errors`에 싣는다 [20].
+`registry_get_persistence`는 하이브마다 읽지 못하면 `software_error`·`winlogon_error`·`ntuser_error`·`system_error`를 따로 싣고 읽은 하이브의 결과는 함께 돌려준다 [21].
+
+**한계.** `build_timeline`은 원천의 사건 생성기가 예외를 스스로 처리해 아무것도 내지 않아도 상태를 `processed`로 둔다 [17][18].
+`yara_scan_directory`는 파일별 오류를 앞 10개만 싣고 오류의 전체 수는 싣지 않는다 [22].
+
+### R03.04 시간 초과·부분 완료 표시
+
+**구현.** 이 방식은 읽기 상한이 있는 EVTX·NTDS 도구, `evtx_export`, `windows_search_parse`, `pcap_get_stats`에 적용된다 [8][9][11][23][24].
+EVTX 질의는 파일 끝까지 읽었는지 `scan_complete`, 읽기 상한에 닿았는지 `scan_limit_hit`, 파싱하지 못한 레코드 수 `parse_errors`를 싣는다 [9].
+`evtx_export`는 읽기 상한, 행 상한 `max_rows`, 파싱 오류, 시간 조건 오류가 없을 때만 `export_complete`를 참으로 둔다 [23].
+NTDS 도구는 `scan_complete`·`schema_complete`·`database_clean`이 모두 참이고 파싱 오류가 없을 때만 `results_complete`를 참으로 둔다 [8].
+`windows_search_parse`는 SIDR 실행이 시간 제한 `timeout`을 넘거나 실패하면 `error`를 싣고 `complete`를 거짓으로 둔다 [11].
+SIDR 기록에 오류나 경고가 있거나, 데이터베이스가 정상 종료되지 않은 상태이거나, 대체 파서를 썼을 때도 `complete`를 거짓으로 둔다 [11][25].
+`pcap_get_stats`는 패킷 수가 `max_packets`를 넘으면 `truncated`를 참으로 두고 분석한 패킷 수를 싣는다 [24].
+
+**한계.** 같은 `MAX_SCAN_EVENTS`(100,000개) 읽기 상한을 쓰는 `evtx_get_stats`·`evtx_attack_summary`·`hunt_ioc`·`build_timeline`의 EVTX 경로는 상한에 닿았는지 싣지 않는다 [26].
+`die_analyze_file`·`die_scan_directory`의 `diec` 시간 초과는 `error` 문구로만 알린다 [4].
+
+### 근거
+
+[1] `call_tool`은 12개 도구의 예외를 `evtx_error_response`로, 나머지 도구의 예외를 `{"error": …}` 글로 돌려준다.
+
+```python
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent] | CallToolResult:
+    """Handle tool calls"""
+    try:
+        result = await _execute_tool(name, arguments)
+        if isinstance(result, CallToolResult):
+            return result
+        return [TextContent(type="text", text=result)]
+    except Exception as e:
+        if name in {"evtx_search", "evtx_security_search", "evtx_get_event", "evtx_correlate_logon_id", "evtx_export", "evtx_ntlm_operational_summary", "security_descriptor_decode", "evtx_describe_security_descriptor", "ntds_get_object_by_sam", "ntds_get_object_sid", "ntds_get_domain_info", "ntds_get_trusts"}:
+            # Keep validation/read errors small; source data is never returned in a traceback.
+            return evtx_error_response(getattr(e, "message", str(e)))
+        logger.exception(f"Error executing tool {name}")
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+```
+
+[`winforensics_mcp/server.py:2466-2479`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2466-L2479)
+
+[2] MCP Python SDK 1.25.0(`ef96a31`)의 저수준 `Server.call_tool` 처리기는 목록에 오른 도구만 `inputSchema`로 검사하고 글 블록 목록을 `isError`가 거짓인 결과로 만든다: [`src/mcp/server/lowlevel/server.py:469-483`](https://github.com/modelcontextprotocol/python-sdk/blob/ef96a31671cc4c702d5b73b34306180313aedfb9/src/mcp/server/lowlevel/server.py#L469-L483), [`src/mcp/server/lowlevel/server.py:514-571`](https://github.com/modelcontextprotocol/python-sdk/blob/ef96a31671cc4c702d5b73b34306180313aedfb9/src/mcp/server/lowlevel/server.py#L514-L571).
+
+[3] `evtx_error_response`는 예외 문구를 줄여 `isError`가 참인 결과를 만든다.
+
+```python
+def evtx_error_response(message: str) -> CallToolResult:
+    """Keep server-side errors within even the smallest supported budget."""
+    preview = message[:800]
+    while True:
+        result = CallToolResult(content=[TextContent(type="text", text=preview)], isError=True)
+        if len(result.model_dump_json(by_alias=True, exclude_none=True)) <= MIN_RESPONSE_CHARS:
+            return result
+        preview = preview[:len(preview) // 2] + "…"
+```
+
+[`winforensics_mcp/evtx_response.py:100-107`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/evtx_response.py#L100-L107)
+
+[4] 파서와 처리 분기가 실패를 `error` 필드에 싣는다: [`winforensics_mcp/server.py:2773-2775`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2773-L2775), [`winforensics_mcp/server.py:2815-2824`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2815-L2824), [`winforensics_mcp/parsers/die_analyzer.py:143-151`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L143-L151).
+
+[5] NTDS 계정 조회의 `status`는 읽기가 완전한지에 따라 `not_found`와 `incomplete`로 갈린다.
+
+```python
+    status = 'ambiguous' if len(matched) > 1 else ('found' if matched else 'not_found') if metadata['results_complete'] else 'incomplete'
+    objects = [{field: copy.deepcopy(node.get(field)) for field in fields} for node in matched[:10]]
+    return {**metadata, 'status': status, 'objects': objects, 'matched_count': len(matched), 'returned': len(objects),
+            'candidates_truncated': len(matched) > len(objects), 'sam_account_name': sam_account_name, 'domain_dn': domain_dn,
+            'results_complete': metadata['results_complete'] and len(matched) == len(objects)}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:436-440`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L436-L440)
+
+[6] (실행 확인) SDK의 `CallToolRequest` 처리기로 도구를 불렀다.
+없는 하이브 경로를 준 `registry_get_key`와 없는 도구 이름 `no_such_tool`은 `isError`가 거짓인 `{"error": …}` 글을 받았다.
+`key_path` 없이 부른 `registry_get_key`는 `isError`가 참인 "Input validation error" 결과를, 없는 파일을 준 `evtx_get_event`는 `isError`가 참인 결과를 받았다.
+
+[7] 처리기는 알 수 없는 도구 이름에 `error` 글을 돌려준다.
+
+```python
+    return json_response({"error": f"Unknown tool: {name}"})
+```
+
+[`winforensics_mcp/server.py:3495-3495`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3495-L3495)
+
+[8] NTDS 메타데이터의 `results_complete`는 읽기·스키마·데이터베이스 상태와 파싱 오류로 정한다.
+
+```python
+def _metadata(snapshot, diagnostic_limit):
+    exact = snapshot['scan_complete'] and snapshot['schema_complete'] and snapshot['database_clean'] and snapshot['parse_errors'] == 0
+    keys = ('source', 'scanned_records', 'total_records', 'scan_complete', 'scan_limit_hit', 'parse_errors', 'schema_complete',
+            'database_state', 'database_state_code', 'database_clean', 'header_copies_consistent', 'header_checksum_verified')
+    return {**{key: copy.deepcopy(snapshot[key]) for key in keys}, 'results_complete': exact,
+            'total_matched_exact': exact, 'match_count_exact': exact,
+            'diagnostics': copy.deepcopy(snapshot['diagnostics'][:diagnostic_limit]),
+            'diagnostic_count': snapshot['diagnostic_count'], 'diagnostics_truncated': snapshot['diagnostic_count'] > diagnostic_limit,
+            'sid_storage': 'ntds-final-subauthority-big-endian', 'schema_mappings': dict(snapshot['schema'])}
+```
+
+[`winforensics_mcp/parsers/ntds_parser.py:397-405`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/ntds_parser.py#L397-L405)
+
+[9] EVTX 질의의 메타데이터가 읽기 완료와 상한, 파싱 오류를 싣는다.
+
+```python
+    diagnostics = {"time_filter_errors": 0}
+    matched = [i for i in _filtered_indices(cached, start_time, end_time, event_ids, contains, not_contains, provider, diagnostics)
+               if predicate(cached.events[i])]
+    metadata = {
+        "total_matched": len(matched), "query_ref": query_ref,
+        "source": {"path": source[0], "size_bytes": source[1], "mtime_ns": source[2]},
+        "scan_complete": cached.scan_complete,
+        "scan_limit_hit": not cached.scan_complete and cached.scanned_records == max_scan,
+        "scanned_records": cached.scanned_records, "parse_errors": cached.parse_errors,
+        "time_filter_errors": diagnostics["time_filter_errors"],
+        "total_matched_exact": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+        "result_set_complete": cached.scan_complete and cached.parse_errors == 0 and diagnostics["time_filter_errors"] == 0,
+    }
+```
+
+[`winforensics_mcp/parsers/evtx_parser.py:685-697`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L685-L697)
+
+[10] `hunt_ioc`의 원천 검색 함수는 쓸 수 없음, 검색하지 않음, 일치 없음, 예외를 다른 필드로 싣는다: [`winforensics_mcp/orchestrators/ioc_hunter.py:178-201`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L178-L201), [`winforensics_mcp/orchestrators/ioc_hunter.py:217-224`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L217-L224), [`winforensics_mcp/orchestrators/ioc_hunter.py:247-253`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L247-L253), [`winforensics_mcp/orchestrators/ioc_hunter.py:1036-1043`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1036-L1043).
+
+[11] `windows_search_parse`는 예외가 나면 `error`를 싣고 `complete`를 거짓으로 둔다.
+
+```python
+                _diagnostic(result, "Evidence hash changed during parsing; results are unreliable")
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        result["error"] = str(exc)[:1024]
+        result["complete"] = False
+        _diagnostic(result, str(exc))
+    result["content_filter_complete"] = result["content_filter_complete"] and result["complete"]
+    result["returned_records"] = len(result["records"])
+    result["has_more"] = result["matched_records"] > offset + result["returned_records"]
+    if result["has_more"]:
+        result["next_offset"] = offset + result["returned_records"]
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:422-431`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L422-L431)
+
+[12] `get_network_interfaces`는 예외가 나면 그때까지 모은 목록을 그대로 돌려준다.
+
+```python
+    try:
+        interfaces_path = f"{control_set}\\Services\\Tcpip\\Parameters\\Interfaces"
+        interfaces_key = reg.open(interfaces_path)
+        
+        for interface_key in interfaces_key.subkeys():
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:922-926`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L922-L926)
+
+```python
+            results.append(interface_info)
+            
+    except Exception:
+        pass
+    
+    return results
+```
+
+[`winforensics_mcp/parsers/registry_parser.py:957-962`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/registry_parser.py#L957-L962)
+
+[13] `hunt_ioc`의 요약 목록과 문장은 `searched`와 `found`로만 원천을 나눈다.
+
+```python
+    found_sources = [r["source"] for r in results if r.get("found")]
+    not_found_sources = [r["source"] for r in results if r.get("searched") and not r.get("found")]
+    unavailable_sources = [r["source"] for r in results if not r.get("available", True)]
+
+    if found_sources:
+        summary = f"IOC '{ioc}' ({final_type}) found in {len(found_sources)} source(s): {', '.join(found_sources)}"
+    else:
+        searched = [r["source"] for r in results if r.get("searched")]
+        summary = f"IOC '{ioc}' ({final_type}) not found in any of the {len(searched)} sources searched"
+
+    return {
+        "ioc": ioc,
+        "ioc_type": final_type,
+        "ioc_type_detected": detected_type,
+        "artifacts_dir": str(artifacts_dir),
+        "found": len(found_sources) > 0,
+        "confidence": confidence,
+        "total_matches": total_matches,
+        "sources_with_matches": found_sources,
+        "sources_searched_no_match": not_found_sources,
+        "sources_unavailable": unavailable_sources,
+        "artifacts_searched": artifacts_searched,
+        "results": results,
+        "summary": summary,
+    }
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:1055-1079`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L1055-L1079)
+
+[14] `investigate_execution`의 요약 문장은 `available`이 참인 원천을 모두 검색한 원천으로 적는다.
+
+```python
+def _generate_summary(
+    target: str,
+    execution_confirmed: bool,
+    confidence: str,
+    evidence_results: list[dict],
+) -> str:
+    """Generate human-readable summary"""
+    if not execution_confirmed:
+        sources_searched = [r["source"] for r in evidence_results if r.get("available", True)]
+        return f"No execution evidence found for '{target}' in {', '.join(sources_searched)}"
+
+    findings = []
+    for result in evidence_results:
+        if result.get("found") and result.get("finding"):
+            findings.append(f"- {result['source']}: {result['finding']}")
+
+    summary = f"Execution of '{target}' confirmed ({confidence} confidence):\n"
+    summary += "\n".join(findings)
+
+    return summary
+```
+
+[`winforensics_mcp/orchestrators/execution_tracker.py:576-595`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/execution_tracker.py#L576-L595)
+
+[15] (실행 확인) `Windows/AppCompat/Programs/Amcache.hve` 자리에 하이브가 아닌 파일을 두고 `hunt_ioc`와 `investigate_execution`을 불렀다.
+두 도구의 Amcache 항목에는 `error: "Registry Parse Exception (Invalid REGF ID)"`가 실렸다.
+`hunt_ioc`는 Amcache를 `sources_searched_no_match`에 넣고 요약을 "IOC 'mimi.exe' (filename) not found in any of the 1 sources searched"로 적었다.
+`investigate_execution`의 요약은 "No execution evidence found for 'mimi.exe' in Amcache"였다.
+
+[16] `hunt_ioc`의 EVTX 원천은 파일 예외가 나면 그 파일을 건너뛴다.
+
+```python
+        for evtx_file in evtx_files:
+            try:
+                result = get_evtx_events(
+                    str(evtx_file),
+                    contains=[ioc],
+                    limit=10,
+                )
+
+                searched_files.append(evtx_file.name)
+                events = result.get("events", [])
+
+                for event in events:
+                    all_matches.append({
+                        "log_file": evtx_file.name,
+                        "event_id": event.get("event_id"),
+                        "timestamp": event.get("timestamp"),
+                        "provider": event.get("provider"),
+                    })
+
+            except Exception:
+                continue
+```
+
+[`winforensics_mcp/orchestrators/ioc_hunter.py:836-856`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L836-L856)
+
+[17] `build_timeline`은 원천마다 상태를 적고 생성기 예외만 `error`로 바꾼다: [`winforensics_mcp/orchestrators/timeline_builder.py:614-701`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L614-L701).
+
+[18] (실행 확인) 가짜 EVTX 레코드 30개를 둔 `Security.evtx`로 `build_timeline`(`sources: ["evtx"]`)을 불렀다.
+시간 범위가 없을 때와 `time_range_start`를 줄 때 모두 `total_events`가 0이었고 EVTX 원천의 상태는 `processed`였다.
+
+[19] `remote_collect_artifacts`는 아티팩트마다 성공 여부와 오류를 싣는다.
+
+```python
+        results = collect_triage_package(
+            collector, Path(args["output_dir"]),
+            include_evtx=args.get("include_evtx", True),
+            include_registry=args.get("include_registry", True),
+        )
+        return json_response([{
+            "artifact": r.artifact_name, "success": r.success,
+            "local_path": str(r.local_path) if r.local_path else None,
+            "size_bytes": r.size_bytes, "error": r.error,
+        } for r in results])
+```
+
+[`winforensics_mcp/server.py:3469-3478`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L3469-L3478)
+
+[20] `disk_parse_prefetch`는 파싱하지 못한 파일을 `errors`에 싣는다.
+
+```python
+            errors.append({
+                "file": str(pf_path),
+                "error": str(e),
+            })
+
+    return {
+        "directory": str(directory),
+        "total_files": len(pf_files),
+        "total_matched": matched_count,
+        "parsed_count": len(results),
+        "offset": offset,
+        "truncated": truncated,
+        "next_offset": offset + len(results) if truncated else None,
+        "prefetch_entries": results,
+        "errors": errors if errors else None,
+    }
+```
+
+[`winforensics_mcp/parsers/prefetch_parser.py:216-231`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/prefetch_parser.py#L216-L231)
+
+[21] `registry_get_persistence`는 하이브마다 오류를 따로 싣는다.
+
+```python
+    elif name == "registry_get_persistence":
+        result = {"run_keys": [], "services": [], "winlogon": None}
+        if args.get("software_hive"):
+            try:
+                result["run_keys"].extend(get_run_keys(args["software_hive"]))
+            except Exception as e:
+                result["software_error"] = str(e)
+            try:
+                result["winlogon"] = get_winlogon_persistence(args["software_hive"])
+            except Exception as e:
+                result["winlogon_error"] = str(e)
+        if args.get("ntuser_hive"):
+            try:
+                result["run_keys"].extend(get_run_keys(args["ntuser_hive"]))
+            except Exception as e:
+                result["ntuser_error"] = str(e)
+        if args.get("system_hive"):
+            try:
+                result["services"] = get_services(args["system_hive"], args.get("include_microsoft_services", False))
+            except Exception as e:
+                result["system_error"] = str(e)
+        return json_response(result)
+```
+
+[`winforensics_mcp/server.py:2724-2745`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2724-L2745)
+
+[22] `yara_scan_directory`는 오류를 앞 10개만 싣는다.
+
+```python
+    return {
+        "directory": str(directory),
+        "pattern": file_pattern,
+        "recursive": recursive,
+        "files_scanned": scanned,
+        "files_matched": len(results),
+        "matches": results,
+        "errors": errors[:10],  # Limit error output
+        "truncated": scanned >= limit,
+    }
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:367-376`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L367-L376)
+
+[23] `evtx_export`의 `export_complete` 조건이다.
+
+```python
+        result = {
+            "format": "jsonl",
+            "sha256": digest.hexdigest(), "exported_rows": exported_rows,
+            "exported_bytes": exported_bytes,
+            "export_complete": bool(metadata["scan_complete"] and metadata["total_matched_exact"]
+                                    and metadata["parse_errors"] == 0
+                                    and metadata.get("time_filter_errors", 0) == 0 and not export_limit_hit),
+            "scan_complete": metadata["scan_complete"], "scan_limit_hit": metadata["scan_limit_hit"],
+            "parse_errors": metadata["parse_errors"], "total_matched": metadata["total_matched"],
+            "time_filter_errors": metadata.get("time_filter_errors", 0),
+            "total_matched_exact": metadata["total_matched_exact"],
+            "export_limit_hit": export_limit_hit,
+            "source": {"path": identity[0], "size": identity[1], "mtime_ns": identity[2]},
+            "query_ref": query_ref, "query": query, "preview": preview,
+        }
+        def validate_candidate(candidate: dict[str, Any]) -> None:
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:173-188`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L173-L188)
+
+[24] `pcap_get_stats`는 분석한 패킷 수와 잘림 여부를 싣는다.
+
+```python
+        "file": str(pcap_path),
+        "file_size_bytes": pcap_path.stat().st_size,
+        "packet_count": packet_count,
+        "packets_analyzed": min(packet_count, max_packets),
+        "truncated": packet_count > max_packets,
+        "total_bytes": total_bytes,
+        "time_range": time_range,
+```
+
+[`winforensics_mcp/parsers/pcap_parser.py:209-215`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/pcap_parser.py#L209-L215)
+
+[25] SIDR 기록의 오류·경고와 데이터베이스 상태, 대체 파서가 `complete`를 거짓으로 만든다.
+
+```python
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            lower = line.lower()
+            if "not clean" in lower or "dirty database" in lower:
+                result["database_state"] = "dirty"
+            if any(marker in lower for marker in ("error", "failed", "panicked", "warning:")):
+                _diagnostic(result, line)
+                result["complete"] = False
+        if process.returncode:
+            raise ValueError(f"SIDR exited with status {process.returncode}; see diagnostics")
+    reports = {}
+    for kind, suffix in REPORTS.items():
+        paths = sorted(output.glob(f"*_{suffix}_*.json"))
+        if len(paths) != 1:
+            result["complete"] = False
+            _diagnostic(result, f"Expected one {suffix} JSONL report; found {len(paths)}")
+        reports[kind] = paths
+        if any("_dirty" in p.stem for p in paths):
+            result["database_state"] = "dirty"
+    if result["database_state"] == "dirty":
+        result["complete"] = False
+        _diagnostic(result, "Dirty ESE database: results may be inaccurate or incomplete.")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:146-166`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L146-L166)
+
+```python
+def _fallback_rows(copied: Path, result: dict):
+    result["backend"] = "pyesedb"
+    result["complete"] = False
+    result["content_filter_complete"] = False
+    _diagnostic(
+        result,
+        "Partial PropertyStore fallback: long values and compressed Search "
+        "content are unsupported. Zero matches are not conclusive. Install SIDR.",
+    )
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:189-197`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L189-L197)
+
+[26] 네 경로는 `MAX_SCAN_EVENTS`를 상한으로 쓰는 EVTX 읽기를 부르고 읽기 상태를 응답에 옮기지 않는다: [`winforensics_mcp/parsers/evtx_parser.py:897`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L897), [`winforensics_mcp/parsers/evtx_parser.py:1076-1081`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L1076-L1081), [`winforensics_mcp/orchestrators/ioc_hunter.py:838-848`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/ioc_hunter.py#L838-L848), [`winforensics_mcp/orchestrators/timeline_builder.py:450-453`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/orchestrators/timeline_builder.py#L450-L453).

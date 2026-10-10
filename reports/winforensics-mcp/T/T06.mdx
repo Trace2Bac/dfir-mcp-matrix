@@ -1,0 +1,200 @@
+---
+cell: T06
+details:
+- id: T06.01
+---
+
+# T06 실행 환경정보 표시
+
+### T06.01 응답 메타데이터에 버전 표시
+
+**구현.** 이 방식은 `windows_search_parse`의 SIDR 실행 경로와 `hunt_ioc_pack`에 적용된다 [1][2].
+`windows_search_parse`는 SIDR로 분석하면 응답의 `backend_metadata`에 실행 파일 경로, 실행 파일의 SHA-256, 코드에 정한 기대 버전 `0.9.2`, 빌드 기준 커밋 `c7d3744…`, `--version`이 출력한 버전 문자열을 싣는다 [1].
+서버는 이 버전 문자열을 읽어 `0.9.2`가 없으면 분석을 실행하지 않으므로 실린 버전은 그 분석을 실행한 SIDR의 버전이다 [1].
+실행 확인에서 저장소의 `.tools/sidr_x86`으로 실행하면 `backend_metadata.version`에 `sidr 0.9.2`가 실렸다 [3].
+
+`hunt_ioc_pack`은 응답의 `pack`에 검사에 쓴 IoC 묶음의 `id`, `name`, `version`, `license`, `upstream`, 규칙 수를 싣는다 [2].
+이 값은 묶음 파일 `pack.json`에서 읽고 `version`은 묶음을 읽을 때 반드시 있어야 하는 필드다 [4].
+저장소에 들어 있는 `impacket-iocs` 묶음의 `version`은 `2026.05.21.3`이다 [5].
+`ioc_pack_list`도 묶음마다 같은 버전을 돌려준다 [4].
+
+서버의 다른 결과에는 도구나 참조 자료의 버전이 실리지 않는다.
+YARA 도구의 결과는 일치한 규칙의 이름, namespace, 태그, 규칙의 `meta`를 싣고 규칙 묶음의 출처나 버전을 싣지 않는다 [6].
+저장소의 규칙 안내 문서는 규칙의 출처를 `Neo23x0/signature-base`로만 적고 가져온 커밋을 적지 않는다 [7].
+DiE 도구의 결과에 있는 `version`은 `diec`가 판별한 패커나 컴파일러의 버전이고 `diec` 자신의 버전이 아니다 [8].
+`diec --version`을 읽는 `get_die_version`이 모듈에 있지만 서버의 처리 분기는 이 함수를 부르지 않는다 [9].
+EVTX, 레지스트리, PE, Prefetch, SRUM 같은 파서 도구의 응답에는 쓴 라이브러리의 버전이 없다.
+서버는 MCP SDK의 `Server`에 패키지 버전 `__version__`(1.5.0)을 주고 이 값은 초기화 응답의 `serverInfo`에만 실린다 [10].
+서버는 호출 기록을 남기지 않고 모델을 부르지 않는다.
+
+**한계.** `windows_search_parse`가 SIDR 대신 `pyesedb`로 읽으면 `backend_metadata`가 없고 `pyesedb`의 버전도 싣지 않는다 [1][11].
+`hunt_ioc_pack`이 `pack_path`로 외부 묶음을 읽으면 `version`은 그 파일이 적은 값을 그대로 싣고 서버는 값의 형식을 확인하지 않는다 [4].
+`hunt_ioc_pack`의 PCAP 검사는 `scapy`로 하지만 응답에 `scapy`의 버전은 없다 [2].
+
+### 근거
+
+[1] SIDR 경로는 실행 파일 정보와 관찰한 버전을 `backend_metadata`에 싣고 버전이 다르면 멈춘다.
+
+```python
+def _sidr_rows(binary: Path, copied: Path, output: Path, timeout: int, result: dict):
+    result["backend"] = "sidr"
+    result["backend_metadata"] = {
+        "path": str(binary),
+        "sha256": _sha256(binary),
+        "expected_version": SIDR_VERSION,
+        "pinned_build_commit": SIDR_COMMIT,
+    }
+    # Redirect to files so a noisy/crashing sidecar cannot exhaust Python memory.
+    with (output / "version.log").open("w+b") as version_log:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            stdout=version_log,
+            stderr=subprocess.STDOUT,
+            timeout=min(timeout, 10),
+            check=False,
+            cwd=output,
+        )
+        version_log.seek(0)
+        version_text = version_log.read(1024).decode("utf-8", errors="replace").strip()
+    result["backend_metadata"]["version"] = version_text
+    if version.returncode or not re.search(r"\b0\.9\.2\b", version_text):
+        raise ValueError(f"SIDR {SIDR_VERSION} is required; observed {version_text!r}")
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:112-134`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L112-L134)
+
+[2] `hunt_ioc_pack`의 응답은 묶음 정보와 버전을 싣는다.
+
+```python
+    return {
+        "pack": {
+            "id": ioc_pack.get("id"),
+            "name": ioc_pack.get("name"),
+            "version": ioc_pack.get("version"),
+            "license": ioc_pack.get("license"),
+            "upstream": ioc_pack.get("upstream"),
+            "rule_count": len(ioc_pack.get("rules", [])),
+        },
+```
+
+[`winforensics_mcp/ioc_packs/behavior_hunter.py:251-259`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/behavior_hunter.py#L251-L259)
+
+[3] (실행 확인) WSL x86_64에서 기준 커밋 소스의 `parse_windows_search`를 저장소의 `.tools/sidr_x86`으로 실행했다.
+
+[4] 묶음을 읽을 때 `version`이 있어야 하고 `ioc_pack_list`도 버전을 싣는다.
+
+```python
+def _validate_pack(pack: dict[str, Any], source: str | Path) -> None:
+    required = {"id", "name", "version", "license", "rules"}
+    missing = sorted(required - set(pack))
+    if missing:
+        raise ValueError(f"IoC pack {source} missing required fields: {', '.join(missing)}")
+    if not isinstance(pack["rules"], list):
+```
+
+[`winforensics_mcp/ioc_packs/loader.py:22-27`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/loader.py#L22-L27)
+
+```python
+            continue
+        pack = json.loads(pack_file.read_text(encoding="utf-8"))
+        packs.append({
+            "id": pack.get("id"),
+            "name": pack.get("name"),
+            "version": pack.get("version"),
+            "license": pack.get("license"),
+            "rule_count": len(pack.get("rules", [])),
+            "source": "bundled",
+```
+
+[`winforensics_mcp/ioc_packs/loader.py:38-46`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/loader.py#L38-L46)
+
+[5] 저장소의 묶음 파일은 `version`을 적는다.
+
+```json
+{
+  "schema_version": "1.0",
+  "id": "impacket-iocs",
+  "name": "Impacket Behavioral IoCs",
+  "version": "2026.05.21.3",
+  "license": "GPL-2.0",
+  "upstream": "https://github.com/ThatTotallyRealMyth/Impacket-IoCs",
+```
+
+[`winforensics_mcp/ioc_packs/impacket-iocs/pack.json:1-7`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/ioc_packs/impacket-iocs/pack.json#L1-L7)
+
+[6] YARA 결과 항목은 규칙 이름, namespace, 태그, `meta`만 싣는다.
+
+```python
+    # Format matches
+    result_matches = []
+    for match in matches:
+        match_info = {
+            "rule": match.rule,
+            "namespace": match.namespace,
+            "tags": list(match.tags) if match.tags else [],
+            "meta": dict(match.meta) if match.meta else {},
+        }
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:234-242`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L234-L242)
+
+[7] 규칙 안내 문서는 출처 저장소만 적는다: [`winforensics_mcp/rules/README.md:1-3`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/rules/README.md#L1-L3).
+
+[8] DiE 결과의 `version`은 판별 항목의 버전이다.
+
+```python
+    # Version
+    if show_version and "version" in item:
+        entry["version"] = item["version"]
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:279-281`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L279-L281)
+
+[9] `get_die_version`은 정의만 있고 서버의 DiE 처리 분기는 `die_analyze_file`·`die_scan_directory`만 부른다.
+
+```python
+def get_die_version() -> Optional[str]:
+    """Get DiE version string."""
+    if not DIE_AVAILABLE:
+        return None
+
+    try:
+        result = subprocess.run(
+            [_DIEC_PATH, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout.strip() or result.stderr.strip()
+    except Exception:
+        return None
+```
+
+[`winforensics_mcp/parsers/die_analyzer.py:66-80`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/die_analyzer.py#L66-L80)
+
+[`winforensics_mcp/server.py:2958-2994`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L2958-L2994)
+
+[10] 서버 객체에 패키지 버전을 준다.
+
+```python
+server = Server("winforensics-mcp", version=__version__)
+```
+
+[`winforensics_mcp/server.py:142-142`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/server.py#L142-L142)
+
+[11] `pyesedb` 대체 경로는 `backend`만 정하고 `backend_metadata`를 만들지 않는다.
+
+```python
+def _fallback_rows(copied: Path, result: dict):
+    result["backend"] = "pyesedb"
+    result["complete"] = False
+    result["content_filter_complete"] = False
+    _diagnostic(
+        result,
+        "Partial PropertyStore fallback: long values and compressed Search "
+        "content are unsupported. Zero matches are not conclusive. Install SIDR.",
+    )
+    database = pyesedb.file()
+```
+
+[`winforensics_mcp/parsers/windows_search_parser.py:189-198`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/windows_search_parser.py#L189-L198)

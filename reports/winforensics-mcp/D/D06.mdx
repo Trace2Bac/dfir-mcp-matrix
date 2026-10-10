@@ -1,0 +1,87 @@
+---
+cell: D06
+details:
+- id: D06.02
+---
+
+# D06 산출물 식별·재생성 처리
+
+### D06.02 입력·작업별 고유 이름
+
+**구현.** 이 방식은 `evtx_export`와 `vt_lookup_behavior`의 파일 이름에 적용된다 [1][2].
+`evtx_export`는 파일 이름에 `uuid4` 난수를 넣는다 [1].
+그래서 같은 원본과 같은 조건으로 다시 내보내도 앞 파일과 다른 이름의 새 파일이 생기고 앞 파일은 그대로 남는다 [1][3].
+`vt_lookup_behavior`는 파일 이름에 조회한 해시의 앞 12자를 넣는다 [2].
+이 값은 입력마다 같은 값이라 다른 해시의 결과와는 구별하지만 같은 해시를 다시 조회한 결과는 구별하지 않는다 [2].
+
+`remote_collect_artifacts`는 `output_dir` 아래 `evtx/Security.evtx`, `registry/SAM`처럼 아티팩트 종류별 고정 이름으로 쓴다 [4].
+이름에 대상 호스트나 수집 시각이 들어가지 않아 같은 `output_dir`에 다른 호스트나 다시 수집한 결과를 쓰면 앞 파일을 알리지 않고 덮어쓴다 [4][5].
+이미 있는 결과를 알아채 다시 만들지 않거나 덮어쓸지를 고르게 하는 인자는 세 도구 모두 없다.
+
+**한계.** `vt_lookup_behavior`는 같은 해시를 같은 `triage_dir`로 다시 조회하면 앞 파일을 알리지 않고 덮어쓴다 [2][5].
+해시 앞 12자가 같은 다른 해시의 결과도 같은 이름에 쓰인다 [2].
+
+### 근거
+
+[1] 내보낸 파일 이름은 매번 `uuid4`로 짓는다.
+
+```python
+    for _ in range(10):
+        destination = directory / f"evtx-export-{uuid.uuid4().hex}.jsonl"
+        # The caller retains ownership information even if interruption occurs
+        # between this helper returning and its result being assigned.
+        publication_candidates.append(destination)
+        result["path"] = str(destination)
+```
+
+[`winforensics_mcp/parsers/evtx_export.py:54-59`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_export.py#L54-L59)
+
+[2] 행동 요약 파일 이름은 해시 앞 12자로 정하고 `write_text`로 쓴다.
+
+```python
+    if triage_dir is not None:
+        output_dir = Path(triage_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"vt-behavior-{file_hash[:12]}.json"
+        output.write_text(json.dumps(response, indent=2, default=str) + "\n", encoding="utf-8")
+        projected["persisted_results"] = str(output)
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:339-344`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L339-L344)
+
+[3] (실행 확인) 같은 EVTX 파일과 같은 인자로 `evtx_export`를 같은 `output_dir`에 두 번 불렀다.
+`evtx-export-0cc19833….jsonl`과 `evtx-export-1195bd5e….jsonl` 두 파일이 남았고 두 파일 모두 응답의 `sha256`과 내용 해시가 같았으며 권한은 `0600`이었다.
+
+[4] 원격 수집은 아티팩트별 고정 이름으로 쓴다.
+
+```python
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_evtx:
+        evtx_dir = output_dir / "evtx"
+        evtx_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["evtx"].items():
+            local_path = evtx_dir / f"{name}.evtx"
+            
+            if isinstance(collector, WinRMCollector):
+                result = collector.collect_file(path, local_path, use_shadow_copy=True)
+            else:
+                result = collector.collect_file(path, local_path)
+            
+            results.append(result)
+
+    if include_registry:
+        reg_dir = output_dir / "registry"
+        reg_dir.mkdir(exist_ok=True)
+        
+        for name, path in ARTIFACT_PATHS["registry"].items():
+            local_path = reg_dir / name
+```
+
+[`winforensics_mcp/collectors/artifact_collector.py:394-416`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/collectors/artifact_collector.py#L394-L416)
+
+[5] (실행 확인) VirusTotal 클라이언트와 WinRM 세션을 가짜로 바꾸고 같은 목적지로 두 번 불렀다.
+같은 해시와 `triage_dir`로 부른 `vt_lookup_behavior`는 파일 하나만 남기고 내용을 두 번째 응답으로 바꿨다.
+`host`를 바꿔 같은 `output_dir`로 부른 `remote_collect_artifacts`는 `registry/SAM`의 내용을 두 번째 수집 내용으로 바꿨고 파일 수는 그대로였다.
