@@ -4,6 +4,7 @@ details:
 - id: T07.03
 - id: T07.04
 - id: T07.07
+- id: T07.08
 ---
 
 # T07 도구 부재 처리
@@ -39,6 +40,16 @@ details:
 **한계.** 설치 함수는 실패하면 서버 로그에 `Error`를 남기고 `false`를 돌려주지만 생성자는 그 값을 보지 않고 툴킷을 만든다 [8][10].
 그 도구를 쓰는 메서드는 실행에 실패해 `null`을 돌려주고 응답에는 설치에 실패했다는 사실이 실리지 않는다 [12].
 `PacketAnalysisToolkit`은 Suricata 룰 파일이 없을 때 `suricata-update`를 부르지만 결과를 보지 않아 룰을 받지 못해도 알리지 않고 Suricata를 실행한다 [14].
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `AnalyzeExecutionEvidenceAsync`와 `FindRegistryPersistenceMechanismsAsync`가 쓰는 LOLBAS 자료 `lolbas.json`에 적용된다 [15][16][17].
+`lolbas.json`은 `WindowsAnalysis` 툴킷의 설치 함수가 내려받아 두는 참조 자료다 [18].
+`LoadLolbasAsync`는 이 파일을 읽어 해석하고 읽지 못하거나 해석하지 못하면 `null`을 돌려준다 [15].
+`AnalyzeExecutionEvidenceAsync`는 `null`을 받으면 LOLBin이 정식 경로 밖에서 실행됐는지 보는 규칙만 빼고 의심 경로 규칙과 도구 이름 목록 규칙으로 실행 파일을 판정한다 [16].
+`FindRegistryPersistenceMechanismsAsync`도 `null`을 받으면 LOLBin 규칙만 빼고 나머지 규칙으로 지속성 항목을 판정한다 [17].
+
+**한계.** 두 메서드의 결과와 요약 문구에는 LOLBAS 자료를 읽지 못해 LOLBin 규칙을 뺐다는 표시가 없다 [19].
 
 ### 근거
 
@@ -351,3 +362,102 @@ SDK 문서도 툴킷 메서드가 실패하면 `null`을 돌려준다고 적는�
 ```
 
 [`src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs:50-55`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/PacketAnalysis/PacketAnalysisToolkit.cs#L50-L55)
+
+[15] `LoadLolbasAsync`는 `lolbas.json`을 읽지 못하거나 해석하지 못하면 `null`을 돌려준다.
+
+```csharp
+    /// <summary>
+    /// Loads the LOLBAS reference dataset (<c>lolbas.json</c>, installed by this toolkit) into a queryable
+    /// <see cref="LolbasReference"/> index. Returns null if the dataset is unavailable or unparseable, so callers
+    /// degrade gracefully (skip living-off-the-land checks) rather than fail.
+    /// </summary>
+    public async Task<LolbasReference?> LoadLolbasAsync()
+    {
+        var r = await auditEnvironment.ExecuteCommandAsync("cat", Q(LolbasPath), false);
+        return r.IsCompleted ? LolbasReference.Parse(r.Output) : null;
+    }
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisToolkit.cs:32-41`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisToolkit.cs#L32-L41)
+
+[16] 실행 증거 분석은 LOLBAS 자료가 `null`이면 LOLBin 규칙만 건너뛴다.
+
+```csharp
+        var lolbas = await WindowsAnalysis.LoadLolbasAsync();
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:392-392`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L392-L392)
+
+```csharp
+    private static string[] ScoreExecution(string path, string name, string[] suspiciousPaths, string[] watchlist, LolbasReference? lolbas)
+    {
+        var reasons = new List<string>();
+        var loc = suspiciousPaths.FirstOrDefault(f => path.Contains(f, StringComparison.OrdinalIgnoreCase));
+        if (loc is not null) reasons.Add($"executed from a suspicious location ('{loc.Trim('\\')}')");
+        var tool = watchlist.FirstOrDefault(w => name.Contains(w, StringComparison.OrdinalIgnoreCase));
+        if (tool is not null) reasons.Add($"matches a notable hacking/anti-forensic/recon tool ('{tool}')");
+        if (lolbas is not null && lolbas.IsLolbin(name) && HasDirectory(path) && !lolbas.IsCanonicalPath(name, path))
+            reasons.Add($"living-off-the-land binary '{name}' run from a non-canonical path (possible masquerading)");
+        return reasons.ToArray();
+    }
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:494-504`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L494-L504)
+
+[17] 지속성 분석은 LOLBAS 자료가 `null`이면 LOLBin 규칙만 건너뛴다.
+
+```csharp
+        // LOLBAS index for living-off-the-land detection (null-tolerant: scoring skips LOLBin checks if absent).
+        var lolbas = await WindowsAnalysis.LoadLolbasAsync();
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:1222-1223`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L1222-L1223)
+
+```csharp
+        // LOLBAS: inspect the program the command launches (its leading token).
+        var program = ProgramToken(cmd);
+        var bin = FileNameOf(program);
+        if (lolbas is not null && lolbas.IsLolbin(bin))
+        {
+            if (HasDirectory(program) && !lolbas.IsCanonicalPath(bin, program))
+                // Right name, wrong place: a known LOLBin invoked by full path from a non-canonical location.
+                reasons.Add($"living-off-the-land binary '{bin}' runs from a non-canonical path (possible masquerading)");
+            else if (reasons.Count > 0)
+                reasons.Add($"invokes living-off-the-land binary '{bin}'");
+        }
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:1376-1386`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L1376-L1386)
+
+[18] 설치 함수가 `lolbas.json`을 내려받는다.
+
+```csharp
+        InstallFile("lolbas.json", "https://lolbas-project.github.io/api/lolbas.json", LolbasPath);
+```
+
+[`src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisToolkit.cs:25-25`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Toolkits/WindowsAnalysis/WindowsAnalysisToolkit.cs#L25-L25)
+
+[19] 두 메서드의 결과와 요약 문구는 LOLBAS 자료를 읽었는지 싣지 않는다.
+
+```csharp
+        var report = new ExecutionReport { Executables = executables };
+        return WorkflowResult<ExecutionReport>.Success(report,
+            $"Correlated {executables.Length} executable(s) from Shimcache" + (amcacheHive is not null ? " + Amcache" : "") +
+            $"; {report.SuspiciousExecutables.Length} flagged " +
+            (report.SuspiciousExecutables.Length == 0 ? "." : $"(e.g. {string.Join(", ", report.SuspiciousExecutables.Take(5).Select(e => e.Name))})."));
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:421-425`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L421-L425)
+
+```csharp
+        var report = new RegistryPersistenceReport(mechanisms);
+
+        op.Complete();
+        return WorkflowResult<RegistryPersistenceReport>.Success(report,
+            report.SuspiciousEntries.Length == 0
+                ? $"Enumerated {report.AllEntries.Length} persistence entr(ies) across {mechanisms.Length} mechanism categories; none scored suspicious."
+                : $"Enumerated {report.AllEntries.Length} persistence entr(ies); {report.SuspiciousEntries.Length} scored suspicious: " +
+                  string.Join(", ", report.SuspiciousEntries.Select(e => $"{e.Name} [{e.Category}]")) + ".");
+```
+
+[`src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs:1239-1246`](https://github.com/allisterb/Camel/blob/63f4cb2e26a2469a35f847bee607516cf6184e91/src/Camel.Workflows/WindowsAnalysis/WindowsAnalysisWorkflow.cs#L1239-L1246)

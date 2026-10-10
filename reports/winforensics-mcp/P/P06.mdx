@@ -9,30 +9,38 @@ details:
 
 ### P06.02 프로세스 메모리에만 보관
 
-**구현.** 서버 프로세스 메모리에 두는 상태는 EVTX 파싱 결과, NTDS 메타데이터, VirusTotal 조회 결과의 캐시 3개다.
+**구현.** 서버 프로세스 메모리에 두는 상태는 EVTX 파싱 결과, NTDS 메타데이터, VirusTotal 조회 결과, 컴파일한 YARA 규칙의 캐시 4개와 VirusTotal에 마지막으로 요청한 시각이다.
 EVTX 캐시 `_evtx_cache`는 파일 하나를 정한 `max_scan`까지 읽어 만든 사건 목록, 원래 레코드 문자열, 레코드 번호를 담는다 [1].
 키는 파일 경로, 크기, 시각, 장치·inode 번호와 `max_scan`, 사용한 파서이고 EVTX 검색·상세 조회·로그온 ID 상관·내보내기가 이 캐시를 함께 쓴다 [2][3].
 NTDS 캐시 `_CACHE`는 파일 식별 정보와 `max_scan`을 키로 스키마와 객체 메타데이터를 담는다 [4].
 VirusTotal 캐시 `_cache`는 조회 대상별로 응답과 조회 시각을 담는다 [5].
-세 캐시는 파일이나 DB에 쓰지 않으므로 프로세스가 끝나면 사라진다 [1][4][5].
+해시 조회는 VirusTotal이 찾지 못했다고 답한 결과도 이 캐시에 넣고 IP·도메인 조회는 찾은 결과만 넣는다 [6].
+YARA 캐시 `_rule_cache`는 규칙 파일의 namespace와 경로 목록을 줄인 값을 키로 컴파일한 규칙과 넣은 시각을 담는다 [7][8].
+VirusTotal 모듈은 요청 간격을 재려고 마지막 요청 시각 `_last_request_time`을 둔다 [9].
+네 캐시와 마지막 요청 시각은 파일이나 DB에 쓰지 않으므로 프로세스가 끝나면 사라진다 [1][4][5][7][9].
 
 나머지 분석 도구는 호출마다 증거 파일을 다시 읽어 결과를 만든다.
 열린 사건이나 작업 목록 같은 상태는 없다.
-EVTX의 이어 읽기 값 `next_cursor`와 사건 참조 `event_ref`는 원본 식별 정보, 질의 해시, 위치를 담은 문자열이고 서버는 이를 따로 저장하지 않는다 [6].
-캐시가 비어 있으면 `evtx_get_event`는 참조한 레코드 번호까지 파일을 다시 읽어 그 사건을 찾는다 [7].
+EVTX의 이어 읽기 값 `next_cursor`와 사건 참조 `event_ref`는 원본 식별 정보, 질의 해시, 위치를 담은 문자열이고 서버는 이를 따로 저장하지 않는다 [10].
+캐시가 비어 있으면 `evtx_get_event`는 참조한 레코드 번호까지 파일을 다시 읽어 그 사건을 찾는다 [11].
 도구가 내보내거나 수집해 쓰는 파일은 도구의 출력이고 서버는 이 파일을 다시 읽어 상태로 쓰지 않는다.
 
 ### P06.05 만료
 
-**구현.** 이 방식은 세 캐시에 적용된다.
+**구현.** 이 방식은 네 캐시에 적용된다.
 EVTX 캐시는 항목이 10개를 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [2].
 NTDS 캐시는 항목이 2개를 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [4].
 VirusTotal 캐시는 항목마다 24시간의 유효 시간을 둔다 [5].
-유효 시간이 지난 항목은 다시 조회할 때 버린다 [5][8].
-캐시에서 꺼낸 VirusTotal 응답에는 `_cached`와 캐시에 둔 시간 `_cache_age_hours`가 붙는다 [8].
+유효 시간이 지난 항목은 다시 조회할 때 버린다 [5][12].
+캐시에서 꺼낸 VirusTotal 응답에는 `_cached`와 캐시에 둔 시간 `_cache_age_hours`가 붙는다 [12].
+YARA 캐시는 항목마다 3,600초의 유효 시간을 둔다 [7].
+같은 키를 다시 찾을 때 유효 시간이 지나 있으면 규칙을 다시 컴파일해 그 항목을 바꾼다 [13].
 EVTX·NTDS 캐시의 키에는 파일 크기와 시각이 들어 있어 파일이 바뀌면 새 항목을 만든다 [2][4].
 
-**한계.** VirusTotal 캐시에는 개수 한도가 없고 유효 시간이 지난 항목도 같은 대상을 다시 조회하기 전에는 메모리에 남는다 [5][8].
+**한계.** VirusTotal 캐시에는 개수 한도가 없고 유효 시간이 지난 항목도 같은 대상을 다시 조회하기 전에는 메모리에 남는다 [5][12].
+YARA 캐시에도 개수 한도가 없고 유효 시간이 지난 다른 키의 항목을 지우는 코드가 없다 [13].
+YARA 캐시의 키에는 규칙 파일의 내용이나 수정 시각이 없어 유효 시간 안에는 내용이 바뀐 규칙 파일도 앞서 컴파일한 규칙으로 검사한다 [8][13].
+같은 경로의 규칙 내용을 바꾼 뒤 다시 검사한 실행에서 유효 시간 안에는 바꾸기 전 규칙이 일치했다 [14].
 
 ### 근거
 
@@ -113,7 +121,53 @@ CACHE_TTL = timedelta(hours=24)
 
 [`winforensics_mcp/parsers/virustotal_client.py:31-33`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L31-L33)
 
-[6] 이어 읽기 값과 사건 참조는 원본 식별 정보와 위치를 담은 문자열이다.
+[6] 해시 조회만 찾지 못한 결과를 캐시에 넣는다: [`winforensics_mcp/parsers/virustotal_client.py:170-180`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L170-L180), [`winforensics_mcp/parsers/virustotal_client.py:388-395`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L388-L395), [`winforensics_mcp/parsers/virustotal_client.py:482-489`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L482-L489).
+
+[7] YARA 캐시는 모듈 전역 `dict`이고 유효 시간은 3,600초다.
+
+```python
+# Rule cache: cache_key -> (compiled_rules, timestamp)
+_rule_cache: dict[str, tuple[Any, float]] = {}
+CACHE_TTL_SECONDS = 3600  # 1 hour
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:25-27`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L25-L27)
+
+[8] YARA 캐시의 키는 namespace와 규칙 파일 경로 목록으로 만든다.
+
+```python
+def _get_cache_key(yar_files: dict[str, str]) -> str:
+    """Generate cache key from rule file paths."""
+    content = str(sorted(yar_files.items()))
+    return hashlib.md5(content.encode()).hexdigest()
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:64-67`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L64-L67)
+
+[9] 마지막 요청 시각은 모듈 전역 값이고 요청 간격을 잴 때 고친다.
+
+```python
+# Rate limiting for free tier (4 requests/minute = 15 seconds between requests)
+_last_request_time: float = 0
+MIN_REQUEST_INTERVAL: float = 15.0  # seconds
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:35-37`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L35-L37)
+
+```python
+def _rate_limit() -> None:
+    """Enforce rate limiting between requests."""
+    global _last_request_time
+    elapsed = time.time() - _last_request_time
+    if elapsed < MIN_REQUEST_INTERVAL:
+        sleep_time = MIN_REQUEST_INTERVAL - elapsed
+        time.sleep(sleep_time)
+    _last_request_time = time.time()
+```
+
+[`winforensics_mcp/parsers/virustotal_client.py:79-86`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L79-L86)
+
+[10] 이어 읽기 값과 사건 참조는 원본 식별 정보와 위치를 담은 문자열이다.
 
 ```python
 def make_evtx_cursor(query_ref: str, offset: int) -> str:
@@ -130,7 +184,7 @@ def _event_ref(source: tuple, ordinal: int) -> str:
 
 [`winforensics_mcp/parsers/evtx_parser.py:90-99`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L90-L99)
 
-[7] 캐시에 없으면 참조한 레코드 번호까지 다시 읽는다.
+[11] 캐시에 없으면 참조한 레코드 번호까지 다시 읽는다.
 
 ```python
     # Prefer an existing scan; on a cache miss, stop at the referenced record.
@@ -143,7 +197,7 @@ def _event_ref(source: tuple, ordinal: int) -> str:
 
 [`winforensics_mcp/parsers/evtx_parser.py:812-817`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/evtx_parser.py#L812-L817)
 
-[8] 유효 시간이 지나지 않았으면 표시를 붙여 돌려주고 지났으면 그 항목을 지운다.
+[12] 유효 시간이 지나지 않았으면 표시를 붙여 돌려주고 지났으면 그 항목을 지운다.
 
 ```python
 def _get_cached(key: str) -> Optional[dict]:
@@ -169,3 +223,26 @@ def _set_cached(key: str, result: dict) -> None:
 ```
 
 [`winforensics_mcp/parsers/virustotal_client.py:89-108`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/virustotal_client.py#L89-L108)
+
+[13] 같은 키의 항목이 유효 시간 안이면 그대로 쓰고 아니면 다시 컴파일해 그 키의 값만 바꾼다.
+
+```python
+    # Check cache
+    cache_key = _get_cache_key(yar_files)
+    if use_cache and cache_key in _rule_cache:
+        rules, timestamp = _rule_cache[cache_key]
+        if time.time() - timestamp < CACHE_TTL_SECONDS:
+            return rules
+
+    # Compile rules
+    rules = yara.compile(filepaths=yar_files)
+
+    # Update cache
+    if use_cache:
+        _rule_cache[cache_key] = (rules, time.time())
+```
+
+[`winforensics_mcp/parsers/yara_scanner.py:122-134`](https://github.com/x746b/winforensics-mcp/blob/cce7f360873fc9ae564296017cbffe2a603d83dd/winforensics_mcp/parsers/yara_scanner.py#L122-L134)
+
+[14] (실행 확인) 규칙 파일 하나로 검사한 뒤 같은 경로의 규칙 내용을 바꿔 다시 검사하면 바꾸기 전 규칙이 일치했다.
+캐시에 넣은 시각을 3,601초 앞으로 돌리자 바꾼 규칙이 일치했다.
