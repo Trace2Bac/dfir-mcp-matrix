@@ -1,0 +1,129 @@
+---
+cell: I02
+details:
+- id: not_implemented
+---
+
+# I02 분석 도구 통신 차단
+
+### 미구현
+
+**판단.** 서버가 분석에 쓰는 외부 프로그램은 Velociraptor이고 서버는 VQL을 보내 아티팩트 수집을 요청한다 [1].
+아티팩트를 실행하는 쪽은 Velociraptor 서버와 단말의 Velociraptor 클라이언트다.
+서버가 만드는 수집 VQL에는 `client_id`, 아티팩트 이름, 아티팩트 매개변수만 있고 실행 중의 통신을 끊거나 끄는 인자는 없다 [1].
+`collect_artifact`와 `hunt_across_fleet`는 요청할 아티팩트 이름을 인자로 받는다 [2].
+`normalize_artifact_name`은 이 이름의 글자 형식만 검사하고 이름을 목록과 대조하지 않는다 [3].
+두 도구는 `ENABLE_DANGEROUS_TOOLS`를 확인하지 않는다 [2].
+`ENABLE_DANGEROUS_TOOLS`를 켜지 않은 채 `collect_artifact`로 `Generic.Client.VQL`에 `http_client()`를 쓰는 VQL을 넘기자 단말의 Velociraptor 클라이언트가 VQL에 적힌 주소로 HTTP 요청을 보냈다 [4].
+`run_vql`은 `ENABLE_DANGEROUS_TOOLS`를 켜면 받은 VQL을 그대로 Velociraptor 서버에 보낸다 [5].
+이 도구로 `http_client()`를 쓰는 VQL을 보내자 Velociraptor 서버가 VQL에 적힌 주소로 HTTP 요청을 보냈다 [6].
+YARA 도구는 규칙 본문을 `YaraRule` 인자로 받아 아티팩트 매개변수로 넘기고 규칙을 내려받을 주소를 넘기는 인자는 두지 않는다 [7].
+이것은 내려받기 인자를 붙이지 않은 것이고 통신을 끄는 장치가 아니다.
+
+서버 프로세스가 직접 부르는 라이브러리는 pyvelociraptor, grpcio, PyYAML, python-dotenv, MCP Python SDK다 [8].
+이 라이브러리들이 Velociraptor API 접속 밖에서 스스로 통신하는지는 소스로 확인하지 않았다.
+
+### 근거
+
+[1] `realtime_collection`과 `start_collection`은 `collect_client`에 `client_id`, 아티팩트 이름, 매개변수를 넣는다.
+
+```python
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_result_artifact = normalize_artifact_name(f"{artifact}{result_scope}")
+    normalized_fields = normalize_fields(fields)
+    normalized_parameters = normalize_env_dict(parameters)
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:552-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L552-L564)
+
+```python
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_parameters = normalize_env_dict(parameters)
+    timeout_arg = ""
+    if timeout is not None:
+        timeout_arg = f", timeout={int(timeout)}"
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:573-585`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L573-L585)
+
+[2] 아티팩트 이름을 인자로 받는 도구다: [`mcp_velociraptor_bridge.py:305-347`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L305-L347), [`mcp_velociraptor_bridge.py:2003-2044`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2003-L2044).
+
+[3] `normalize_artifact_name`은 정규식으로 이름 형식을 검사한다.
+
+```python
+def normalize_artifact_name(artifact: str) -> str:
+    cleaned = artifact.strip()
+    if not cleaned or not VALID_ARTIFACT_RE.fullmatch(cleaned):
+        raise ValueError(f"Invalid artifact name: {artifact!r}")
+    return cleaned
+```
+
+[`velociraptor_api.py:83-87`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L83-L87)
+
+```python
+VALID_ARTIFACT_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+```
+
+[`velociraptor_api.py:25-25`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L25-L25)
+
+[4] (실행 확인) `127.0.0.1:18767`에 HTTP 수신 프로그램을 실행하고 `ENABLE_DANGEROUS_TOOLS` 없이 서버 모듈을 가져왔다.
+`run_vql`은 `This tool is disabled by default`로 시작하는 오류 응답을 돌려줬다.
+`collect_artifact`를 아티팩트 `Generic.Client.VQL`, 매개변수 `Command`에 `SELECT Response FROM http_client(url='http://127.0.0.1:18767/mv-rv-endpoint')`를 넣어 Linux 단말을 대상으로 부르자 `flow_id`를 담은 성공 응답이 왔고 수신 프로그램에 `GET /mv-rv-endpoint` 요청이 왔다.
+
+[5] `run_vql`은 환경변수를 확인한 뒤 받은 질의를 `run_vql_query`에 넘긴다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)
+
+[6] (실행 확인) `127.0.0.1:18765`에 HTTP 수신 프로그램을 실행하고 `ENABLE_DANGEROUS_TOOLS=true`로 `run_vql`에 `SELECT Response, Url FROM http_client(url='http://127.0.0.1:18765/mv-i02-check')`를 보냈다.
+응답은 `Response`가 404인 행이었고 수신 프로그램의 로그에 `GET /mv-i02-check` 요청이 남았다.
+
+[7] `yara_scan_files`가 아티팩트에 넘기는 매개변수다.
+
+```python
+    parameters = {
+        "YaraRule": YaraRule,
+        "FileNameRegex": FileNameRegex,
+        "PathRegex": PathRegex,
+        "DriveLetter": DriveLetter,
+    }
+    return _run_collection_tool(
+        client_id,
+        "Windows.Detection.Yara.NTFS",
+        parameters,
+        Fields,
+        "",
+        org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1840-1853`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1840-L1853)
+
+[8] 서버 코드가 가져오는 외부 라이브러리다: [`mcp_velociraptor_bridge.py:1-1`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1-L1), [`velociraptor_api.py:8-10`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L8-L10), [`velociraptor_env.py:22-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L22-L28).

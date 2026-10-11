@@ -1,0 +1,261 @@
+---
+cell: P01
+details:
+- id: not_implemented
+---
+
+# P01 분석 방법 적합성 확인
+
+### 미구현
+
+**판단.** 서버는 단말의 OS나 증거 형식을 판별하지 않고 호출자가 고른 도구와 `client_id`를 대조 없이 Velociraptor에 넘긴다 [1][2].
+도구는 이름이 `linux_`·`macos_`·`windows_`로 시작하는 묶음으로 나뉘고 도구마다 요청할 아티팩트 이름이 코드에 고정되어 있다 [3].
+이 도구들은 `client_id`가 가리키는 단말의 OS를 조회하지 않고 `collect_client` 요청 VQL을 만든다 [1][2].
+`yara_scan_files`, `yara_scan_process`, `quarantine_host`, `unquarantine_host`, `collect_forensic_triage`는 이름에 OS가 없지만 `Windows.`로 시작하는 아티팩트를 요청하고 Windows용이라는 사실은 도구 설명에만 적혀 있다 [4].
+`client_info`와 `list_clients`가 돌려주는 `OSType`은 Velociraptor가 단말 기록에 둔 `os_info.system` 값이다 [5].
+서버는 이 값을 응답에 실을 뿐 다른 도구의 실행 조건으로 쓰지 않는다 [1][5].
+`list_clients`의 `os_filter`는 받은 문자열을 `os_info.system`에 대한 정규식 조건으로 넘기고 `hunt_across_fleet`의 `os_filter`는 Velociraptor `hunt()`의 `os` 인자로 넘긴다 [6].
+두 인자는 호출자가 준 값이고 서버는 그 값을 요청할 아티팩트와 대조하지 않는다 [6].
+`collect_artifact`와 `hunt_across_fleet`는 아티팩트 이름의 문자 종류만 검사하고 받은 이름대로 요청한다 [7].
+`list_windows_artifacts`·`list_linux_artifacts`·`list_macos_artifacts`는 이름이 `windows.`·`linux.`·`macos.`에 맞는 아티팩트를 골라 이름, 줄인 설명, 매개변수 이름을 돌려준다 [8].
+이 목록 도구는 단말을 인자로 받지 않고 아티팩트 정의의 precondition을 응답에 싣지 않는다 [8].
+`macos_browser_history`는 `URLRegex`가 기본값이 아니면 요청할 아티팩트에 `URLRegex` 매개변수가 없다는 오류를 돌려준다 [9].
+이 검사는 인자 값을 코드에 적어 둔 기본값과 비교할 뿐 Velociraptor의 아티팩트 정의나 단말의 OS를 조회하지 않는다 [9].
+
+아티팩트가 단말의 OS에 맞는지는 Velociraptor가 아티팩트 정의의 precondition으로 판단한다 [10].
+Velociraptor v0.77.1의 `Windows.System.Pslist`는 `OS = 'windows'`를 precondition으로 둔다 [10].
+Linux 단말에 `windows_pslist`를 부르면 서버는 `ok`가 참이고 `data`가 빈 목록인 응답을 돌려준다 [11].
+같은 단말에 `collect_artifact`로 `Windows.System.Pslist`를 요청하면 flow가 시작되고 flow 기록에는 precondition 때문에 질의를 건너뛰었다는 문구가 남는다 [12].
+서버는 flow 기록의 이 문구를 읽지 않으므로 응답만으로는 OS가 맞지 않아 실행되지 않은 경우와 맞는 항목이 없는 경우를 구별할 수 없다 [2][11].
+`macos_pslist`가 요청하는 `MacOS.Sys.Pslist`는 `Linux.Sys.Pslist`의 다른 이름이고 precondition이 `linux|darwin`이다 [3][13].
+그래서 Linux 단말에 `macos_pslist`를 부르면 그 단말의 프로세스 목록이 돌아온다 [14].
+Windows 단말과 macOS 단말에 요청했을 때의 동작은 실행으로 확인하지 않았다.
+
+같은 저장소의 MCP 클라이언트 예제 `agent_poc/`는 `client_info` 응답의 `OSType`으로 단말의 OS를 정하고 그 OS의 역할 표에 적힌 도구만 부른다 [15][16].
+`OSType`이 `win`·`lin`·`mac`으로 시작하거나 `darwin`·`osx`이면 각각 `windows`·`linux`·`macos`로 정한다 [15].
+그 OS의 표에 없는 역할은 실행하지 않고 결과의 `skipped`에 `not_applicable`로 적는다 [16].
+이 선택은 클라이언트 코드가 하므로 다른 MCP 클라이언트로 붙으면 적용되지 않고 서버는 어느 클라이언트에서 온 호출이든 OS를 대조하지 않는다 [1][16].
+
+### 근거
+
+[1] 실시간 수집 도구의 공통 처리기는 받은 `client_id`와 아티팩트 이름을 `realtime_collection`에 그대로 넘긴다.
+
+```python
+def _run_collection_tool(
+    client_id: str,
+    artifact: str,
+    parameters: ArtifactParameters | None,
+    fields: str,
+    result_scope: str,
+    org_id: str = "",
+) -> str:
+    return _run_json_tool(
+        realtime_collection,
+        client_id,
+        artifact,
+        parameters,
+        fields,
+        result_scope,
+        org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:50-66`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L50-L66)
+
+[2] `realtime_collection`은 단말의 OS를 조회하지 않고 수집 요청과 결과 조회 VQL을 만든다.
+
+```python
+def realtime_collection(
+    client_id: str,
+    artifact: str,
+    parameters: Mapping[str, ParameterValue] | None = None,
+    fields: str = "*",
+    result_scope: str = "",
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_result_artifact = normalize_artifact_name(f"{artifact}{result_scope}")
+    normalized_fields = normalize_fields(fields)
+    normalized_parameters = normalize_env_dict(parameters)
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:544-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L544-L564)
+
+[3] OS별 도구는 아티팩트 이름을 코드에 적어 둔다.
+`linux_yara_scan`은 [`mcp_velociraptor_bridge.py:1884-1907`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1884-L1907)에 따로 있다.
+묶음의 위치는 [`mcp_velociraptor_bridge.py:374-695`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L374-L695)(`linux_`), [`mcp_velociraptor_bridge.py:697-889`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L697-L889)(`macos_`), [`mcp_velociraptor_bridge.py:891-1825`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L891-L1825)(`windows_`)다.
+
+```python
+async def macos_pslist(
+    client_id: str,
+    org_id: str = "",
+    ProcessRegex: str = ".",
+    Fields: str = "*",
+) -> str:
+    """
+    List running processes on a macOS host.
+    """
+    return _run_collection_tool(
+        client_id,
+        "MacOS.Sys.Pslist",
+        {"ProcessRegex": ProcessRegex},
+        Fields,
+        "",
+        org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:697-713`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L697-L713)
+
+[4] 이름에 OS가 없는 도구가 요청하는 Windows 아티팩트: [`mcp_velociraptor_bridge.py:1828-1880`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1828-L1880), [`mcp_velociraptor_bridge.py:1911-1933`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1911-L1933), [`mcp_velociraptor_bridge.py:2048-2072`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2048-L2072).
+
+[5] `OSType`은 `clients()`의 `os_info.system`이다.
+
+```python
+    select_clause = (
+        "SELECT client_id,"
+        "timestamp(epoch=first_seen_at) as FirstSeen,"
+        "timestamp(epoch=last_seen_at) as LastSeen,"
+        "os_info.hostname as Hostname,"
+        "os_info.fqdn as Fqdn,"
+        "os_info.system as OSType,"
+        "os_info.release as OS,"
+        "os_info.machine as Machine,"
+        "agent_information.version as AgentVersion "
+    )
+```
+
+[`velociraptor_api.py:326-336`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L326-L336)
+
+[6] `os_filter`는 정규식 조건과 `hunt()`의 `os` 인자로 전달된다.
+
+```python
+        f"WHERE (os_info.hostname =~ {vql_literal(search_pattern)} "
+        f"OR os_info.fqdn =~ {vql_literal(search_pattern)} "
+        f"OR client_id =~ {vql_literal(search_pattern)}) "
+        f"AND os_info.system =~ {vql_literal(os_pattern)} "
+        f"ORDER BY LastSeen DESC LIMIT {int(limit)}"
+```
+
+[`velociraptor_api.py:397-401`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L397-L401)
+
+```python
+    if os_filter.strip():
+        hunt_args.append(f"os={vql_literal(os_filter.strip())}")
+```
+
+[`velociraptor_api.py:425-426`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L425-L426)
+
+[7] 아티팩트 이름은 허용 문자만 검사한다.
+허용 문자 정규식은 [`velociraptor_api.py:25`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L25)에 있다.
+
+```python
+def normalize_artifact_name(artifact: str) -> str:
+    cleaned = artifact.strip()
+    if not cleaned or not VALID_ARTIFACT_RE.fullmatch(cleaned):
+        raise ValueError(f"Invalid artifact name: {artifact!r}")
+    return cleaned
+```
+
+[`velociraptor_api.py:83-87`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L83-L87)
+
+[8] 목록 도구는 이름 정규식으로 고르고 `name`·`description`·`parameters`만 조회한다.
+OS별 정규식은 [`mcp_velociraptor_bridge.py:2091-2097`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2091-L2097), [`mcp_velociraptor_bridge.py:2113-2119`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2113-L2119), [`mcp_velociraptor_bridge.py:2136-2142`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2136-L2142)에 있다.
+
+```python
+def _summarize_artifacts(
+    scope_regex: str,
+    org_id: str = "",
+    include_parameter_details: bool = False,
+    name_regex: str = ".",
+) -> list[dict]:
+    parameter_projection = "*" if include_parameter_details else "name"
+    vql = f"""
+    LET params(data) = SELECT {parameter_projection} FROM data
+    SELECT name, description, params(data=parameters) AS parameters
+    FROM artifact_definitions()
+    WHERE type =~ 'client'
+      AND name =~ {vql_literal(scope_regex)}
+      AND name =~ {vql_literal(name_regex or ".")}
+    ORDER BY name
+    """
+```
+
+[`mcp_velociraptor_bridge.py:196-211`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L196-L211)
+
+[9] `URLRegex`를 쓰면 실행하지 않고 오류를 돌려준다.
+
+```python
+    if URLRegex != ".":
+        return _json_error(
+            "MacOS.Applications.Chrome.History does not expose URLRegex; "
+            "custom filtering requires urlSQLQuery."
+        )
+```
+
+[`mcp_velociraptor_bridge.py:796-800`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L796-L800)
+
+[10] Velociraptor v0.77.1 `Windows.System.Pslist`의 precondition: [`artifacts/definitions/Windows/System/Pslist.yaml:35-36`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/artifacts/definitions/Windows/System/Pslist.yaml#L35-L36).
+
+[11] (실행 확인) Linux 단말의 `client_id`로 `windows_pslist`를 부르면 `{"ok": true, "data": []}`가 돌아온다.
+
+[12] (실행 확인) 같은 단말에 `collect_artifact`로 `Windows.System.Pslist`를 요청하면 `flow_id`가 돌아오고 그 flow의 기록에 `Windows.System.Pslist: Skipping query due to preconditions`가 남는다.
+
+[13] Velociraptor v0.77.1 `Linux.Sys.Pslist`는 `MacOS.Sys.Pslist`를 다른 이름으로 두고 precondition이 `linux|darwin`이다: [`artifacts/definitions/Linux/Sys/Pslist.yaml:5-14`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/artifacts/definitions/Linux/Sys/Pslist.yaml#L5-L14).
+
+[14] (실행 확인) Linux 단말의 `client_id`로 `macos_pslist`를 부르면 `systemd`를 비롯한 그 단말의 프로세스 행이 돌아온다.
+
+[15] `agent_poc`는 `OSType`의 앞 글자로 OS 이름을 정한다.
+
+```python
+    @property
+    def normalized_os_type(self) -> str:
+        lowered = (self.os_type or "unknown").strip().lower()
+        if lowered.startswith("win"):
+            return "windows"
+        if lowered.startswith("lin"):
+            return "linux"
+        if lowered.startswith("mac") or lowered in {"darwin", "osx"}:
+            return "macos"
+        return lowered
+```
+
+[`agent_poc/mcp_agent.py:369-378`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L369-L378)
+
+[16] `agent_poc`는 정한 OS의 역할 표에서 도구를 고르고 표에 없는 역할은 `skipped`에 적는다.
+단말 정보는 [`agent_poc/mcp_agent.py:544-556`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L544-L556)에서 `client_info`로 얻는다.
+
+```python
+        toolsets_by_os = {
+            "windows": WINDOWS_TOOLSETS,
+            "linux": LINUX_TOOLSETS,
+            "macos": MACOS_TOOLSETS,
+        }
+        toolsets = toolsets_by_os.get(case_context.normalized_os_type, {})
+        requested = requested_roles or list(toolsets.keys())
+
+        specs: List[AnalystSpec] = []
+        skipped: List[Dict[str, str]] = []
+        for role in requested:
+            allowed_tools = toolsets.get(role)
+            if not allowed_tools:
+                skipped.append({
+                    "role": role,
+                    "status": "not_applicable",
+                    "reason": (
+                        f"No {role} analyst is defined for {case_context.normalized_os_type} endpoints."
+                    ),
+                })
+                continue
+```
+
+[`agent_poc/mcp_agent.py:871-891`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L871-L891)

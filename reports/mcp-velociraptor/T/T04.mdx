@@ -1,0 +1,189 @@
+---
+cell: T04
+details:
+- id: T04.06
+---
+
+# T04 실행 방식
+
+### T04.06 원격 API 작업 요청
+
+**구현.** 이 방식은 도구 78개 모두에 적용된다 [1].
+서버 프로세스는 증거를 직접 읽거나 해석하지 않고 Velociraptor 서버의 gRPC API에 VQL 문장을 보내 돌아온 행을 받는다 [1].
+`init_stub`은 서버를 시작할 때 API 설정 파일의 인증서와 키로 TLS 채널을 만들어 `api_connection_string` 주소에 붙는다 [2].
+`run_vql_query`는 VQL 문장 하나를 `VQLCollectorArgs`에 담아 `stub.Query`로 보내고 응답의 `Response`를 `json.loads`로 풀어 행 목록으로 모은다 [1].
+단말에서 수집하는 도구 62개는 `realtime_collection`으로 `collect_client`를 요청하고 같은 질의 안에서 `System.Flow.Completion` 이벤트를 기다린 뒤 `source()`로 결과 행을 읽는다 [3].
+`collect_artifact`·`collect_file`·`collect_forensic_triage`·`quarantine_host`·`unquarantine_host`·`kill_process`는 `start_collection`으로 `collect_client`만 요청하고 `flow_id`를 돌려받는다 [4].
+두 수집 함수는 `collect_client`에 `urgent='TRUE'`를 고정해 넘기고 이 값을 바꾸는 도구 인자는 없다 [3][4].
+Velociraptor v0.77.1은 `urgent`를 그 수집을 단말에서 대기 중인 다른 수집보다 먼저 처리하게 하는 인자로 설명한다 [5].
+실행 확인에서 `collect_artifact`로 요청한 flow의 `request.urgent`는 `true`였다 [6].
+`hunt_across_fleet`는 `hunt()`를 요청한다 [7].
+`start_hunt`가 `hunt()`에 넘기는 인자는 `description`, `artifacts`, `spec`, `os`, `pause`다 [7].
+대상 단말을 좁히는 인자는 `os` 하나이고 만료 시각 `expires`, 라벨 조건 `include_labels`·`exclude_labels`, 실행 시간과 행 수와 업로드 크기의 상한 `timeout`·`max_rows`·`max_bytes`는 넘기지 않는다 [7][8].
+아티팩트를 단말에서 실행하는 것은 단말의 Velociraptor 클라이언트이고 수집을 예약하고 결과를 보관하는 것은 Velociraptor 서버다.
+`list_clients`·`client_info`·`list_orgs`·`get_hunt_results_tool`·`get_collection_results`와 아티팩트 목록 도구 3개가 보내는 질의는 Velociraptor 서버에 보관된 기록을 읽는다 [9].
+`ENABLE_DANGEROUS_TOOLS`가 켜진 `run_vql`은 모델이 쓴 VQL 문장을 같은 경로로 보낸다 [10].
+Velociraptor v0.77.1의 API는 질의마다 인증서 사용자의 이름으로 권한 관리자를 만들어 질의 실행 범위에 넣는다 [11].
+서버 코드는 `subprocess`를 불러오지 않고 `os`와 `asyncio`는 `os.environ`과 `asyncio.sleep`에만 쓴다 [12].
+그래서 서버가 외부 실행 파일을 하위 프로세스로 실행하는 경로는 없다 [12].
+서버 프로세스 안에서 하는 일은 인자 검사, VQL 문장 구성, 응답 JSON 풀기다 [1][3].
+
+### 근거
+
+[1] `run_vql_query`는 VQL 문장을 gRPC로 보내고 응답을 행 목록으로 모은다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[2] `init_stub`은 API 설정 파일로 TLS 채널을 만든다.
+
+```python
+def init_stub(config_path: str | None = None):
+    global stub
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=config["ca_certificate"].encode("utf-8"),
+        private_key=config["client_private_key"].encode("utf-8"),
+        certificate_chain=config["client_cert"].encode("utf-8")
+    )
+    channel_opts = (('grpc.ssl_target_name_override', "VelociraptorServer"),)
+    channel = grpc.secure_channel(config["api_connection_string"], creds, options=channel_opts)
+    stub = api_pb2_grpc.APIStub(channel)
+```
+
+[`velociraptor_api.py:284-295`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L284-L295)
+
+[3] `realtime_collection`이 만드는 VQL 문장이다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:556-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L556-L564)
+
+[4] `start_collection`이 만드는 VQL 문장이다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:578-585`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L578-L585)
+
+이 함수를 쓰는 도구의 호출 지점은 [`mcp_velociraptor_bridge.py:231-239`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L231-L239), [`mcp_velociraptor_bridge.py:1928-1933`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1928-L1933), [`mcp_velociraptor_bridge.py:1955-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1955-L1960), [`mcp_velociraptor_bridge.py:2044-2044`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2044-L2044), [`mcp_velociraptor_bridge.py:2066-2072`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2066-L2072)다.
+
+[5] Velociraptor v0.77.1의 `collect_client`는 `urgent` 인자를 `Set the collection as urgent - skips other queues collections on the client.`로 설명한다([`vql/server/flows/create.go:50`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/vql/server/flows/create.go#L50)).
+
+[6] (실행 확인) 시험 서버에서 `collect_artifact`로 `Linux.Search.FileFinder`를 수집하고 `flows()`로 그 flow를 읽었다.
+`request.urgent`는 `true`였다.
+
+[7] `start_hunt`가 `hunt()`의 인자를 모아 만드는 VQL 문장이다.
+
+```python
+    hunt_args = [
+        f"description={vql_literal(hunt_description)}",
+        f"artifacts={vql_literal(normalized_artifact)}",
+    ]
+    if spec_vql:
+        hunt_args.append(f"spec={spec_vql}")
+    if os_filter.strip():
+        hunt_args.append(f"os={vql_literal(os_filter.strip())}")
+    if create_paused:
+        hunt_args.append("pause=TRUE")
+
+    vql = (
+        "SELECT hunt(" + ", ".join(hunt_args) + ") AS HuntResult FROM scope()"
+    )
+    rows = run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:419-433`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L419-L433)
+
+[8] Velociraptor v0.77.1의 `hunt()`가 받는 인자 목록이다([`vql/server/hunts/create.go:44-61`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/vql/server/hunts/create.go#L44-L61)).
+
+[9] 보관된 기록을 읽는 질의는 [`velociraptor_api.py:362-368`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L362-L368), [`velociraptor_api.py:385-403`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L385-L403), [`velociraptor_api.py:535-541`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L535-L541), [`velociraptor_api.py:590-596`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L590-L596), [`velociraptor_api.py:613-618`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L613-L618), [`velociraptor_api.py:621-622`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L621-L622), [`mcp_velociraptor_bridge.py:203-216`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L203-L216)에 있다.
+
+[10] `run_vql`은 받은 문장을 `run_vql_query`에 넘긴다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)
+
+[11] Velociraptor v0.77.1의 API 질의 처리기는 호출자 이름으로 `ACLManager`를 만든다([`api/query.go:93-99`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/api/query.go#L93-L99)).
+
+[12] `mcp_velociraptor_bridge.py`와 `velociraptor_api.py`가 불러오는 모듈이다.
+나머지 서버 파일 `velociraptor_env.py`는 `os`·`pathlib`과 `dotenv`만 불러온다.
+세 파일에서 `os`를 쓰는 곳은 `os.environ`을 읽고 쓰는 줄뿐이고 `asyncio`를 쓰는 곳은 `get_collection_results`의 `asyncio.sleep` 하나다.
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+import os
+import asyncio
+import ast
+import json
+import logging
+import re
+from velociraptor_api import *
+```
+
+[`mcp_velociraptor_bridge.py:1-9`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1-L9)
+
+```python
+import json
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Mapping
+
+import grpc
+import yaml
+from pyvelociraptor import api_pb2, api_pb2_grpc
+from velociraptor_env import load_environment
+```
+
+[`velociraptor_api.py:1-11`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L1-L11)

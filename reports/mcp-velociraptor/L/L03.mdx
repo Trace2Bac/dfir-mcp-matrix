@@ -1,0 +1,62 @@
+---
+cell: L03
+details:
+- id: not_applicable
+---
+
+# L03 기록 실패 처리
+
+### 비적용
+
+**판단.** 서버는 MCP 도구 호출의 기록을 쓰지 않는다.
+서버 코드에는 기록 파일이나 DB를 여는 곳이 없고 로거에 항목을 쓰는 곳은 `run_vql_query`의 `logger.debug` 한 곳이다 [1].
+이 항목은 루트 로거 수준이 `INFO`여서 `VELOCIRAPTOR_DEBUG_VQL`을 켜도 출력되지 않는다 [2].
+기록을 쓰는 호출이 없으므로 쓰기가 실패할 때의 처리를 볼 대상이 없다.
+`agent_poc`가 쓰는 결과 파일은 클라이언트 기록이고 `_save_results`는 쓰기 예외를 처리하지 않는다 [3].
+
+### 근거
+
+[1] `run_vql_query`는 `DEBUG_VQL`이 참이면 요청을 `DEBUG` 수준으로 쓴다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[2] (실행 확인) `VELOCIRAPTOR_DEBUG_VQL=1`로 서버 모듈을 가져온 뒤 확인한 루트 로거 수준은 `INFO`였고 `velociraptor_api` 로거의 `DEBUG` 출력은 꺼져 있었다.
+이 상태에서 `run_vql_query`를 부르자 루트 로거에 붙인 처리기가 받은 항목이 없었다.
+
+[3] `_save_results`는 `agent_poc`의 분석 결과를 JSON 파일로 쓴다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+
+        print(f"✓ Results saved to: {filename}", flush=True)
+```
+
+[`agent_poc/mcp_agent.py:1130-1140`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1140)

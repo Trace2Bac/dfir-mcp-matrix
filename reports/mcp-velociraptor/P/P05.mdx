@@ -1,0 +1,158 @@
+---
+cell: P05
+details:
+- id: not_applicable
+---
+
+# P05 사건 자료 정리
+
+### 비적용
+
+**판단.** 서버는 사건 자료를 파일, DB, 메모리 어디에도 남기지 않는다.
+서버 코드에는 파일이나 DB에 쓰는 코드가 없다 [1].
+서버 코드가 여는 파일은 `.env`와 API 설정 파일이고 둘 다 읽기만 한다 [2][3].
+프로세스 메모리에 두는 값은 Velociraptor API 연결 객체 `stub`과 시작할 때 환경변수에서 읽은 `DEFAULT_ORG_ID`, `DEBUG_VQL`, `ENABLE_DANGEROUS_TOOLS`다 [4][5].
+이 값은 연결과 설정이고 증거, 호출 기록, 파생물, 조사 상태를 담지 않는다 [4][5].
+서버는 도구 호출의 인자와 결과를 쌓아 두지 않고 응답을 돌려준 뒤 버린다 [6].
+`DEBUG_VQL`이 켜져 있으면 요청을 `logger.debug`로 넘기지만 서버 코드에는 이 기록을 파일에 쓰는 설정이 없다 [7].
+
+flow, hunt, 수집 결과는 Velociraptor 서버가 자기 저장소에 보관한다 [8].
+서버에는 flow, hunt, 수집 결과를 지우는 도구가 없다 [9].
+서버가 hunt를 멈추는 요청은 `hunt_across_fleet`의 매개변수 대조가 실패했을 때 보내는 `hunt_update`의 `stop=TRUE` 하나이고 이 요청은 hunt를 지우지 않는다 [10].
+`run_vql`은 `ENABLE_DANGEROUS_TOOLS`가 켜져 있으면 받은 VQL을 검사 없이 Velociraptor에 보낸다 [11].
+이 경로로 Velociraptor의 기록을 지우는 VQL을 보내는 것은 실행으로 확인하지 않았다.
+
+같은 저장소의 MCP 클라이언트 예제 `agent_poc/`는 분석 결과 JSON을 출력 폴더에 쓴다 [12].
+이 파일은 클라이언트가 남기는 것이고 `agent_poc/`의 코드에도 그 파일을 지우는 코드는 없다 [12].
+
+### 근거
+
+[1] (실행 확인) 서버 파일 세 개에서 `open(`, `.write(`, `json.dump(`, `sqlite`, `tempfile`, `FileHandler`, `os.remove`, `unlink`, `mkdir`를 찾으면 맞는 줄이 없다.
+
+[2] `.env`는 읽어서 환경변수에 올리기만 한다.
+
+```python
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        _load_simple_env(env_path)
+        return
+
+    load_dotenv(env_path, override=False)
+```
+
+[`velociraptor_env.py:19-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L19-L28)
+
+[3] API 설정 파일은 읽기만 한다.
+
+```python
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+```
+
+[`velociraptor_api.py:286-287`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L286-L287)
+
+[4] `velociraptor_api`의 모듈 전역 값이다.
+
+```python
+stub = None
+DEFAULT_ORG_ID = os.environ.get("VELOCIRAPTOR_ORG_ID", "").strip()
+DEBUG_VQL = os.environ.get("VELOCIRAPTOR_DEBUG_VQL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+```
+
+[`velociraptor_api.py:15-22`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L15-L22)
+
+[5] `mcp_velociraptor_bridge`가 모듈을 읽을 때 정하는 값이다.
+
+```python
+init_stub(os.environ.get("VELOCIRAPTOR_API_CONFIG"))
+api_list_orgs = list_orgs
+
+ArtifactParameters = dict[str, ParameterValue]
+ENABLE_DANGEROUS_TOOLS = os.environ.get("ENABLE_DANGEROUS_TOOLS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+```
+
+[`mcp_velociraptor_bridge.py:19-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L19-L28)
+
+[6] 도구는 함수의 반환값을 JSON 문자열로 바꿔 돌려준다.
+
+```python
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:43-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L43-L47)
+
+[7] `DEBUG_VQL`이 켜져 있을 때의 기록이다.
+
+```python
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+```
+
+[`velociraptor_api.py:311-312`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L311-L312)
+
+[8] (실행 확인) 한 서버 프로세스에서 `collect_artifact`로 시작한 flow의 결과 27행을 새로 실행한 서버 프로세스의 `get_collection_results`로 받았다.
+
+[9] (실행 확인) 도구 78개의 이름과 서버 파일의 VQL에 flow, hunt, 수집 결과를 지우는 요청이 없다.
+
+[10] 매개변수 대조가 실패하면 hunt를 멈춘다.
+
+```python
+        except Exception:
+            run_vql_query(
+                "SELECT hunt_update(hunt_id="
+                f"{vql_literal(hunt_id)}, stop=TRUE) AS Result FROM scope()",
+                org_id=org_id,
+            )
+            raise
+```
+
+[`velociraptor_api.py:458-464`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L458-L464)
+
+[11] `run_vql`은 받은 문자열을 그대로 질의로 보낸다.
+
+```python
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:365-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L365-L371)
+
+[12] `agent_poc`는 결과를 출력 폴더의 JSON 파일로 쓴다.
+`agent_poc/mcp_agent.py`와 `agent_poc/velociraptor_mcp_runtime.py`에는 파일을 지우는 호출이 없다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+```
+
+[`agent_poc/mcp_agent.py:1130-1138`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1138)

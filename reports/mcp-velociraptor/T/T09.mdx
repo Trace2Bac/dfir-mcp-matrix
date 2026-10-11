@@ -1,0 +1,225 @@
+---
+cell: T09
+details:
+- id: T09.05
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### T09.05 호출자가 지정한 대상 되돌림
+
+**구현.** 이 방식은 단말의 격리를 푸는 `unquarantine_host`에 적용된다 [1].
+`unquarantine_host`는 `Windows.Remediation.Quarantine` 수집을 `RemovePolicy: "Y"`로 시작해 격리 정책 삭제를 요청한다 [1].
+이 도구는 호출자가 준 `client_id`만으로 격리 해제를 요청하고 앞선 `quarantine_host` 호출이 남긴 값을 읽지 않는다 [1].
+서버는 격리한 단말의 목록이나 격리 때의 `flow_id`를 보관하지 않으므로 어느 단말을 풀지는 호출자가 알고 있어야 한다 [1][2].
+`unquarantine_host`는 그 단말이 격리된 적이 있는지 확인하지 않고 `ENABLE_DANGEROUS_TOOLS`도 확인하지 않는다 [1][3].
+응답은 `flow_id`, `artifacts`, `timeout`, `specs`를 담은 수집 시작 정보다 [2][4].
+서버는 격리 해제 수집의 결과 행을 읽지 않으므로 격리가 풀렸는지는 응답에 실리지 않는다 [2].
+
+단말을 바꾸는 나머지 도구는 `quarantine_host`와 `kill_process`다 [1].
+`quarantine_host`는 `Windows.Remediation.Quarantine` 수집을 `MessageBox` 매개변수와 함께 시작해 단말의 네트워크 격리를 요청한다 [1].
+`kill_process`는 `Generic.Utils.KillProcess` 수집을 `Pid` 매개변수와 함께 시작해 프로세스 종료를 요청한다 [1].
+두 도구는 `ENABLE_DANGEROUS_TOOLS`가 켜져 있을 때만 수집을 시작한다 [1][3].
+두 도구의 응답도 수집 시작 정보다 [2][4].
+프로세스 종료를 되돌리는 도구는 없다.
+
+서버는 조치의 전후 상태, 변경 내역, 되돌림 정보를 남기지 않는다 [2][5].
+서버는 조치 전과 후에 단말의 상태를 조회하지 않고 조치 수집의 결과 행도 읽지 않는다 [2].
+서버 코드가 파일을 다루는 곳은 접속 설정 파일과 `.env`를 읽는 두 곳뿐이고 쓰는 곳은 없다 [5].
+그래서 어느 단말에 어떤 조치를 언제 요청했는지는 서버 쪽에 남지 않는다.
+조치 수집의 요청과 결과는 Velociraptor 서버가 flow로 보관한다.
+
+`collect_artifact`와 `hunt_across_fleet`은 아티팩트 이름을 가리지 않고 `ENABLE_DANGEROUS_TOOLS`도 확인하지 않는다 [6].
+그래서 두 도구로도 `Windows.Remediation.Quarantine` 같은 조치 아티팩트를 요청할 수 있고 그때도 서버는 변경 내역과 되돌림 정보를 남기지 않는다 [6].
+실행 확인에서 수집 시작 함수를 호출 내용만 적는 함수로 바꾸고 설정을 끈 채 부르면 `unquarantine_host`, 격리 아티팩트를 준 `collect_artifact`, 격리 아티팩트를 준 `hunt_across_fleet`의 요청이 모두 시작 함수에 닿았다 [7].
+`run_vql`은 설정이 켜져 있으면 받은 VQL을 Velociraptor 서버에 보내고 그 질의도 기록하지 않는다 [8].
+
+`kill_process`가 요청하는 `Generic.Utils.KillProcess`는 Velociraptor v0.77.1에 들어 있는 아티팩트 정의에 없다 [7].
+실행 확인에서 설정을 켜고 직접 실행한 프로세스의 PID로 `kill_process`를 부르면 `Failed to start collection: []`가 왔고 그 프로세스는 끝나지 않았다 [7].
+Windows 단말이 없어 격리와 격리 해제의 단말 쪽 동작은 실행으로 확인하지 않았다.
+
+### 근거
+
+[1] 조치 도구 세 개의 수집 요청이다.
+
+```python
+@mcp.tool()
+async def quarantine_host(client_id: str, org_id: str = "") -> str:
+    """
+    Quarantine a Windows host. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    return _run_dangerous_collection(
+        client_id,
+        "Windows.Remediation.Quarantine",
+        {"MessageBox": "Host quarantined by MCP automation."},
+        org_id,
+    )
+
+
+@mcp.tool()
+async def unquarantine_host(client_id: str, org_id: str = "") -> str:
+    """
+    Remove a Windows quarantine policy.
+    """
+    return _start_collection_tool(
+        client_id,
+        "Windows.Remediation.Quarantine",
+        {"RemovePolicy": "Y"},
+        org_id=org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1910-1933`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1910-L1933)
+
+```python
+@mcp.tool()
+async def kill_process(client_id: str, pid: int, org_id: str = "") -> str:
+    """
+    Kill a remote process by PID. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    return _run_dangerous_collection(
+        client_id,
+        "Generic.Utils.KillProcess",
+        {"Pid": int(pid)},
+        org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1936-1946`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1936-L1946)
+
+[2] 수집 시작 처리는 시작 질의의 첫 행을 응답으로 돌려준다.
+
+```python
+def _start_collection_tool(
+    client_id: str,
+    artifact: str,
+    parameters: ArtifactParameters | None = None,
+    timeout: int | None = None,
+    org_id: str = "",
+) -> str:
+    try:
+        response = start_collection(
+            client_id,
+            artifact,
+            parameters,
+            timeout=timeout,
+            org_id=org_id,
+        )
+    except Exception as exc:
+        return _json_error(str(exc))
+
+    if not isinstance(response, list) or not response or "flow_id" not in response[0]:
+        return _json_error(f"Failed to start collection: {response}")
+
+    return _json_success(response[0])
+```
+
+[`mcp_velociraptor_bridge.py:69-90`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L69-L90)
+
+[3] 설정이 꺼져 있으면 수집을 시작하지 않는다.
+
+```python
+def _run_dangerous_collection(
+    client_id: str,
+    artifact: str,
+    parameters: ArtifactParameters | None = None,
+    org_id: str = "",
+) -> str:
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _start_collection_tool(client_id, artifact, parameters, org_id=org_id)
+```
+
+[`mcp_velociraptor_bridge.py:231-239`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L231-L239)
+
+[4] 시작 질의가 고르는 필드다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:578-585`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L578-L585)
+
+[5] 서버 코드가 파일을 읽는 곳은 접속 설정 파일과 `.env`를 읽는 줄이다: [`velociraptor_api.py:286-287`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L286-L287), [`velociraptor_env.py:28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L28), [`velociraptor_env.py:32`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L32).
+
+[6] 두 도구는 받은 아티팩트 이름을 그대로 넘긴다.
+
+```python
+    if parameters is not None and legacy_parameters.strip():
+        return _json_error(
+            "Provide either 'parameters' or 'legacy_parameters', not both."
+        )
+
+    try:
+        parsed_parameters = parameters
+        if legacy_parameters.strip():
+            parsed_parameters = _parse_collection_parameters(legacy_parameters)
+        elif parameters is not None:
+            parsed_parameters = {
+                key: normalize_parameter_value(value)
+                for key, value in parameters.items()
+            }
+    except Exception as exc:
+        return _json_error(str(exc))
+    return _start_collection_tool(client_id, artifact, parsed_parameters, org_id=org_id)
+```
+
+[`mcp_velociraptor_bridge.py:2028-2044`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2028-L2044)
+
+```python
+    if parameters is not None and legacy_parameters.strip():
+        return _json_error(
+            "Provide either 'parameters' or 'legacy_parameters', not both."
+        )
+    try:
+        parsed_parameters = parameters
+        if legacy_parameters.strip():
+            parsed_parameters = _parse_collection_parameters(legacy_parameters)
+        elif parameters is not None:
+            parsed_parameters = {
+                key: normalize_parameter_value(value)
+                for key, value in parameters.items()
+            }
+        result = start_hunt(
+            artifact,
+            parsed_parameters,
+            description,
+            os_filter,
+            org_id,
+        )
+    except Exception as exc:
+        return _json_error(str(exc))
+    return _json_success(result[0] if result else {})
+```
+
+[`mcp_velociraptor_bridge.py:325-347`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L325-L347)
+
+[7] (실행 확인) `ENABLE_DANGEROUS_TOOLS`가 없는 상태에서 `quarantine_host`, `kill_process`, `run_vql`은 `This tool is disabled by default. Set ENABLE_DANGEROUS_TOOLS=true only when you accept the endpoint impact risk.`를 `error`로 돌려주었다.
+같은 상태에서 `start_collection`과 `start_hunt`를 호출 내용만 적는 함수로 바꾸고 부르면 `unquarantine_host`는 `Windows.Remediation.Quarantine`과 `{"RemovePolicy": "Y"}`로 `start_collection`을 불렀다.
+`collect_artifact`에 `Windows.Remediation.Quarantine`을 주면 `start_collection`이, `hunt_across_fleet`에 같은 이름을 주면 `start_hunt`가 그 이름으로 불렸다.
+격리 아티팩트는 실제로 실행하지 않았다.
+Velociraptor v0.77.1 시험 서버의 `artifact_definitions()`에는 `Windows.Remediation.Quarantine`과 `Linux.Remediation.Quarantine`이 있고 `Generic.Utils.KillProcess`는 없었다.
+`Windows.Remediation.Quarantine` 정의의 매개변수는 `PolicyName`, `RuleLookupTable`, `MessageBox`, `RemovePolicy`, `VelociraptorURL`이었다.
+설정을 켜고 직접 실행한 `sleep` 프로세스의 PID로 `kill_process`를 부르면 `{"ok": false, "error": "Failed to start collection: []"}`가 왔고 3초 뒤에도 그 프로세스는 살아 있었다.
+
+[8] `run_vql`은 설정을 확인한 뒤 받은 질의를 보낸다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)

@@ -1,0 +1,224 @@
+---
+cell: P06
+details:
+- id: not_implemented
+---
+
+# P06 조사 상태 유지
+
+### 미구현
+
+**판단.** 서버는 열린 사건, 작업 목록, 불러온 자료, 캐시 같은 조사 상태를 두지 않는다 [1][2].
+도구는 호출마다 인자로 VQL을 새로 만들어 `stub`으로 보내고 받은 행을 JSON으로 돌려준 뒤 버린다 [3][4].
+`get_collection_results`가 세는 대기 횟수도 그 호출 안의 값이다 [5].
+서버는 시작한 flow와 hunt의 ID도 보관하지 않고 응답으로만 돌려준다 [6].
+
+요청 사이에 프로세스 메모리에 남는 값은 Velociraptor API 연결 객체 `stub`과 시작할 때 읽은 설정값 `DEFAULT_ORG_ID`·`DEBUG_VQL`·`ENABLE_DANGEROUS_TOOLS`뿐이다 [1][2].
+이 네 값은 연결과 설정이고 조사에서 부른 도구나 받은 결과를 담지 않는다 [1][2].
+`velociraptor_api`는 모듈을 읽을 때 `.env`의 값을 환경변수에 올리고 `DEFAULT_ORG_ID`와 `DEBUG_VQL`을 정한다 [1][7].
+`.env`는 `VELOCIRAPTOR_ENV_FILE`이 가리키는 파일과 저장소 폴더의 `.env`를 차례로 읽고 이미 있는 환경변수는 바꾸지 않는다 [7].
+`mcp_velociraptor_bridge`는 모듈을 읽을 때 `init_stub`을 불러 API 설정 파일의 인증서와 주소로 gRPC 채널을 만들고 `stub`에 둔다 [2][8].
+`ENABLE_DANGEROUS_TOOLS`도 이때 한 번 읽는다 [2].
+네 값은 모듈 전역 변수여서 프로세스가 끝나면 사라지고 서버는 이 값을 파일이나 DB에 쓰지 않는다 [1][2].
+네 값에는 유효 시간이나 개수 한도가 없다 [1][2].
+서버를 실행한 뒤에는 환경변수를 바꿔도 값이 바뀌지 않는다 [9].
+API 설정 파일이나 `.env`를 바꿔도 실행 중인 서버의 `stub`과 설정값은 그대로다 [2][8].
+
+flow, hunt, 수집 결과는 Velociraptor 서버가 보관한다.
+서버를 다시 시작하면 서버는 API 설정 파일을 다시 읽어 Velociraptor에 연결한다 [8].
+모델이 가진 `flow_id`를 다시 시작한 서버의 `get_collection_results`에 주면 앞 프로세스에서 시작한 flow의 결과가 돌아온다 [10].
+이 결과는 Velociraptor가 보관한 기록이고 서버가 저장했다가 다시 읽은 상태가 아니다 [5][10].
+서버에는 flow나 hunt의 목록을 조회하는 도구가 없다 [11].
+그래서 클라이언트 문맥에서 `flow_id`나 `hunt_id`가 사라지면 `run_vql`을 켜지 않고는 서버 도구로 그 수집을 다시 찾을 수 없다 [11][12].
+
+같은 저장소의 MCP 클라이언트 예제 `agent_poc/`는 역할마다 서버 프로세스를 새로 실행해 붙고 역할이 끝나면 연결을 닫는다 [13].
+
+### 근거
+
+[1] `velociraptor_api`의 모듈 전역 값이다.
+
+```python
+load_environment()
+
+stub = None
+DEFAULT_ORG_ID = os.environ.get("VELOCIRAPTOR_ORG_ID", "").strip()
+DEBUG_VQL = os.environ.get("VELOCIRAPTOR_DEBUG_VQL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+```
+
+[`velociraptor_api.py:13-22`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L13-L22)
+
+[2] `mcp_velociraptor_bridge`가 모듈을 읽을 때 정하는 값이다.
+
+```python
+# velociraptor_api loads repo-local .env before resolving VELOCIRAPTOR_API_CONFIG,
+# ./api_client.yaml, or ~/.config/api_client.yaml.
+init_stub(os.environ.get("VELOCIRAPTOR_API_CONFIG"))
+api_list_orgs = list_orgs
+
+ArtifactParameters = dict[str, ParameterValue]
+ENABLE_DANGEROUS_TOOLS = os.environ.get("ENABLE_DANGEROUS_TOOLS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+```
+
+[`mcp_velociraptor_bridge.py:17-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L17-L28)
+
+[3] 질의마다 요청 객체를 새로 만들고 받은 행을 지역 목록에 모아 돌려준다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[4] 도구는 함수의 반환값을 JSON 문자열로 바꿔 돌려준다.
+
+```python
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:43-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L43-L47)
+
+[5] 대기 횟수는 호출 안의 반복 변수이고 결과는 받은 `flow_id`로 Velociraptor에서 조회한다.
+
+```python
+    try:
+        for attempt in range(max_retries):
+            status = get_flow_status(client_id, flow_id, artifact, org_id=org_id)
+            if status != "FINISHED":
+                await asyncio.sleep(retry_delay)
+                continue
+
+            result = get_flow_results(client_id, flow_id, artifact, fields, org_id=org_id)
+            return _json_success(result)
+```
+
+[`mcp_velociraptor_bridge.py:1988-1996`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1988-L1996)
+
+[6] flow를 시작한 도구는 Velociraptor가 돌려준 행을 응답에 싣고 따로 보관하지 않는다.
+
+```python
+    if not isinstance(response, list) or not response or "flow_id" not in response[0]:
+        return _json_error(f"Failed to start collection: {response}")
+
+    return _json_success(response[0])
+```
+
+[`mcp_velociraptor_bridge.py:87-90`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L87-L90)
+
+[7] `.env`를 읽는 순서와 덮어쓰지 않는 조건이다.
+
+```python
+def load_environment() -> None:
+    """Load dotenv values without overriding existing environment."""
+    repo_root = Path(__file__).resolve().parent
+    configured_env = os.environ.get("VELOCIRAPTOR_ENV_FILE", "").strip()
+
+    if configured_env:
+        configured_path = Path(configured_env).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = repo_root / configured_path
+        _load_env_file(configured_path)
+
+    _load_env_file(repo_root / ".env")
+
+
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        _load_simple_env(env_path)
+        return
+
+    load_dotenv(env_path, override=False)
+```
+
+[`velociraptor_env.py:5-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L5-L28)
+
+[8] `init_stub`은 설정 파일을 읽어 채널을 만들고 전역 `stub`에 둔다.
+
+```python
+def init_stub(config_path: str | None = None):
+    global stub
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=config["ca_certificate"].encode("utf-8"),
+        private_key=config["client_private_key"].encode("utf-8"),
+        certificate_chain=config["client_cert"].encode("utf-8")
+    )
+    channel_opts = (('grpc.ssl_target_name_override', "VelociraptorServer"),)
+    channel = grpc.secure_channel(config["api_connection_string"], creds, options=channel_opts)
+    stub = api_pb2_grpc.APIStub(channel)
+```
+
+[`velociraptor_api.py:284-295`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L284-L295)
+
+[9] (실행 확인) 모듈을 읽은 뒤 프로세스의 환경변수 `ENABLE_DANGEROUS_TOOLS`를 `true`로 바꾸고 `run_vql`을 부르면 거부 문구가 그대로 돌아온다.
+
+[10] (실행 확인) 한 서버 프로세스에서 `collect_artifact`로 `Linux.Sys.Users`를 요청해 받은 `flow_id`를 새로 실행한 서버 프로세스의 `get_collection_results`에 주면 결과 27행이 돌아온다.
+
+[11] (실행 확인) 도구 78개 가운데 `flow_id`나 `hunt_id`를 받지 않고 flow나 hunt의 목록을 돌려주는 도구는 없고 서버 파일의 `hunts()` 조회는 `start_hunt` 안에만 있다.
+
+[12] `run_vql`은 `ENABLE_DANGEROUS_TOOLS`가 켜져 있을 때만 받은 VQL을 보낸다.
+
+```python
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:365-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L365-L371)
+
+[13] `agent_poc`는 역할마다 클라이언트 객체를 새로 만들어 연결하고 [`agent_poc/mcp_agent.py:973-977`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L973-L977)에서 연결을 닫는다.
+연결할 때 서버를 하위 프로세스로 실행하는 코드는 [`agent_poc/velociraptor_mcp_runtime.py:97-108`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L97-L108)에 있다.
+
+```python
+    async def _run_analyst(self, spec: AnalystSpec, case_context: CaseContext) -> AnalystResult:
+        started_at = _utc_now()
+        client = self._create_client(
+            list(spec.allowed_tools),
+            label=f"{spec.role} analyst",
+        )
+        evidence: Dict[str, Any] = {}
+        try:
+            await client.connect()
+            client.reset_conversation()
+            evidence = await self._collect_role_evidence(client, spec, case_context)
+```
+
+[`agent_poc/mcp_agent.py:902-912`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L902-L912)

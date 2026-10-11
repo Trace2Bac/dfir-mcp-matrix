@@ -1,0 +1,223 @@
+---
+cell: I04
+details:
+- id: I04.01
+- id: I04.02
+---
+
+# I04 서버 자격증명 처리
+
+### I04.01 환경변수·설정 파일에 분리 보관
+
+**구현.** 이 방식은 Velociraptor API 접속에 쓰는 인증서와 개인 키에 적용된다 [1].
+`init_stub`은 API 설정 파일에서 `ca_certificate`, `client_private_key`, `client_cert`를 읽어 gRPC 채널의 TLS 자격증명으로 쓴다 [1].
+API 설정 파일의 경로는 `VELOCIRAPTOR_API_CONFIG`로 정하고 값이 없으면 현재 폴더와 `~/.config`의 `api_client.yaml`을 쓴다 [2].
+`VELOCIRAPTOR_API_CONFIG`는 `.env` 파일에도 적을 수 있고 `load_environment`는 이미 있는 환경변수를 덮어쓰지 않는다 [3].
+`VELOCIRAPTOR_ORG_ID`를 환경변수로 둔 채 같은 이름을 적은 `.env`를 읽게 했을 때 환경변수 값이 그대로였다 [4].
+`.env`에는 설정 파일의 경로를 적고 인증서나 키 값은 적지 않는다 [5].
+저장소의 `.gitignore`는 `api_client.yaml`과 `.env`를 제외한다 [6].
+README는 이 설정 파일을 `administrator,api` 역할로 만드는 명령을 안내한다 [7].
+
+같은 저장소의 `agent_poc`는 Azure OpenAI API 키를 환경변수 `AZURE_OPENAI_API_KEY`에서 읽는다 [8].
+이 키는 MCP 클라이언트가 모델 서비스에 접속할 때 쓰는 값이고 서버 코드는 이 값을 읽지 않는다 [8].
+
+**한계.** `init_stub`은 설정 파일의 권한이나 소유자를 확인하지 않는다 [1].
+권한을 `0644`로 둔 설정 파일 사본으로도 채널이 만들어지고 질의가 실행됐다 [9].
+
+### I04.02 도구 인자 수신 금지
+
+**구현.** 이 방식은 서버의 모든 도구에 적용된다 [10].
+인증서와 개인 키는 서버가 시작할 때 `init_stub`이 설정 파일에서 읽고 도구는 이 값을 인자로 받지 않는다 [1][10].
+설정 파일 경로를 받는 도구 인자도 없다 [10].
+
+도구 실행 중에 난 예외는 `_run_json_tool`이 메시지 문자열을 그대로 응답의 `error`에 넣는다 [11].
+접속되지 않는 주소로 부른 호출의 오류 응답에는 접속 주소가 있었고 인증서·키 값과 설정 파일 경로는 없었다 [12].
+설정 파일을 찾지 못해 시작이 실패하면 `resolve_config_path`의 오류 메시지가 표준 오류로 나가고 `VELOCIRAPTOR_API_CONFIG`로 준 경로가 그 메시지에 담긴다 [2][13].
+`VELOCIRAPTOR_DEBUG_VQL`을 켰을 때 `run_vql_query`가 로거에 넘기는 항목은 VQL 요청이고 인증서나 키 값은 담지 않는다 [14].
+
+### 근거
+
+[1] `init_stub`은 API 설정 파일의 인증서와 개인 키로 채널을 만든다.
+
+```python
+def init_stub(config_path: str | None = None):
+    global stub
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=config["ca_certificate"].encode("utf-8"),
+        private_key=config["client_private_key"].encode("utf-8"),
+        certificate_chain=config["client_cert"].encode("utf-8")
+    )
+    channel_opts = (('grpc.ssl_target_name_override', "VelociraptorServer"),)
+    channel = grpc.secure_channel(config["api_connection_string"], creds, options=channel_opts)
+    stub = api_pb2_grpc.APIStub(channel)
+```
+
+[`velociraptor_api.py:284-295`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L284-L295)
+
+[2] `resolve_config_path`는 환경변수, 현재 폴더, 홈 폴더 순서로 파일을 찾고 없으면 경로를 담은 예외를 낸다.
+
+```python
+def resolve_config_path(config_path: str | None = None) -> Path:
+    explicit_path = config_path or os.environ.get("VELOCIRAPTOR_API_CONFIG")
+    if explicit_path:
+        resolved = Path(explicit_path).expanduser()
+        if resolved.is_file():
+            return resolved
+        raise FileNotFoundError(
+            f"Velociraptor API config not found: {resolved}. "
+            "Set VELOCIRAPTOR_API_CONFIG to a valid file path."
+        )
+
+    candidates = [
+        Path("api_client.yaml"),
+        Path.home() / ".config" / "api_client.yaml",
+    ]
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved.is_file():
+            return resolved
+
+    raise FileNotFoundError(
+        "Velociraptor API config not found. Checked ./api_client.yaml and "
+        "~/.config/api_client.yaml. Set VELOCIRAPTOR_API_CONFIG to override."
+    )
+```
+
+[`velociraptor_api.py:258-281`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L258-L281)
+
+[3] `load_environment`는 `.env` 파일의 값을 이미 있는 환경변수 위에 덮어쓰지 않고 읽는다.
+
+```python
+def load_environment() -> None:
+    """Load dotenv values without overriding existing environment."""
+    repo_root = Path(__file__).resolve().parent
+    configured_env = os.environ.get("VELOCIRAPTOR_ENV_FILE", "").strip()
+
+    if configured_env:
+        configured_path = Path(configured_env).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = repo_root / configured_path
+        _load_env_file(configured_path)
+
+    _load_env_file(repo_root / ".env")
+
+
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        _load_simple_env(env_path)
+        return
+
+    load_dotenv(env_path, override=False)
+```
+
+[`velociraptor_env.py:5-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L5-L28)
+
+[4] (실행 확인) `VELOCIRAPTOR_ORG_ID=FROMFILE`과 `VELOCIRAPTOR_MODEL_PROVIDER=fromfile`을 적은 파일을 `VELOCIRAPTOR_ENV_FILE`로 가리키고 환경변수 `VELOCIRAPTOR_ORG_ID=FROMENV`를 둔 채 `load_environment`를 불렀다.
+`VELOCIRAPTOR_ORG_ID`는 `FROMENV`로 남았고 `VELOCIRAPTOR_MODEL_PROVIDER`는 `fromfile`이 됐다.
+
+[5] `example.env`는 설정 파일의 경로만 적는다: [`example.env:8-10`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/example.env#L8-L10).
+
+```text
+# Path to the Velociraptor API client config generated by:
+# velociraptor --config /etc/velociraptor/server.config.yaml config api_client --name api --role administrator,api api_client.yaml
+VELOCIRAPTOR_API_CONFIG=/absolute/path/to/api_client.yaml
+```
+
+[`example.env:8-10`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/example.env#L8-L10)
+
+[6] `.gitignore`의 해당 줄이다.
+
+```text
+.env
+.env.*
+!example.env
+api_client.yaml
+```
+
+[`.gitignore:11-14`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/.gitignore#L11-L14)
+
+[7] README의 API 설정 파일 생성 명령이다: [`README.md:19-21`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/README.md#L19-L21), [`README.md:25-27`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/README.md#L25-L27).
+
+[8] `agent_poc`는 API 키를 환경변수에서 읽어 Azure OpenAI 클라이언트를 만든다.
+
+```python
+    def _get_azure_openai_client(self):
+        if OpenAI is None:
+            raise RuntimeError(
+                "The openai package is required when "
+                "VELOCIRAPTOR_MODEL_PROVIDER=azure. Install requirements.txt."
+            )
+        if self.azure_openai_client is None:
+            api_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    "Azure OpenAI mode requires AZURE_OPENAI_API_KEY."
+                )
+            self.azure_openai_client = OpenAI(
+                base_url=_azure_openai_base_url(),
+                api_key=api_key,
+            )
+        return self.azure_openai_client
+```
+
+[`agent_poc/velociraptor_mcp_runtime.py:131-147`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L131-L147)
+
+[9] (실행 확인) API 설정 파일을 임시 폴더에 복사해 권한을 `0644`로 바꾸고 그 사본으로 `init_stub`을 불렀다.
+`run_vql_query("SELECT 1 AS One FROM scope()")`가 `[{'One': 1}]`을 돌려줬다.
+원래 설정 파일의 권한은 `0600`이었다.
+
+[10] (실행 확인) MCP 클라이언트 세션으로 `tools/list`를 받아 도구 78개의 인자 이름 90가지를 모았다.
+이름에 `config`, `cert`, `key`, `token`, `password`, `secret`, `cred`가 있는 인자는 없었다.
+
+[11] `_run_json_tool`은 예외 메시지를 응답에 넣는다.
+
+```python
+def _json_error(message: str) -> str:
+    return json.dumps({"ok": False, "error": message})
+
+
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:39-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L39-L47)
+
+[12] (실행 확인) API 설정 파일의 사본에서 `api_connection_string`만 `127.0.0.1:1`로 바꾸고 그 사본으로 `list_orgs`를 불렀다.
+응답의 `error`에는 `ipv4:127.0.0.1:1: Failed to connect to remote host: Connection refused`가 있었다.
+응답 문자열에 `BEGIN`과 설정 파일 경로는 없었다.
+
+[13] (실행 확인) `VELOCIRAPTOR_API_CONFIG=/nonexistent/dir/api.yaml`로 서버를 실행했다.
+표준 오류에 `FileNotFoundError: Velociraptor API config not found: /nonexistent/dir/api.yaml. Set VELOCIRAPTOR_API_CONFIG to a valid file path.`가 나오고 종료 코드 1로 끝났다.
+
+[14] `run_vql_query`는 요청 메시지만 로거에 넘긴다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)

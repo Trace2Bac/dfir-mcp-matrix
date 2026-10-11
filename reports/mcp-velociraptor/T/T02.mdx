@@ -1,0 +1,650 @@
+---
+cell: T02
+details:
+- id: T02.01
+- id: T02.03
+- id: T02.04
+- id: T02.07
+- id: T02.08
+---
+
+# T02 실행 허용 범위 제한
+
+### T02.01 클라이언트 도구 선택
+
+**구현.** 이 방식은 저장소가 함께 내놓는 MCP 클라이언트 예제 `agent_poc/`에 적용된다 [1].
+이 예제는 운영체제마다 역할 표를 두고 역할마다 쓸 도구 이름 목록을 코드에 적는다 [2].
+`get_tool_definitions`는 이 목록에 없는 도구를 모델에게 보여 줄 도구 정의에서 뺀다 [3].
+저장소의 조사 흐름은 역할마다 이 목록을 그 역할의 클라이언트에 허용 도구로 준다 [4].
+증거 수집은 모델이 아니라 코드가 역할 표의 도구를 차례로 불러 한다 [5].
+역할 표의 도구는 58개이고 `run_vql`, `quarantine_host`, `unquarantine_host`, `kill_process`, `hunt_across_fleet`, `collect_artifact`는 어느 역할에도 없다 [2].
+증거를 모은 뒤 모델에게 요약을 맡기는 호출은 허용 도구를 빈 목록으로 주어 모델에게 도구 정의를 하나도 주지 않는다 [4].
+서버에는 이 목록이 없어 다른 MCP 클라이언트로 붙으면 이 방식이 적용되지 않는다 [6].
+
+**한계.** 모델 응답의 도구 호출을 실행하는 반복문은 도구 이름을 허용 목록과 대조하지 않고 `call_tool`에 넘긴다 [7].
+`call_tool`도 허용 목록을 확인하지 않고 받은 이름으로 MCP 도구를 부른다 [7].
+그래서 모델이 받은 도구 정의에 없는 이름을 도구 호출로 돌려주면 그 도구가 실행된다 [7].
+모델이 정의를 받지 않은 도구 이름을 실제로 돌려주는지는 확인하지 못했다.
+
+### T02.03 외부 플랫폼 권한에 위임
+
+**구현.** 이 방식은 모델이 아티팩트 이름이나 VQL 문장을 정하는 `collect_artifact`·`hunt_across_fleet`·`run_vql`에 적용된다 [8][9].
+`collect_artifact`는 이름이 형식 검사를 지나면 어느 아티팩트든 대상 단말에서 수집하게 한다 [8].
+`hunt_across_fleet`는 같은 방식으로 어느 아티팩트든 여러 단말에 배포한다 [10].
+`run_vql`은 `ENABLE_DANGEROUS_TOOLS`가 켜져 있으면 모델이 쓴 VQL 문장을 검사하지 않고 그대로 보낸다 [9].
+서버는 이 세 도구가 요청하는 아티팩트와 VQL을 좁히지 않고 API 설정 파일의 인증서로 붙은 계정의 역할 권한이 허용한 작업만 Velociraptor에서 실행되도록 맡긴다 [11].
+Velociraptor v0.77.1은 API 질의에 `ANY_QUERY`, 단말 수집에 `COLLECT_CLIENT`, hunt에 `START_HUNT` 권한을 요구한다 [12].
+README는 `administrator,api` 역할로 API 설정 파일을 만드는 명령을 안내한다 [13].
+
+**한계.** README가 안내하는 `administrator` 역할은 `ANY_QUERY`·`COLLECT_CLIENT`·`START_HUNT`와 단말에서 명령을 실행하는 아티팩트가 요구하는 `EXECVE`를 가진다 [12].
+시험 서버에서 이 역할의 API 설정으로 `collect_artifact`에 `EXECVE`를 요구하는 `Linux.Sys.BashShell`을 주자 단말에서 셸 명령이 실행되었다 [14][15].
+API 설정에 준 역할이 이 요청들을 얼마나 막는지는 운영 배포의 설정에 달려 있고 저장소는 `administrator,api` 밖의 역할을 안내하지 않는다 [13].
+
+### T02.04 고정 명령·템플릿
+
+**구현.** 이 방식은 `run_vql`을 뺀 도구 77개가 Velociraptor에 보내는 VQL 문장에 적용된다 [16][17].
+VQL 문장의 틀은 서버 코드에 문자열로 적혀 있고 모델이 준 값은 그 틀의 정한 자리에만 들어간다 [16][17].
+수집 도구 62개는 `realtime_collection`의 틀을 쓰고 `collect_artifact`를 비롯한 도구 6개는 `start_collection`의 틀을 쓴다 [16][17].
+두 틀은 `collect_client(urgent='TRUE', client_id=…, artifacts=…, env=dict(…))` 호출로 수집을 요청한다 [16][17].
+`hunt_across_fleet`는 `hunt(description=…, artifacts=…, spec=…, os=…)` 틀을 쓴다 [18].
+단말 목록, 조직 목록, 아티팩트 목록, 수집 결과와 hunt 결과를 읽는 도구 8개도 코드에 적은 `SELECT` 틀을 쓴다 [19].
+문자열 값은 `vql_literal`이 역슬래시와 작은따옴표 앞에 역슬래시를 붙이고 작은따옴표로 감싸 틀에 넣는다 [20].
+논리값, 숫자, `None`, list는 `TRUE`·`FALSE`, 숫자, `null`, 대괄호 목록으로 바꿔 넣는다 [20].
+아티팩트 인자의 이름과 열 이름은 따옴표 없이 틀에 들어가고 서버는 그 전에 이름이 영문자, 숫자, `_`(열 이름은 `.`도)만 담는지 검사한다 [20][21].
+
+도구가 아티팩트 인자의 값을 코드에 정해 두는 경우도 있다.
+`windows_shadow_copies`는 `Windows.System.WMIQuery`의 `WMIQuery`를 `SELECT * FROM Win32_ShadowCopy`로 정해 두고 모델에게서 질의를 받지 않는다 [22].
+`windows_event_log_cleared`와 `windows_powershell_scriptblock`은 `Windows.EventLogs.EvtxHunter`의 `ChannelRegex`와 `IdRegex`를 코드에 정한 값으로 넘긴다 [22].
+`collect_file`은 모델이 준 경로를 `[{"glob": path}]` 모양의 JSON 문자열로 감싸 `collectionSpec` 값에 넣는다 [23].
+`collect_forensic_triage`는 `Targets`를 `["_BasicCollection"]`으로, `timeout`을 2400으로 정해 둔다 [23].
+`quarantine_host`는 `MessageBox`를, `unquarantine_host`는 `RemovePolicy`를 코드에 정한 값으로 넘기고 `kill_process`는 모델에게서 `pid`만 받는다 [23].
+`windows_netstat_enriched`는 아티팩트 이름에 source 이름을 붙인 `Windows.Network.NetstatEnriched/Netstat`를 코드에 적어 쓴다 [24].
+`linux_file_finder`와 `macos_file_finder`는 `SearchGlob` 값이 있으면 `SearchFilesGlob` 자리에 넣고 `windows_hash_search`는 `SearchGlob`이나 `SearchFilesGlob` 값을 `Glob` 자리에 넣는다 [25].
+`windows_event_logs`는 `SearchRegex`를 `IocRegex` 자리에, `EventIDRegex`를 `IdRegex` 자리에 넣고 `SearchVSS`가 참이고 `VSSAnalysisAge`가 0이면 30으로 바꾼다 [26].
+`windows_powershell_scriptblock`도 `SearchRegex`를 `IocRegex` 자리에 넣는다 [22].
+`windows_mutants`는 `ProcessRegex`를 아티팩트 인자 `processRegex` 자리에 넣고 `MutantNameRegex`가 비면 `MutantRegex` 값을 `MutantNameRegex` 자리에 넣는다 [27].
+`windows_powershell_history`는 `SearchRegex`가 기본값 `.`이 아니고 `SearchStrings`가 비었을 때 `SearchRegex` 값을 `SearchStrings` 자리에 넣는다 [27].
+`windows_ntfs_mft`는 `Device` 값이 있으면 `MFTDrive` 자리에 넣고 `windows_usn_journal`은 `Device`가 비면 `DriveLetter` 값을 `Device` 자리에 넣는다 [27].
+
+도구는 모델이 주지 않은 인자에도 함수의 기본값을 아티팩트 인자로 넘기고 그 기본값 가운데에는 아티팩트 정의의 기본값보다 범위가 넓은 값이 있다 [28][29].
+`linux_file_finder`는 `SearchFilesGlob`을 `/**`로, `LocalFilesystemOnly`를 거짓으로, `ExcludePathRegex`를 빈 문자열로 넘긴다 [28].
+Velociraptor v0.77.1의 `Linux.Search.FileFinder` 정의에서 이 세 인자의 기본값은 `/home/*`, `Y`, `^/(proc|sys|run|snap)`이다 [29].
+수집 요청에 실린 값은 빈 문자열이어도 정의의 기본값을 대신한다 [30].
+실행 확인에서 `SearchFilesGlob`만 `/proc/sys/kernel/**`로 주어 `linux_file_finder`를 부르면 하위 폴더의 파일 21행을 포함한 145행이 왔고 같은 값만 주어 `collect_artifact`로 수집하면 0행이었다 [30].
+`macos_file_finder`도 `SearchFilesGlob`의 기본값이 `/**`이고 정의의 기본값이 `Y`인 `DoNotFollowSymlinks`를 거짓으로 넘긴다 [28][29].
+`windows_hash_search`는 `Glob`의 기본값이 `C:/**`이고 정의의 기본값이 `N`인 `UPLOAD_IS_RESUMABLE`을 참으로 넘긴다 [28][29].
+`yara_scan_files`는 `FileNameRegex`와 `PathRegex`의 기본값이 `.`이고 정의의 기본값은 `^kernel32\.dll$`과 `C:\\Windows\\System32\\`다 [28][29].
+`windows_usn_journal`은 정의에 기본값이 없는 `FastPaths`를 참으로 넘기고 정의는 이 인자를 더 빠르지만 덜 정확한 경로 조립 방식으로 설명한다 [28][29].
+`windows_ntfs_mft`는 정의의 기본값이 `ntfs`인 `Accessor`를 `auto`로 넘기고 같은 아티팩트를 요청하는 `windows_ntfs_mft_search`는 `Accessor`를 넘기지 않는다 [28][29].
+macOS와 Windows 도구가 넘기는 이 기본값의 결과는 단말이 없어 실행으로 확인하지 않았다.
+
+틀에 넣는 값 가운데에는 모델이 쓴 룰과 질의가 있다.
+`yara_scan_files`·`yara_scan_process`·`linux_yara_scan`과 `linux_file_finder`·`macos_file_finder`·`windows_hash_search`는 `YaraRule`로 받은 YARA 룰 본문을 아티팩트 인자로 넘긴다 [31].
+`windows_browser_history`와 `macos_browser_history`는 `urlSQLQuery`로 받은 SQL 문장을 아티팩트 인자로 넘긴다 [32].
+서버는 이 룰 본문과 SQL 문장의 구조나 연산을 검사하지 않는다 [31][32].
+`run_vql`은 틀 없이 모델이 쓴 VQL 문장 전체를 보낸다 [9].
+
+### T02.07 사전 등록된 백엔드 작업만 호출
+
+**구현.** 이 방식은 아티팩트 이름을 코드에 적어 둔 도구 67개에 적용된다 [33].
+수집 도구 62개와 `collect_file`·`collect_forensic_triage`·`quarantine_host`·`unquarantine_host`·`kill_process`는 도구마다 수집할 아티팩트 이름 하나를 코드에 문자열로 적어 둔다 [33][23].
+코드에 적힌 이름은 63개다 [34].
+`Windows.EventLogs.EvtxHunter`는 도구 3개가, `Windows.NTFS.MFT`와 `Windows.Remediation.Quarantine`은 도구 2개씩이 함께 쓴다 [34].
+이 도구들에는 아티팩트 이름을 받는 인자가 없어 모델은 도구를 골라 그 도구에 정해진 아티팩트를 고르기만 한다 [33].
+아티팩트가 단말에서 실행할 VQL은 Velociraptor 서버에 등록된 아티팩트 정의에 있고 저장소에는 아티팩트 정의 파일이 없다.
+서버 코드에는 아티팩트 정의를 Velociraptor에 올리거나 고치는 VQL이 없다.
+
+**한계.** `collect_artifact`와 `hunt_across_fleet`는 모델이 준 아티팩트 이름을 형식만 검사해 수집하므로 모델은 이 두 도구로 코드에 적히지 않은 아티팩트도 수집할 수 있다 [8][10].
+서버는 코드에 적은 이름이 붙은 Velociraptor 서버에 등록되어 있는지 확인하지 않는다 [16].
+Velociraptor v0.77.1 시험 서버의 아티팩트 정의 437개에는 코드에 적은 63개 가운데 13개가 없었다 [34].
+`YaraRule`과 `urlSQLQuery`를 받는 도구 8개에서는 모델이 준 값이 그 아티팩트가 실행할 룰과 SQL 문장이 된다 [31][32].
+
+### T02.08 설정으로 도구 끄기
+
+**구현.** 이 방식은 `run_vql`·`quarantine_host`·`kill_process`에 적용된다 [35].
+서버는 환경변수 `ENABLE_DANGEROUS_TOOLS`를 모듈을 불러올 때 한 번 읽어 값이 `1`·`true`·`yes`·`on` 가운데 하나일 때만 참으로 둔다 [35].
+이 값은 한 번만 읽으므로 서버를 실행하는 동안에는 바뀌지 않는다 [35].
+서버는 이 값을 읽기 전에 `.env` 파일을 불러오므로 값은 프로세스 환경이나 `.env` 파일에서 온다 [36].
+세 도구는 이 값이 참이 아니면 Velociraptor에 요청하지 않고 사용 설명을 담은 오류를 돌려준다 [37].
+세 도구는 이 값과 관계없이 도구로 등록된다 [9].
+`example.env`는 이 값의 기본을 `false`로 적고 disruptive 도구를 켠다고 설명한다 [38].
+`unquarantine_host`는 `quarantine_host`와 같은 `Windows.Remediation.Quarantine`을 `RemovePolicy=Y`로 수집하지만 이 값을 확인하지 않는다 [23].
+
+**한계.** `collect_artifact`와 `hunt_across_fleet`는 이 값을 확인하지 않고 어느 아티팩트든 수집하게 한다 [8][10].
+그래서 `quarantine_host`와 `kill_process`가 쓰는 아티팩트 이름을 이 두 도구에 넘기면 값이 꺼져 있어도 요청이 Velociraptor에 전달된다 [8][10].
+값이 꺼진 상태에서 `collect_artifact`에 `Linux.Sys.BashShell`을 주어 직접 실행한 `sleep` 프로세스를 끝냈다 [15].
+같은 상태에서 `collect_artifact`에 `Generic.Client.VQL`을 주자 `Command` 인자로 준 VQL 문장이 단말에서 실행되어 결과 행이 왔다 [39].
+`collect_artifact`에 `Generic.Utils.KillProcess`를 직접 넘겼을 때 그 아티팩트가 프로세스를 끝내는지는 시험 서버에 그 정의가 없어 확인하지 못했다 [15].
+
+### 근거
+
+[1] 저장소 문서는 `agent_poc/`를 분석 유형마다 도구를 걸러 쓰는 MCP 클라이언트 예제로 적는다.
+
+[`agent_poc/README.md:70-74`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/README.md#L70-L74)
+
+[2] 운영체제마다 역할별 도구 목록을 코드에 적는다.
+
+```python
+WINDOWS_TOOL_REQUESTS = {
+    "process": (
+        ("windows_pslist", {}),
+    ),
+    "network": (
+        ("windows_netstat_enriched", {}),
+        ("windows_dns_cache", {}),
+```
+
+[`agent_poc/mcp_agent.py:42-48`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L42-L48)
+
+목록 전체는 [`agent_poc/mcp_agent.py:42-177`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L42-L177)이고 세 표의 도구 이름을 모으면 58개다.
+`run_vql`·`quarantine_host`·`unquarantine_host`·`kill_process`·`hunt_across_fleet`·`collect_artifact`는 어느 역할에도 없다.
+
+[3] `get_tool_definitions`는 목록 밖의 도구를 뺀다.
+
+```python
+    def get_tool_definitions(
+        self,
+        allowed_tools: Optional[Collection[str]] = None,
+    ) -> list[dict]:
+        """Convert MCP tools to Ollama function calling format."""
+        allowed_tool_names = self._resolve_allowed_tools(allowed_tools)
+        tool_defs = []
+        for tool in self.tools:
+            if allowed_tool_names is not None and tool.name not in allowed_tool_names:
+                continue
+```
+
+[`agent_poc/velociraptor_mcp_runtime.py:159-168`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L159-L168)
+
+[4] 조사 흐름은 역할 목록을 허용 도구로 주고 요약 호출은 빈 목록을 준다.
+
+```python
+    async def _run_analyst(self, spec: AnalystSpec, case_context: CaseContext) -> AnalystResult:
+        started_at = _utc_now()
+        client = self._create_client(
+            list(spec.allowed_tools),
+            label=f"{spec.role} analyst",
+        )
+```
+
+[`agent_poc/mcp_agent.py:902-907`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L902-L907)
+
+```python
+            response = await client.chat(
+                synthesis_prompt,
+                allowed_tools=[],
+                system_prompt=ANALYST_SYSTEM_PROMPT,
+            )
+```
+
+[`agent_poc/mcp_agent.py:934-938`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L934-L938)
+
+[5] `_collect_role_evidence`는 역할 표의 도구를 차례로 부른다.
+
+```python
+        for tool_name, overrides in self._tool_requests(spec):
+            tool_display = self._tool_display_name(tool_name)
+            self._emit_verbose_progress(client.label, f"running {tool_display}")
+            payload = await client.call_tool_payload(
+                tool_name,
+                self._tool_arguments(case_context, overrides),
+            )
+```
+
+[`agent_poc/mcp_agent.py:762-768`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L762-L768)
+
+[6] 서버는 FastMCP로 도구를 등록하기만 하고 허용 목록을 두지 않는다.
+
+```python
+mcp = FastMCP("velociraptor-mcp")
+
+# velociraptor_api loads repo-local .env before resolving VELOCIRAPTOR_API_CONFIG,
+# ./api_client.yaml, or ~/.config/api_client.yaml.
+init_stub(os.environ.get("VELOCIRAPTOR_API_CONFIG"))
+```
+
+[`mcp_velociraptor_bridge.py:15-19`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L15-L19)
+
+[7] 모델 응답의 도구 호출을 실행하는 반복문과 `call_tool`은 허용 목록을 확인하지 않는다.
+
+```python
+        while response.get("message", {}).get("tool_calls"):
+            self.conversation_history.append(response["message"])
+
+            for tool_call in response["message"]["tool_calls"]:
+                tool_name = tool_call["function"]["name"]
+                tool_args = tool_call["function"]["arguments"]
+
+                if self.verbose:
+                    print(f"{self.label} tool: {tool_name}", file=sys.stderr)
+                    if tool_args:
+                        print(json.dumps(tool_args, indent=2), file=sys.stderr)
+
+                tool_result = await self.call_tool(tool_name, tool_args)
+```
+
+[`agent_poc/velociraptor_mcp_runtime.py:255-267`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L255-L267)
+
+```python
+    async def call_tool_payload(self, tool_name: str, arguments: dict) -> dict:
+        """Execute a tool via MCP and return the structured bridge payload."""
+        try:
+            result = await self.session.call_tool(tool_name, arguments)
+            if result.content:
+                raw_text = "\n".join(
+                    item.text if hasattr(item, "text") else str(item)
+                    for item in result.content
+                )
+                return self._decode_tool_payload(raw_text)
+            return {"ok": True, "data": str(result)}
+        except Exception as e:
+            return {"ok": False, "error": f"Error calling tool {tool_name}: {str(e)}"}
+
+    async def call_tool(self, tool_name: str, arguments: dict) -> str:
+        """Execute a tool via MCP."""
+        payload = await self.call_tool_payload(tool_name, arguments)
+```
+
+[`agent_poc/velociraptor_mcp_runtime.py:218-234`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L218-L234)
+
+[8] `collect_artifact`는 이름 형식 검사만 지나면 어느 아티팩트든 수집한다.
+
+```python
+    try:
+        parsed_parameters = parameters
+        if legacy_parameters.strip():
+            parsed_parameters = _parse_collection_parameters(legacy_parameters)
+        elif parameters is not None:
+            parsed_parameters = {
+                key: normalize_parameter_value(value)
+                for key, value in parameters.items()
+            }
+    except Exception as exc:
+        return _json_error(str(exc))
+    return _start_collection_tool(client_id, artifact, parsed_parameters, org_id=org_id)
+```
+
+[`mcp_velociraptor_bridge.py:2033-2044`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2033-L2044)
+
+[9] `run_vql`은 조건 없이 도구로 등록되고 설정이 켜져 있으면 받은 문장을 그대로 보낸다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)
+
+[10] `hunt_across_fleet`는 어느 아티팩트든 배포한다.
+
+```python
+        result = start_hunt(
+            artifact,
+            parsed_parameters,
+            description,
+            os_filter,
+            org_id,
+        )
+    except Exception as exc:
+        return _json_error(str(exc))
+    return _json_success(result[0] if result else {})
+```
+
+[`mcp_velociraptor_bridge.py:338-347`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L338-L347)
+
+[11] `init_stub`은 API 설정 파일의 인증서로 gRPC 채널을 만든다.
+
+```python
+def init_stub(config_path: str | None = None):
+    global stub
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=config["ca_certificate"].encode("utf-8"),
+        private_key=config["client_private_key"].encode("utf-8"),
+        certificate_chain=config["client_cert"].encode("utf-8")
+    )
+    channel_opts = (('grpc.ssl_target_name_override', "VelociraptorServer"),)
+    channel = grpc.secure_channel(config["api_connection_string"], creds, options=channel_opts)
+    stub = api_pb2_grpc.APIStub(channel)
+```
+
+[`velociraptor_api.py:284-295`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L284-L295)
+
+[12] Velociraptor v0.77.1의 권한 요구와 역할별 권한은 API 질의([`api/api.go:923-935`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/api/api.go#L923-L935)), 수집([`vql/server/flows/create.go:85-91`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/vql/server/flows/create.go#L85-L91)), hunt([`vql/server/hunts/create.go:69-73`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/vql/server/hunts/create.go#L69-L73)), 역할 표([`acls/roles.go:183-223`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/acls/roles.go#L183-L223))에 있다.
+
+[13] API 설정 파일을 만드는 명령 안내다.
+
+[`README.md:21`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/README.md#L21)
+
+[14] (실행 확인) 시험 서버에 붙을 API 설정 파일은 README의 안내대로 `administrator,api` 역할로 만들었다.
+
+[15] (실행 확인) `ENABLE_DANGEROUS_TOOLS`를 끈 상태에서 직접 실행한 `sleep` 프로세스의 PID로 `collect_artifact`에 `Linux.Sys.BashShell`과 `Command="kill <PID>"`를 주었다.
+수집이 시작되었고 그 프로세스는 신호 15로 끝났다.
+`artifact_definitions()`로 읽은 `Linux.Sys.BashShell`의 `required_permissions`는 `EXECVE`였다.
+같은 상태에서 `collect_artifact`에 `Generic.Utils.KillProcess`와 그 PID를 주자 `{"ok": false, "error": "Failed to start collection: []"}`가 왔고 그 아티팩트는 시험 서버에 없었다.
+
+[16] `realtime_collection`의 VQL 틀이다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:556-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L556-L564)
+
+[17] `start_collection`의 VQL 틀이다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:578-585`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L578-L585)
+
+[18] `start_hunt`의 VQL 틀이다.
+
+```python
+    hunt_args = [
+        f"description={vql_literal(hunt_description)}",
+        f"artifacts={vql_literal(normalized_artifact)}",
+    ]
+    if spec_vql:
+        hunt_args.append(f"spec={spec_vql}")
+    if os_filter.strip():
+        hunt_args.append(f"os={vql_literal(os_filter.strip())}")
+    if create_paused:
+        hunt_args.append("pause=TRUE")
+
+    vql = (
+        "SELECT hunt(" + ", ".join(hunt_args) + ") AS HuntResult FROM scope()"
+    )
+```
+
+[`velociraptor_api.py:419-432`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L419-L432)
+
+[19] 기록을 읽는 `SELECT` 틀은 [`velociraptor_api.py:362-368`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L362-L368), [`velociraptor_api.py:385-403`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L385-L403), [`velociraptor_api.py:535-541`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L535-L541), [`velociraptor_api.py:590-594`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L590-L594), [`velociraptor_api.py:613-616`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L613-L616), [`velociraptor_api.py:621-622`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L621-L622), [`mcp_velociraptor_bridge.py:203-211`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L203-L211)에 있다.
+
+[20] `vql_literal`은 값을 VQL 값으로 바꾸고 `normalize_env_dict`는 이름을 검사한 뒤 `이름=값`으로 잇는다.
+
+```python
+def vql_literal(value: ParameterValue) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(vql_literal(item) for item in value) + "]"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+```
+
+[`velociraptor_api.py:32-43`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L32-L43)
+
+```python
+def normalize_env_dict(parameters: Mapping[str, ParameterValue] | None = None) -> str:
+    if parameters is None:
+        return ""
+    if not isinstance(parameters, Mapping):
+        raise TypeError("parameters must be a mapping or None")
+
+    items = []
+    for key, value in parameters.items():
+        if not VALID_PARAMETER_NAME_RE.fullmatch(key):
+            raise ValueError(f"Invalid parameter name: {key!r}")
+        normalized_value = normalize_parameter_value(value)
+        items.append(f"{key}={vql_literal(normalized_value)}")
+
+    return ",".join(items)
+```
+
+[`velociraptor_api.py:90-103`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L90-L103)
+
+[21] 이름 형식을 정한 정규식과 열 이름 검사다.
+
+```python
+VALID_PARAMETER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+VALID_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+VALID_ARTIFACT_RE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+```
+
+[`velociraptor_api.py:23-25`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L23-L25)
+
+```python
+def normalize_fields(fields: str) -> str:
+    cleaned = fields.strip()
+    if not cleaned:
+        raise ValueError("Fields must not be empty.")
+    if cleaned == "*":
+        return cleaned
+
+    result = []
+    for field in cleaned.split(","):
+        candidate = field.strip()
+        if not candidate or not VALID_FIELD_RE.fullmatch(candidate):
+            raise ValueError(
+                "Invalid field selection. Use '*' or a comma-separated list of field "
+                "names such as 'Pid, Name, CommandLine'."
+            )
+        result.append(candidate)
+
+    return ", ".join(result)
+```
+
+[`velociraptor_api.py:63-80`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L63-L80)
+
+[22] 아티팩트 인자의 값을 코드에 정해 둔 지점은 [`mcp_velociraptor_bridge.py:1203-1211`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1203-L1211), [`mcp_velociraptor_bridge.py:1153-1158`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1153-L1158), [`mcp_velociraptor_bridge.py:1524-1530`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1524-L1530)이다.
+
+[23] `start_collection`을 쓰는 고정 도구의 아티팩트와 인자는 [`mcp_velociraptor_bridge.py:1915-1920`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1915-L1920), [`mcp_velociraptor_bridge.py:1928-1933`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1928-L1933), [`mcp_velociraptor_bridge.py:1941-1946`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1941-L1946), [`mcp_velociraptor_bridge.py:1954-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1954-L1960), [`mcp_velociraptor_bridge.py:2062-2072`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2062-L2072)에 있다.
+
+[24] `windows_netstat_enriched`의 아티팩트 이름이다.
+
+```python
+    artifact = "Windows.Network.NetstatEnriched/Netstat"
+    result_scope = ""
+```
+
+[`mcp_velociraptor_bridge.py:958-959`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L958-L959)
+
+[25] 파일 검색 도구가 인자를 옮기는 지점이다.
+
+```python
+    if Hash or HashRegex:
+        Calculate_Hash = True
+    if SearchGlob:
+        SearchFilesGlob = SearchGlob
+```
+
+[`mcp_velociraptor_bridge.py:670-673`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L670-L673)
+
+```python
+    if SearchGlob:
+        Glob = SearchGlob
+    elif SearchFilesGlob:
+        Glob = SearchFilesGlob
+    if Hash or HashRegex:
+        Calculate_Hash = True
+```
+
+[`mcp_velociraptor_bridge.py:1649-1654`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1649-L1654)
+
+[26] `windows_event_logs`가 인자를 옮기는 지점이다.
+
+```python
+    if SearchRegex:
+        IocRegex = SearchRegex
+    if EventIDRegex:
+        IdRegex = EventIDRegex
+    if SearchVSS and not VSSAnalysisAge:
+        VSSAnalysisAge = 30
+```
+
+[`mcp_velociraptor_bridge.py:1465-1470`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1465-L1470)
+
+[27] 인자를 다른 이름의 아티팩트 인자 자리에 넣는 지점은 [`mcp_velociraptor_bridge.py:1249-1258`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1249-L1258), [`mcp_velociraptor_bridge.py:1555-1558`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1555-L1558), [`mcp_velociraptor_bridge.py:1721-1724`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1721-L1724), [`mcp_velociraptor_bridge.py:1760-1763`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1760-L1763)이다.
+
+[28] 도구 함수의 인자 기본값과 그 값을 아티팩트 인자로 넘기는 지점은 [`mcp_velociraptor_bridge.py:652-685`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L652-L685), [`mcp_velociraptor_bridge.py:851-880`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L851-L880), [`mcp_velociraptor_bridge.py:1632-1664`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1632-L1664), [`mcp_velociraptor_bridge.py:1832-1845`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1832-L1845), [`mcp_velociraptor_bridge.py:1754-1775`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1754-L1775), [`mcp_velociraptor_bridge.py:1694-1733`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1694-L1733), [`mcp_velociraptor_bridge.py:1426-1432`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1426-L1432)다.
+
+[29] (실행 확인) Velociraptor v0.77.1 시험 서버의 `artifact_definitions()`로 아티팩트 인자의 기본값을 읽었다.
+`Linux.Search.FileFinder`는 `SearchFilesGlob`이 `/home/*`, `LocalFilesystemOnly`가 `Y`, `ExcludePathRegex`가 `^/(proc|sys|run|snap)`이었다.
+`MacOS.Search.FileFinder`는 `SearchFilesGlob`이 `/Users/*`, `DoNotFollowSymlinks`가 `Y`였다.
+`Windows.Search.FileFinder`는 `Glob`이 빈 값, `UPLOAD_IS_RESUMABLE`이 `N`이었다.
+`Windows.Detection.Yara.NTFS`는 `FileNameRegex`가 `^kernel32\.dll$`, `PathRegex`가 `C:\\Windows\\System32\\`였다.
+`Windows.Forensics.Usn`의 `FastPaths`는 기본값이 빈 값이고 설명이 `When set use a faster but less accurate path reassembly algorithm.`이었다.
+`Windows.NTFS.MFT`의 `Accessor`는 `ntfs`였다.
+
+[30] (실행 확인) Linux 단말에 `linux_file_finder`를 `SearchFilesGlob`을 `/proc/sys/kernel/**`로, `Fields`를 `OSPath`로 주어 불렀다.
+145행이 왔고 그 가운데 21행은 `/proc/sys/kernel/firmware_config/force_sysfs_fallback`처럼 하위 폴더의 파일이었다.
+같은 `SearchFilesGlob`만 주어 `collect_artifact`로 `Linux.Search.FileFinder`를 수집하면 flow는 `FINISHED`가 되었고 결과는 0행이었다.
+`linux_groups`를 인자 없이 부르면 57행이 왔고 정의의 기본값이 `/etc/group`인 `GroupFile`을 빈 문자열로 주면 0행이 왔다.
+
+[31] `YaraRule`을 아티팩트 인자로 넘기는 지점은 [`mcp_velociraptor_bridge.py:674-685`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L674-L685), [`mcp_velociraptor_bridge.py:871-880`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L871-L880), [`mcp_velociraptor_bridge.py:1655-1664`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1655-L1664), [`mcp_velociraptor_bridge.py:1840-1845`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1840-L1845), [`mcp_velociraptor_bridge.py:1868-1872`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1868-L1872), [`mcp_velociraptor_bridge.py:1895-1899`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1895-L1899)다.
+
+[32] `urlSQLQuery`를 아티팩트 인자로 넘기는 지점이다.
+
+```python
+    parameters = {
+        "historyGlobs": historyGlobs,
+        "urlSQLQuery": urlSQLQuery,
+        "userRegex": userRegex,
+    }
+```
+
+[`mcp_velociraptor_bridge.py:801-805`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L801-L805)
+
+```python
+    parameters = {
+        "historyGlobs": historyGlobs,
+        "urlSQLQuery": urlSQLQuery,
+        "userRegex": userRegex,
+        "URLRegex": URLRegex,
+    }
+```
+
+[`mcp_velociraptor_bridge.py:1811-1816`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1811-L1816)
+
+[33] 고정 아티팩트 도구는 아티팩트 이름을 인자로 받지 않고 코드에 적은 이름을 넘긴다.
+
+```python
+@mcp.tool()
+async def linux_pslist(
+    client_id: str,
+    org_id: str = "",
+    ProcessRegex: str = ".",
+    Fields: str = "*"
+) -> str:
+    """
+    List running processes on a Linux host.
+
+    Args:
+        client_id: The Velociraptor client ID.
+        org_id: Optional Velociraptor org ID for multi-tenant deployments.
+        ProcessRegex: Case-insensitive regex to filter process names.
+        Fields: Comma-separated string of fields to return.
+
+    Returns:
+        Process list as a string or error message.
+
+    """
+    artifact = "Linux.Sys.Pslist"
+    result_scope = ""
+    parameters = {"ProcessRegex": ProcessRegex}
+
+    return _run_collection_tool(client_id, artifact, parameters, Fields, result_scope, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:373-397`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L373-L397)
+
+[34] (실행 확인) 서버 코드에서 `_run_collection_tool`·`_start_collection_tool`·`_run_dangerous_collection`에 문자열로 넘기는 아티팩트 이름을 뽑았다.
+이름을 코드에 적은 도구는 67개였고 `/` 뒤의 source 이름을 뗀 이름은 63개였다.
+`Windows.EventLogs.EvtxHunter`는 도구 3개에, `Windows.NTFS.MFT`와 `Windows.Remediation.Quarantine`은 도구 2개씩에 적혀 있었다.
+Velociraptor v0.77.1 시험 서버의 `artifact_definitions()` 이름 437개와 대조하자 63개 가운데 13개가 없었다.
+없는 이름은 `Generic.Utils.KillProcess`, `Windows.Triage.Targets`, `Windows.Detection.Malfind`, `Windows.NTFS.Timestomp`, `Windows.EventLogs.LogonSessions`, `Windows.Mounted.Mass.Storage`, `Linux.Sys.SSHAuthorizedKeys`, `Linux.Network.ArpCache`, `MacOS.Sys.Users`, `MacOS.Sys.LaunchAgents`, `MacOS.Sys.LoginItems`, `MacOS.Sys.BashHistory`, `MacOS.Forensics.Quarantine`이었다.
+
+[35] `ENABLE_DANGEROUS_TOOLS`는 모듈을 불러올 때 한 번 읽는다.
+
+```python
+ENABLE_DANGEROUS_TOOLS = os.environ.get("ENABLE_DANGEROUS_TOOLS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DANGEROUS_TOOLS_WARNING = (
+    "This tool is disabled by default. Set ENABLE_DANGEROUS_TOOLS=true "
+    "only when you accept the endpoint impact risk."
+)
+```
+
+[`mcp_velociraptor_bridge.py:23-32`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L23-L32)
+
+[36] `velociraptor_api`는 불러올 때 `.env` 파일을 읽고 `mcp_velociraptor_bridge.py`는 이 모듈을 먼저 불러온 뒤 `ENABLE_DANGEROUS_TOOLS`를 읽는다.
+
+```python
+from velociraptor_env import load_environment
+
+load_environment()
+```
+
+[`velociraptor_api.py:11-13`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L11-L13)
+
+```python
+from velociraptor_api import *
+```
+
+[`mcp_velociraptor_bridge.py:9-9`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L9-L9)
+
+[37] `quarantine_host`와 `kill_process`가 거치는 `_run_dangerous_collection`의 확인이다.
+
+```python
+def _run_dangerous_collection(
+    client_id: str,
+    artifact: str,
+    parameters: ArtifactParameters | None = None,
+    org_id: str = "",
+) -> str:
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _start_collection_tool(client_id, artifact, parameters, org_id=org_id)
+```
+
+[`mcp_velociraptor_bridge.py:231-239`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L231-L239)
+
+`run_vql`의 같은 확인은 [`mcp_velociraptor_bridge.py:369-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L369-L371)에 있다.
+
+[38] `example.env`의 설명이다.
+
+```text
+# Enable disruptive tools: run_vql, quarantine_host, and kill_process.
+# Keep disabled unless you explicitly accept endpoint impact risk.
+ENABLE_DANGEROUS_TOOLS=false
+```
+
+[`example.env:20-22`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/example.env#L20-L22)
+
+[39] (실행 확인) `ENABLE_DANGEROUS_TOOLS`를 끈 상태에서 `run_vql`은 `This tool is disabled by default`로 시작하는 오류를 돌려주었다.
+같은 상태에서 `collect_artifact`에 `Generic.Client.VQL`과 `Command="SELECT 6*7 AS Answer, Hostname, OS FROM info()"`를 주자 `flow_id`가 왔다.
+그 flow는 `FINISHED`가 되었고 `get_collection_results`는 `Answer`가 42이고 `OS`가 `linux`인 행 하나를 돌려주었다.
+`artifact_definitions()`로 읽은 `Generic.Client.VQL`은 유형이 `client`이고 `required_permissions`가 `IMPERSONATION`이었다.

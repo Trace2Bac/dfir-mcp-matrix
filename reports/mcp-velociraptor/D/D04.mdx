@@ -1,0 +1,115 @@
+---
+cell: D04
+details:
+- id: not_applicable
+---
+
+# D04 출력 경로 제한
+
+### 비적용
+
+**판단.** 서버는 파생물을 담은 파일이나 DB를 만들거나 고치거나 지우지 않는다.
+서버 코드에는 파일을 쓰거나 지우는 호출이 없고 어떤 도구도 서버 쪽 출력 위치를 인자로 받지 않는다 [1][2].
+`collect_file`의 `path`와 파일 찾기 도구의 glob은 단말에서 읽을 대상을 가리키는 값이고 Velociraptor 아티팩트의 매개변수로 전달된다 [3].
+수집 결과가 놓이는 위치는 Velociraptor 서버가 `client_id`와 `flow_id`로 정한다 [4].
+
+서버가 읽는 설정 파일의 위치는 환경변수와 정해 둔 후보 경로로 정해진다.
+`.env`는 환경변수 `VELOCIRAPTOR_ENV_FILE`의 경로와 저장소 루트에서 찾는다 [5].
+API 설정 파일은 환경변수 `VELOCIRAPTOR_API_CONFIG`의 경로, 작업 폴더의 `api_client.yaml`, `~/.config/api_client.yaml` 순서로 찾는다 [6].
+같은 저장소의 `agent_poc/mcp_agent.py`는 결과 파일을 `agent_poc/output/` 아래에 쓰고 파일 이름에 `hostname` 인자를 검사 없이 넣는다 [7].
+이는 MCP 클라이언트의 동작이라 서버 구현으로 세지 않는다.
+
+### 근거
+
+[1] 서버 세 파일의 가져오기 문이다: [`mcp_velociraptor_bridge.py:1-9`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1-L9), [`velociraptor_api.py:1-11`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L1-L11), [`velociraptor_env.py:1-2`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L1-L2).
+
+[2] 도구 정의와 인자다: [`mcp_velociraptor_bridge.py:242-2142`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L242-L2142).
+
+[3] `collect_file`은 `path`를 아티팩트 매개변수로 넘긴다.
+
+```python
+@mcp.tool()
+async def collect_file(client_id: str, path: str, org_id: str = "") -> str:
+    """
+    Start a Generic.Collectors.File collection for a path or glob.
+    """
+    collection_spec = json.dumps([{"glob": path}])
+    return _start_collection_tool(
+        client_id,
+        "Generic.Collectors.File",
+        {"collectionSpec": collection_spec},
+        org_id=org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1949-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1949-L1960)
+
+[4] (실행 확인) `collect_artifact`가 돌려준 `flow_id`로 Velociraptor 서버의 데이터 저장소를 보니 `clients/<client_id>/collections/<flow_id>/`와 `clients/<client_id>/artifacts/Generic.Client.Info/<flow_id>/` 아래에 파일이 생겨 있었다.
+
+[5] `.env`를 찾는 위치다.
+
+```python
+def load_environment() -> None:
+    """Load dotenv values without overriding existing environment."""
+    repo_root = Path(__file__).resolve().parent
+    configured_env = os.environ.get("VELOCIRAPTOR_ENV_FILE", "").strip()
+
+    if configured_env:
+        configured_path = Path(configured_env).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = repo_root / configured_path
+        _load_env_file(configured_path)
+
+    _load_env_file(repo_root / ".env")
+```
+
+[`velociraptor_env.py:5-16`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L5-L16)
+
+[6] API 설정 파일을 찾는 위치다.
+
+```python
+def resolve_config_path(config_path: str | None = None) -> Path:
+    explicit_path = config_path or os.environ.get("VELOCIRAPTOR_API_CONFIG")
+    if explicit_path:
+        resolved = Path(explicit_path).expanduser()
+        if resolved.is_file():
+            return resolved
+        raise FileNotFoundError(
+            f"Velociraptor API config not found: {resolved}. "
+            "Set VELOCIRAPTOR_API_CONFIG to a valid file path."
+        )
+
+    candidates = [
+        Path("api_client.yaml"),
+        Path.home() / ".config" / "api_client.yaml",
+    ]
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved.is_file():
+            return resolved
+
+    raise FileNotFoundError(
+        "Velociraptor API config not found. Checked ./api_client.yaml and "
+        "~/.config/api_client.yaml. Set VELOCIRAPTOR_API_CONFIG to override."
+    )
+```
+
+[`velociraptor_api.py:258-281`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L258-L281)
+
+[7] `agent_poc`가 결과 파일을 쓰는 곳이다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+
+        print(f"✓ Results saved to: {filename}", flush=True)
+```
+
+[`agent_poc/mcp_agent.py:1130-1140`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1140)

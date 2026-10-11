@@ -1,0 +1,79 @@
+---
+cell: L02
+details:
+- id: not_applicable
+---
+
+# L02 기록 구성
+
+### 비적용
+
+**판단.** 서버는 MCP 도구 호출을 파일이나 DB에 남기지 않는다.
+서버 코드에서 로거에 항목을 쓰는 곳은 `run_vql_query`의 `logger.debug` 한 곳이고 FastMCP가 정한 루트 로거 수준이 `INFO`여서 이 항목은 출력되지 않는다 [1][2][3].
+도구 실행 중에 난 예외는 `_run_json_tool`이 오류 응답으로 바꾸고 로그에는 쓰지 않는다 [4].
+표준 오류에는 등록되지 않은 도구 이름을 부를 때 SDK가 쓰는 경고만 남는다 [3].
+서버 기록이 없으므로 요청, 처리, 결과 상태, 결과 참조를 무엇으로 남기는지 볼 대상이 없다.
+`agent_poc`가 쓰는 결과 파일은 클라이언트 기록이다 [5].
+Velociraptor의 API 로그는 Velociraptor의 기록이다.
+
+### 근거
+
+[1] `run_vql_query`는 `DEBUG_VQL`이 참이면 요청을 `DEBUG` 수준으로 쓴다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[2] MCP Python SDK 1.28.1의 `FastMCP`는 `log_level` 기본값 `INFO`로 `configure_logging`을 부르고 이 함수는 `logging.basicConfig`로 루트 로거를 설정한다: [`src/mcp/server/fastmcp/server.py:160`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/server.py#L160), [`src/mcp/server/fastmcp/server.py:242`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/server.py#L242), [`src/mcp/server/fastmcp/utilities/logging.py:27-43`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/utilities/logging.py#L27-L43).
+
+[3] (실행 확인) MCP 클라이언트 세션으로 서버를 실행하고 표준 오류를 파일로 받았다.
+`VELOCIRAPTOR_DEBUG_VQL=1`로 실행해 성공한 호출, 오류 응답이 나온 호출, 인자 형식이 틀린 호출을 보냈을 때 표준 오류에 남은 항목은 없었다.
+등록되지 않은 도구 이름을 부른 호출에는 `Tool 'nonexistent_tool' not listed, no validation will be performed` 한 줄이 남았다.
+
+[4] `_run_json_tool`은 예외를 오류 응답으로 바꾼다.
+
+```python
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:43-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L43-L47)
+
+[5] `_save_results`는 `agent_poc`의 분석 결과를 JSON 파일로 쓴다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+
+        print(f"✓ Results saved to: {filename}", flush=True)
+```
+
+[`agent_poc/mcp_agent.py:1130-1140`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1140)

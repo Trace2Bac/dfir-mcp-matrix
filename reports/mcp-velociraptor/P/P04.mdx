@@ -1,0 +1,313 @@
+---
+cell: P04
+details:
+- id: not_implemented
+---
+
+# P04 조사 단위 관리
+
+### 미구현
+
+**판단.** 서버에는 조사를 사건이나 세션으로 묶거나 나누는 장치가 없다.
+사건이나 세션을 만들거나 여는 도구가 없고 서버가 정하는 ID도 없다 [1].
+도구가 받는 식별자는 `org_id`, `client_id`, `flow_id`, `hunt_id`이고 모두 Velociraptor가 정한 값이다 [2].
+`org_id`는 Velociraptor의 다중 테넌트 단위인 org를 가리킨다 [2].
+`org_id` 인자가 비면 서버는 환경변수 `VELOCIRAPTOR_ORG_ID`의 값을 쓰고 그 값도 비면 org를 정하지 않고 요청한다 [3].
+서버는 `org_id`를 검사하거나 앞선 호출의 org와 대조하지 않고 gRPC 요청의 `org_id` 필드에 싣는다 [3].
+Velociraptor에 없는 org를 주면 Velociraptor의 `Org not found` 오류가 응답의 `error`에 실린다 [4].
+`client_info`는 `search_all_orgs`가 참이고 `org_id`가 없으면 모든 org에서 단말을 찾아 가장 최근에 접속한 한 건을 `OrgId`와 함께 돌려준다 [5].
+`VELOCIRAPTOR_ORG_ID`가 있으면 `org_id` 인자를 비워도 org가 정해지므로 `search_all_orgs`를 참으로 주어도 서버는 그 org 하나에서만 찾는다 [3][5].
+서버는 이렇게 찾은 org를 뒤의 호출에 이어 두지 않으므로 모델이 `org_id`를 호출마다 다시 넘겨야 한다 [3][5].
+`list_orgs`는 `org_id`를 받지 않고 `VELOCIRAPTOR_ORG_ID`가 정한 org나 기본 org에서 `orgs()`를 조회한다 [6].
+
+서버는 시작한 flow와 hunt의 ID를 보관하지 않고 응답으로만 돌려준다 [7].
+`get_collection_results`와 `get_hunt_results_tool`은 받은 `flow_id`와 `hunt_id`를 이 서버가 시작한 flow·hunt와 대조하지 않는다 [8].
+그래서 다른 서버 프로세스가 시작한 flow의 결과도 `client_id`와 `flow_id`를 알면 조회된다 [9].
+수집 요청 VQL은 `client_id`, 아티팩트 이름, 매개변수, 시간 제한만 넘기고 조사나 MCP 서버를 가리키는 표시를 붙이지 않는다 [10].
+`hunt_across_fleet`는 `description`이 비면 `MCP Hunt: <아티팩트 이름>`을 hunt 설명으로 붙인다 [11].
+이 설명은 `hunt()`가 hunt ID를 돌려주지 않았을 때 설명이 같은 가장 최근 hunt를 찾는 데 쓰이고 조사 단위를 나누지 않는다 [11][12].
+`description` 없이 같은 아티팩트로 만든 hunt는 설명이 같아 이 조회로는 서로 구별되지 않는다 [11][12].
+서버는 `mcp.run()`을 인자 없이 불러 stdio 전송으로 실행되므로 서버 프로세스 하나에 클라이언트 연결이 하나다 [13][14].
+서버는 연결이나 프로세스마다 따로 두는 조사 상태가 없다 [15].
+
+같은 저장소의 MCP 클라이언트 예제 `agent_poc/`는 분석 한 번마다 호스트 이름으로 단말을 찾아 `client_id`·`org_id`·OS를 담은 `CaseContext`를 만든다 [16].
+`agent_poc/`는 역할마다 서버 프로세스를 새로 실행해 붙고 분석 결과를 `<호스트 이름>_<분석 종류>_<시각>.json` 파일 하나에 쓴다 [17][18].
+이 묶음은 클라이언트 코드가 정하므로 다른 MCP 클라이언트로 붙으면 적용되지 않고 서버는 그 단위를 인자로 받지 않는다 [16][2].
+
+### 근거
+
+[1] (실행 확인) MCP 클라이언트 세션으로 도구 목록을 받으면 78개이고 사건이나 세션을 만들거나 여는 도구는 없다.
+
+[2] 식별자는 도구 인자로 받는다.
+`org_id`의 설명은 다중 테넌트 배치의 Velociraptor org ID라고 적는다.
+`hunt_id`는 [`mcp_velociraptor_bridge.py:351-361`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L351-L361)의 `get_hunt_results_tool`이 받는다.
+
+```python
+async def get_collection_results(
+    client_id: str,
+    flow_id: str,
+    artifact: str,
+    org_id: str = "",
+    fields: str = "*",
+    max_retries: int = 10,
+    retry_delay: int = 30
+) -> str:
+    """
+    Retrieve Velociraptor collection results for a given client, flow ID, and artifact.
+    Waits and retries if the flow hasn't finished or if no results are immediately available.
+
+    Args:
+        client_id: The Velociraptor client ID.
+        flow_id: The flow ID returned from the initial collection.
+        artifact: The name of the artifact collected (e.g., Windows.NTFS.MFT).
+        org_id: Optional Velociraptor org ID for multi-tenant deployments.
+```
+
+[`mcp_velociraptor_bridge.py:1963-1980`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1963-L1980)
+
+[3] `org_id`를 정하고 요청에 싣는 코드다.
+
+```python
+def resolve_org_id(org_id: str | None = None) -> str | None:
+    resolved = (org_id or DEFAULT_ORG_ID).strip()
+    return resolved or None
+
+
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+```
+
+[`velociraptor_api.py:298-309`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L298-L309)
+
+[4] (실행 확인) `list_clients`에 `org_id`로 `O999`를 주면 `StatusCode.UNAVAILABLE`과 `Org not found`가 담긴 문자열이 `error`로 돌아온다.
+
+[5] 모든 org에서 단말을 찾는 VQL과 `OrgId`를 붙이는 코드다.
+
+```python
+    if search_all_orgs and not resolved_org_id:
+        vql = (
+            "SELECT OrgId, Name as OrgName, client_id, FirstSeen, LastSeen, Hostname, "
+            "Fqdn, OSType, OS, Machine, AgentVersion "
+            "FROM foreach( "
+            "row={ SELECT OrgId, Name FROM orgs() }, "
+            "query={ "
+            "SELECT OrgId, OrgName, client_id, FirstSeen, LastSeen, Hostname, "
+            "Fqdn, OSType, OS, Machine, AgentVersion "
+            "FROM query( "
+            "query={ "
+            f"{select_clause} FROM clients() {where_clause} "
+            "ORDER BY LastSeen DESC LIMIT 1 "
+            "}, "
+            "org_id=OrgId "
+            ") "
+            "} "
+            ") ORDER BY LastSeen DESC LIMIT 1"
+        )
+```
+
+[`velociraptor_api.py:342-360`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L342-L360)
+
+```python
+    result = run_vql_query(vql, org_id=resolved_org_id)
+    if not result:
+        return None
+    row = result[0]
+    if resolved_org_id and "OrgId" not in row:
+        row["OrgId"] = resolved_org_id
+    return row
+```
+
+[`velociraptor_api.py:368-374`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L368-L374)
+
+[6] `list_orgs`는 `org_id` 없이 조회한다.
+
+```python
+def list_orgs() -> list[dict]:
+    return run_vql_query("SELECT OrgId, Name, Nonce FROM orgs()")
+```
+
+[`velociraptor_api.py:621-622`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L621-L622)
+
+[7] flow를 시작한 도구는 Velociraptor가 돌려준 행을 응답에 싣고 따로 보관하지 않는다.
+
+```python
+    if not isinstance(response, list) or not response or "flow_id" not in response[0]:
+        return _json_error(f"Failed to start collection: {response}")
+
+    return _json_success(response[0])
+```
+
+[`mcp_velociraptor_bridge.py:87-90`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L87-L90)
+
+[8] 받은 `flow_id`로 바로 flow 기록과 결과를 조회한다.
+
+```python
+    try:
+        for attempt in range(max_retries):
+            status = get_flow_status(client_id, flow_id, artifact, org_id=org_id)
+            if status != "FINISHED":
+                await asyncio.sleep(retry_delay)
+                continue
+
+            result = get_flow_results(client_id, flow_id, artifact, fields, org_id=org_id)
+            return _json_success(result)
+```
+
+[`mcp_velociraptor_bridge.py:1988-1996`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1988-L1996)
+
+[9] (실행 확인) 한 서버 프로세스에서 `collect_artifact`로 `Linux.Sys.Users`를 요청해 받은 `flow_id`를 새로 실행한 서버 프로세스의 `get_collection_results`에 주면 결과 27행이 돌아온다.
+
+[10] 수집 요청 VQL이다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+```
+
+[`velociraptor_api.py:578-583`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L578-L583)
+
+[11] hunt 설명의 기본값과 hunt ID를 찾는 순서다.
+
+```python
+    normalized_artifact = normalize_artifact_name(artifact)
+    hunt_description = description or f"MCP Hunt: {normalized_artifact}"
+```
+
+[`velociraptor_api.py:413-414`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L413-L414)
+
+```python
+    if not hunt_id:
+        hunt_id = _find_hunt_id_by_description(hunt_description, org_id=org_id)
+    if not hunt_id:
+        raise RuntimeError("Velociraptor hunt() did not return a hunt id.")
+```
+
+[`velociraptor_api.py:444-447`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L444-L447)
+
+[12] 설명이 같은 가장 최근 hunt를 찾는다.
+
+```python
+def _find_hunt_id_by_description(
+    description: str,
+    org_id: str | None = None,
+) -> str:
+    rows = run_vql_query(
+        "SELECT hunt_id, create_time, hunt_description "
+        "FROM hunts() "
+        f"WHERE hunt_description = {vql_literal(description)} "
+        "ORDER BY create_time DESC LIMIT 1",
+        org_id=org_id,
+    )
+    if not rows:
+        return ""
+    return str(rows[0].get("hunt_id") or "")
+```
+
+[`velociraptor_api.py:488-501`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L488-L501)
+
+[13] 서버 실행 코드다.
+
+```python
+if __name__ == "__main__":
+    mcp.run()
+```
+
+[`mcp_velociraptor_bridge.py:2145-2146`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2145-L2146)
+
+[14] MCP Python SDK 1.28.1의 `FastMCP.run`은 `transport`의 기본값이 `stdio`다: [`src/mcp/server/fastmcp/server.py:279-296`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/server.py#L279-L296).
+
+[15] 서버가 프로세스에 두는 값은 API 연결 객체와 설정값뿐이다: [`velociraptor_api.py:15-22`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L15-L22), [`mcp_velociraptor_bridge.py:19-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L19-L28).
+
+```python
+stub = None
+DEFAULT_ORG_ID = os.environ.get("VELOCIRAPTOR_ORG_ID", "").strip()
+DEBUG_VQL = os.environ.get("VELOCIRAPTOR_DEBUG_VQL", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+```
+
+[`velociraptor_api.py:15-22`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L15-L22)
+
+[16] `agent_poc`는 `client_info`로 찾은 단말 정보로 `CaseContext`를 만든다.
+
+```python
+    async def _build_case_context(self, hostname: str) -> Optional[CaseContext]:
+        client_info = await self._resolve_client_info(hostname)
+        if not client_info:
+            return None
+
+        return CaseContext(
+            hostname=hostname,
+            client_id=client_info["client_id"],
+            org_id=client_info.get("OrgId"),
+            os_type=client_info.get("OSType") or "unknown",
+            target=self._target_phrase(client_info),
+            platform_guidance=self._platform_guidance(client_info),
+            shared_guidance=self._shared_guidance(),
+        )
+```
+
+[`agent_poc/mcp_agent.py:592-605`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L592-L605)
+
+[17] `agent_poc`는 역할마다 클라이언트 객체를 새로 만들어 연결하고 연결할 때 서버를 하위 프로세스로 실행한다.
+
+```python
+    async def _run_analyst(self, spec: AnalystSpec, case_context: CaseContext) -> AnalystResult:
+        started_at = _utc_now()
+        client = self._create_client(
+            list(spec.allowed_tools),
+            label=f"{spec.role} analyst",
+        )
+        evidence: Dict[str, Any] = {}
+        try:
+            await client.connect()
+            client.reset_conversation()
+            evidence = await self._collect_role_evidence(client, spec, case_context)
+```
+
+[`agent_poc/mcp_agent.py:902-912`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L902-L912)
+
+```python
+    async def connect(self):
+        """Connect to the MCP server bridge."""
+        bridge_path = Path(__file__).resolve().parent.parent / "mcp_velociraptor_bridge.py"
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=[str(bridge_path)],
+            env=None,
+        )
+
+        stdio_transport = await self.exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+```
+
+[`agent_poc/velociraptor_mcp_runtime.py:97-108`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L97-L108)
+
+[18] `agent_poc`가 결과 파일 이름을 정하는 코드다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+```
+
+[`agent_poc/mcp_agent.py:1130-1138`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1138)

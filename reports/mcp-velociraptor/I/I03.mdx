@@ -1,0 +1,221 @@
+---
+cell: I03
+details:
+- id: I03.02
+---
+
+# I03 외부 전송 범위 구성
+
+### I03.02 메타데이터·추출 값 전송
+
+**구현.** 이 방식은 Velociraptor에 질의를 보내는 도구에 적용된다 [1].
+서버가 Velociraptor로 보내는 것은 `run_vql_query`가 요청에 넣는 VQL 문장과 org ID다 [1].
+도구는 호출 인자를 VQL의 정해진 자리에 넣는다 [2][3].
+수집 도구는 `client_id`, 아티팩트 이름, 아티팩트 매개변수를 `collect_client` 호출에 넣는다 [2].
+아티팩트 이름은 도구마다 코드에 정해져 있고 매개변수 이름도 도구가 정한다 [4].
+매개변수 값은 프로세스 이름·경로·사용자 이름에 대조할 정규식, 파일 경로 glob, 해시, 날짜, PID, YARA 규칙 같은 값이다 [4][5].
+단말 조회 도구는 호스트 이름과 검색 정규식을 `clients()` 질의의 조건에 넣는다 [3].
+결과 조회 도구는 `client_id`, `flow_id`, `hunt_id`, 아티팩트 이름, 필드 목록을 넣는다 [6].
+문자열 값은 `vql_literal`이 작은따옴표 문자열로 바꿔 넣는다 [7].
+서버 코드에는 파일을 읽어 Velociraptor나 다른 서비스로 보내는 곳이 없다.
+수집 결과는 Velociraptor에서 받아 MCP 응답으로 돌려준다 [1].
+
+파일 검색 도구의 `Upload_File` 인자는 아티팩트 매개변수로 전달된다 [4].
+Velociraptor v0.77.1의 `Linux.Search.FileFinder`는 이 매개변수가 참이면 단말에서 찾은 파일을 Velociraptor 서버로 올린다 [8].
+이 전송은 단말의 Velociraptor 클라이언트가 한다.
+
+같은 저장소의 `agent_poc`는 역할마다 모은 증거 묶음을 JSON 글로 요약 요청에 넣어 모델 서비스로 보낸다 [9].
+증거 묶음에는 도구마다 행 수, 조건으로 고른 행 8개까지, 앞 3행이 들어 있다 [9].
+모델 서비스는 기본값이 Ollama이고 `VELOCIRAPTOR_MODEL_PROVIDER`가 `azure`면 Azure OpenAI다 [9][10].
+이 전송은 MCP 클라이언트인 `agent_poc`가 하며 서버 코드에는 모델 서비스로 보내는 곳이 없다 [10].
+
+**한계.** `run_vql`이 보내는 VQL은 호출자가 인자로 쓴 질의이며 보낼 값을 코드가 정하지 않는다 [11].
+이 도구는 `ENABLE_DANGEROUS_TOOLS`를 켜야 실행된다 [11].
+`collect_artifact`와 `hunt_across_fleet`는 아티팩트 이름과 매개변수 이름·값을 호출자가 정한다 [12].
+두 도구는 `ENABLE_DANGEROUS_TOOLS`를 확인하지 않는다 [12].
+이 두 도구에서 서버는 이름의 글자 형식과 값의 자료형만 검사한다 [13].
+
+### 근거
+
+[1] `run_vql_query`는 요청에 VQL과 `org_id`를 넣어 `stub.Query`로 보내고 응답을 모아 돌려준다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[2] `realtime_collection`은 `client_id`, 아티팩트 이름, 매개변수, 필드 목록을 VQL에 넣는다.
+
+```python
+def realtime_collection(
+    client_id: str,
+    artifact: str,
+    parameters: Mapping[str, ParameterValue] | None = None,
+    fields: str = "*",
+    result_scope: str = "",
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_result_artifact = normalize_artifact_name(f"{artifact}{result_scope}")
+    normalized_fields = normalize_fields(fields)
+    normalized_parameters = normalize_env_dict(parameters)
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:544-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L544-L564)
+
+[3] `list_all_clients`는 검색 정규식과 OS 정규식, 행 수 한도를 VQL에 넣는다.
+
+```python
+def list_all_clients(
+    search: str = ".",
+    os_filter: str = ".",
+    limit: int = 100,
+    org_id: str | None = None,
+) -> list[dict]:
+    search_pattern = search or "."
+    os_pattern = os_filter or "."
+    vql = (
+        "SELECT client_id,"
+        "timestamp(epoch=first_seen_at) as FirstSeen,"
+        "timestamp(epoch=last_seen_at) as LastSeen,"
+        "os_info.hostname as Hostname,"
+        "os_info.fqdn as Fqdn,"
+        "os_info.system as OSType,"
+        "os_info.release as OS,"
+        "os_info.machine as Machine,"
+        "agent_information.version as AgentVersion,"
+        "last_ip as LastIP "
+        "FROM clients() "
+        f"WHERE (os_info.hostname =~ {vql_literal(search_pattern)} "
+        f"OR os_info.fqdn =~ {vql_literal(search_pattern)} "
+        f"OR client_id =~ {vql_literal(search_pattern)}) "
+        f"AND os_info.system =~ {vql_literal(os_pattern)} "
+        f"ORDER BY LastSeen DESC LIMIT {int(limit)}"
+    )
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:377-403`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L377-L403)
+
+[4] `linux_pslist`와 `linux_file_finder`는 아티팩트 이름과 매개변수 이름을 코드에서 정한다.
+
+```python
+    artifact = "Linux.Sys.Pslist"
+    result_scope = ""
+    parameters = {"ProcessRegex": ProcessRegex}
+
+    return _run_collection_tool(client_id, artifact, parameters, Fields, result_scope, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:393-397`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L393-L397)
+
+```python
+    if Hash or HashRegex:
+        Calculate_Hash = True
+    if SearchGlob:
+        SearchFilesGlob = SearchGlob
+    parameters = {
+        "SearchFilesGlob": SearchFilesGlob,
+        "Upload_File": Upload_File,
+        "YaraRule": YaraRule,
+        "Calculate_Hash": Calculate_Hash,
+        "MoreRecentThan": MoreRecentThan,
+        "ModifiedBefore": ModifiedBefore,
+        "ExcludePathRegex": ExcludePathRegex,
+        "LocalFilesystemOnly": LocalFilesystemOnly,
+        "OneFilesystem": OneFilesystem,
+        "DoNotFollowSymlinks": DoNotFollowSymlinks,
+    }
+    return _run_collection_tool(
+        client_id,
+        "Linux.Search.FileFinder",
+        parameters,
+        Fields,
+        "",
+        org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:670-693`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L670-L693)
+
+[5] (실행 확인) MCP 클라이언트 세션으로 `tools/list`를 받아 도구 78개의 인자 이름 90가지를 모았다.
+인자 이름은 `ProcessRegex`, `PathRegex`, `UserRegex`, `IPRegex`, `SearchFilesGlob`, `Hash`, `DateAfter`, `pid`, `YaraRule`, `client_id`, `flow_id`, `hunt_id`, `artifact`, `parameters`, `query` 같은 것이었다.
+
+[6] 결과 조회 함수가 VQL에 넣는 값이다: [`velociraptor_api.py:526-541`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L526-L541), [`velociraptor_api.py:588-601`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L588-L601), [`velociraptor_api.py:604-618`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L604-L618).
+
+[7] `vql_literal`은 값을 VQL 리터럴로 바꾼다.
+
+```python
+def vql_literal(value: ParameterValue) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(vql_literal(item) for item in value) + "]"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+```
+
+[`velociraptor_api.py:32-43`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L32-L43)
+
+[8] Velociraptor v0.77.1의 `Linux.Search.FileFinder` 정의는 `Upload_File`이 참이면 `upload()`를 부른다: [`artifacts/definitions/Linux/Search/FileFinder.yaml:199-201`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/artifacts/definitions/Linux/Search/FileFinder.yaml#L199-L201).
+
+[9] `agent_poc`가 증거 묶음을 요약 요청에 넣어 모델 서비스로 보내는 곳이다: [`agent_poc/mcp_agent.py:729-746`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L729-L746), [`agent_poc/mcp_agent.py:841-849`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L841-L849), [`agent_poc/mcp_agent.py:929-938`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L929-L938), [`agent_poc/velociraptor_mcp_runtime.py:335-359`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/velociraptor_mcp_runtime.py#L335-L359).
+
+[10] README와 `example.env`는 Azure OpenAI 방식이 모은 증거를 Azure API 계정으로 보낸다고 적는다: [`README.md:86-88`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/README.md#L86-L88), [`example.env:24-25`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/example.env#L24-L25).
+
+```text
+# Agent POC model settings. Azure OpenAI mode sends collected evidence to the
+# configured Azure API account for summarization.
+```
+
+[`example.env:24-25`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/example.env#L24-L25)
+
+[11] `run_vql`은 환경변수를 확인한 뒤 받은 질의를 `run_vql_query`에 넘긴다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)
+
+[12] 아티팩트 이름과 매개변수를 인자로 받는 도구다: [`mcp_velociraptor_bridge.py:305-347`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L305-L347), [`mcp_velociraptor_bridge.py:2003-2044`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2003-L2044).
+
+[13] 이름 형식과 값의 자료형을 검사하는 함수다: [`velociraptor_api.py:46-60`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L46-L60), [`velociraptor_api.py:83-87`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L83-L87), [`velociraptor_api.py:90-103`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L90-L103).

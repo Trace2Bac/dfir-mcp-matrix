@@ -1,0 +1,105 @@
+---
+cell: E02
+details:
+- id: not_applicable
+---
+
+# E02 증거 무결성 검증
+
+### 비적용
+
+**판단.** 서버는 증거를 파일이나 바이트 형태로 받지 않는다 [1].
+도구가 받는 것은 `client_id`와 아티팩트 매개변수이고 돌려주는 것은 Velociraptor가 돌려준 결과 행을 담은 JSON 문자열이다 [1].
+단말의 파일을 읽고 해시를 계산하는 일은 단말의 Velociraptor 클라이언트가 한다.
+
+`linux_file_finder`·`macos_file_finder`·`windows_hash_search`는 `Calculate_Hash` 인자를 FileFinder 아티팩트의 같은 이름 매개변수로 넘긴다 [2].
+아티팩트는 이 값이 켜지면 찾은 파일마다 VQL 함수 `hash`를 불러 결과 행의 `Hash` 열에 MD5·SHA-1·SHA-256을 싣는다 [3].
+서버는 이 값을 응답에 그대로 싣고 다시 계산하거나 다른 값과 대조하지 않는다 [1].
+세 도구에는 `Hash`와 `HashRegex` 인자도 있다 [2].
+서버는 두 인자 가운데 하나라도 값이 있으면 `Calculate_Hash`를 켜고 그 값은 아티팩트 매개변수에 넣지 않는다 [2].
+실행 확인에서 파일의 해시와 다른 값을 `Hash`로 주어도 `linux_file_finder`는 그 파일의 행을 돌려주었다 [4].
+
+`collect_file`은 `Generic.Collectors.File` 수집을 시작하고 `linux_file_finder`·`macos_file_finder`·`windows_hash_search`는 `Upload_File` 인자를 아티팩트에 넘긴다 [2][5].
+아티팩트가 올린 파일은 Velociraptor 서버의 저장소에 남는다 [6].
+아티팩트나 VQL을 코드에 정해 둔 MCP 도구 가운데 올린 파일의 내용을 받아 오는 것은 없다 [1].
+`run_vql`은 `ENABLE_DANGEROUS_TOOLS`가 켜져 있으면 모델이 준 VQL의 결과 행을 그대로 돌려준다 [7].
+이 경로로 올린 파일의 내용을 읽는 VQL을 보내는 것은 실행으로 확인하지 않았다.
+
+### 근거
+
+[1] 수집 도구는 Velociraptor 질의의 결과 행을 JSON으로 감싸 돌려준다.
+
+```python
+def _json_success(data) -> str:
+    return json.dumps({"ok": True, "data": data}, default=str)
+
+
+def _json_error(message: str) -> str:
+    return json.dumps({"ok": False, "error": message})
+
+
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:35-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L35-L47)
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:556-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L556-L564)
+
+[2] `Hash`·`HashRegex`는 `Calculate_Hash`를 켜는 데만 쓰이고 매개변수 목록에 없다: [`mcp_velociraptor_bridge.py:670-685`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L670-L685), [`mcp_velociraptor_bridge.py:867-880`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L867-L880), [`mcp_velociraptor_bridge.py:1653-1664`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1653-L1664).
+
+[3] (실행 확인) Velociraptor v0.77.1의 `artifacts show Linux.Search.FileFinder` 출력에 `if(condition=Calculate_Hash and Mode.IsRegular, then=hash(path=OSPath, accessor=ACCESSOR)) AS Hash`가 있었다.
+Linux 단말에 만든 32바이트 파일을 `linux_file_finder`에 `Calculate_Hash=True`로 찾자 행의 `Hash.SHA256`이 단말에서 `sha256sum`으로 계산한 값과 같았다.
+
+[4] (실행 확인) 같은 파일을 `Hash`에 0이 40개인 문자열을 주고 찾자 `Hash` 열이 채워진 그 파일의 행 1개가 왔다.
+
+[5] `collect_file`은 받은 경로를 `collectionSpec` 매개변수에 넣어 수집을 시작한다.
+
+```python
+@mcp.tool()
+async def collect_file(client_id: str, path: str, org_id: str = "") -> str:
+    """
+    Start a Generic.Collectors.File collection for a path or glob.
+    """
+    collection_spec = json.dumps([{"glob": path}])
+    return _start_collection_tool(
+        client_id,
+        "Generic.Collectors.File",
+        {"collectionSpec": collection_spec},
+        org_id=org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1949-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1949-L1960)
+
+[6] (실행 확인) `collect_artifact`로 `Generic.Collectors.File`을 수집해 그 파일을 올린 뒤 Velociraptor의 `uploads()`를 조회하자 `vfs_path`가 `fs:/clients/<client_id>/collections/<flow_id>/uploads/auto/…`인 기록이 있었다.
+
+[7] `run_vql`은 설정이 켜져 있으면 받은 VQL의 결과를 그대로 돌려준다.
+
+```python
+@mcp.tool()
+def run_vql(query: str, org_id: str = "") -> str:
+    """
+    Run arbitrary VQL. Disabled unless ENABLE_DANGEROUS_TOOLS=true.
+    """
+    if not ENABLE_DANGEROUS_TOOLS:
+        return _json_error(DANGEROUS_TOOLS_WARNING)
+    return _run_json_tool(run_vql_query, query, org_id)
+```
+
+[`mcp_velociraptor_bridge.py:364-371`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L364-L371)

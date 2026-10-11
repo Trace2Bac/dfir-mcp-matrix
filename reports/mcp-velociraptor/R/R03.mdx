@@ -1,0 +1,388 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 서버의 도구 78개 모두에 적용된다 [1].
+도구는 성공이면 `{"ok": true, "data": …}`를, 실패면 `{"ok": false, "error": "<문구>"}`를 JSON 글로 돌려준다 [1].
+`_run_json_tool`은 부른 함수에서 난 예외를 모두 처리해 예외 문구를 `error`에 싣는다 [1].
+gRPC 호출이 실패하거나 서버의 인자 검사가 예외를 내면 이 경로로 `ok`가 `false`인 응답이 된다 [1][2][3].
+수집을 시작만 하는 도구는 Velociraptor의 결과에 `flow_id`가 없으면 `Failed to start collection`으로 시작하는 `error`를 돌려준다 [4].
+`client_info`는 단말을 찾지 못하면 `Client not found`로 시작하는 `error`를 돌려준다 [5].
+`ok`가 `false`인 응답은 MCP 결과의 `isError`가 `false`다 [2].
+MCP 오류 결과(`isError: true`)는 도구 함수가 실행되기 전에 FastMCP가 만든다 [6].
+FastMCP는 인자의 자료형이 맞지 않거나 필수 인자가 빠지면 `Error executing tool`로 시작하는 오류 결과를 돌려준다 [6][2].
+등록되지 않은 도구 이름에는 `Unknown tool`로 시작하는 오류 결과를 돌려준다 [6][2].
+`hunt_across_fleet`의 성공 응답에는 `state`·`parameter_validation`·`created_paused`·`start_result`가 실린다 [7].
+`parameter_validation`은 모델이 아티팩트 매개변수를 주지 않았으면 `validated: false`와 `reason: no_parameters_requested`다 [8][9].
+매개변수를 줬으면 서버는 Velociraptor가 hunt에 넣은 매개변수를 요청한 값과 대조해 일치하면 `validated: true`를 싣는다 [8].
+일치하지 않으면 서버는 hunt를 멈추고 `ok`가 `false`인 응답을 돌려준다 [8][9].
+
+서버는 `Context`를 가져오지 않고 도구 함수에는 진행 알림을 보내는 코드가 없다 [10].
+`progressToken`을 붙여 `linux_pslist`와 30초 동안 재시도한 `get_collection_results`를 불렀을 때 진행 알림과 로그 알림은 하나도 오지 않았다 [11].
+
+**한계.** Velociraptor가 질의를 실행하다 낸 오류는 `ok`가 `true`인 응답으로 돌아온다 [12].
+`run_vql_query`는 응답 메시지에 `error` 속성 값이 있으면 `RuntimeError`를 내도록 적혀 있다 [13].
+pyvelociraptor 0.1.14의 응답 메시지 `VQLResponse`에는 `error` 필드가 없어 이 분기는 실행되지 않는다 [12][14].
+Velociraptor는 질의의 오류를 `log` 필드에 실어 보내고 서버는 `log`를 읽지 않는다 [13][12].
+`run_vql`에 없는 플러그인을 부르는 VQL과 문법이 틀린 VQL을 주자 둘 다 `{"ok": true, "data": []}`가 왔다 [12].
+없는 플러그인을 부르는 질의를 `Generic.Client.VQL`로 수집하자 flow는 Velociraptor에서 `ERROR`가 됐고 `get_collection_results`는 그 flow에 `{"ok": true, "data": []}`를 돌려줬다 [15].
+
+응답에는 오류 종류를 나타내는 필드가 없고 `error`는 서버가 정한 문구이거나 예외 문구 그대로다 [1].
+API 포트가 틀린 설정으로 `list_clients`를 부르자 `error`에 gRPC 예외 객체의 문자열 표현이 그대로 실렸다 [3].
+수집 시작이 실패한 응답의 `error`는 `Failed to start collection: []`이고 Velociraptor가 flow를 만들지 않은 이유는 실리지 않는다 [4][16].
+`hunt_across_fleet`의 `state`는 서버가 적은 고정 문자열 `STARTED`이고 Velociraptor에서 읽은 hunt 상태가 아니다 [7].
+hunt를 만든 직후 Velociraptor `hunts()`가 돌려준 `state`는 `RUNNING`이었다 [17].
+`hunt()`가 hunt를 만들지 못해도 설명이 같은 hunt가 이미 있으면 `start_hunt`는 그 hunt의 ID로 처리를 이어 가 `ok`가 `true`인 응답을 돌려준다 [18].
+멈춰 둔 hunt와 설명이 같은 요청을 Velociraptor가 받지 않는 `os_filter` 값 `plan9`로 보내자 새 hunt는 생기지 않았고 응답은 멈춰 둔 hunt의 `hunt_id`를 담은 성공이었다 [19].
+
+`get_collection_results`는 재시도 횟수를 다 쓰면 `ok`가 `false`인 응답과 고정 문구를 돌려준다 [20].
+flow가 아직 끝나지 않은 경우, flow ID가 없는 경우, `artifact`가 flow의 아티팩트 이름과 다른 경우, `max_retries`가 0인 경우에 같은 문구가 돌아왔다 [21].
+끝난 flow에 그 flow의 아티팩트 이름을 주어도 이 문구가 돌아오는 경우가 있다 [15].
+30행을 모으고 끝난 `Linux.Sys.Crontab` flow에 `artifact`를 `Linux.Sys.Crontab`으로 주자 이 문구가 왔고 `Linux.Sys.Crontab/CronTabs`로 주자 6행이 왔다 [15].
+`artifact`를 `Linux.Sys.Crontab/CronScripts`나 `Linux.Sys.Crontab/Uploaded`로 주어도 이 문구가 왔다 [15].
+`collect_file`은 `ok`가 `true`인 응답으로 `flow_id`를 돌려줬고 그 flow는 0행으로 끝났다 [15].
+이 flow에 `artifact`를 `Generic.Collectors.File`로 주자 같은 문구가 왔다 [15].
+소스 이름에 공백이 있는 `Generic.Collectors.File/All Matches Metadata`를 주자 `Invalid artifact name`으로 시작하는 `error`가 왔다 [15].
+이 응답에는 시간이 다 됐다는 것을 다른 실패와 구분하는 값이 없다 [20].
+
+`realtime_collection`은 Velociraptor의 완료 알림을 기다리는 질의에 시간 제한을 두지 않는다 [22].
+등록되지 않은 `client_id`로 `linux_pslist`를 부르자 60초 뒤 호출을 끊을 때까지 응답이 오지 않았다 [23].
+서버가 수집 처리기에 넘기는 아티팩트 이름 63개 가운데 13개는 Velociraptor v0.77.1 시험 서버의 정의 437개에 없다 [24].
+13개 가운데 11개는 실시간 수집 도구가 부르는 이름이고 2개는 수집을 시작만 하는 `kill_process`와 `collect_forensic_triage`가 부르는 이름이다 [24].
+11개 가운데 `Linux.Network.ArpCache`를 부르는 `linux_arp_cache`는 75초 동안 응답이 오지 않았고 flow도 생기지 않았다 [23].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 행 목록을 돌려주는 도구에 적용된다 [1][13].
+조건에 맞는 행이 없으면 `run_vql_query`가 빈 목록을 돌려주고 도구는 `{"ok": true, "data": []}`를 돌려준다 [1][13].
+gRPC 호출이 실패하거나 서버의 인자 검사가 예외를 내면 `ok`가 `false`인 응답이 돌아오므로 이 실패와 결과가 없는 것은 `ok` 값으로 나뉜다 [1].
+`get_collection_results`는 flow가 끝났고 결과가 0행이면 `{"ok": true, "data": []}`를 돌려준다 [20].
+응답에 찾지 못함만을 뜻하는 상태 값은 없다 [1].
+
+**한계.** `client_info`는 단말을 찾지 못한 경우를 `ok`가 `false`인 응답으로 돌려준다 [5].
+이 응답은 조회 실패와 `ok` 값이 같고 `error`의 문구로만 구분된다 [5][16].
+`collect_artifact`에 없는 아티팩트 이름을 주면 `Failed to start collection: []`이 `error`로 돌아온다 [4][16].
+
+빈 목록은 조건에 맞는 행이 없다는 뜻이 아닌 경우에도 돌아온다.
+Velociraptor가 질의를 실행하다 오류를 낸 `run_vql` 호출과 `ERROR`로 끝난 flow의 응답은 `{"ok": true, "data": []}`였다 [12][15].
+Linux 단말에 `windows_pslist`를 부르자 Velociraptor는 사전 조건이 맞지 않아 질의를 건너뛰었고 응답은 `{"ok": true, "data": []}`였다 [25].
+`linux_crontab`은 flow가 30행을 모았는데도 `{"ok": true, "data": []}`를 돌려줬다 [26].
+없는 hunt ID로 부른 `get_hunt_results_tool`의 응답도 `{"ok": true, "data": []}`였다 [27].
+이 응답들은 조건에 맞는 행이 없을 때의 응답과 같다 [25][26][27].
+
+### 근거
+
+[1] 성공 응답과 실패 응답을 만드는 함수와 예외를 처리하는 함수다.
+
+```python
+def _json_success(data) -> str:
+    return json.dumps({"ok": True, "data": data}, default=str)
+
+
+def _json_error(message: str) -> str:
+    return json.dumps({"ok": False, "error": message})
+
+
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:35-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L35-L47)
+
+[2] (실행 확인) MCP stdio 세션으로 도구를 불러 결과의 `isError`를 봤다.
+없는 호스트 이름으로 부른 `client_info`와 잘못된 `Fields`로 부른 `linux_pslist`, `ENABLE_DANGEROUS_TOOLS` 없이 부른 `run_vql`은 `ok`가 `false`였고 `isError`는 `false`였다.
+`limit`에 `abc`를 준 `list_clients`와 `hostname` 없이 부른 `client_info`는 `isError`가 `true`였고 글은 `Error executing tool`로 시작했다.
+등록되지 않은 이름 `no_such_tool`을 부른 결과는 `isError`가 `true`였고 글은 `Unknown tool: no_such_tool`이었다.
+
+[3] (실행 확인) API 주소의 포트를 닫힌 포트로 바꾼 설정 사본으로 `list_clients`를 불렀다.
+응답은 `ok`가 `false`였고 `error`는 `<_MultiThreadedRendezvous of RPC that terminated with:`로 시작해 `StatusCode.UNAVAILABLE`과 연결 거부 문구를 담고 있었다.
+
+[4] `_start_collection_tool`은 결과에 `flow_id`가 없으면 오류 응답을 돌려준다.
+
+```python
+def _start_collection_tool(
+    client_id: str,
+    artifact: str,
+    parameters: ArtifactParameters | None = None,
+    timeout: int | None = None,
+    org_id: str = "",
+) -> str:
+    try:
+        response = start_collection(
+            client_id,
+            artifact,
+            parameters,
+            timeout=timeout,
+            org_id=org_id,
+        )
+    except Exception as exc:
+        return _json_error(str(exc))
+
+    if not isinstance(response, list) or not response or "flow_id" not in response[0]:
+        return _json_error(f"Failed to start collection: {response}")
+
+    return _json_success(response[0])
+```
+
+[`mcp_velociraptor_bridge.py:69-90`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L69-L90)
+
+[5] `client_info`는 찾지 못한 경우를 오류 응답으로 돌려준다.
+
+```python
+    try:
+        result = find_client_info(
+            hostname,
+            org_id=org_id,
+            search_all_orgs=search_all_orgs,
+        )
+    except Exception as exc:
+        return _json_error(str(exc))
+
+    if result is None:
+        return _json_error(f"Client not found: {hostname}")
+
+    return _json_success(result)
+```
+
+[`mcp_velociraptor_bridge.py:271-283`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L271-L283)
+
+[6] MCP Python SDK 1.28.1은 인자 검사와 도구 함수에서 난 예외를 `ToolError`로 바꾸고 그 문구로 `isError: true` 결과를 만든다: [`src/mcp/server/fastmcp/tools/base.py:100-117`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/tools/base.py#L100-L117), [`src/mcp/server/fastmcp/tools/tool_manager.py:89-91`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/tools/tool_manager.py#L89-L91), [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L589-L590), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L473-L480).
+
+[7] `start_hunt`가 돌려주는 `dict`다.
+
+```python
+    return [
+        {
+            "hunt_id": hunt_id,
+            "description": hunt_description,
+            "artifacts": [normalized_artifact],
+            "parameters": normalized_parameters,
+            "parameter_validation": validation,
+            "os_filter": os_filter,
+            "state": "STARTED",
+            "created_paused": create_paused,
+            "start_result": start_rows[0].get("Result") if start_rows else None,
+        }
+    ]
+```
+
+[`velociraptor_api.py:473-485`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L473-L485)
+
+[8] `validate_hunt_parameters`는 hunt에 컴파일된 매개변수를 요청한 값과 대조한다: [`velociraptor_api.py:196-256`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L196-L256).
+
+```python
+    for compiled_arg in candidates:
+        if not isinstance(compiled_arg, dict):
+            continue
+        env_map = _compiled_arg_env_map(compiled_arg)
+        missing_or_mismatched = []
+        for key, expected in normalized_parameters.items():
+            if key not in env_map:
+                missing_or_mismatched.append(key)
+                continue
+            if not _parameter_values_equal(env_map[key], expected):
+                missing_or_mismatched.append(key)
+        if not missing_or_mismatched:
+            return {
+                "validated": True,
+                "parameters": normalized_parameters,
+                "compiled_env": env_map,
+            }
+
+    expected_env = ", ".join(
+        f"{key}={value}" for key, value in sorted(normalized_parameters.items())
+    )
+    raise RuntimeError(
+        "Refusing to start parameterized hunt because Velociraptor did not "
+        f"compile the requested env for {normalized_artifact}: {expected_env}"
+    )
+```
+
+[`velociraptor_api.py:232-256`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L232-L256)
+
+[9] `start_hunt`는 대조가 실패하면 hunt를 멈추고 예외를 다시 던진다.
+
+```python
+    validation = {"validated": False, "reason": "no_parameters_requested"}
+    if normalized_parameters:
+        hunt_info = _get_hunt_info(hunt_id, org_id=org_id)
+        try:
+            validation = validate_hunt_parameters(
+                hunt_info,
+                normalized_artifact,
+                normalized_parameters,
+            )
+        except Exception:
+            run_vql_query(
+                "SELECT hunt_update(hunt_id="
+                f"{vql_literal(hunt_id)}, stop=TRUE) AS Result FROM scope()",
+                org_id=org_id,
+            )
+            raise
+```
+
+[`velociraptor_api.py:449-464`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L449-L464)
+
+[10] 서버는 `FastMCP`만 가져온다.
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+import os
+import asyncio
+import ast
+import json
+import logging
+import re
+from velociraptor_api import *
+
+
+# Keep stdio responses clean by suppressing chatty MCP library info logs.
+logging.getLogger("mcp").setLevel(logging.WARNING)
+
+mcp = FastMCP("velociraptor-mcp")
+```
+
+[`mcp_velociraptor_bridge.py:1-15`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1-L15)
+
+[11] (실행 확인) MCP stdio 세션에서 진행 알림 처리기와 로그 알림 처리기를 등록하고 `linux_pslist`와 `get_collection_results`를 `progressToken`과 함께 불렀다.
+`get_collection_results`가 30초 동안 재시도하는 사이를 포함해 두 처리기는 한 번도 불리지 않았다.
+
+[12] (실행 확인) `ENABLE_DANGEROUS_TOOLS`를 켜고 `run_vql`을 불렀다.
+`SELECT * FROM no_such_plugin_rvr()`와 `SELECT * FROM`의 응답은 둘 다 `{"ok": true, "data": []}`였다.
+같은 두 질의를 `stub.Query`로 직접 보내자 응답 메시지의 `log`에 `ERROR:Plugin no_such_plugin_rvr not found.`로 시작하는 줄과 `VQL Error: 1:14: unexpected token`으로 시작하는 줄이 왔다.
+응답 메시지에는 `error` 속성이 없었다.
+pyvelociraptor 0.1.14의 `VQLResponse` 필드는 `Response`·`Columns`·`types`·`query_id`·`part`·`Query`·`timestamp`·`total_rows`·`log`였다.
+
+[13] `run_vql_query`는 응답 메시지의 `error`와 `Response`만 읽고 행이 없으면 빈 목록을 돌려준다.
+
+```python
+def run_vql_query(vql: str, org_id: str | None = None):
+    if stub is None:
+        raise RuntimeError("Stub not initialized. Call init_stub() first.")
+    request = api_pb2.VQLCollectorArgs(Query=[api_pb2.VQLRequest(VQL=vql)])
+    resolved_org_id = resolve_org_id(org_id)
+    if resolved_org_id:
+        request.org_id = resolved_org_id
+    results = []
+    if DEBUG_VQL:
+        logger.debug("VQL request: %s", request)
+    
+    for resp in stub.Query(request):
+        if hasattr(resp, "error") and resp.error:
+            raise RuntimeError(f"Velociraptor API error: {resp.error}")
+        if hasattr(resp, "Response") and resp.Response:
+            results.extend(json.loads(resp.Response))
+    return results
+```
+
+[`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319)
+
+[14] Velociraptor v0.77.1의 `VQLResponse` 정의에는 `log` 필드가 있고 `error` 필드가 없다: [`actions/proto/vql.proto:109-167`](https://github.com/Velocidex/velociraptor/blob/3137c7f714ab344dd37d0df1d5393573e41b30a5/actions/proto/vql.proto#L109-L167).
+
+[15] (실행 확인) `collect_artifact`와 `collect_file`로 flow 세 개를 시작하고 25초 뒤 `get_collection_results`를 불렀다.
+`Generic.Client.VQL`에 `Command`를 `SELECT * FROM no_such_plugin_rvr()`로 준 flow는 Velociraptor에서 `ERROR`였고 응답은 `{"ok": true, "data": []}`였다.
+`Linux.Sys.Crontab` flow는 `FINISHED`, 30행이었고 flow 기록의 완료 문구는 `Collection Linux.Sys.Crontab/CronTabs is done after`로 시작했다.
+이 flow에 `max_retries` 2, `retry_delay` 1로 `artifact`를 `Linux.Sys.Crontab`, `Linux.Sys.Crontab/CronScripts`, `Linux.Sys.Crontab/Uploaded`로 주자 2초 뒤 `No results found after multiple retries or the flow did not finish.`가 왔다.
+같은 flow에 `artifact`를 `Linux.Sys.Crontab/CronTabs`로 주자 6행이 왔다.
+`collect_file`을 `path` `/etc/hostname`으로 부른 응답은 `ok`가 `true`였고 그 flow는 `FINISHED`, 0행이었다.
+이 flow의 완료 문구는 `Collection Generic.Collectors.File/All Matches Metadata is done after`로 시작했다.
+이 flow에 `artifact`를 `Generic.Collectors.File`로 주자 같은 문구가 왔고 `Generic.Collectors.File/All Matches Metadata`로 주자 `Invalid artifact name: 'Generic.Collectors.File/All Matches Metadata'`가 왔다.
+
+[16] (실행 확인) 찾지 못한 대상에 대한 응답을 확인했다.
+없는 호스트 이름 `NOPE-HOST`로 부른 `client_info`의 응답은 `{"ok": false, "error": "Client not found: NOPE-HOST"}`였다.
+`collect_artifact`를 `artifact` `No.Such.Artifact`로 부른 응답은 `{"ok": false, "error": "Failed to start collection: []"}`였다.
+
+[17] (실행 확인) `hunt_across_fleet`을 `Linux.Sys.Users`로 불렀다.
+응답의 `state`는 `STARTED`, `parameter_validation`은 `{"validated": false, "reason": "no_parameters_requested"}`, `created_paused`는 `true`였다.
+바로 뒤 Velociraptor `hunts()`가 돌려준 그 hunt의 `state`는 `RUNNING`이었다.
+
+[18] hunt ID를 얻지 못하면 설명이 같은 hunt의 ID를 쓰고 그것도 없을 때만 예외를 낸다.
+
+```python
+    if not hunt_id:
+        hunt_id = _find_hunt_id_by_description(hunt_description, org_id=org_id)
+    if not hunt_id:
+        raise RuntimeError("Velociraptor hunt() did not return a hunt id.")
+```
+
+[`velociraptor_api.py:444-447`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L444-L447)
+
+[19] (실행 확인) `hunt_across_fleet`를 `Linux.Mounts`만 주어 불러 hunt를 만들고 `hunt_update(stop=TRUE)`로 멈춘 뒤 `Linux.Mounts`와 `os_filter` `plan9`로 다시 불렀다.
+두 번째 호출의 응답은 `ok`가 `true`였고 첫 hunt의 `hunt_id`와 `state` `STARTED`를 담았다.
+`hunts()`의 hunt 수는 이 호출 전후로 같았고 첫 hunt의 `state`는 `STOPPED`에서 `RUNNING`으로 바뀌었다.
+확인한 뒤 그 hunt를 멈췄다.
+
+[20] `get_collection_results`의 재시도와 응답이다.
+
+```python
+    try:
+        for attempt in range(max_retries):
+            status = get_flow_status(client_id, flow_id, artifact, org_id=org_id)
+            if status != "FINISHED":
+                await asyncio.sleep(retry_delay)
+                continue
+
+            result = get_flow_results(client_id, flow_id, artifact, fields, org_id=org_id)
+            return _json_success(result)
+    except Exception as exc:
+        return _json_error(str(exc))
+
+    return _json_error("No results found after multiple retries or the flow did not finish.")
+```
+
+[`mcp_velociraptor_bridge.py:1988-2000`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1988-L2000)
+
+[21] (실행 확인) `get_collection_results`를 네 가지 조건으로 불렀다.
+`collect_artifact`로 방금 시작한 flow에 `max_retries` 6, `retry_delay` 5로 부르자 30초 뒤 `{"ok": false, "error": "No results found after multiple retries or the flow did not finish."}`가 왔다.
+그 flow는 Velociraptor 기록에서 만든 지 29초 뒤에 시작됐다.
+끝난 뒤 같은 인자로 다시 부르자 27행이 왔다.
+없는 flow ID `F.NOPE`, 끝난 flow에 다른 아티팩트 이름 `Linux.Sys.Pslist`, `max_retries` 0으로 부른 응답도 같은 문구였다.
+
+[22] `realtime_collection`은 `watch_monitoring`의 첫 행을 기다린다.
+
+```python
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters})) "
+        f"LET get_monitoring = SELECT * FROM watch_monitoring(artifact='System.Flow.Completion') WHERE FlowId = collection.flow_id LIMIT 1 "
+        f"LET get_results = SELECT * FROM source(client_id=collection.request.client_id, flow_id=collection.flow_id,artifact={vql_literal(normalized_result_artifact)}) "
+        f"SELECT {normalized_fields} FROM foreach(row=get_monitoring, query=get_results) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:556-564`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L556-L564)
+
+[23] (실행 확인) 응답이 오지 않는 호출 두 가지를 확인했다.
+MCP stdio 세션에서 `client_id` `C.0000000000000000`으로 `linux_pslist`를 부르고 60초를 기다렸으나 결과가 오지 않아 호출을 끊었다.
+`linux_arp_cache`를 부르고 75초를 기다렸으나 결과가 오지 않았다.
+그 뒤 `flows()`에 `ArpCache` flow는 없었다.
+Velociraptor v0.77.1 서버의 `artifact_definitions()`에는 `Linux.Network.ArpCache`가 없었다.
+
+[24] (실행 확인) Velociraptor v0.77.1 시험 서버의 `artifact_definitions()`가 돌려준 정의 437개를 서버 코드가 수집 처리기에 넘기는 아티팩트 이름 63개와 대조했다.
+이름에 `/`가 있으면 그 앞부분으로 대조했다.
+정의에 없는 이름은 13개였다.
+실시간 수집 도구가 부르는 이름은 `Linux.Sys.SSHAuthorizedKeys`·`Linux.Network.ArpCache`·`MacOS.Sys.Users`·`MacOS.Sys.LaunchAgents`·`MacOS.Sys.LoginItems`·`MacOS.Sys.BashHistory`·`MacOS.Forensics.Quarantine`·`Windows.Mounted.Mass.Storage`·`Windows.NTFS.Timestomp`·`Windows.Detection.Malfind`·`Windows.EventLogs.LogonSessions` 11개였다.
+수집을 시작만 하는 도구가 부르는 이름은 `Generic.Utils.KillProcess`와 `Windows.Triage.Targets` 2개였다.
+
+[25] (실행 확인) Linux 단말에 `windows_pslist`를 불렀다.
+29초 뒤 `{"ok": true, "data": []}`가 왔다.
+그 flow의 Velociraptor 기록에는 `Windows.System.Pslist: Skipping query due to preconditions`가 있었고 모은 행은 0이었다.
+
+[26] (실행 확인) Linux 단말에 `linux_crontab`을 불렀다.
+응답은 `{"ok": true, "data": []}`였고 Velociraptor의 flow 기록에는 이름 있는 소스 세 개에 모두 30행이 있었다.
+
+[27] (실행 확인) `get_hunt_results_tool`을 없는 hunt ID `H.NOPE`로 불렀다.
+응답은 `{"ok": true, "data": []}`였다.

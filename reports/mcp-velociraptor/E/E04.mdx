@@ -1,0 +1,109 @@
+---
+cell: E04
+details:
+- id: not_applicable
+---
+
+# E04 분석 입력 준비
+
+### 비적용
+
+**판단.** MCP 도구는 이미지, 보관 파일, 수집물 같은 증거 입력을 받지 않고 `client_id`와 아티팩트 매개변수를 받아 Velociraptor에 수집을 요청한다 [1].
+단말의 파일시스템과 레지스트리, 이벤트 로그를 읽어 결과 행으로 만드는 일은 단말의 Velociraptor 클라이언트가 아티팩트 정의대로 한다.
+서버 코드에는 작업 사본을 만들거나 보관 파일을 풀거나 이미지를 마운트하거나 부속 자료를 찾는 처리가 없다 [1].
+
+`collect_file`은 받은 경로를 `collectionSpec` 매개변수에 넣어 `Generic.Collectors.File` 수집을 시작하고 `flow_id`를 포함한 수집 정보를 응답으로 돌려준다 [2].
+`collect_forensic_triage`는 `Windows.Triage.Targets`를 `_BasicCollection` 대상과 시간 제한 2400초로 시작하고 같은 수집 정보를 돌려준다 [3].
+`Generic.Collectors.File` 수집이 올리는 파일은 Velociraptor 서버의 저장소에 남는다 [4].
+실행 확인에서 `collect_file`이 시작한 수집은 Linux 단말에서 결과 행과 올린 파일 없이 끝났다 [4].
+MCP 서버는 그 파일을 받아 오지 않고 서버의 분석 단계나 외부 도구에 넘기지도 않는다 [1].
+`get_collection_results`와 `get_hunt_results_tool`은 Velociraptor가 저장한 결과 행을 `source()`와 `hunt_results()`로 조회해 응답으로 돌려준다 [5].
+
+### 근거
+
+[1] 도구 처리기는 Velociraptor 질의를 보내고 결과 행을 JSON으로 돌려주는 호출뿐이다: [`mcp_velociraptor_bridge.py:35-90`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L35-L90), [`velociraptor_api.py:303-319`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L303-L319), [`velociraptor_api.py:544-618`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L544-L618).
+
+[2] `collect_file`의 수집 요청이다.
+
+```python
+@mcp.tool()
+async def collect_file(client_id: str, path: str, org_id: str = "") -> str:
+    """
+    Start a Generic.Collectors.File collection for a path or glob.
+    """
+    collection_spec = json.dumps([{"glob": path}])
+    return _start_collection_tool(
+        client_id,
+        "Generic.Collectors.File",
+        {"collectionSpec": collection_spec},
+        org_id=org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:1949-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1949-L1960)
+
+[3] `collect_forensic_triage`의 수집 요청이다.
+
+```python
+    artifact = "Windows.Triage.Targets"
+    parameters = {"Targets": '["_BasicCollection"]'}
+    timeout = 2400
+
+    return _start_collection_tool(
+        client_id,
+        artifact,
+        parameters,
+        timeout=timeout,
+        org_id=org_id,
+    )
+```
+
+[`mcp_velociraptor_bridge.py:2062-2072`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L2062-L2072)
+
+[4] (실행 확인) Velociraptor v0.77.1 시험 서버에서 `Generic.Collectors.File`로 Linux 단말의 32바이트 파일을 수집한 뒤 `uploads()`를 조회하자 `vfs_path`가 `fs:/clients/<client_id>/collections/<flow_id>/uploads/auto/…`인 기록이 있었다.
+이 수집은 `collect_artifact`에 `collectionSpec`을 `Glob` 열이 있는 CSV로, `Root`를 `/`로 주어 시작했다.
+같은 파일의 경로를 `collect_file`에 주었을 때는 flow가 `FINISHED`가 되었지만 결과 행과 올린 파일이 0개였다.
+`Windows.Triage.Targets`는 시험 서버에 정의가 없고 Windows 단말도 없어 `collect_forensic_triage`의 수집은 실행하지 않았다.
+
+[5] 저장된 결과 행을 조회하는 두 함수다.
+
+```python
+def get_hunt_results(
+    hunt_id: str,
+    artifact: str,
+    fields: str = "*",
+    limit: int = 500,
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_fields = normalize_fields(fields)
+    vql = (
+        f"SELECT {normalized_fields} "
+        f"FROM hunt_results(hunt_id={vql_literal(hunt_id)}, "
+        f"artifact={vql_literal(normalized_artifact)}) "
+        f"LIMIT {int(limit)}"
+    )
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:526-541`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L526-L541)
+
+```python
+def get_flow_results(
+    client_id: str,
+    flow_id: str,
+    artifact: str,
+    fields: str = "*",
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_fields = normalize_fields(fields)
+    vql = (
+        f"SELECT {normalized_fields} FROM source(client_id={vql_literal(client_id)}, "
+        f"flow_id={vql_literal(flow_id)},artifact={vql_literal(normalized_artifact)}) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:604-618`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L604-L618)

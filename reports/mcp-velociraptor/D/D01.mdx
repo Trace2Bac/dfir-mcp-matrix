@@ -1,0 +1,200 @@
+---
+cell: D01
+details:
+- id: not_implemented
+---
+
+# D01 파생물 보관
+
+### 미구현
+
+**판단.** 서버는 도구 결과를 응답으로 돌려주기만 하고 파일이나 DB에 남기지 않는다.
+도구는 결과를 `_json_success`로 JSON 글로 만들어 반환값으로 돌려준다 [1].
+서버를 이루는 세 파일에는 파일을 쓰거나 폴더를 만드는 호출이 없다 [2].
+서버가 여는 파일은 설정을 읽는 두 가지다.
+`load_environment`는 `.env` 파일을 읽어 환경변수로 올린다 [3].
+`init_stub`은 API 설정 파일을 읽어 Velociraptor API로 가는 gRPC 연결을 만든다 [4].
+도구 다섯 개를 부른 뒤 서버 프로세스가 열어 둔 대상에 일반 파일은 없었고 저장소 폴더의 파일 목록은 호출 전과 같았다 [5].
+
+수집 요청과 그 결과는 Velociraptor 서버가 보관한다.
+수집 도구는 VQL `collect_client`로 수집을 요청하고 Velociraptor 서버가 수집마다 flow를 만든다 [6].
+`collect_artifact`를 부른 뒤 Velociraptor 서버의 데이터 저장소에는 그 `flow_id` 이름으로 요청, 기록, 결과 행 파일이 생겼다 [5].
+`get_collection_results`와 `get_hunt_results_tool`은 그 결과를 VQL `source`와 `hunt_results`로 읽어 돌려주고 서버 쪽에 사본을 두지 않는다 [7].
+`collect_file`은 `Generic.Collectors.File` 수집을 요청하고 파일 찾기 도구 `linux_file_finder`·`macos_file_finder`·`windows_hash_search`는 `Upload_File`을 아티팩트 매개변수로 넘긴다 [8].
+이 수집에서 단말이 올리는 파일도 Velociraptor 서버가 받아 보관하고 서버에는 그 파일을 받아 두는 코드가 없다 [9][2].
+같은 저장소의 `agent_poc/mcp_agent.py`는 분석 결과를 `agent_poc/output/` 아래 JSON 파일로 쓴다 [10].
+이 파일은 MCP 클라이언트가 자기 쪽에 쓰는 것이라 서버의 파생물로 세지 않는다.
+
+### 근거
+
+[1] 도구 결과는 JSON 글로 만들어 돌려준다.
+
+```python
+def _json_success(data) -> str:
+    return json.dumps({"ok": True, "data": data}, default=str)
+
+
+def _json_error(message: str) -> str:
+    return json.dumps({"ok": False, "error": message})
+
+
+def _run_json_tool(func, *args, **kwargs) -> str:
+    try:
+        return _json_success(func(*args, **kwargs))
+    except Exception as exc:
+        return _json_error(str(exc))
+```
+
+[`mcp_velociraptor_bridge.py:35-47`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L35-L47)
+
+[2] 서버 세 파일의 가져오기 문이다: [`mcp_velociraptor_bridge.py:1-9`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1-L9), [`velociraptor_api.py:1-11`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L1-L11), [`velociraptor_env.py:1-2`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L1-L2).
+
+[3] `.env` 파일을 읽는 곳이다.
+
+```python
+def load_environment() -> None:
+    """Load dotenv values without overriding existing environment."""
+    repo_root = Path(__file__).resolve().parent
+    configured_env = os.environ.get("VELOCIRAPTOR_ENV_FILE", "").strip()
+
+    if configured_env:
+        configured_path = Path(configured_env).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = repo_root / configured_path
+        _load_env_file(configured_path)
+
+    _load_env_file(repo_root / ".env")
+
+
+def _load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        _load_simple_env(env_path)
+        return
+
+    load_dotenv(env_path, override=False)
+```
+
+[`velociraptor_env.py:5-28`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_env.py#L5-L28)
+
+[4] API 설정 파일을 읽는 곳이다.
+
+```python
+def init_stub(config_path: str | None = None):
+    global stub
+    resolved_path = resolve_config_path(config_path)
+    config = yaml.safe_load(resolved_path.read_text())
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=config["ca_certificate"].encode("utf-8"),
+        private_key=config["client_private_key"].encode("utf-8"),
+        certificate_chain=config["client_cert"].encode("utf-8")
+    )
+    channel_opts = (('grpc.ssl_target_name_override', "VelociraptorServer"),)
+    channel = grpc.secure_channel(config["api_connection_string"], creds, options=channel_opts)
+    stub = api_pb2_grpc.APIStub(channel)
+```
+
+[`velociraptor_api.py:284-295`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L284-L295)
+
+[5] (실행 확인) MCP 클라이언트 세션으로 서버를 실행해 `list_orgs`·`linux_pslist`·`collect_artifact`·`get_collection_results`·`windows_event_log_cleared`를 불렀다.
+호출 뒤 서버 프로세스의 `/proc/<pid>/fd`에는 파이프, 소켓, eventpoll, eventfd만 있었다.
+저장소 폴더의 파일 16개는 호출 전후로 이름, 크기, 수정 시각이 같았다.
+이 실행은 `PYTHONDONTWRITEBYTECODE=1`로 했다.
+`collect_artifact`가 돌려준 `flow_id`로 Velociraptor 서버의 데이터 저장소를 보니 `clients/<client_id>/collections/<flow_id>/` 아래에 `requests.json.db`·`logs.json`·`stats.json.db`가, `clients/<client_id>/artifacts/Generic.Client.Info/<flow_id>/` 아래에 결과 행 파일이 있었다.
+
+[6] 수집은 `collect_client`로 요청한다.
+
+```python
+def start_collection(
+    client_id: str,
+    artifact: str,
+    parameters: Mapping[str, ParameterValue] | None = None,
+    timeout: int | None = None,
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_parameters = normalize_env_dict(parameters)
+    timeout_arg = ""
+    if timeout is not None:
+        timeout_arg = f", timeout={int(timeout)}"
+    vql = (
+        f"LET collection <= collect_client(urgent='TRUE',client_id={vql_literal(client_id)}, "
+        f"artifacts={vql_literal(normalized_artifact)}, env=dict({normalized_parameters}){timeout_arg}) "
+        "SELECT flow_id, request.artifacts as artifacts, request.timeout as timeout, "
+        "request.specs[0] as specs FROM foreach(row=collection) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:566-585`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L566-L585)
+
+[7] 결과는 Velociraptor에서 읽어 돌려준다.
+
+```python
+def get_flow_results(
+    client_id: str,
+    flow_id: str,
+    artifact: str,
+    fields: str = "*",
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_fields = normalize_fields(fields)
+    vql = (
+        f"SELECT {normalized_fields} FROM source(client_id={vql_literal(client_id)}, "
+        f"flow_id={vql_literal(flow_id)},artifact={vql_literal(normalized_artifact)}) "
+    )
+
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:604-618`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L604-L618)
+
+```python
+def get_hunt_results(
+    hunt_id: str,
+    artifact: str,
+    fields: str = "*",
+    limit: int = 500,
+    org_id: str | None = None,
+) -> list[dict]:
+    normalized_artifact = normalize_artifact_name(artifact)
+    normalized_fields = normalize_fields(fields)
+    vql = (
+        f"SELECT {normalized_fields} "
+        f"FROM hunt_results(hunt_id={vql_literal(hunt_id)}, "
+        f"artifact={vql_literal(normalized_artifact)}) "
+        f"LIMIT {int(limit)}"
+    )
+    return run_vql_query(vql, org_id=org_id)
+```
+
+[`velociraptor_api.py:526-541`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/velociraptor_api.py#L526-L541)
+
+[8] 파일을 올리게 하는 수집을 요청하는 도구다: [`mcp_velociraptor_bridge.py:1949-1960`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1949-L1960), [`mcp_velociraptor_bridge.py:649-693`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L649-L693), [`mcp_velociraptor_bridge.py:848-888`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L848-L888), [`mcp_velociraptor_bridge.py:1629-1672`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/mcp_velociraptor_bridge.py#L1629-L1672).
+
+[9] (실행 확인) `linux_file_finder`를 `SearchFilesGlob="/etc/hostname"`, `Upload_File=True`로 불렀다.
+응답 행의 `Upload`에는 Velociraptor가 적은 `StoredSize`·`sha256`·`md5`가 실렸다.
+Velociraptor 서버의 데이터 저장소에는 `clients/<client_id>/collections/<flow_id>/uploads/file/etc/hostname`이 생겼다.
+
+[10] `agent_poc`가 결과 파일을 쓰는 곳이다.
+
+```python
+    def _save_results(self, hostname: str, analysis_type: str, results: Dict[str, Any]):
+        """Save analysis results to JSON file."""
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.output_dir}/{hostname}_{analysis_type}_{timestamp}.json"
+
+        with open(filename, "w") as file_handle:
+            json.dump(results, file_handle, indent=2)
+
+        print(f"✓ Results saved to: {filename}", flush=True)
+```
+
+[`agent_poc/mcp_agent.py:1130-1140`](https://github.com/mgreen27/mcp-velociraptor/blob/1f97a4f4e64d27faf07fe684d8cbfe270b57757d/agent_poc/mcp_agent.py#L1130-L1140)
