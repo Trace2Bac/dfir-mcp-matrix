@@ -1,0 +1,190 @@
+---
+cell: D03
+details:
+- id: not_implemented
+---
+
+# D03 파생물 무결성 검증
+
+### 미구현
+
+**판단.** 서버는 남긴 파생물의 해시를 계산하지도 대조하지도 않는다.
+`CommandHistoryManager.dump`는 명령 결과를 파일에 쓰기만 하고 목록 항목 `CommandRecordSummary`에는 번호, 명령, 시각, 종료 코드만 있다 [1][2].
+`get_command`는 결과 본문 파일을 읽어 돌려줄 뿐 저장할 때와 내용이 같은지 확인하지 않는다 [3].
+`AnalystNoteManager.dump`도 분석 메모의 목록 파일과 본문 파일을 쓰기만 한다 [4].
+컨테이너 안 분석 도구가 `/artifacts`에 만든 파일의 해시나 크기를 서버가 남기는 곳은 없다 [5].
+`list_files`는 `artifacts` 폴더의 파일마다 이름, 경로, 크기를 응답으로 돌려줄 뿐 그 값을 남기거나 앞 값과 대조하지 않는다 [6].
+
+`get_hash`는 모델이 준 컨테이너 안 경로에 `md5sum`·`sha1sum`·`sha256sum`·`sha512sum` 가운데 하나를 실행하는 도구다 [7].
+이 도구는 증거와 파생물을 가리지 않고 모델이 불러야 실행된다 [7].
+사건 폴더의 `analysis`와 `artifacts`가 컨테이너에 연결되어 있어 `get_hash`에 `/analysis/command_history/1.txt`나 `/artifacts` 아래 경로를 주면 그 파일의 해시가 새 명령 결과로 저장된다 [8][9].
+서버는 그 값을 기준값으로 따로 남기지 않고 나중에 대조하는 도구도 없다 [7].
+
+### 근거
+
+[1] 명령 결과를 파일에 쓰는 곳이다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+```
+
+[`mcp_dfir/data_manager.py:23-37`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L37)
+
+[2] 목록 항목의 필드다.
+
+```python
+class CommandRecordSummary(BaseModel):
+    number: int = Field(examples=[1])
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    exit_code: int = Field(examples=[0])
+```
+
+[`mcp_dfir/tools/models.py:21-25`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L21-L25)
+
+[3] 결과 본문 파일을 읽어 돌려준다.
+
+```python
+    def get_command(self, command_number: int) -> CommandRecord:
+        for command in self.command_summary_list:
+            if command.number == command_number:
+                with open(file=config.command_record_directory / f"{command_number}.txt", encoding="utf-8") as file:
+                    return CommandRecord(
+                        command=command.command,
+                        date_run=command.date_run,
+                        result=file.read(),
+                        exit_code=command.exit_code,
+                    )
+        raise KeyError(f"Could not find command with number {command_number}")
+```
+
+[`mcp_dfir/data_manager.py:51-61`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L51-L61)
+
+[4] 분석 메모를 파일에 쓰는 곳이다.
+
+```python
+    def dump(self, note: AnalystNote | None):
+        # Update note summary
+        with open(file=config.analyst_notes_list_json, mode="w", encoding="utf-8") as note_summary_file:
+            json.dump(
+                [note.model_dump() for note in self.note_list],
+                note_summary_file,
+                indent=4,
+            )
+
+        # Write to note file
+        if note is not None:
+            with open(
+                file=config.analyst_notes_directory / f"{note.title}.md", mode="w", encoding="utf-8"
+            ) as note_file:
+                note_file.write(note.description)
+```
+
+[`mcp_dfir/data_manager.py:72-86`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L72-L86)
+
+[5] 실행 도구는 명령의 표준 출력과 종료 코드만 다룬다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[6] `list_files`는 파일마다 이름, 경로, 크기를 돌려준다.
+
+```python
+    out_list = []
+    for dir_path, _, file_name_list in selected_volume.external_path.walk():
+        for file_name in file_name_list:
+            external_file_path = Path(dir_path / file_name)
+            internal_file_path = (
+                f"/{path}/{str(external_file_path.relative_to(selected_volume.external_path)).replace('\\', '/')}"
+            )
+            out_list.append(
+                FileDetails(
+                    name=file_name,
+                    path=internal_file_path,
+                    size=external_file_path.stat().st_size,
+                )
+            )
+    return out_list
+```
+
+[`mcp_dfir/tools/file_search.py:28-42`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L28-L42)
+
+[7] `get_hash`는 받은 경로에 해시 명령을 실행한다.
+
+```python
+def get_hash(
+    ctx: Context, file_path: str, algorithm: Literal["md5", "sha1", "sha256", "sha512"]
+) -> CommandRecordSummary:
+    if algorithm.lower() not in HASHING_ALGORITHMS:
+        raise KeyError(
+            f'Unsupported hashing algorithm "{algorithm}", this function supports: {", ".join(HASHING_ALGORITHMS)}'
+        )
+
+    command_list = [f"{algorithm.lower()}sum", file_path]
+    return docker_manager.exec_stream(ctx, command_list)
+```
+
+[`mcp_dfir/tools/hash.py:21-30`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/hash.py#L21-L30)
+
+[8] 컨테이너에 연결하는 볼륨이다.
+
+```python
+        # Docker
+        self.docker_volumes = [
+            DockerVolume(
+                name="evidence", internal_path="/evidence", external_path=self.evidence_directory, permissions="ro"
+            ),
+            DockerVolume(
+                name="analysis", internal_path="/analysis", external_path=self.analysis_directory, permissions="ro"
+            ),
+            DockerVolume(
+                name="symbols", internal_path="/symbols", external_path=self.symbols_directory, permissions="rw"
+            ),
+            DockerVolume(
+                name="artifacts", internal_path="/artifacts", external_path=self.artifact_directory, permissions="rw"
+            ),
+        ]
+```
+
+[`mcp_dfir/config.py:89-103`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L89-L103)
+
+[9] (실행 확인) `get_hash`에 `/analysis/command_history/1.txt`와 `sha256`을 주자 `sha256sum /analysis/command_history/1.txt`가 10번 명령으로 기록되고 결과 본문 파일에 해시 한 줄이 남았다.
+`/artifacts/fd-find.txt`와 `md5`를 주자 `md5sum /artifacts/fd-find.txt`가 11번 명령으로 기록되었다.

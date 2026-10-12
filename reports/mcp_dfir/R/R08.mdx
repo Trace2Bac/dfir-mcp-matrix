@@ -1,0 +1,188 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 명령을 실행하는 도구의 결과 본문에 적용된다 [1][2].
+실행기 `exec_stream`은 표준 출력을 그대로 저장하고 `get_command_result`는 저장한 글에서 고른 글을 돌려준다 [1][2].
+두 함수에는 시각 값을 찾거나 바꾸는 코드가 없다 [1][2].
+`fls -l`의 결과 본문은 줄마다 `2026-09-29 04:56:24 (UTC)` 꼴의 시각 네 개를 실었다 [3].
+`istat`의 결과 본문은 `2026-09-29 04:56:24.000000000 (UTC)` 꼴의 시각을 실었다 [3].
+`fls -m`의 결과 본문은 줄마다 시각 네 개를 `1790657784` 같은 정수로 실었다 [3].
+`icat`으로 읽은 `auth.log`의 줄은 `Sep 29 10:00:01`처럼 연도와 시간대가 없는 원래 표기 그대로였다 [3].
+예시 사건의 `windows.pslist` 결과 본문은 `CreateTime`을 `2017-05-12T21:21:55+00:00`으로 싣는다 [4].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 Volatility와 Sleuth Kit 도구의 결과 본문에 적용된다 [5][3].
+`run_volatility_command`는 Volatility를 늘 `-r jsonl`로 실행한다 [5].
+Volatility 3의 JSON 렌더러는 `datetime` 값을 `isoformat()` 문자열로 출력하고 JSONL 렌더러는 이 렌더러를 물려받는다 [6].
+Volatility 3는 Windows FILETIME과 Unix 시각을 UTC 시간대가 붙은 `datetime`으로 바꾸므로 이 문자열 끝에는 `+00:00`이 붙는다 [7][4].
+FILETIME이 0이면 Volatility는 값 대신 해당 없음 표시를 내고 JSON 렌더러는 이를 `null`로 출력한다 [6][7].
+예시 사건의 `windows.pslist` 결과 본문에서 `System` 행의 `CreateTime`은 `null`이다 [4].
+Volatility의 시각 열은 예시 사건의 명령 기록과 Volatility 소스로 확인했고 시험용 메모리 이미지에서는 맞는 심볼이 없어 시각 열을 내는 플러그인을 실행하지 못했다.
+
+`fls -l`·`istat`·`fsstat`의 결과 본문에서는 시각마다 괄호 안에 시간대 이름이 붙는다 [3].
+The Sleuth Kit 4.12.1은 시각을 프로세스의 지역 시각으로 바꿔 시간대 이름과 함께 출력한다 [8].
+`Dockerfile`은 시간대를 정하지 않고 컨테이너 안의 시각은 UTC였다 [9][3].
+`run_sleuthkit_command`는 시간대를 정하는 인자를 더하지 않고 모델이 준 인자만 넘긴다 [10].
+모델이 `fls -l`에 `-z EST5EDT`를 주자 같은 시각이 `2026-09-29 00:56:24 (EDT)`로 실렸다 [3].
+
+실행 도구의 응답과 `get_command_history`에 실리는 `date_run`은 도구 출력에서 온 시각이 아니라 서버가 명령 기록을 만들 때 적는 시각이다 [11].
+`date_as_str`은 `datetime.now()`를 `%d/%m/%Y %H:%M:%S`로 적으므로 이 값은 시간대 표기가 없는 호스트 지역 시각이다 [11].
+`date_run`은 일, 월, 연도 순서이고 응답에는 이 순서를 알리는 값이나 필드가 없다 [11].
+한국 표준시 호스트에서 실행한 응답의 `date_run`은 `12/10/2026 13:46:50`이었고 그 명령이 컨테이너 안에서 출력한 시각은 `2026-10-12 04:46 UTC`였다 [3].
+출력 schema가 싣는 `date_run`의 예시는 `01/01/2024 12:00:00`이어서 일과 월의 순서를 가를 수 없다 [11][3].
+
+**한계.** 결과 본문의 시각 표기는 실행한 명령과 인자가 정하고 서버는 시간대나 단위가 없는 표기에 아무것도 보태지 않는다 [1][2].
+`fls -m`의 결과 본문에 실린 정수 시각에는 단위와 시간대 표기가 없었다 [3].
+`icat`으로 읽은 로그 파일의 시각에는 시간대가 없었다 [3].
+
+### 근거
+
+[1] `exec_stream`은 표준 출력을 이어 붙인 글로 `CommandRecord`를 만들어 `CommandHistoryManager`에 넘긴다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[2] `get_command_result`는 저장한 글을 범위와 정규식으로만 고른다.
+
+```python
+    # Get the command result
+    content = command_history_manager.get_command(command_number=command_number).result
+
+    # Truncate for head/tail
+    if head:
+        content = "\n".join(content.split("\n")[:head])
+    elif tail:
+        content = "\n".join(content.split("\n")[tail:])
+
+    # Truncate for head/tail bytes
+    if head_bytes:
+        content = content[:head_bytes]
+    elif tail_bytes:
+        content = content[-tail_bytes:]
+
+    # Regex search
+    output = []
+    for line in content.split("\n"):
+        if regex is None or re.search(regex, line):
+            output.append(line)
+
+    output_str = "\n".join(output)
+
+    if byte_limit is not None and len(output_str) >= byte_limit:
+        raise RuntimeError(f"Output exceeds maximum size, output was {len(output_str)} bytes")
+
+    return output_str
+```
+
+[`mcp_dfir/tools/history.py:44-70`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/history.py#L44-L70)
+
+[3] (실행 확인) 한국 표준시로 맞춘 Windows 호스트에서 시험용 ext4 이미지를 둔 사건 폴더로 서버를 실행하고 MCP stdio 세션으로 도구를 불렀다.
+`run_sleuthkit_command`로 `fls -r -l /evidence/disk.dd`를 실행한 결과 본문의 줄은 `2026-09-29 04:56:24 (UTC)`를 네 번 실었다.
+`istat /evidence/disk.dd 17`의 결과 본문에서 `Inode Times:` 아래 네 줄은 이름, 탭, `2026-09-29 04:56:24.000000000 (UTC)` 꼴이었다.
+`icat /evidence/disk.dd 20`의 결과 본문 첫 줄은 `Sep 29 10:00:01 host sshd[100]: Failed password for root from 10.0.0.5 port 2222 ssh2`였다.
+`fsstat /evidence/disk.dd`의 결과 본문에는 `Last Written at: 2026-09-29 04:56:24 (UTC)`가 있었다.
+`fls -r -l -z EST5EDT /evidence/disk.dd`의 결과 본문에서 같은 줄의 시각은 `2026-09-29 00:56:24 (EDT)`였다.
+`fls -r -m / /evidence/disk.dd`의 결과 본문은 `0|/home/user/.bash_history|17|r/rrw-r--r--|1000|1000|45|1790657784|1790657784|1790657784|1790657784` 꼴의 줄이었다.
+`run_find`에 `/proc/self -maxdepth 0 -printf`와 형식 문자열 `%TY-%Tm-%Td %TH:%TM %TZ\n`을 주어 실행한 응답의 `date_run`은 `12/10/2026 13:46:50`이었고 결과 본문은 `2026-10-12 04:46 UTC`였다.
+`tools/list`가 돌려준 실행 도구의 출력 schema에서 `date_run`은 `{"examples": ["01/01/2024 12:00:00"], "title": "Date Run", "type": "string"}`이었다.
+
+[4] 예시 사건의 `windows.pslist` 결과 본문이다: [`examples/tryhackme_volatility/analysis/command_history/6.txt:2-3`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history/6.txt#L2-L3).
+
+[5] `run_volatility_command`는 `-r jsonl`을 인자 앞에 넣는다.
+
+```python
+def run_volatility_command(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs volatility3: vol -s /symbols -r jsonl <arguments>
+
+    - To analyze a file you must specify the path using `-f /evidence/example.mem`
+    - Volatility3 does not come with many built-in symbols so they may need to be manually downloaded
+    """
+    return docker_manager.exec_stream(command_list=["vol", "-s", "/symbols", "-r", "jsonl", *arguments], ctx=ctx)
+```
+
+[`mcp_dfir/tools/volatility.py:22-28`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L22-L28)
+
+[6] Volatility 3의 JSON 렌더러는 `datetime`을 `isoformat()`으로, 값이 없으면 `None`으로 바꾸고([`volatility3/cli/text_renderer.py:549-553`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/cli/text_renderer.py#L549-L553)) JSONL 렌더러는 JSON 렌더러를 물려받는다([`volatility3/cli/text_renderer.py:618-625`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/cli/text_renderer.py#L618-L625)).
+
+[7] Volatility 3는 FILETIME과 Unix 시각을 UTC 시간대의 `datetime`으로 바꾸고 FILETIME이 0이면 해당 없음 값을 돌려준다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/renderers/conversion.py#L15-L28), [`volatility3/framework/renderers/conversion.py:52-65`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/renderers/conversion.py#L52-L65).
+
+[8] The Sleuth Kit 4.12.1의 `tsk_fs_time_to_str`은 `localtime`으로 바꾼 시각 뒤에 시간대 이름을 괄호로 붙인다: [`tsk/fs/fs_name.c:302-320`](https://github.com/sleuthkit/sleuthkit/blob/b42c1cf3c56c20cf3cb12d0ecf67af88aba24ed7/tsk/fs/fs_name.c#L302-L320).
+
+[9] `Dockerfile`의 환경변수에는 시간대 설정이 없다.
+
+```dockerfile
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV VOLATILITY_SYMBOLS=/usr/local/lib/python3.12/site-packages/volatility3/symbols
+
+WORKDIR /tools
+```
+
+[`Dockerfile:1-8`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L1-L8)
+
+[10] `run_sleuthkit_command`는 고른 도구와 모델이 준 인자만 `exec_stream`에 넘긴다.
+
+```python
+    if tool not in SLEUTHKIT_COMMANDS:
+        raise KeyError(f"Tool: {tool} not found in command list: {', '.join(list(SLEUTHKIT_COMMANDS.keys()))}")
+    return docker_manager.exec_stream(ctx=ctx, command_list=[tool, *arguments])
+```
+
+[`mcp_dfir/tools/sleuthkit.py:116-118`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/sleuthkit.py#L116-L118)
+
+[11] `date_as_str`과 이를 기본값으로 쓰는 두 모델이다.
+
+```python
+def date_as_str() -> str:
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+class CommandRecordSummary(BaseModel):
+    number: int = Field(examples=[1])
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    exit_code: int = Field(examples=[0])
+
+
+class CommandRecord(BaseModel):
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+```
+
+[`mcp_dfir/tools/models.py:17-30`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L17-L30)

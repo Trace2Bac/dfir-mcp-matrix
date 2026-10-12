@@ -1,0 +1,166 @@
+---
+cell: I03
+details:
+- id: I03.02
+---
+
+# I03 외부 전송 범위 구성
+
+### I03.02 메타데이터·추출 값 전송
+
+**구현.** 이 방식은 `download_windows_symbol`과 `download_linux_symbol`이 보내는 요청에 적용된다 [1][2].
+`download_windows_symbol`은 PDB 이름, GUID, age를 Microsoft 심볼 서버 주소의 경로에 넣어 GET 요청을 보낸다 [1].
+세 값은 모델이 인자로 준다 [1].
+저장소의 예시 사건에서는 심볼이 없어 실패한 `windows.info`의 출력에 Volatility 3가 메모리 이미지를 훑어 찾은 커널의 PDB 이름과 GUID·age가 실렸다 [3].
+모델은 그 값을 `download_windows_symbol`의 인자로 넘겼다 [4].
+`download_linux_symbol`은 심볼 저장소 안의 파일 경로 `symbol_path`를 GitHub 주소의 경로에 넣어 GET 요청을 보낸다 [2].
+심볼 맵에 있는 경로에는 배포판 이름과 커널 버전이 들어 있다 [5].
+`search_linux_symbols`는 심볼 맵 전체를 받아 정규식을 서버 프로세스 안에서 대조하므로 정규식은 요청에 실리지 않는다 [6].
+세 요청은 모두 본문이 없는 GET이고 서버 코드에는 증거 파일이나 그 내용을 올리는 곳이 없다 [1][2][6].
+서버는 요청에 헤더를 더하지 않는다 [1][2].
+보낼 값의 종류는 도구가 정하고 값은 모델이 준다 [1][2].
+보내기 전에 값을 고르거나 가리는 처리는 없다 [1][2].
+
+Docker 데몬에는 Docker CLI가 컨테이너 이름, 이미지 이름, 컨테이너에 연결할 호스트 쪽 폴더 경로, 실행할 명령 줄을 보낸다 [7][8].
+명령 줄에는 모델이 준 증거 경로와 검색 문자열이 그대로 들어 있다 [8].
+증거는 데몬이 컨테이너에 연결한 `evidence` 폴더에서 컨테이너가 읽고 서버 코드가 데몬으로 올리지 않는다 [7].
+Docker 데몬이 서버와 다른 호스트에 있는 구성은 실행으로 확인하지 않았다.
+
+**한계.** 서버는 `pdb_name`·`guid`·`symbol_path`의 형식을 검사하지 않으므로 모델이 준 문자열이 무엇이든 요청 경로에 들어간다 [1][2].
+`pdb_name`을 `nosuchfile.pdb`로, `guid`를 0 32개로 주자 그 값을 넣은 주소로 요청이 나갔고 오류 문구에 그 주소가 실렸다 [9].
+
+### 근거
+
+[1] `_download_windows_pdb`는 인자 세 개로 주소를 만들어 `requests.get`에 주소만 넘긴다.
+
+```python
+def _download_windows_pdb(ctx: Context, pdb_name: str, guid: str, age: int) -> tuple[str, CommandRecordSummary]:
+    """Downloads a pdb file and returns the internal path"""
+    guid = guid.replace("-", "")  # Normalize path
+    url = f"{WINDOWS_SYMBOL_SERVER}/{pdb_name}/{guid}{age}/{pdb_name}"
+    ctx.report_progress(f"Pulling symbol from {url}")
+    output_file_name = f"{guid}_{pdb_name}"
+    external_path = config.windows_symbols_directory / "raw" / output_file_name
+    external_path.parent.mkdir(mode=500, parents=True, exist_ok=True)
+    internal_path = f"/symbols/windows/raw/{output_file_name}"
+
+    response = requests.get(url)
+
+    if response.status_code == HTTPStatus.NOT_FOUND:
+        raise RuntimeError(
+            f"PDB not found on symbol server. Check that pdb_name and guid are correct.\nURL attempted: {url}"
+        )
+
+    response.raise_for_status()
+    external_path.write_bytes(response.content)
+```
+
+[`mcp_dfir/tools/volatility.py:35-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L35-L53)
+
+[2] `download_linux_symbol`은 `symbol_path`를 붙인 주소를 `requests.get`에 넘긴다.
+
+```python
+def download_linux_symbol(ctx: Context, symbol_path: str) -> CommandRecordSummary:
+    """Download a symbol map from the Abyss-W4tcher/volatility3-symbols repository"""
+
+    # Download json file from repo
+    url = f"{LINUX_SYMBOL_REPO_BASE_URL}/{symbol_path}"
+    ctx.report_progress(f"Downloading symbol from {url}")
+    response = requests.get(url=url)
+    response.raise_for_status()
+
+    # Save json file
+    config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+    file_name = symbol_path.rsplit("/", maxsplit=1)[-1]
+    file_path = config.linux_symbols_directory / file_name
+    file_path.write_bytes(response.content)
+```
+
+[`mcp_dfir/tools/volatility.py:141-154`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L141-L154)
+
+[3] 예시 사건 폴더의 2번 항목의 결과 본문에는 Volatility 3가 받으려던 주소 `http://msdl.microsoft.com/download/symbols/ntoskrnl.pdb/423320282DB842E7BA2B0BFC86A84D752/ntoskrnl.pd_`가 있다: [`examples/tryhackme_volatility/analysis/command_history/2.txt:9-16`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history/2.txt#L9-L16).
+
+[4] 예시 사건의 Claude Code 기록에는 모델이 그 값을 읽고 도구를 부른 줄이 있다: [`examples/tryhackme_volatility/claude_code_log.txt:102-105`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/claude_code_log.txt#L102-L105).
+
+[5] `SymbolSearchResult`의 예시 값은 심볼 맵의 이름과 경로 모양을 적는다.
+
+```python
+class SymbolSearchResult(BaseModel):
+    symbol_name: str = Field(
+        examples=[
+            "Linux version 5.15.0-1065-oracle (buildd@lcy02-amd64-029) (gcc (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0, GNU ld (GNU Binutils for Ubuntu) 2.34) #71~20.04.1-Ubuntu SMP Mon Jul 29 16:34:02 UTC 2024 (Ubuntu 5.15.0-1065.71~20.04.1-oracle 5.15.160)"
+        ]
+    )
+    file_path_list: list[str] = Field(
+        examples=[["Ubuntu/amd64/5.15.0/1065/oracle/Ubuntu_5.15.0-1065-oracle_5.15.0-1065.71~20.04.1_amd64.json.xz"]]
+    )
+```
+
+[`mcp_dfir/tools/volatility.py:100-108`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L100-L108)
+
+[6] `search_linux_symbols`는 인자 없는 주소에서 목록을 받고 정규식은 받은 목록에 `re.search`로 대조한다.
+
+```python
+def search_linux_symbols(ctx: Context, regex: str) -> CommandRecordSummary:
+    """Load linux symbol map from Abyss-W4tcher/volatility3-symbols and search for symbols matching the regex"""
+
+    # Download symbol map if it doesn't exist
+    if not config.linux_symbol_map_json.exists():
+        ctx.report_progress("Downloading linux symbol map from github.com/Abyss-W4tcher/volatility3-symbols")
+        response = requests.get(url=LINUX_SYMBOL_MAP_SOURCE)
+        response.raise_for_status()
+        config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+        config.linux_symbol_map_json.write_bytes(response.content)
+
+    # Parse the symbol map
+    with open(config.linux_symbol_map_json, encoding="utf-8") as symbol_map_file:
+        symbol_map: dict = json.load(symbol_map_file)
+
+    # Return the a list of matches
+    out_list = []
+    for symbol_name, file_path_list in symbol_map.items():
+        if re.search(regex, symbol_name):
+            out_list.append(SymbolSearchResult(symbol_name=symbol_name, file_path_list=file_path_list))
+```
+
+[`mcp_dfir/tools/volatility.py:111-130`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L111-L130)
+
+[7] 서버는 이미지 이름, 컨테이너 이름, 볼륨 목록, 네트워크 설정을 `docker.run`에 넘긴다.
+
+```python
+        volumes = [
+            (volume_mount.external_path, volume_mount.internal_path, volume_mount.permissions)
+            for volume_mount in list(config.docker_volumes)
+        ]
+        self.container = self.docker.run(
+            config.docker_config.image_name,
+            name=config.docker_config.container_name,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            networks=["none"],
+        )
+```
+
+[`mcp_dfir/docker_manager.py:42-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L42-L53)
+
+[8] `exec_stream`은 도구가 넘긴 인자 배열을 `docker.execute`에 넘긴다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+```
+
+[`mcp_dfir/docker_manager.py:67-77`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L77)
+
+[9] (실행 확인) `download_windows_symbol`을 `pdb_name="nosuchfile.pdb"`, `guid="00000000000000000000000000000000"`, `age=1`로 불렀다.
+응답은 `PDB not found on symbol server. Check that pdb_name and guid are correct.`와 `URL attempted: https://msdl.microsoft.com/download/symbols/nosuchfile.pdb/000000000000000000000000000000001/nosuchfile.pdb`를 담은 오류 결과였다.

@@ -8,29 +8,35 @@ details:
 
 ### 미구현
 
-**판단.** 앞선 호출이 만든 상태를 조건으로 호출을 막는 코드가 없다.
-서버 지침은 분석 전에 증거 목록을 만들고 이전 명령과 분석 노트를 검토하라고 적는다 [1].
-서버는 이 순서를 지켰는지 보지 않는다.
-컨테이너 명령 도구는 증거 목록을 만들었는지, 이전 명령을 조회했는지와 관계없이 `exec_stream`으로 명령을 실행한다 [2].
-`exec_stream`은 컨테이너가 없으면 거부하지만 서버는 기동할 때 컨테이너부터 시작하므로 모델이 채워야 할 조건이 아니다 [3].
-`download_windows_symbol`은 같은 심볼 파일이 있으면 `overwrite` 없이 다시 받지 않는다 [4].
-이 검사는 파일 덮어쓰기를 막는 것이다.
+**판단.** 서버에는 앞선 작업 상태, 승인, 호출자 신원, 실행 자원으로 호출을 막거나 미루는 코드가 없다.
+실행 도구는 인자 검사를 마치면 바로 `exec_stream`으로 컨테이너에서 명령을 실행한다 [1].
+`exec_stream`은 컨테이너 객체가 없을 때만 `RuntimeError`로 거부한다 [2].
+서버는 MCP 연결을 받기 전에 컨테이너를 시작하므로 이 조건은 앞선 도구 호출이 만드는 상태가 아니다 [3].
+
+서버 지침은 분석 전에 증거 목록을 만들고 이미 실행한 명령과 분석 메모를 검토하라고 적는다 [4].
+같은 지침은 증거가 바뀌었거나 잘못 실행한 경우가 아니면 명령을 다시 실행하지 말라고 적는다 [4].
+README는 명령 기록 기능을 `the agent never re-runs commands already completed`로 설명한다 [5].
+서버 코드는 새 명령을 명령 기록에 있는 명령과 대조하지 않고 목록 길이에 1을 더한 번호를 매겨 저장한다 [6].
+같은 인자로 `get_hash`를 두 번 부르자 두 번 모두 실행되어 번호 36과 37이 붙었다 [7].
+새 사건 폴더에서 증거 목록이나 명령 기록을 조회하지 않고 처음부터 `get_hash`를 불러도 명령이 실행되었다 [7].
+
+`download_windows_symbol`은 같은 심볼 파일이 이미 있으면 `overwrite`가 참일 때만 다시 받는다 [8].
+이 조건은 이미 있는 파일을 덮어쓸지 고르는 인자이고 호출마다 받는 승인이 아니다 [8].
+승인 토큰이나 승인 기록을 요청과 대조하는 코드는 없다.
+서버는 `auth=None`으로 FastMCP를 만들고 stdio로만 실행되어 원격 MCP 연결을 받지 않는다 [9].
+메모리, CPU, 디스크 여유 공간을 확인하는 코드는 없다.
+심볼을 내려받는 세 도구는 요청 사이에 간격을 두지 않고 `requests.get`을 부른다 [10].
+
+동시 실행 수를 정하는 장치도 없다.
+도구 함수는 모두 동기 함수이고 MCP Python SDK 1.27.0의 FastMCP는 동기 함수를 이벤트 루프에서 바로 부른다 [1][11].
+`exec_stream`은 `docker exec`의 출력을 끝까지 읽은 뒤에 돌아오므로 한 명령이 끝날 때까지 다른 요청은 처리되지 않는다 [2][11].
+혼자 부르면 0.96초 뒤에 응답하는 `run_volatility_command` 호출 3개를 동시에 보내자 마지막 응답이 2.82초 뒤에 왔다 [12].
+그 호출을 보내고 0.2초 뒤에 보낸 `get_command_history`는 앞 호출이 끝난 1.01초 뒤에 응답했다 [12].
+이는 서버가 정한 제한이 아니라 SDK가 동기 함수를 부르는 방식에서 생기는 동작이다.
 
 ### 근거
 
-[1] 서버 지침의 분석 전 순서다.
-
-```python
-Before beginning analysis always perform the following tasks:
-1. Perform an inventory of all evidence, ask the user for specific details on how, when, and where the evidence was acquired
-2. Review all previous commands that have already been run, commands should never be re-run unless the evidence has been updated or the commands were run incorrectly
-3. Review all analyst notes to not perform duplicate analysis
-```
-
-[`mcp_dfir/server.py:32-35`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/server.py#L32-L35)
-
-[2] 컨테이너 명령 도구는 인자를 붙여 바로 `exec_stream`을 부른다.
-`run_strings`·`run_grep`의 예다.
+[1] 실행 도구는 인자를 붙여 바로 `exec_stream`을 부른다.
 
 ```python
 def run_strings(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
@@ -41,30 +47,91 @@ def run_strings(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
 def run_grep(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
     """Runs: grep <arguments>"""
     return docker_manager.exec_stream(ctx=ctx, command_list=["grep", *arguments])
+
+
+def run_find(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs: find <arguments>"""
+    if " ".join(arguments).find("-exec") != -1:
+        raise RuntimeError("Cannot run exec in find")
+    return docker_manager.exec_stream(ctx=ctx, command_list=["find", *arguments])
 ```
 
-[`mcp_dfir/tools/file_search.py:45-52`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L45-L52)
+[`mcp_dfir/tools/file_search.py:45-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/file_search.py#L45-L59)
 
-[3] 컨테이너가 없으면 거부하고([`mcp_dfir/docker_manager.py:67-69`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L69)) 서버는 MCP 연결을 받기 전에 컨테이너를 시작한다([`mcp_dfir/runner.py:56-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L56-L59)).
+[2] `exec_stream`은 컨테이너 객체가 있는지만 확인하고 명령의 출력을 끝까지 읽는다.
 
 ```python
     def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
         if self.container is None:
             raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
 ```
 
-[`mcp_dfir/docker_manager.py:67-69`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L69)
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[3] 서버는 MCP 서버를 실행하기 전에 컨테이너를 시작한다.
 
 ```python
     # Start the mcp server
     docker_manager.start_forensic_container()
     try:
         mcp.run(transport="stdio")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        docker_manager.stop_forensic_container()
 ```
 
-[`mcp_dfir/runner.py:56-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L56-L59)
+[`mcp_dfir/runner.py:56-63`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L56-L63)
 
-[4] 심볼 파일이 이미 있으면 거부한다.
+[4] 서버 지침의 분석 전 순서다.
+
+```python
+Before beginning analysis always perform the following tasks:
+1. Perform an inventory of all evidence, ask the user for specific details on how, when, and where the evidence was acquired
+2. Review all previous commands that have already been run, commands should never be re-run unless the evidence has been updated or the commands were run incorrectly
+3. Review all analyst notes to not perform duplicate analysis
+```
+
+[`mcp_dfir/server.py:32-35`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/server.py#L32-L35)
+
+[5] README의 기능 목록이다: [`README.md:15-15`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/README.md#L15-L15).
+
+[6] 명령 번호는 목록 길이에 1을 더한 값이다.
+
+```python
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:44-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L44-L49)
+
+[7] (실행 확인) 새 사건 폴더로 서버를 실행하고 첫 호출로 `get_hash`에 `/evidence/notes.txt`와 `sha256`을 주면 번호 1인 명령 기록이 종료 코드 0으로 생겼다.
+같은 사건 폴더에서 같은 인자로 `get_hash`를 잇달아 두 번 부르면 `sha256sum /evidence/notes.txt` 명령 기록이 번호 36과 37로 따로 생겼다.
+
+[8] 심볼 파일이 이미 있으면 `overwrite`가 참일 때만 진행한다.
 
 ```python
     if output_file_external_path.exists() and not overwrite:
@@ -72,6 +139,28 @@ def run_grep(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
             f"File {output_file_internal_path} already exists, it can be used by volatility with the `-s /symbols` "
             "argument, set overwrite to True to overwrite this file"
         )
+    else:
+        output_file_external_path.parent.mkdir(mode=500, parents=True, exist_ok=True)
 ```
 
-[`mcp_dfir/tools/volatility.py:75-79`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L75-L79)
+[`mcp_dfir/tools/volatility.py:75-81`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L75-L81)
+
+[9] 서버는 인증 없이 FastMCP를 만들고 stdio로 실행한다([`mcp_dfir/runner.py:59-59`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L59-L59)).
+
+```python
+mcp = FastMCP(
+    "llm-forensics",
+    auth=None,
+```
+
+[`mcp_dfir/server.py:26-28`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/server.py#L26-L28)
+
+[10] 심볼을 내려받는 요청이다: [`mcp_dfir/tools/volatility.py:45-45`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L45-L45), [`mcp_dfir/tools/volatility.py:117-117`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L117-L117), [`mcp_dfir/tools/volatility.py:147-147`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L147-L147).
+
+[11] MCP Python SDK 1.27.0은 동기 도구 함수를 `await` 없이 바로 부르고([`src/mcp/server/fastmcp/utilities/func_metadata.py:92-95`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/func_metadata.py#L92-L95)) 받은 메시지마다 같은 이벤트 루프의 작업으로 처리한다([`src/mcp/server/lowlevel/server.py:673-684`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L673-L684)).
+
+[12] (실행 확인) MCP 세션 하나에서 `run_volatility_command`에 `frameworkinfo.FrameworkInfo`를 주어 불렀다.
+한 번 부르면 응답이 0.96초 뒤에 왔다.
+같은 호출 3개를 동시에 보내면 응답이 1.98초, 2.82초, 2.82초 뒤에 왔다.
+이 호출을 보내고 0.2초 뒤에 `get_command_history`를 보내면 두 응답이 모두 1.01초 뒤에 왔다.
+`get_command_history`를 먼저 보내면 그 응답은 0.01초 뒤에 왔다.

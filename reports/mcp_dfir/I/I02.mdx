@@ -1,0 +1,174 @@
+---
+cell: I02
+details:
+- id: I02.03
+---
+
+# I02 분석 도구 통신 차단
+
+### I02.03 네트워크 차단
+
+**구현.** 이 방식은 서버가 컨테이너에서 실행하는 분석 도구 전부에 적용된다 [1].
+서버는 컨테이너를 만들 때 `networks=["none"]`을 넘긴다 [1].
+Volatility 3, The Sleuth Kit 도구, `strings`·`grep`·`find`·`tar`·해시 명령은 모두 `exec_stream`이 이 컨테이너 안에서 실행한다 [2].
+서버가 만든 컨테이너의 `NetworkMode`는 `none`이었고 컨테이너 안의 네트워크 장치는 `lo`뿐이었다 [3].
+컨테이너 안에서 `raw.githubusercontent.com`에 보낸 HTTPS 요청은 이름 풀이에서 실패했고 IP 주소로 직접 연 연결은 `Network is unreachable`로 실패했다 [3].
+서버는 Volatility 3 명령에 `--offline`을 붙이지 않는다 [4].
+이미지 안의 Volatility 3는 `OFFLINE` 기본값이 거짓이어서 Windows 커널 심볼이 없으면 Microsoft 심볼 서버에서 PDB를 받으려 한다 [5].
+저장소의 예시 사건 폴더에는 `windows.info`가 `http://msdl.microsoft.com/download/symbols/…`를 받으려다 `Symbol file could not be downloaded from remote server` 경고를 남기고 종료 코드 1로 끝난 명령 기록이 있다 [6].
+심볼은 컨테이너 밖의 서버 프로세스가 심볼 도구로 받아 `/symbols`에 연결되는 폴더에 둔다 [7].
+`Dockerfile`에는 네트워크 설정이 없고 네트워크를 끊는 것은 서버 코드가 컨테이너를 만들 때 넘기는 인자다 [1][8].
+
+서버 프로세스가 불러 쓰는 라이브러리는 `attrs`, `loguru`, `mcp`, `python_on_whales`, `requests`다 [9].
+서버 프로세스에는 이 라이브러리들의 통신을 끊거나 끄는 설정이 없다.
+`requests`는 심볼 도구가 요청을 보낼 때만 불린다 [7].
+python-on-whales 0.81.0은 `PATH`에서 `docker` 실행 파일을 찾아 실행하고 찾지 못하면 예외를 낸다 [10].
+이 라이브러리들이 그 밖에 스스로 통신하는지는 소스 전체로 확인하지 않았다.
+
+**한계.** 서버는 같은 이름의 컨테이너가 이미 있으면 네트워크 설정을 확인하지 않고 그 컨테이너를 쓴다 [11].
+컨테이너 이름은 사건 폴더 이름에 `-forensics`를 붙인 값이다 [12].
+그 이름의 컨테이너를 기본 네트워크로 미리 실행해 두자 서버가 그 컨테이너에서 명령을 실행했다 [13].
+그 컨테이너 안에서 `raw.githubusercontent.com`에 보낸 HTTPS 요청은 200으로 돌아왔다 [13].
+
+### 근거
+
+[1] 서버는 컨테이너를 `networks=["none"]`으로 만든다.
+
+```python
+        volumes = [
+            (volume_mount.external_path, volume_mount.internal_path, volume_mount.permissions)
+            for volume_mount in list(config.docker_volumes)
+        ]
+        self.container = self.docker.run(
+            config.docker_config.image_name,
+            name=config.docker_config.container_name,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            networks=["none"],
+        )
+```
+
+[`mcp_dfir/docker_manager.py:42-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L42-L53)
+
+[2] 도구가 넘긴 명령은 `exec_stream`이 서버가 시작한 컨테이너에서 실행한다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+```
+
+[`mcp_dfir/docker_manager.py:67-77`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L77)
+
+[3] (실행 확인) 서버가 만든 컨테이너를 `docker inspect`로 보자 `HostConfig.NetworkMode`가 `none`이었다.
+서버가 실행 중일 때 `docker exec`로 그 컨테이너에서 `ls /sys/class/net`을 실행하자 `lo`만 나왔다.
+같은 컨테이너에서 `python3`의 `urllib.request.urlopen`으로 `https://raw.githubusercontent.com/…/README.md`를 열자 `Temporary failure in name resolution`으로 끝났다.
+`socket.create_connection`으로 IP 주소의 443번 포트에 연결하자 `[Errno 101] Network is unreachable`로 끝났다.
+
+[4] `run_volatility_command`가 붙이는 고정 인자는 `-s /symbols -r jsonl`이다.
+
+```python
+def run_volatility_command(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs volatility3: vol -s /symbols -r jsonl <arguments>
+
+    - To analyze a file you must specify the path using `-f /evidence/example.mem`
+    - Volatility3 does not come with many built-in symbols so they may need to be manually downloaded
+    """
+    return docker_manager.exec_stream(command_list=["vol", "-s", "/symbols", "-r", "jsonl", *arguments], ctx=ctx)
+```
+
+[`mcp_dfir/tools/volatility.py:22-28`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L22-L28)
+
+[5] 이미지 안의 Volatility 3(커밋 `9424c3a`)는 `OFFLINE` 기본값이 거짓이고 PDB를 `SYMBOL_SERVER_URL`에서 받으며 받지 못하면 경고를 남긴다: [`volatility3/framework/constants/__init__.py:58`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/constants/__init__.py#L58), [`volatility3/framework/constants/__init__.py:122-125`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/constants/__init__.py#L122-L125), [`volatility3/framework/symbols/windows/pdbconv.py:945-967`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/symbols/windows/pdbconv.py#L945-L967), [`volatility3/framework/symbols/windows/pdbutil.py:258-289`](https://github.com/volatilityfoundation/volatility3/blob/9424c3a601edac0cb2c21d064a7e737c8741aa94/volatility3/framework/symbols/windows/pdbutil.py#L258-L289).
+
+[6] 예시 사건 폴더의 2번 항목이고 그 결과 본문은 [`examples/tryhackme_volatility/analysis/command_history/2.txt:9-16`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history/2.txt#L9-L16)에 있다.
+
+```json
+    {
+        "number": 2,
+        "command": "vol -s /symbols -r jsonl -f /evidence/Investigation-2.raw windows.info",
+        "date_run": "11/04/2026 14:52:05",
+        "exit_code": 1
+    },
+```
+
+[`examples/tryhackme_volatility/analysis/command_history.json:8-13`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history.json#L8-L13)
+
+[7] 심볼 도구는 서버 프로세스에서 `requests.get`으로 받아 사건 폴더의 `symbols` 아래에 쓴다: [`mcp_dfir/tools/volatility.py:38-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L38-L53), [`mcp_dfir/tools/volatility.py:114-120`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L114-L120), [`mcp_dfir/tools/volatility.py:144-154`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L144-L154).
+
+[8] `Dockerfile`의 끝부분은 사용자와 진입점만 정한다.
+
+```dockerfile
+# Create analyst user
+RUN useradd -m -d /tools analyst \
+&& chown -R analyst:analyst /tools
+USER analyst
+
+ENTRYPOINT ["sleep", "infinity"]
+```
+
+[`Dockerfile:29-34`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L29-L34)
+
+[9] 저장소가 정한 의존성이다.
+
+```toml
+dependencies = [
+    "attrs",
+    "loguru",
+    "mcp",
+    "python_on_whales",
+    "requests",
+]
+```
+
+[`pyproject.toml:10-16`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/pyproject.toml#L10-L16)
+
+[10] python-on-whales 0.81.0은 `shutil.which`로 실행 파일을 찾고 없으면 `ClientNotFoundError`를 낸다: [`python_on_whales/client_config.py:88-96`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/client_config.py#L88-L96).
+
+[11] 서버는 같은 이름의 컨테이너를 찾으면 실행 중인지만 보고 그대로 쓴다.
+
+```python
+    def start_forensic_container(self):
+        logger.info("Starting forensics docker container")
+
+        try:
+            self.container = self.docker.container.inspect(config.docker_config.container_name)
+
+            if self.container.state.running:
+                logger.info("Forensics container already running")
+                return
+
+            logger.info("Forensics container exists but is stopped, starting it")
+            self.docker.container.start(config.docker_config.container_name)
+            return
+
+        except NoSuchContainer:
+            logger.info("Forensics container does not exist, creating one")
+```
+
+[`mcp_dfir/docker_manager.py:25-40`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L25-L40)
+
+[12] 컨테이너 이름은 사건 폴더 이름으로 만든다.
+
+```python
+        self.docker_config = DockerConfig(
+            container_name=f"{self.working_directory.name.replace(' ', '_')}-forensics",
+            image_name=f"androsh7/forensics-docker:{VERSION}",
+        )
+```
+
+[`mcp_dfir/config.py:104-107`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L104-L107)
+
+[13] (실행 확인) 사건 폴더 이름에 `-forensics`를 붙인 이름으로 `docker run -d --name <이름> androsh7/forensics-docker:0.1.2`를 먼저 실행했다.
+이 컨테이너의 `NetworkMode`는 `bridge`였다.
+서버를 실행하자 표준 오류에 `Forensics container already running`이 남았고 `run_find`가 그 컨테이너에서 실행됐다.
+서버가 실행 중일 때 `docker exec`로 그 컨테이너에서 `urllib.request.urlopen`으로 `https://raw.githubusercontent.com/…/README.md`를 열자 상태 코드 200이 돌아왔다.

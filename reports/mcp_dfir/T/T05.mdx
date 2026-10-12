@@ -1,0 +1,314 @@
+---
+cell: T05
+details:
+- id: T05.01
+- id: T05.02
+---
+
+# T05 분석 도구 검증
+
+### T05.01 저장소·의존성 고정
+
+**구현.** 이 방식은 분석 도구를 담은 컨테이너 이미지에 적용된다 [1].
+서버 코드는 이미지 이름을 `androsh7/forensics-docker:<VERSION>`으로 만들고 `VERSION`은 상수 `0.1.2`다 [1].
+서버는 그 사건의 컨테이너가 없으면 이 이름으로 `docker.run`을 불러 컨테이너를 만든다 [2].
+서버에는 이미지를 따로 내려받거나 만드는 코드가 없다 [2].
+python-on-whales 0.81.0의 `run`은 `pull`의 기본값이 `missing`이고 서버는 이 값을 바꾸지 않아 `docker run`에 `--pull` 인자가 붙지 않는다 [3][2].
+이미지 이름에는 태그만 있고 다이제스트는 없다 [1].
+서버는 이미지의 다이제스트를 읽거나 대조하지 않는다 [2].
+
+태그가 가리키는 이미지 안의 도구 버전은 저장소가 정하지 않는다 [4].
+`Dockerfile`은 `python:3.12-slim`에서 시작해 `sleuthkit`과 `binutils`를 버전 없이 `apt-get install`로 설치한다 [4].
+Volatility 3는 태그나 커밋을 적지 않고 `git clone`으로 받은 기본 브랜치를 `pip install -e ".[full]"`로 설치한다 [4].
+저장소의 workflow는 PyPI 배포와 테스트 둘이고 이미지를 만들거나 올리는 workflow는 없다 [5].
+Docker Hub에서 받은 `0.1.2` 이미지에는 Volatility 3의 `develop` 브랜치 커밋 `9424c3a`(패키지 버전 2.28.1)와 The Sleuth Kit 4.12.1이 있었다 [6].
+저장소의 예시 사건 폴더에 남은 실패 기록의 버전 줄은 `Volatility 3 Framework 2.28.0`이고 그 기록에는 명령을 실행한 이미지의 태그가 없다 [7].
+`pyproject.toml`은 `attrs`·`loguru`·`mcp`·`python_on_whales`·`requests`를 버전 없이 이름만 적고 저장소에 잠금 파일은 없다 [8].
+
+심볼은 고정하지 않는다 [9].
+Linux 심볼과 심볼 맵은 `Abyss-W4tcher/volatility3-symbols` 저장소의 `refs/heads/master` 주소에서 받는다 [9].
+Windows 심볼은 Microsoft 심볼 서버에서 받는다 [9].
+서버는 실행 중에 이미지, Volatility, The Sleuth Kit의 버전을 묻거나 읽지 않는다.
+
+**한계.** 서버는 같은 이름의 컨테이너가 이미 있으면 그 컨테이너를 만든 이미지를 확인하지 않고 다시 쓴다 [2].
+다른 이미지 이름으로 만든 컨테이너를 같은 이름으로 미리 두고 서버를 시작하자 서버는 그 컨테이너에서 도구를 실행했다 [10].
+그래서 `VERSION`이 다른 서버를 같은 사건 폴더 이름으로 실행해도 앞서 만든 컨테이너가 남아 있으면 그 컨테이너의 도구가 실행된다 [1][2].
+컨테이너 안의 Volatility 소스 폴더는 실행 계정 `analyst`의 소유라서 도구 호출이 그 안의 파일을 만들고 지울 수 있다 [4][11].
+`run_find`로 Volatility 플러그인 폴더에 만든 파일은 서버를 다시 시작한 뒤에도 남아 플러그인으로 실행되었다 [11].
+
+### T05.02 설정·호출 인자로 지정
+
+**구현.** 이 방식은 Volatility가 쓰는 심볼에 적용된다 [12][13][14].
+`run_volatility_command`는 심볼 폴더를 `-s /symbols`로 정해 넘긴다 [12].
+이 폴더는 사용자가 실행 인자 `--case-dir`로 정한 사건 폴더의 `symbols`이고 README는 이 폴더를 심볼을 내려받으면 채워지는 곳으로 설명한다 [15][16].
+`Dockerfile`은 환경변수 `VOLATILITY_SYMBOLS`에 심볼 폴더 경로를 적는다 [17].
+서버 코드와 이미지 안 Volatility 3 소스에는 이 이름을 읽는 곳이 없었고 그 값이 가리키는 폴더도 이미지에 없었다 [6].
+`download_windows_symbol`은 호출 인자 `pdb_name`·`guid`·`age`로 받을 PDB를 정한다 [13].
+서버는 `<심볼 서버>/<pdb_name>/<guid><age>/<pdb_name>` 주소에서 PDB를 받아 `pdbconv`로 바꾸고 결과를 `symbols/windows/<pdb_name>/<guid>-<age>.json.xz`에 둔다 [13].
+서버는 `guid`와 `age`를 증거에서 읽지 않고 모델이 준 값을 그대로 쓴다 [13].
+`download_linux_symbol`은 호출 인자 `symbol_path`를 심볼 저장소 주소 뒤에 붙여 받고 경로의 마지막 조각을 이름으로 `symbols/linux`에 둔다 [14].
+`download_linux_symbol`에는 `overwrite` 인자가 없고 `symbols/linux`에 같은 이름의 파일이 이미 있는지 확인하지 않고 받은 내용을 쓴다 [14].
+파일 이름은 `symbol_path`의 마지막 조각이라 폴더가 다르고 이름이 같은 두 경로는 같은 파일에 쓰인다 [14].
+마지막 조각이 `README.md`인 두 경로를 차례로 주자 `symbols/linux/README.md`가 7,465바이트에서 5,752바이트로 바뀌었고 두 호출 모두 종료 코드 0인 명령 기록을 남겼다 [18].
+`search_linux_symbols`는 심볼 맵에서 정규식에 맞는 배너와 그 심볼 파일 경로를 찾는다 [19].
+심볼 맵 `symbol_map.json`은 사건 폴더에 없을 때만 받고 그 뒤에는 다시 받지 않는다 [19].
+서버는 받은 PDB와 심볼 파일을 쓰기 전에 HTTP 상태 코드만 확인하고 해시, 크기, 형식은 확인하지 않는다 [13][14].
+`run_volatility_command`의 `arguments`에 `--plugin-dirs /artifacts`를 주자 이미지에 없는 플러그인 파일이 실행되었다 [20].
+이미지 이름이나 분석 도구의 버전을 정하는 실행 인자, 환경변수, 설정 파일은 없다 [21].
+
+**한계.** `download_linux_symbol`은 `symbol_path`를 검사하지 않아 `..`이 들어 있는 값은 심볼 저장소 밖의 주소가 된다 [14].
+`symbol_path`에 `../../../../../volatilityfoundation/volatility3/<커밋>/README.md`를 주자 다른 저장소의 README가 `symbols/linux/README.md`로 저장되었다 [22].
+이 호출의 결과 본문은 `Successfully downloaded symbol file README.md`로 시작했다 [22].
+
+`search_linux_symbols`는 맞는 배너가 있으면 찾은 항목의 list를 `json.dumps`로 바꾸는 줄에서 `TypeError`로 끝나 심볼 파일 경로를 돌려주지 못한다 [19][23].
+심볼 맵에 있는 커널 버전에 맞는 정규식을 주자 `Object of type SymbolSearchResult is not JSON serializable` 오류가 왔고 심볼 맵에 없는 문자열을 주었을 때만 명령 기록이 생겼다 [23].
+
+### 근거
+
+[1] 이미지 이름과 버전 상수다.
+
+```python
+        self.docker_config = DockerConfig(
+            container_name=f"{self.working_directory.name.replace(' ', '_')}-forensics",
+            image_name=f"androsh7/forensics-docker:{VERSION}",
+        )
+```
+
+[`mcp_dfir/config.py:104-107`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L104-L107)
+
+```python
+VERSION = "0.1.2"
+```
+
+[`mcp_dfir/constants.py:3-3`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/constants.py#L3-L3)
+
+[2] 컨테이너가 있으면 다시 쓰고 없으면 이미지 이름으로 만든다.
+
+```python
+    def start_forensic_container(self):
+        logger.info("Starting forensics docker container")
+
+        try:
+            self.container = self.docker.container.inspect(config.docker_config.container_name)
+
+            if self.container.state.running:
+                logger.info("Forensics container already running")
+                return
+
+            logger.info("Forensics container exists but is stopped, starting it")
+            self.docker.container.start(config.docker_config.container_name)
+            return
+
+        except NoSuchContainer:
+            logger.info("Forensics container does not exist, creating one")
+
+        volumes = [
+            (volume_mount.external_path, volume_mount.internal_path, volume_mount.permissions)
+            for volume_mount in list(config.docker_volumes)
+        ]
+        self.container = self.docker.run(
+            config.docker_config.image_name,
+            name=config.docker_config.container_name,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            networks=["none"],
+        )
+```
+
+[`mcp_dfir/docker_manager.py:25-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L25-L53)
+
+[3] python-on-whales 0.81.0의 `run`은 `pull`의 기본값이 `missing`이고 `never`일 때만 `--pull` 인자를 붙인다: [`python_on_whales/components/container/cli_wrapper.py:742`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L742), [`python_on_whales/components/container/cli_wrapper.py:914-915`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L914-L915).
+
+[4] 이미지를 만드는 정의다: [`Dockerfile:1-1`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L1-L1), [`Dockerfile:11-15`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L11-L15), [`Dockerfile:18-27`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L18-L27), [`Dockerfile:30-32`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L30-L32).
+
+[5] 저장소의 workflow다: [`.github/workflows/publish.yaml:12-31`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/.github/workflows/publish.yaml#L12-L31), [`.github/workflows/publish.yaml:33-44`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/.github/workflows/publish.yaml#L33-L44), [`.github/workflows/pytest.yaml:1-24`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/.github/workflows/pytest.yaml#L1-L24).
+
+[6] (실행 확인) `docker run --rm --network none --entrypoint bash androsh7/forensics-docker:0.1.2`로 이미지 안을 보았다.
+`/tools/volatility3/.git/HEAD`는 `refs/heads/develop`을 가리켰고 그 커밋은 `9424c3a601edac0cb2c21d064a7e737c8741aa94`였다.
+`volatility3.framework.constants.PACKAGE_VERSION`은 `2.28.1`이었고 `fls -V`는 `The Sleuth Kit ver 4.12.1`을 출력했다.
+이 이미지의 다이제스트는 `sha256:85239eb962eb444609d7e85d75d030f23dd249c87caabbb2fab3bd9b711bf2f3`이었다.
+같은 방법으로 본 이미지의 `env`에는 `VOLATILITY_SYMBOLS=/usr/local/lib/python3.12/site-packages/volatility3/symbols`가 있었고 `grep -rn VOLATILITY_SYMBOLS --include=*.py /tools/volatility3`은 한 줄도 내지 않았다.
+`ls -d /usr/local/lib/python3.12/site-packages/volatility3`은 `No such file or directory`로 끝났다.
+기준 커밋의 `mcp_dfir/` 아래 파이썬 파일에도 `VOLATILITY_SYMBOLS`는 없었다.
+
+[7] 예시 사건 폴더의 실패 기록이다: [`examples/tryhackme_volatility/analysis/command_history/2.txt:10-14`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history/2.txt#L10-L14).
+
+[8] 서버의 파이썬 의존성이다.
+
+```toml
+dependencies = [
+    "attrs",
+    "loguru",
+    "mcp",
+    "python_on_whales",
+    "requests",
+]
+```
+
+[`pyproject.toml:10-16`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/pyproject.toml#L10-L16)
+
+[9] 심볼을 받는 주소다.
+
+```python
+# Volatility symbols
+WINDOWS_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
+LINUX_SYMBOL_REPO_BASE_URL = "https://raw.githubusercontent.com/Abyss-W4tcher/volatility3-symbols/refs/heads/master"
+LINUX_SYMBOL_MAP_SOURCE = f"{LINUX_SYMBOL_REPO_BASE_URL}/banners/banners_plain.json"
+```
+
+[`mcp_dfir/constants.py:5-8`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/constants.py#L5-L8)
+
+[10] (실행 확인) 같은 이미지에 다른 이름표 `t1-local/other:9.9`를 붙여 `t1-b-forensics`라는 컨테이너를 먼저 만들고 사건 폴더 `t1-b`로 서버를 실행했다.
+`get_hash`에 `/etc/hostname`을 주면 그 컨테이너에서 `md5sum`이 종료 코드 0으로 끝났다.
+세션 뒤 `docker inspect`가 보인 그 컨테이너의 이미지 이름은 `t1-local/other:9.9`였다.
+
+[11] (실행 확인) `run_find`에 `/evidence/notes.txt -fprintf /tools/volatility3/volatility3/framework/plugins/t1q.py <플러그인 코드>`를 주면 종료 코드 0으로 끝났다.
+MCP 세션을 끝내 컨테이너가 멈춘 뒤 서버를 다시 실행해 `run_volatility_command`에 `t1q.T1Q`를 주면 그 파일의 클래스가 돌려준 행이 결과로 저장되었다.
+이미지 안에서 `/tools`와 `/tools/volatility3`의 소유자는 `analyst`였다.
+
+[12] 심볼 폴더를 정해 넘기는 명령 배열이다.
+
+```python
+def run_volatility_command(ctx: Context, arguments: list[str]) -> CommandRecordSummary:
+    """Runs volatility3: vol -s /symbols -r jsonl <arguments>
+
+    - To analyze a file you must specify the path using `-f /evidence/example.mem`
+    - Volatility3 does not come with many built-in symbols so they may need to be manually downloaded
+    """
+    return docker_manager.exec_stream(command_list=["vol", "-s", "/symbols", "-r", "jsonl", *arguments], ctx=ctx)
+```
+
+[`mcp_dfir/tools/volatility.py:22-28`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L22-L28)
+
+[13] Windows 심볼을 받아 바꾸는 흐름이다: [`mcp_dfir/tools/volatility.py:35-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L35-L53), [`mcp_dfir/tools/volatility.py:66-79`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L66-L79), [`mcp_dfir/tools/volatility.py:83-97`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L83-L97).
+
+[14] Linux 심볼을 받아 저장한다.
+
+```python
+def download_linux_symbol(ctx: Context, symbol_path: str) -> CommandRecordSummary:
+    """Download a symbol map from the Abyss-W4tcher/volatility3-symbols repository"""
+
+    # Download json file from repo
+    url = f"{LINUX_SYMBOL_REPO_BASE_URL}/{symbol_path}"
+    ctx.report_progress(f"Downloading symbol from {url}")
+    response = requests.get(url=url)
+    response.raise_for_status()
+
+    # Save json file
+    config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+    file_name = symbol_path.rsplit("/", maxsplit=1)[-1]
+    file_path = config.linux_symbols_directory / file_name
+    file_path.write_bytes(response.content)
+
+    return command_history_manager.add_command(
+        CommandRecord(
+            command=f'mcp_dfir:tools:volatility:download_linux_symbol(symbol_path="{symbol_path}")',
+            result=f"Successfully downloaded symbol file {file_name} ({file_path.stat().st_size} bytes) from {url}",
+            exit_code=0,
+        )
+    )
+```
+
+[`mcp_dfir/tools/volatility.py:141-162`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L141-L162)
+
+[15] 사건 폴더는 실행 인자로 받고 그 아래 `symbols`를 컨테이너의 `/symbols`에 연결한다.
+
+```python
+    parser.add_argument(
+        "-d", "--case-dir", type=Path, default=Path.cwd(), help=f"Working directory for the case, default: {Path.cwd()}"
+    )
+```
+
+[`mcp_dfir/runner.py:17-19`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L17-L19)
+
+```python
+            DockerVolume(
+                name="symbols", internal_path="/symbols", external_path=self.symbols_directory, permissions="rw"
+            ),
+```
+
+[`mcp_dfir/config.py:97-99`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L97-L99)
+
+[16] README의 사건 폴더 구성이다: [`README.md:44-56`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/README.md#L44-L56).
+
+[17] `Dockerfile`이 정하는 환경변수다.
+
+```dockerfile
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV VOLATILITY_SYMBOLS=/usr/local/lib/python3.12/site-packages/volatility3/symbols
+```
+
+[`Dockerfile:3-6`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/Dockerfile#L3-L6)
+
+[18] (실행 확인) `download_linux_symbol`에 `symbol_path` `README.md`를 주면 `list_files`가 `/symbols/linux/README.md`를 7465바이트로 보였다.
+이어 `symbol_path` `../../../../../volatilityfoundation/volatility3/9424c3a601edac0cb2c21d064a7e737c8741aa94/README.md`를 주면 `list_files`가 같은 파일을 5752바이트로 보였다.
+두 호출 모두 `isError` 없이 종료 코드 0인 명령 기록을 남겼다.
+
+[19] 심볼 맵을 받아 검색한다.
+
+```python
+def search_linux_symbols(ctx: Context, regex: str) -> CommandRecordSummary:
+    """Load linux symbol map from Abyss-W4tcher/volatility3-symbols and search for symbols matching the regex"""
+
+    # Download symbol map if it doesn't exist
+    if not config.linux_symbol_map_json.exists():
+        ctx.report_progress("Downloading linux symbol map from github.com/Abyss-W4tcher/volatility3-symbols")
+        response = requests.get(url=LINUX_SYMBOL_MAP_SOURCE)
+        response.raise_for_status()
+        config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+        config.linux_symbol_map_json.write_bytes(response.content)
+
+    # Parse the symbol map
+    with open(config.linux_symbol_map_json, encoding="utf-8") as symbol_map_file:
+        symbol_map: dict = json.load(symbol_map_file)
+
+    # Return the a list of matches
+    out_list = []
+    for symbol_name, file_path_list in symbol_map.items():
+        if re.search(regex, symbol_name):
+            out_list.append(SymbolSearchResult(symbol_name=symbol_name, file_path_list=file_path_list))
+
+    return command_history_manager.add_command(
+        CommandRecord(
+            command=f'mcp_dfir:tools:volatility:search_linux_symbols(regex="{regex}")',
+            result=json.dumps(out_list, indent=4),
+            exit_code=0,
+        )
+    )
+```
+
+[`mcp_dfir/tools/volatility.py:111-138`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L111-L138)
+
+[20] (실행 확인) `run_find`의 `-fprintf`로 `/artifacts/t1p.py`에 플러그인 클래스 하나를 담은 파일을 만들었다.
+`run_volatility_command`에 `--plugin-dirs /artifacts t1p.T1`을 주면 종료 코드 0으로 끝났고 결과 본문에 그 클래스가 돌려준 행이 있었다.
+
+[21] 서버의 실행 인자다.
+
+```python
+    parser = argparse.ArgumentParser(prog="mcp-dfir", description="MCP Server for Performing Memory and Disk Forensics")
+    parser.add_argument("--version", action="version", version=f"mcp-dfir v{VERSION}")
+    parser.add_argument(
+        "-d", "--case-dir", type=Path, default=Path.cwd(), help=f"Working directory for the case, default: {Path.cwd()}"
+    )
+    parser.add_argument("--init", action="store_true", help="Create case directories then exit")
+    parser.add_argument(
+        "--clear-case-dir", action="store_true", help="Clear the case directory before starting the server"
+    )
+    parser.add_argument(
+        "--clear-docker", action="store_true", help="Clear the forensics docker container before starting the server"
+    )
+    args = parser.parse_args()
+```
+
+[`mcp_dfir/runner.py:15-27`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L15-L27)
+
+[22] (실행 확인) `download_linux_symbol`에 `symbol_path` `../../../../../volatilityfoundation/volatility3/9424c3a601edac0cb2c21d064a7e737c8741aa94/README.md`를 주었다.
+`isError` 없이 종료 코드 0인 명령 기록이 생겼고 `list_files`가 `/symbols/linux/README.md`(5752바이트)를 보였다.
+저장된 파일은 `# Volatility 3: The volatile memory extraction framework`로 시작했다.
+
+[23] (실행 확인) 심볼 맵 `symbol_map.json`이 있는 사건 폴더에서 `search_linux_symbols`를 불렀다.
+정규식 `5[.]15[.]0-1065-oracle`을 주면 `Error executing tool search_linux_symbols: Object of type SymbolSearchResult is not JSON serializable`이 왔다.
+심볼 맵에 없는 문자열을 주면 종료 코드 0인 명령 기록이 생겼다.

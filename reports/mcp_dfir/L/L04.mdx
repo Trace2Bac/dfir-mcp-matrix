@@ -1,0 +1,282 @@
+---
+cell: L04
+details:
+- id: L04.02
+- id: L04.04
+---
+
+# L04 기록 위변조 방지
+
+### L04.02 일련번호
+
+**구현.** 이 방식은 `command_history.json`의 모든 항목에 적용된다 [1].
+`add_command`는 메모리 목록의 길이에 1을 더한 값을 항목의 `number`로 매긴다 [1].
+서버 프로세스 하나가 빈 명령 기록에서 쓰기 시작하면 번호는 1부터 빠짐없이 이어진다 [1].
+`command_history.json`에서 2번 항목을 지우고 서버를 다시 시작하자 `get_command_history`가 1번 다음에 3번이 오는 목록을 돌려줬다 [2].
+번호가 이어지는지 확인하는 코드는 서버에 없다 [3].
+`load`는 항목마다 필드의 자료형만 확인하고 번호의 차례나 중복은 확인하지 않는다 [3][4].
+항목에는 앞 항목의 해시나 서명이 없고 항목 수를 명령 기록 밖에 남기는 곳도 없다 [4].
+서버는 명령 기록 목록에 항목을 덧붙이지 않고 `"w"` 모드로 파일 전체를 다시 쓴다 [1].
+명령 기록을 다시 읽어 대조하는 도구나 사용자 CLI 인자도 없다 [5].
+손으로 고친 `command`와 `exit_code`, 바꿔 쓴 결과 본문 파일은 서버를 다시 시작한 뒤 고친 그대로 읽혔다 [2].
+`date_run`을 지운 항목은 서버가 파일을 읽은 시각으로 채워졌고 다음 쓰기에서 그 값이 파일에 남았다 [2][4].
+
+**한계.** 번호를 마지막 번호가 아니라 목록 길이로 정하므로 중간 항목이 지워진 명령 기록 목록에 서버가 이어 쓰면 번호가 겹친다 [1].
+2번 항목을 지운 명령 기록 목록에 명령 하나를 더 실행하자 9번 항목이 둘이 되고 `9.txt`가 새 출력으로 바뀌었다 [2].
+같은 사건 폴더로 서버 프로세스 둘을 실행하자 두 프로세스가 같은 번호를 썼다 [6].
+끝 항목을 지운 명령 기록 목록과 번호를 다시 매긴 명령 기록 목록은 번호만으로는 원래 것과 가를 수 없다.
+
+### L04.04 실행 환경의 기록 쓰기 차단
+
+**구현.** 이 방식은 모델이 도구로 컨테이너에서 실행하는 명령에 적용된다 [7].
+서버는 컨테이너를 만들 때 사건 폴더의 `analysis`를 컨테이너의 `/analysis`에 `ro`로 연결한다 [7][8].
+명령 기록 목록과 결과 본문 파일은 모두 이 폴더 아래에 있다 [9].
+실행기 `exec_stream`을 거치는 도구 8개의 명령은 모두 이 컨테이너 안에서 실행된다 [10].
+`run_find`로 `/analysis`의 `command_history.json`에 `-delete`를 실행하자 `Read-only file system` 오류로 끝났고 파일은 그대로였다 [11].
+`tsk_recover`의 출력 폴더를 `/analysis/command_history/x`로 주자 복구된 파일이 0개였다 [11].
+컨테이너 안에서 명령 기록 목록을 읽는 명령은 실행된다 [11].
+서버 프로세스는 호스트 쪽 `analysis` 폴더에 직접 쓰고 명령 기록 목록과 결과 본문 파일의 권한이나 추가 전용 속성을 정하지 않는다 [1].
+`analysis` 폴더는 `mkdir(mode=500)`으로 만들고 이 값은 8진수가 아닌 10진수 500이다 [12].
+그래서 호스트에서 서버와 같은 계정으로 실행되는 프로그램은 명령 기록 목록과 결과 본문 파일을 그대로 고칠 수 있다.
+
+**한계.** 서버는 같은 이름의 컨테이너가 이미 있으면 연결 설정을 확인하지 않고 그 컨테이너를 쓴다 [13].
+폴더를 연결하지 않고 미리 만들어 둔 같은 이름의 컨테이너가 있을 때 서버는 그 컨테이너에서 명령을 실행했다 [14].
+
+컨테이너 밖 서버 프로세스에서 파일을 쓰는 도구에는 이 읽기 전용 연결이 적용되지 않는다.
+`download_linux_symbol`은 `symbol_path`의 마지막 `/` 뒤 조각을 파일 이름으로 삼아 서버 프로세스에서 `symbols/linux` 아래에 쓴다 [15].
+Windows 호스트에서 `symbol_path`를 `README.md?x=/..\..\analysis\command_history\1.txt`로 주자 내려받은 내용이 1번 항목의 결과 본문 파일을 덮어썼다 [16].
+같은 방법으로 `command_history.json`을 가리키자 그 호출이 끝난 뒤 파일에는 `add_command`가 메모리 목록으로 다시 쓴 항목들이 남아 있었다 [15][16].
+
+### 근거
+
+[1] `add_command`는 목록 길이에 1을 더해 번호를 매기고 `dump`는 파일 전체를 `"w"` 모드로 다시 쓴다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:23-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L49)
+
+[2] (실행 확인) 항목이 1번부터 9번까지인 `command_history.json`을 서버가 꺼진 동안 고쳤다.
+1번 항목의 `command`를 `md5sum /evidence/EDITED.txt`로, `exit_code`를 7로 바꾸고 2번 항목을 지우고 9번 항목의 `date_run`을 지웠으며 `1.txt`의 내용을 바꿨다.
+서버를 다시 시작하자 표준 오류에 경고가 없었고 `get_command_history`는 고친 1번 항목과 1, 3, 4, 5, 6, 7, 8, 9번 차례의 목록을 돌려줬다.
+9번 항목의 `date_run`은 서버를 시작한 시각이었다.
+`get_command_result`를 `command_number=1`로 부르자 바꿔 쓴 내용이 돌아왔다.
+이어서 `get_hash`를 부르자 새 항목의 `number`가 9였고 `command_history.json`에 9번 항목이 둘 남았으며 `9.txt`는 새 출력으로 바뀌었다.
+
+[3] `load`는 파일의 항목을 차례로 `CommandRecordSummary`로 읽어 목록에 더한다.
+
+```python
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+```
+
+[`mcp_dfir/data_manager.py:39-42`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L39-L42)
+
+[4] 항목 모델에는 번호, 명령, 시각, 종료 코드만 있고 `date_run`은 값이 없으면 지금 시각으로 채워진다.
+
+```python
+def date_as_str() -> str:
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+class CommandRecordSummary(BaseModel):
+    number: int = Field(examples=[1])
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    exit_code: int = Field(examples=[0])
+```
+
+[`mcp_dfir/tools/models.py:17-25`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L17-L25)
+
+[5] 사용자 CLI의 인자는 `--version`, `--case-dir`, `--init`, `--clear-case-dir`, `--clear-docker`다.
+
+```python
+    parser = argparse.ArgumentParser(prog="mcp-dfir", description="MCP Server for Performing Memory and Disk Forensics")
+    parser.add_argument("--version", action="version", version=f"mcp-dfir v{VERSION}")
+    parser.add_argument(
+        "-d", "--case-dir", type=Path, default=Path.cwd(), help=f"Working directory for the case, default: {Path.cwd()}"
+    )
+    parser.add_argument("--init", action="store_true", help="Create case directories then exit")
+    parser.add_argument(
+        "--clear-case-dir", action="store_true", help="Clear the case directory before starting the server"
+    )
+    parser.add_argument(
+        "--clear-docker", action="store_true", help="Clear the forensics docker container before starting the server"
+    )
+    args = parser.parse_args()
+```
+
+[`mcp_dfir/runner.py:15-27`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L15-L27)
+
+[6] (실행 확인) 빈 사건 폴더 하나로 서버 프로세스 둘을 함께 실행해 각각 `get_hash`를 한 번씩 불렀다.
+두 응답의 `number`는 모두 1이었고 `command_history.json`에는 나중에 쓴 프로세스의 항목 하나만 남았다.
+
+[7] 서버는 `analysis`와 `evidence`를 `ro`로, `symbols`와 `artifacts`를 `rw`로 정하고 이 목록으로 컨테이너를 만든다.
+
+```python
+        self.docker_volumes = [
+            DockerVolume(
+                name="evidence", internal_path="/evidence", external_path=self.evidence_directory, permissions="ro"
+            ),
+            DockerVolume(
+                name="analysis", internal_path="/analysis", external_path=self.analysis_directory, permissions="ro"
+            ),
+            DockerVolume(
+                name="symbols", internal_path="/symbols", external_path=self.symbols_directory, permissions="rw"
+            ),
+            DockerVolume(
+                name="artifacts", internal_path="/artifacts", external_path=self.artifact_directory, permissions="rw"
+            ),
+        ]
+```
+
+[`mcp_dfir/config.py:90-103`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L90-L103)
+
+```python
+        volumes = [
+            (volume_mount.external_path, volume_mount.internal_path, volume_mount.permissions)
+            for volume_mount in list(config.docker_volumes)
+        ]
+        self.container = self.docker.run(
+            config.docker_config.image_name,
+            name=config.docker_config.container_name,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            networks=["none"],
+        )
+```
+
+[`mcp_dfir/docker_manager.py:42-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L42-L53)
+
+[8] (실행 확인) 서버가 만든 컨테이너를 `docker inspect`로 보자 `/analysis`와 `/evidence`는 `RW`가 `false`였고 `/symbols`와 `/artifacts`는 `true`였다.
+
+[9] 명령 기록 목록과 결과 본문 파일을 두는 폴더의 경로는 `analysis` 폴더 아래로 정한다.
+
+```python
+        # Command history
+        self.command_history_json = self.analysis_directory / "command_history.json"
+        self.command_record_directory = self.analysis_directory / "command_history"
+```
+
+[`mcp_dfir/config.py:76-78`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L76-L78)
+
+[10] 도구가 넘긴 명령은 `exec_stream`이 서버가 시작한 컨테이너에서 실행한다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+```
+
+[`mcp_dfir/docker_manager.py:67-75`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L75)
+
+[11] (실행 확인) `run_find`를 `["/analysis", "-name", "command_history.json", "-delete"]`로 부르자 `exit_code`가 1인 항목이 남았고 결과 본문에 `find: cannot delete '/analysis/command_history.json': Read-only file system`이 있었다.
+호스트의 `command_history.json`은 그대로 있었다.
+`run_sleuthkit_command`를 `tool="tsk_recover"`, `arguments=["-a", "/evidence/disk.dd", "/analysis/command_history/x"]`로 부르자 결과 본문이 `Files Recovered: 0`이었고 호스트의 `analysis/command_history`에 새 폴더는 생기지 않았다.
+`run_grep`을 `["-c", "number", "/analysis/command_history.json"]`으로 부르자 `exit_code`가 0이고 결과 본문이 `7`인 항목이 남았다.
+
+[12] `analysis` 폴더는 `mode=500`으로 만든다.
+
+```python
+        self.analysis_directory = self.working_directory / "analysis"
+        self.analysis_directory.mkdir(mode=500, parents=False, exist_ok=True)
+```
+
+[`mcp_dfir/config.py:64-65`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L64-L65)
+
+[13] 서버는 같은 이름의 컨테이너를 찾으면 실행 중인지만 보고 그대로 쓴다.
+
+```python
+    def start_forensic_container(self):
+        logger.info("Starting forensics docker container")
+
+        try:
+            self.container = self.docker.container.inspect(config.docker_config.container_name)
+
+            if self.container.state.running:
+                logger.info("Forensics container already running")
+                return
+
+            logger.info("Forensics container exists but is stopped, starting it")
+            self.docker.container.start(config.docker_config.container_name)
+            return
+
+        except NoSuchContainer:
+            logger.info("Forensics container does not exist, creating one")
+```
+
+[`mcp_dfir/docker_manager.py:25-40`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L25-L40)
+
+[14] (실행 확인) 사건 폴더 이름에 `-forensics`를 붙인 이름으로 폴더를 연결하지 않은 컨테이너를 같은 이미지로 미리 실행해 두고 서버를 실행했다.
+서버 표준 오류에 `Forensics container already running`이 남았다.
+`run_find`를 `["/evidence", "/analysis", "-maxdepth", "0"]`으로 부르자 결과 본문의 Docker CLI 명령 줄에 미리 만든 컨테이너의 ID가 있었고 두 경로 모두 `No such file or directory`였다.
+
+[15] `download_linux_symbol`은 받은 내용을 서버 프로세스에서 쓰고 그 뒤 `add_command`를 부른다.
+
+```python
+def download_linux_symbol(ctx: Context, symbol_path: str) -> CommandRecordSummary:
+    """Download a symbol map from the Abyss-W4tcher/volatility3-symbols repository"""
+
+    # Download json file from repo
+    url = f"{LINUX_SYMBOL_REPO_BASE_URL}/{symbol_path}"
+    ctx.report_progress(f"Downloading symbol from {url}")
+    response = requests.get(url=url)
+    response.raise_for_status()
+
+    # Save json file
+    config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+    file_name = symbol_path.rsplit("/", maxsplit=1)[-1]
+    file_path = config.linux_symbols_directory / file_name
+    file_path.write_bytes(response.content)
+
+    return command_history_manager.add_command(
+        CommandRecord(
+            command=f'mcp_dfir:tools:volatility:download_linux_symbol(symbol_path="{symbol_path}")',
+            result=f"Successfully downloaded symbol file {file_name} ({file_path.stat().st_size} bytes) from {url}",
+            exit_code=0,
+        )
+    )
+```
+
+[`mcp_dfir/tools/volatility.py:141-162`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L141-L162)
+
+[16] (실행 확인) Windows 호스트에서 서버를 실행해 `download_linux_symbol`을 `symbol_path`가 `README.md?x=/..\..\analysis\command_history\1.txt`인 인자로 불렀다.
+응답 항목의 결과 본문은 `Successfully downloaded symbol file ..\..\analysis\command_history\1.txt (7465 bytes) from …`였다.
+그 뒤 `get_command_result`를 `command_number=1`로 부르자 심볼 저장소 `README.md`의 첫 줄이 돌아왔고 `symbols/linux` 아래에는 새 파일이 없었다.
+`symbol_path`를 `README.md?x=/..\..\analysis\command_history.json`으로 준 호출 뒤에는 `command_history.json`이 항목 4개를 담은 JSON이었다.

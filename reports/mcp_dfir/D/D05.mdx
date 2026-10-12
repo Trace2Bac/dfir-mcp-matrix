@@ -1,0 +1,169 @@
+---
+cell: D05
+details:
+- id: D05.01
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 서버 코드가 결과 본문 파일과 분석 메모를 쓰는 경로, 그리고 컨테이너 안 도구가 파일을 쓰지 못해 0이 아닌 코드로 끝나는 실행 도구 호출에 적용된다 [1][2].
+`CommandHistoryManager.dump`와 `AnalystNoteManager.dump`는 파일을 열고 쓰는 호출의 예외를 처리하지 않는다 [1].
+MCP Python SDK 1.27.0의 FastMCP는 도구 함수에서 난 예외를 `Error executing tool <도구 이름>: <예외 글>`로 바꿔 올리고 그 글은 `isError`가 참인 결과로 전달된다 [3].
+`command_history/4.txt` 자리에 같은 이름의 폴더를 만들어 둔 뒤 `get_hash`를 부르자 `[Errno 13] Permission denied` 오류 결과가 왔다 [4].
+없는 하위 폴더를 가리키는 제목으로 `add_analyst_note`를 부르자 `[Errno 2] No such file or directory` 오류 결과가 왔다 [4].
+결과 본문을 만들다 실패한 호출도 같은 방식으로 오류로 끝난다 [2][4].
+`exec_stream`은 표준 출력 조각을 `decode()`하다 난 `UnicodeDecodeError`를 처리하지 않는다 [2].
+`search_linux_symbols`는 찾은 항목의 list를 `json.dumps`에 넘기다 난 `TypeError`를 처리하지 않는다 [5][4].
+
+컨테이너 안 도구가 0이 아닌 코드로 끝나면 `exec_stream`은 `DockerException`을 받아 종료 코드와 예외 글을 명령 결과로 저장하고 응답의 `exit_code`에 그 코드를 싣는다 [2].
+이때 도구 결과의 `isError`는 거짓이다 [4].
+읽기 전용인 `/evidence` 아래에 쓰려 한 `find -fprint`의 응답은 `exit_code`가 1이었고 결과 본문에 `Read-only file system`이 들어 있었다 [4].
+없는 폴더를 `-o`로 준 Volatility의 응답은 `exit_code`가 2였다 [4].
+저장한 파일을 다시 읽어 확인하거나 완료 표시를 남기는 코드는 없다 [1].
+
+서버 코드는 컨테이너 안 도구가 파일을 썼는지 확인하지 않고 그 도구의 종료 코드를 응답에 옮긴다 [2].
+`exec_stream`에는 쓰기 실패를 예외로 받아 버리거나 로그에만 남기는 곳이 없다 [2].
+종료 코드가 0이면 `exec_stream`은 `stdout` 조각만 모으므로 표준 오류는 결과에 남지 않는다 [2].
+읽기 전용인 `/evidence`와 `/analysis` 아래를 출력 폴더로 준 `tsk_recover`는 폴더를 만들지 못하고도 종료 코드 0으로 끝났다 [4].
+이 호출의 응답은 `exit_code`가 0이었고 결과 본문은 `Files Recovered: 0` 한 줄이었다 [4].
+같은 명령을 이미지에서 직접 실행하자 표준 오류에 `Error making directory` 줄이 나왔고 종료 코드는 0이었다 [4].
+그래서 이 호출의 응답과 결과 본문에는 폴더를 만들지 못했다는 표시가 없었다 [4].
+The Sleuth Kit 4.12.1의 다른 도구가 파일을 쓰지 못했을 때 내는 종료 코드는 확인하지 못했다.
+
+서버는 사건 폴더의 하위 폴더를 `mkdir(mode=500)`으로 만든다 [6].
+500은 10진수이고 8진수로는 `0o764`다 [6].
+이미지 안 Python 3.12에서 같은 호출로 만든 폴더의 권한은 umask 022가 적용된 `0o744`였다 [4].
+이 값은 폴더를 만든 계정의 쓰기 권한을 남기므로 서버 코드의 파일 쓰기는 이 `mode` 때문에 실패하지 않는다 [6][4].
+시험한 Windows 호스트에서는 서버가 만든 폴더에 결과 본문 파일과 분석 메모 파일이 그대로 쓰였다 [4].
+
+**한계.** `add_command`는 요약을 목록에 먼저 넣고 `dump`는 명령 기록 목록을 쓴 뒤에 결과 본문 파일을 쓴다 [1].
+결과 본문 파일을 쓰지 못한 4번 호출은 오류로 끝났지만 `get_command_history`에는 `exit_code`가 0인 항목으로 남았다 [4].
+그 번호로 `get_command_result`를 부르자 같은 `Permission denied` 오류가 왔다 [4].
+오류 결과에는 명령 번호가 실리지 않는다 [4].
+컨테이너의 명령은 저장보다 먼저 실행되므로 저장이 실패해도 그 명령은 이미 끝난 뒤다 [2].
+분석 메모도 목록 파일을 먼저 쓰므로 본문 파일을 쓰지 못한 제목이 `show_analyst_notes_summary`에 남는다 [1][4].
+`UnicodeDecodeError`나 `TypeError`로 끝난 호출은 명령 기록 목록에 남지 않는다 [2][4].
+`dump`는 명령 기록 목록을 쓰기 모드로 열어 전체를 다시 쓰고 임시 파일에 쓴 뒤 이름을 바꾸는 단계가 없다 [1].
+명령 기록 목록을 쓰는 도중 실패했을 때 앞 목록이 남는지는 실행으로 확인하지 못했다.
+
+### 근거
+
+[1] 목록에 넣고 명령 기록 목록을 쓴 뒤 결과 본문 파일을 쓰며 예외를 처리하지 않는다.
+분석 메모는 [`mcp_dfir/data_manager.py:72-96`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L72-L96)에서 같은 순서로 쓴다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:23-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L49)
+
+[2] `exec_stream`은 `stdout`만 모으고 `DockerException`만 처리한다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[3] MCP Python SDK 1.27.0의 FastMCP가 도구 함수의 예외를 오류 결과로 바꾸는 곳이다: [`src/mcp/server/fastmcp/tools/base.py:112-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L112-L117), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[4] (실행 확인) MCP 클라이언트 세션으로 서버를 실행해 저장이 실패하는 조건을 만들고 도구를 불렀다.
+사건 폴더의 `analysis/command_history/4.txt`를 폴더로 만들어 둔 뒤 부른 `get_hash`는 `Error executing tool get_hash: [Errno 13] Permission denied: '…\\command_history\\4.txt'`와 `isError` 참으로 끝났다.
+바로 뒤 `get_command_history`에는 `number` 4, `exit_code` 0인 항목이 있었고 `get_command_result`에 4를 주자 같은 `Permission denied` 오류가 왔다.
+다음 명령은 5번을 받아 정상으로 저장되었다.
+제목 `sub/inner`로 부른 `add_analyst_note`는 `[Errno 2] No such file or directory`로 끝났고 그 제목은 `show_analyst_notes_summary`에 남았다.
+`blkcat /evidence/disk.dd 1`은 `'utf-8' codec can't decode byte 0xec` 오류로, 맞는 심볼이 있는 `search_linux_symbols`는 `Object of type SymbolSearchResult is not JSON serializable` 오류로 끝났고 두 호출 모두 목록에 항목이 없었다.
+`find /evidence -maxdepth 0 -fprint /evidence/fd-find.txt`의 응답은 `isError` 거짓, `exit_code` 1이었다.
+`vol -s /symbols -r jsonl -o /artifacts/fd-novol -f /evidence/disk.dd timeliner.Timeliner --create-bodyfile`의 응답은 `exit_code` 2였고 결과 본문 파일에 `The output directory specified does not exist`가 있었다.
+`tsk_recover -e /evidence/disk.dd /evidence/fd-rec`와 `/analysis/fd-rec`를 준 같은 명령의 응답은 `exit_code` 0이었고 결과 본문 파일은 `Files Recovered: 0`이었다.
+`docker run`으로 이미지에서 `tsk_recover -e /evidence/disk.dd /evidence/fd-rec`를 직접 실행하자 표준 오류에 `Error making directory (/evidence/fd-rec)`가 세 줄 나오고 종료 코드는 0이었다.
+이미지의 Python 3.12.13에서 `Path('/tmp/x').mkdir(mode=500)`으로 만든 폴더의 권한은 `0o744`였고 `oct(500)`은 `0o764`였다.
+시험한 호스트는 Windows 11이다.
+
+[5] `search_linux_symbols`가 결과 본문을 만드는 곳이다.
+
+```python
+    # Return the a list of matches
+    out_list = []
+    for symbol_name, file_path_list in symbol_map.items():
+        if re.search(regex, symbol_name):
+            out_list.append(SymbolSearchResult(symbol_name=symbol_name, file_path_list=file_path_list))
+
+    return command_history_manager.add_command(
+        CommandRecord(
+            command=f'mcp_dfir:tools:volatility:search_linux_symbols(regex="{regex}")',
+            result=json.dumps(out_list, indent=4),
+            exit_code=0,
+        )
+    )
+```
+
+[`mcp_dfir/tools/volatility.py:126-138`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L126-L138)
+
+[6] 사건 폴더의 하위 폴더를 만드는 곳이다.
+명령 결과 폴더와 분석 메모 폴더도 [`mcp_dfir/data_manager.py:21`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L21)과 [`mcp_dfir/data_manager.py:70`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L70)에서 같은 값으로 만든다.
+
+```python
+        self.analysis_directory = self.working_directory / "analysis"
+        self.analysis_directory.mkdir(mode=500, parents=False, exist_ok=True)
+
+        self.artifact_directory = self.working_directory / "artifacts"
+        self.artifact_directory.mkdir(mode=500, parents=False, exist_ok=True)
+
+        self.symbols_directory = self.working_directory / "symbols"
+        self.symbols_directory.mkdir(mode=500, parents=False, exist_ok=True)
+
+        self.evidence_directory = self.working_directory / "evidence"
+        self.evidence_directory.mkdir(mode=500, parents=False, exist_ok=True)
+```
+
+[`mcp_dfir/config.py:64-74`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L64-L74)

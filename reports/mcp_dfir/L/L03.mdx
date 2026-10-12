@@ -1,0 +1,144 @@
+---
+cell: L03
+details:
+- id: L03.01
+---
+
+# L03 기록 실패 처리
+
+### L03.01 실행 후 응답 차단
+
+**구현.** 이 방식은 항목을 쓰는 모든 호출에 적용된다 [1].
+`exec_stream`은 컨테이너 명령을 끝까지 실행한 뒤 `add_command`를 부르고 그 반환값을 도구 결과로 돌려준다 [2].
+심볼 도구도 내려받은 파일을 저장한 뒤에 `add_command`를 부른다 [3].
+`add_command`가 부르는 `dump`는 `command_history.json`을 `"w"` 모드로 열어 목록 전체를 다시 쓰고 이어서 결과 본문 파일을 쓴다 [1].
+`dump`와 `add_command`, 이 둘을 부르는 `exec_stream`과 도구 본문에는 쓰기 예외를 처리하는 코드가 없다 [1][2].
+그래서 쓰기가 실패하면 예외가 도구 본문 밖으로 나가고 FastMCP가 그 예외를 오류 결과로 바꾼다 [4].
+실행 결과인 번호와 종료 코드는 응답에 실리지 않는다 [2].
+`command_history.json`을 읽기 전용으로 바꾼 뒤 `run_sleuthkit_command`로 `tsk_recover`를 실행하자 `/artifacts`에 파일 3개가 복구됐고 응답은 `Permission denied` 오류 결과였다 [5].
+오류 문구에는 명령 기록 목록의 호스트 쪽 전체 경로가 들어 있었다 [5].
+서버의 표준 오류에는 명령 기록 쓰기 실패를 알리는 줄이 남지 않았다 [5].
+
+`add_command`는 파일에 쓰기 전에 항목을 메모리 목록에 먼저 더한다 [1].
+그래서 쓰기가 실패한 항목도 그 서버 프로세스의 `get_command_history` 응답에는 나오고 다음 항목의 번호는 그 항목 다음으로 매겨진다 [1][5].
+그 뒤의 쓰기가 성공하면 `dump`가 목록 전체를 쓰므로 앞서 실패한 항목이 결과 본문 파일 없이 `command_history.json`에 남는다 [1][6].
+서버 코드에는 실패한 항목을 따로 다시 쓰거나 다른 곳에 남기는 처리가 없다 [1].
+쓰기가 다시 성공하기 전에 서버를 다시 시작하자 실패한 항목은 목록에서 사라졌다 [5].
+결과 본문 파일 쓰기만 실패한 호출은 항목이 `command_history.json`에 남고 응답은 오류 결과로 끝났다 [6].
+
+`dump`는 임시 파일을 거치지 않고 `command_history.json`을 비운 뒤 쓴다 [1].
+쓰는 도중에 프로세스가 끝나면 파일은 비거나 중간까지만 남는다 [1].
+`CommandHistoryManager`는 서버를 시작할 때 이 파일을 `json.load`로 읽고 예외를 처리하지 않는다 [7].
+파일을 절반만 남기거나 비운 뒤 서버를 실행하자 서버 프로세스가 MCP 연결을 받기 전에 예외로 끝났다 [8].
+쓰는 도중에 프로세스가 끝난 상태는 재현하지 않고 파일을 직접 잘라 확인했다.
+
+### 근거
+
+[1] `add_command`는 항목을 목록에 더한 뒤 `dump`를 부르고 `dump`는 예외 처리 없이 두 파일을 `"w"` 모드로 쓴다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:23-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L49)
+
+[2] `exec_stream`은 명령을 실행한 뒤 `add_command`의 반환값을 돌려준다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+        except DockerException as ex:
+            exit_code = ex.return_code if ex.return_code is not None else 1
+            output.append(str(ex))
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:67-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L88)
+
+[3] 심볼 도구는 파일을 저장한 뒤 `add_command`를 부른다: [`mcp_dfir/tools/volatility.py:52-63`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L52-L63), [`mcp_dfir/tools/volatility.py:114-138`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L114-L138), [`mcp_dfir/tools/volatility.py:147-162`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L147-L162).
+
+[4] MCP Python SDK 1.27.0은 도구 본문에서 난 예외를 `ToolError`로 바꾸고 요청 처리기가 그 문구를 오류 결과로 돌려준다: [`src/mcp/server/fastmcp/tools/base.py:99-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L99-L117), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[5] (실행 확인) 항목이 하나인 사건 폴더의 `command_history.json`에 Windows 읽기 전용 속성을 주고 서버를 실행했다.
+`run_sleuthkit_command`를 `tool="tsk_recover"`, `arguments=["-a", "/evidence/disk.dd", "/artifacts/rec1"]`로 부르자 `Error executing tool run_sleuthkit_command: [Errno 13] Permission denied: '<사건 폴더의 전체 경로>\\analysis\\command_history.json'` 오류 결과가 돌아왔다.
+이어서 부른 `list_files`는 `/artifacts/rec1` 아래 파일 3개를 돌려줬다.
+`get_command_history`는 2번 `tsk_recover` 항목을 돌려줬고 `get_command_result`는 `2.txt`가 없다는 오류 결과로 끝났다.
+같은 서버에서 `search_linux_symbols`도 같은 오류 결과로 끝났고 `get_command_history`에는 3번 항목으로 나왔다.
+디스크의 `command_history.json`에는 1번 항목만 있었다.
+서버 표준 오류에는 `loguru`의 컨테이너 시작·중지 줄과 SDK의 요청 처리 줄만 있었다.
+읽기 전용을 둔 채 서버를 다시 시작해 `get_hash`를 한 번 부른 뒤의 `get_command_history`에는 1번 항목과 방금 부른 `sha1sum` 항목만 있었고 `tsk_recover`와 `search_linux_symbols` 항목은 없었다.
+
+[6] (실행 확인) `command_history.json`을 읽기 전용으로 둔 채 `get_hash`를 부르자 오류 결과가 돌아왔다.
+읽기 전용을 풀고 결과 본문 파일 자리 `analysis/command_history/3.txt`에 폴더를 만든 뒤 `get_hash`를 다시 부르자 `3.txt`에 대한 `Permission denied` 오류 결과가 돌아왔다.
+이때 `command_history.json`에는 첫째 호출의 2번 항목과 둘째 호출의 3번 항목이 모두 있었고 `2.txt`는 없었다.
+`get_hash`를 한 번 더 부르자 4번 항목이 정상으로 돌아왔다.
+
+[7] `CommandHistoryManager`는 만들어질 때 `load`를 부르고 `load`는 파일 전체를 `json.load`로 읽는다.
+
+```python
+class CommandHistoryManager(BaseModel):
+    command_summary_list: list[CommandRecordSummary] = Field(default_factory=list, init=False)
+
+    def model_post_init(self, __context):
+        # Load commands
+        if config.command_history_json.exists():
+            self.load()
+        config.command_record_directory.mkdir(mode=500, parents=True, exist_ok=True)
+```
+
+[`mcp_dfir/data_manager.py:14-21`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L14-L21)
+
+```python
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+```
+
+[`mcp_dfir/data_manager.py:39-42`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L39-L42)
+
+[8] (실행 확인) 605바이트인 `command_history.json`을 앞 302바이트만 남기고 서버를 실행했다.
+MCP 클라이언트의 `initialize`가 `Connection closed`로 끝났고 서버 표준 오류에는 `CommandHistoryManager`를 만드는 줄에서 난 `Expecting value` 오류가 남았다.
+파일을 0바이트로 비운 뒤에도 같은 자리에서 서버가 끝났다.

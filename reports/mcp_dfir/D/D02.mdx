@@ -1,0 +1,190 @@
+---
+cell: D02
+details:
+- id: D02.01
+---
+
+# D02 파생물 추적
+
+### D02.01 ID·경로 참조
+
+**구현.** 이 방식은 결과 본문 파일과 컨테이너 안 분석 도구가 인자로 받은 경로에 만든 파일에 적용된다 [1].
+결과 본문 파일의 이름은 명령 번호이고 같은 번호의 항목이 명령 기록 목록 `command_history.json`에 `number`·`command`·`date_run`·`exit_code`로 남는다 [1][2].
+`command`는 서버가 컨테이너에서 실행한 인자 배열을 공백으로 이은 글이다 [3].
+모델이 인자로 넘긴 증거 경로와 출력 경로가 이 글에 그대로 들어간다 [3].
+예시 사건 폴더의 1번 항목은 `sha256sum /evidence/Investigation-2.raw`이고 그 출력은 `command_history/1.txt`에 있다 [4].
+`get_command_result`는 명령 번호로 목록 항목을 찾아 같은 번호의 파일을 읽는다 [5].
+분석 도구가 `/artifacts`에 만든 파일은 그 경로가 명령의 인자였을 때 목록 항목의 `command`로 이어진다 [3].
+`tsk_recover -e /evidence/disk.dd /artifacts/fd-rec`를 실행한 항목은 복구한 파일이 놓인 폴더와 읽은 이미지를 함께 적는다 [6].
+Volatility의 `volatility.body`처럼 분석 도구가 이름을 정하는 파일은 `command`에 출력 폴더만 남는다 [6].
+심볼 도구의 항목은 `command`에 서버 함수 이름과 인자를 적은 글을 남긴다 [7].
+
+목록 항목에는 MCP 도구 이름, 입력이나 출력의 해시, 크기가 없다 [2].
+결과 본문 파일 곁이나 `artifacts` 폴더에 입력, 실행, 시각을 적은 manifest를 두지 않는다 [1].
+앞 명령이 만든 파일을 뒤 명령이 읽을 때 그 관계는 두 항목의 `command`에 적힌 경로로만 이어지고 부모 관계를 적는 필드는 없다 [2].
+분석 메모 `AnalystNote`에는 명령 번호나 증거 경로를 담는 필드가 없다 [8].
+`add_analyst_note`는 명령 기록 목록에 항목을 남기지 않는다 [9].
+그래서 분석 메모에서 근거가 된 명령 결과로 가는 연결은 모델이 `description`에 적은 글뿐이고 메모를 만든 호출과 시각도 남지 않는다 [8][9].
+
+**한계.** `add_command`는 메모리에 있는 목록의 길이에 1을 더해 번호를 정하고 명령 기록 목록은 서버를 시작할 때만 읽는다 [1][10].
+같은 사건 폴더에 서버 프로세스 둘을 붙이고 명령을 하나씩 실행하자 두 프로세스가 모두 1번을 매겼다 [6].
+먼저 실행한 프로세스의 1번 항목은 `md5sum` 명령인데 `1.txt`에는 나중 프로세스의 `sha256sum` 출력이 들어 있었다 [6].
+먼저 실행한 프로세스가 다음 명령을 실행하자 명령 기록 목록은 그 프로세스의 항목 2개로 바뀌고 나중 프로세스의 항목은 사라졌다 [6].
+결과 본문 파일을 쓰지 못한 호출은 목록 항목만 남고 그 번호의 파일이 없다 [1][6].
+`command`는 인자를 공백으로 이은 글이라 공백이 들어 있는 경로는 인자의 경계를 가를 수 없다 [3].
+`tsk_recover`를 같은 폴더로 다시 실행하면 같은 이름의 파일을 덮어쓰므로 앞 실행의 항목도 나중 실행이 쓴 파일을 가리킨다 [6].
+
+### 근거
+
+[1] 명령 번호를 정하고 명령 기록 목록과 그 번호의 결과 본문 파일을 쓴다.
+
+```python
+    def dump(self, command: CommandRecord | None, command_number: int | None = None):
+        # Write to command history
+        with open(file=config.command_history_json, mode="w", encoding="utf-8") as command_summary_file:
+            json.dump(
+                [record.model_dump() for record in self.command_summary_list],
+                command_summary_file,
+                indent=4,
+            )
+
+        # Write to command file
+        if command is not None and command_number is not None:
+            with open(
+                file=config.command_record_directory / f"{command_number}.txt", mode="w", encoding="utf-8"
+            ) as command_file:
+                command_file.write(command.result)
+
+    def load(self):
+        with open(file=config.command_history_json, encoding="utf-8") as command_file:
+            for command_summary_dict in json.load(command_file):
+                self.command_summary_list.append(CommandRecordSummary.model_validate(command_summary_dict))
+
+    def add_command(self, command_record: CommandRecord) -> CommandRecordSummary:
+        number = len(self.command_summary_list) + 1
+        summary = command_record.summary(number=number)
+        self.command_summary_list.append(summary)
+        self.dump(command_record, number)
+        return summary
+```
+
+[`mcp_dfir/data_manager.py:23-49`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L23-L49)
+
+[2] 목록 항목의 필드다.
+
+```python
+class CommandRecordSummary(BaseModel):
+    number: int = Field(examples=[1])
+    command: str = Field(examples=["vol -f capture.mem linux.pslist"])
+    date_run: str = Field(default_factory=date_as_str, examples=["01/01/2024 12:00:00"])
+    exit_code: int = Field(examples=[0])
+```
+
+[`mcp_dfir/tools/models.py:21-25`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L21-L25)
+
+[3] 실행한 인자 배열을 공백으로 이어 `command`로 남긴다.
+
+```python
+        result = "".join(output)
+        return command_history_manager.add_command(
+            CommandRecord(
+                command=" ".join(command_list),
+                result=result,
+                exit_code=exit_code,
+            )
+        )
+```
+
+[`mcp_dfir/docker_manager.py:81-88`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L81-L88)
+
+[4] 예시 사건 폴더의 1번 항목과 그 결과 본문 파일이다: [`examples/tryhackme_volatility/analysis/command_history/1.txt:1`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history/1.txt#L1).
+
+```json
+    {
+        "number": 1,
+        "command": "sha256sum /evidence/Investigation-2.raw",
+        "date_run": "11/04/2026 14:52:00",
+        "exit_code": 0
+    },
+```
+
+[`examples/tryhackme_volatility/analysis/command_history.json:2-7`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/examples/tryhackme_volatility/analysis/command_history.json#L2-L7)
+
+[5] 번호로 목록 항목을 찾아 같은 번호의 파일을 읽는다.
+
+```python
+    def get_command(self, command_number: int) -> CommandRecord:
+        for command in self.command_summary_list:
+            if command.number == command_number:
+                with open(file=config.command_record_directory / f"{command_number}.txt", encoding="utf-8") as file:
+                    return CommandRecord(
+                        command=command.command,
+                        date_run=command.date_run,
+                        result=file.read(),
+                        exit_code=command.exit_code,
+                    )
+        raise KeyError(f"Could not find command with number {command_number}")
+```
+
+[`mcp_dfir/data_manager.py:51-61`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L51-L61)
+
+[6] (실행 확인) MCP 클라이언트 세션으로 서버를 실행해 명령을 실행한 뒤 `command_history.json`과 결과 본문 파일을 확인했다.
+`tsk_recover` 항목의 `command`는 `tsk_recover -e /evidence/disk.dd /artifacts/fd-rec`였다.
+Volatility `timeliner` 항목의 `command`에는 `-o /artifacts`만 있고 `volatility.body`라는 이름은 없었다.
+같은 사건 폴더에 서버 프로세스 둘을 붙여 첫째 프로세스에서 `md5sum`, 둘째 프로세스에서 `sha256sum` 해시를 차례로 구하자 두 응답의 `number`가 모두 1이었다.
+그 뒤 `1.txt`에는 `sha256sum`의 출력이 있었고 첫째 프로세스의 `get_command_history`는 1번을 `md5sum /evidence/notes.txt`로 돌려주었다.
+첫째 프로세스에서 명령을 하나 더 실행하자 `command_history.json`에는 첫째 프로세스의 항목 2개만 있었다.
+`command_history/4.txt` 자리에 폴더를 만들어 두고 명령을 실행하자 호출은 오류로 끝났고 목록에는 4번 항목이 남았다.
+`tsk_recover`를 같은 출력 폴더로 다시 실행하자 3번과 4번 항목의 `command`가 같았다.
+이미지에서 `tsk_recover`를 직접 두 번 실행해 그 사이에 복구된 파일 하나의 내용을 바꾸자 둘째 실행이 그 파일을 이미지의 내용으로 다시 썼다.
+
+[7] 심볼 도구가 남기는 `command` 글이다: [`mcp_dfir/tools/volatility.py:57-63`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L57-L63), [`mcp_dfir/tools/volatility.py:132-138`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L132-L138), [`mcp_dfir/tools/volatility.py:156-162`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L156-L162).
+
+[8] 분석 메모의 필드다.
+
+```python
+class AnalystNote(BaseModel):
+    title: str = Field(examples=["Found WannaCry ransomware executable"])
+    status: Literal["benign", "malicious", "unknown"] = Field(examples=["malicious"])
+    tags: list[str] = Field(examples=[["malware", "ransomware", "executable"]])
+    description: str = Field(
+        examples=[
+            "# Found WannaCry ransomware executable\nFound WannaCry executable after running <COMMAND>, follow-on analysis needed"
+        ]
+    )
+```
+
+[`mcp_dfir/tools/models.py:54-62`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/models.py#L54-L62)
+
+[9] 분석 메모를 더하는 경로는 `add_command`를 부르지 않는다.
+
+```python
+def add_analyst_note(note: AnalystNote) -> None:
+    analyst_note_manager.add_note(note=note)
+```
+
+[`mcp_dfir/tools/notes.py:16-17`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/notes.py#L16-L17)
+
+```python
+    def add_note(self, note: AnalystNote) -> AnalystNote:
+        self.note_list.append(note.summary())
+        self.dump(note)
+        return note
+```
+
+[`mcp_dfir/data_manager.py:93-96`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L93-L96)
+
+[10] 명령 기록 목록은 `CommandHistoryManager`를 만들 때 읽는다.
+
+```python
+class CommandHistoryManager(BaseModel):
+    command_summary_list: list[CommandRecordSummary] = Field(default_factory=list, init=False)
+
+    def model_post_init(self, __context):
+        # Load commands
+        if config.command_history_json.exists():
+            self.load()
+        config.command_record_directory.mkdir(mode=500, parents=True, exist_ok=True)
+```
+
+[`mcp_dfir/data_manager.py:14-21`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/data_manager.py#L14-L21)

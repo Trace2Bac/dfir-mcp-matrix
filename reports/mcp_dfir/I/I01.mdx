@@ -1,0 +1,300 @@
+---
+cell: I01
+details:
+- id: I01.03
+- id: I01.05
+- id: I01.06
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.03 기본 활성화
+
+**구현.** 이 방식은 서버 코드가 여는 연결 세 가지에 모두 적용된다 [1][2][3].
+세 가지는 심볼 도구의 HTTP 요청, Docker 데몬 접속, 컨테이너 이미지 받기다.
+연결을 켜거나 끄는 설정 파일, 환경변수, 시작 인자는 없다 [4].
+심볼 도구 `download_windows_symbol`·`search_linux_symbols`·`download_linux_symbol`은 늘 도구 목록에 있고 모델이 부르면 `requests.get`으로 요청을 보낸다 [1].
+`search_linux_symbols`는 심볼 맵 `symbols/linux/symbol_map.json`이 없을 때만 이 파일을 받는다 [1].
+같은 사건 폴더에서 이 도구를 다시 불렀을 때 `symbol_map.json`의 수정 시각은 바뀌지 않았다 [5].
+`download_windows_symbol`은 변환한 심볼 파일이 이미 있고 `overwrite`가 거짓이면 요청을 보내지 않고 예외로 끝난다 [6].
+서버는 시작할 때 `DockerClient()`가 실행하는 Docker CLI로 데몬에 컨테이너 상태를 묻고 컨테이너를 시작하거나 만든다 [2].
+그 뒤 실행 도구를 부를 때마다 `docker exec`가 데몬에 접속한다 [7][8].
+python-on-whales 0.81.0의 `run`은 `pull` 기본값이 `missing`이어서 이미지가 로컬에 없으면 `docker image pull`을 먼저 실행한다 [3].
+이미지가 이미 있는 호스트에서는 이미지를 받지 않는다 [3].
+이미지 태그 상수를 Docker Hub에는 있고 로컬에는 없는 `0.1.1`로 바꿔 서버를 시작하자 `docker image pull`이 실행되어 이미지를 받았고 초기화 응답은 2.6초 뒤에 왔다 [9].
+`--init`과 `--clear-case-dir`는 Docker를 다루는 모듈을 불러오기 전에 끝난다 [10].
+
+### I01.05 고정 목적지
+
+**구현.** 이 방식은 심볼 도구의 요청 주소와 컨테이너 이미지 이름에 적용된다 [11][12].
+Microsoft 심볼 서버 주소 `https://msdl.microsoft.com/download/symbols`와 GitHub의 Linux 심볼 저장소 주소 `https://raw.githubusercontent.com/Abyss-W4tcher/volatility3-symbols/refs/heads/master`는 `constants.py`의 상수다 [11].
+이 주소를 바꾸는 설정, 환경변수, 도구 인자는 없다 [4][11].
+`download_windows_symbol`은 `pdb_name`·`guid`·`age`를 이 주소 뒤의 경로 `/<pdb_name>/<guid><age>/<pdb_name>`에 넣는다 [13].
+`download_linux_symbol`은 `symbol_path`를 주소 뒤의 경로에 그대로 붙인다 [14].
+`search_linux_symbols`가 받는 심볼 맵의 주소는 인자와 관계없이 `banners/banners_plain.json`이다 [1][11].
+인자 값은 주소의 경로에만 들어가고 접속할 호스트는 바뀌지 않는다 [13][14][15].
+이미지 이름은 `androsh7/forensics-docker:<VERSION>`이고 `VERSION`은 코드 상수 `0.1.2`다 [12].
+이미지 이름에 레지스트리 호스트가 없으므로 받을 곳은 Docker가 기본으로 쓰는 레지스트리다 [12].
+세 요청은 모두 `requests.get`에 주소만 넘긴다 [1].
+requests 2.33.1은 이 경우 인증서를 확인하고 시간 제한 없이 응답을 기다리며 리다이렉트를 30번까지 따라간다 [16].
+requests 2.33.1은 `trust_env`가 기본으로 참이어서 환경변수에 정한 프록시도 쓴다 [16].
+
+**한계.** 서버는 경로에 넣는 인자를 검사하지 않는다 [13][14].
+requests는 주소의 `..` 조각을 해석한 뒤 요청하므로 `symbol_path`에 `..`를 넣으면 같은 호스트의 다른 저장소 파일을 받는다 [15][17].
+`symbol_path`를 `../../../../../volatilityfoundation/volatility3/9424c3a601edac0cb2c21d064a7e737c8741aa94/README.md`로 주자 Volatility 3 저장소의 `README.md`가 `symbols/linux/README.md`로 저장됐다 [17].
+Microsoft 심볼 서버는 PDB 요청에 다른 호스트를 가리키는 302 응답을 돌려줬다 [18].
+requests가 이 응답을 따라가므로 PDB 본문은 응답이 정한 호스트에서 받는다 [16][18].
+서버 코드에는 리다이렉트 대상을 확인하는 처리가 없다 [13].
+
+### I01.06 설정으로 목적지 지정
+
+**구현.** 이 방식은 Docker 데몬 접속에 적용된다 [2].
+서버는 `DockerClient()`를 인자 없이 만들어 접속할 데몬의 주소를 넘기지 않는다 [2].
+python-on-whales 0.81.0은 `host`나 `context`를 받지 않으면 `docker` 명령에 `--host`와 `--context`를 붙이지 않는다 [19].
+그래서 접속할 데몬은 Docker CLI의 설정과 환경변수 `DOCKER_HOST`가 정한다 [19][20].
+`DOCKER_HOST`를 `tcp://127.0.0.1:1`로 주고 서버를 실행하자 Docker CLI가 그 주소로 접속하다 실패했고 서버 프로세스가 예외로 끝났다 [20].
+도구 인자와 서버의 시작 인자에는 데몬 주소를 받는 것이 없다 [4].
+
+### 근거
+
+[1] 심볼 도구는 세 곳에서 `requests.get`에 주소만 넘긴다: [`mcp_dfir/tools/volatility.py:38-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L38-L53), [`mcp_dfir/tools/volatility.py:114-120`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L114-L120), [`mcp_dfir/tools/volatility.py:144-148`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L144-L148).
+
+[2] 서버는 `DockerClient()`를 인자 없이 만들고 시작할 때 컨테이너를 찾아 시작하거나 만든다.
+
+```python
+    def __attrs_post_init__(self):
+        self.docker = DockerClient()
+        self.container = None
+```
+
+[`mcp_dfir/docker_manager.py:21-23`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L21-L23)
+
+```python
+    def start_forensic_container(self):
+        logger.info("Starting forensics docker container")
+
+        try:
+            self.container = self.docker.container.inspect(config.docker_config.container_name)
+
+            if self.container.state.running:
+                logger.info("Forensics container already running")
+                return
+
+            logger.info("Forensics container exists but is stopped, starting it")
+            self.docker.container.start(config.docker_config.container_name)
+            return
+
+        except NoSuchContainer:
+            logger.info("Forensics container does not exist, creating one")
+
+        volumes = [
+            (volume_mount.external_path, volume_mount.internal_path, volume_mount.permissions)
+            for volume_mount in list(config.docker_volumes)
+        ]
+        self.container = self.docker.run(
+            config.docker_config.image_name,
+            name=config.docker_config.container_name,
+            detach=True,
+            remove=False,
+            volumes=volumes,
+            networks=["none"],
+        )
+```
+
+[`mcp_dfir/docker_manager.py:25-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L25-L53)
+
+[3] python-on-whales 0.81.0의 `run`은 `pull`이 `missing`이면 이미지를 `inspect`로 찾고 없을 때 `docker image pull`로 받는다: [`python_on_whales/components/container/cli_wrapper.py:1576`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L1576), [`python_on_whales/components/container/cli_wrapper.py:1785-1791`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L1785-L1791), [`python_on_whales/components/image/cli_wrapper.py:912-920`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/image/cli_wrapper.py#L912-L920), [`python_on_whales/components/image/cli_wrapper.py:644-666`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/image/cli_wrapper.py#L644-L666).
+
+[4] 서버의 시작 인자에는 연결을 켜거나 목적지를 정하는 것이 없다.
+
+```python
+    parser = argparse.ArgumentParser(prog="mcp-dfir", description="MCP Server for Performing Memory and Disk Forensics")
+    parser.add_argument("--version", action="version", version=f"mcp-dfir v{VERSION}")
+    parser.add_argument(
+        "-d", "--case-dir", type=Path, default=Path.cwd(), help=f"Working directory for the case, default: {Path.cwd()}"
+    )
+    parser.add_argument("--init", action="store_true", help="Create case directories then exit")
+    parser.add_argument(
+        "--clear-case-dir", action="store_true", help="Clear the case directory before starting the server"
+    )
+    parser.add_argument(
+        "--clear-docker", action="store_true", help="Clear the forensics docker container before starting the server"
+    )
+    args = parser.parse_args()
+```
+
+[`mcp_dfir/runner.py:15-27`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L15-L27)
+
+[5] (실행 확인) `search_linux_symbols`를 처음 부르자 `symbols/linux/symbol_map.json`(3,523,417바이트)이 생겼다.
+같은 사건 폴더에서 서버를 다시 시작해 이 도구를 다시 부른 뒤에도 파일의 수정 시각은 처음 받은 때 그대로였다.
+
+[6] `download_windows_symbol`은 변환한 파일이 있으면 내려받기 전에 예외를 낸다.
+
+```python
+    # Set correct naming convention and directory tree for volatility parsing
+    output_file_name = f"{guid}-{age}.json.xz"
+    output_file_external_path = config.windows_symbols_directory / pdb_name / output_file_name
+    output_file_internal_path = f"/symbols/windows/{pdb_name}/{output_file_name}"
+    if output_file_external_path.exists() and not overwrite:
+        raise RuntimeError(
+            f"File {output_file_internal_path} already exists, it can be used by volatility with the `-s /symbols` "
+            "argument, set overwrite to True to overwrite this file"
+        )
+    else:
+        output_file_external_path.parent.mkdir(mode=500, parents=True, exist_ok=True)
+```
+
+[`mcp_dfir/tools/volatility.py:71-81`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L71-L81)
+
+[7] 실행 도구의 명령은 `docker.execute`로 실행한다.
+
+```python
+    def exec_stream(self, ctx: Context, command_list: list[str]) -> CommandRecordSummary:
+        if self.container is None:
+            raise RuntimeError("No docker container is currently running")
+
+        ctx.report_progress(f"Running command {' '.join(command_list)}")
+        output = []
+        exit_code = 0
+        try:
+            for stream, data in self.docker.execute(self.container, command_list, stream=True):
+                if stream == "stdout":
+                    output.append(data.decode())
+```
+
+[`mcp_dfir/docker_manager.py:67-77`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/docker_manager.py#L67-L77)
+
+[8] python-on-whales 0.81.0의 `execute`는 `docker exec` 명령을 만들어 실행한다: [`python_on_whales/components/container/cli_wrapper.py:1036`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L1036), [`python_on_whales/components/container/cli_wrapper.py:1069-1080`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/components/container/cli_wrapper.py#L1069-L1080).
+
+[9] (실행 확인) `mcp_dfir.constants.VERSION`을 `0.1.1`로 바꾼 뒤 MCP Python SDK 1.27.0의 stdio 클라이언트로 `runner.main`을 실행했다.
+`docker image pull`의 출력 `0.1.1: Pulling from androsh7/forensics-docker`, `Digest: sha256:…`, `Status: Downloaded newer image for …`, `docker.io/androsh7/forensics-docker:0.1.1` 4줄이 서버 표준 출력으로 나갔고 클라이언트는 이 4줄에 `Failed to parse JSONRPC message from server`를 기록했다.
+그 세션의 초기화 응답은 2.6초 뒤에 왔고 `get_hash`는 `exit_code` 0을 돌려줬다.
+Docker Hub의 `0.1.1`과 `0.1.2`는 계층 8개의 다이제스트가 같아 이 실행에서 새로 받은 계층은 없었다.
+
+[10] `--clear-case-dir`와 `--init`은 `docker_manager`를 불러오기 전에 `sys.exit`으로 끝난다.
+
+```python
+    if args.clear_case_dir:
+        user_input = input(
+            f"Are you sure you want to clear the case directory {args.case_dir}? This action cannot be undone. Type 'yes' to confirm: "
+        )
+        if user_input != "yes":
+            parser.exit(status=1, message="Case directory not cleared")
+        for path in "artifacts", "analysis", "evidence", "symbols":
+            shutil.rmtree(args.case_dir / path, ignore_errors=True)
+        print("Case directory cleared")
+        sys.exit(0)
+
+    # Load config
+    config.load(working_directory=args.case_dir)
+
+    if args.init:
+        sys.exit(0)
+
+    if args.clear_docker:
+        from mcp_dfir.docker_manager import docker_manager
+
+        docker_manager.clear_forensic_container()
+        sys.exit(0)
+
+    # Load MCP server
+    from mcp_dfir.docker_manager import docker_manager
+    from mcp_dfir.server import mcp
+
+    # Start the mcp server
+    docker_manager.start_forensic_container()
+```
+
+[`mcp_dfir/runner.py:29-57`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/runner.py#L29-L57)
+
+[11] 심볼 주소 세 개는 코드 상수다.
+
+```python
+VERSION = "0.1.2"
+
+# Volatility symbols
+WINDOWS_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
+LINUX_SYMBOL_REPO_BASE_URL = "https://raw.githubusercontent.com/Abyss-W4tcher/volatility3-symbols/refs/heads/master"
+LINUX_SYMBOL_MAP_SOURCE = f"{LINUX_SYMBOL_REPO_BASE_URL}/banners/banners_plain.json"
+```
+
+[`mcp_dfir/constants.py:3-8`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/constants.py#L3-L8)
+
+[12] 이미지 이름은 `VERSION` 상수로 만든다.
+
+```python
+        self.docker_config = DockerConfig(
+            container_name=f"{self.working_directory.name.replace(' ', '_')}-forensics",
+            image_name=f"androsh7/forensics-docker:{VERSION}",
+        )
+```
+
+[`mcp_dfir/config.py:104-107`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/config.py#L104-L107)
+
+[13] `_download_windows_pdb`는 상수 주소 뒤에 인자를 붙여 요청하고 404만 따로 처리한다.
+
+```python
+def _download_windows_pdb(ctx: Context, pdb_name: str, guid: str, age: int) -> tuple[str, CommandRecordSummary]:
+    """Downloads a pdb file and returns the internal path"""
+    guid = guid.replace("-", "")  # Normalize path
+    url = f"{WINDOWS_SYMBOL_SERVER}/{pdb_name}/{guid}{age}/{pdb_name}"
+    ctx.report_progress(f"Pulling symbol from {url}")
+    output_file_name = f"{guid}_{pdb_name}"
+    external_path = config.windows_symbols_directory / "raw" / output_file_name
+    external_path.parent.mkdir(mode=500, parents=True, exist_ok=True)
+    internal_path = f"/symbols/windows/raw/{output_file_name}"
+
+    response = requests.get(url)
+
+    if response.status_code == HTTPStatus.NOT_FOUND:
+        raise RuntimeError(
+            f"PDB not found on symbol server. Check that pdb_name and guid are correct.\nURL attempted: {url}"
+        )
+
+    response.raise_for_status()
+    external_path.write_bytes(response.content)
+```
+
+[`mcp_dfir/tools/volatility.py:35-53`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L35-L53)
+
+[14] `download_linux_symbol`은 상수 주소 뒤에 `symbol_path`를 붙여 요청하고 마지막 조각을 파일 이름으로 쓴다.
+
+```python
+def download_linux_symbol(ctx: Context, symbol_path: str) -> CommandRecordSummary:
+    """Download a symbol map from the Abyss-W4tcher/volatility3-symbols repository"""
+
+    # Download json file from repo
+    url = f"{LINUX_SYMBOL_REPO_BASE_URL}/{symbol_path}"
+    ctx.report_progress(f"Downloading symbol from {url}")
+    response = requests.get(url=url)
+    response.raise_for_status()
+
+    # Save json file
+    config.linux_symbols_directory.mkdir(mode=500, parents=True, exist_ok=True)
+    file_name = symbol_path.rsplit("/", maxsplit=1)[-1]
+    file_path = config.linux_symbols_directory / file_name
+    file_path.write_bytes(response.content)
+```
+
+[`mcp_dfir/tools/volatility.py:141-154`](https://github.com/Androsh7/mcp_dfir/blob/305fcadb784f4f3e80cc8f8287b0ea57a007f8a5/mcp_dfir/tools/volatility.py#L141-L154)
+
+[15] (실행 확인) requests 2.33.1로 요청을 보내지 않고 `requests.Request("GET", <주소>).prepare().url`만 계산했다.
+`symbol_path`가 `../../../../../volatilityfoundation/volatility3/<커밋>/README.md`이면 주소가 `https://raw.githubusercontent.com/volatilityfoundation/volatility3/<커밋>/README.md`가 됐다.
+`symbol_path`가 `//evil.example/x`나 `@evil.example/x`여도 호스트는 `raw.githubusercontent.com`이었다.
+
+[16] requests 2.33.1의 `Session`은 `verify`와 `trust_env`가 참이고 `request`의 `timeout` 기본값은 `None`, `allow_redirects` 기본값은 참이다: [`src/requests/sessions.py:420-441`](https://github.com/psf/requests/blob/111d2b77790bf49943c0dfa09b365371c24aec7e/src/requests/sessions.py#L420-L441), [`src/requests/sessions.py:503-514`](https://github.com/psf/requests/blob/111d2b77790bf49943c0dfa09b365371c24aec7e/src/requests/sessions.py#L503-L514), [`src/requests/sessions.py:753-765`](https://github.com/psf/requests/blob/111d2b77790bf49943c0dfa09b365371c24aec7e/src/requests/sessions.py#L753-L765), [`src/requests/models.py:81`](https://github.com/psf/requests/blob/111d2b77790bf49943c0dfa09b365371c24aec7e/src/requests/models.py#L81).
+
+[17] (실행 확인) `download_linux_symbol`을 `symbol_path`가 `../../../../../volatilityfoundation/volatility3/9424c3a601edac0cb2c21d064a7e737c8741aa94/README.md`인 인자로 불렀다.
+응답은 `exit_code`가 0인 항목이었고 `symbols/linux/README.md`(5,752바이트)가 생겼다.
+없는 경로 `nosuch/none.json.xz`를 준 호출은 `404 Client Error: Not Found for url: https://raw.githubusercontent.com/Abyss-W4tcher/volatility3-symbols/refs/heads/master/nosuch/none.json.xz` 오류 결과로 끝났다.
+
+[18] (실행 확인) `https://msdl.microsoft.com/download/symbols/ntoskrnl.pdb/423320282DB842E7BA2B0BFC86A84D752/ntoskrnl.pdb`에 리다이렉트를 따라가지 않는 GET 요청을 한 번 보냈다.
+응답은 302였고 `Location`의 호스트는 `vsblobprodscussu5shard60.blob.core.windows.net`이었다.
+같은 PDB를 `download_windows_symbol`로 받자 4,131,840바이트 파일이 `symbols/windows/raw` 아래에 저장됐다.
+
+[19] python-on-whales 0.81.0은 `context`와 `host`가 `None`이 아닐 때만 `docker` 명령에 `--context`와 `--host`를 붙인다: [`python_on_whales/client_config.py:99-112`](https://github.com/gabrieldemarmiesse/python-on-whales/blob/059d89a178ccaa07e8c426c7af00e6ac41f3ae8a/python_on_whales/client_config.py#L99-L112).
+
+[20] (실행 확인) 환경변수 `DOCKER_HOST=tcp://127.0.0.1:1`을 주고 서버를 실행했다.
+MCP 클라이언트의 `initialize`가 `Connection closed`로 끝났다.
+서버 표준 오류에는 `error during connect: Get "http://127.0.0.1:1/v1.55/containers/<컨테이너 이름>/json": dial tcp 127.0.0.1:1`로 시작하는 Docker CLI 오류가 남았다.
+이 환경변수를 주지 않은 실행에서 Docker CLI의 현재 컨텍스트는 `desktop-linux`였고 그 주소는 같은 호스트의 `npipe:////./pipe/dockerDesktopLinuxEngine`이었다.
