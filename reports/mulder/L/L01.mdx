@@ -60,19 +60,22 @@ details:
 
 `orchestrator.log`에는 서버를 거치지 않는 모델 호출과 모델의 글이 남는다 [24][25].
 모델 세션을 시작할 때 모델 이름과 최대 차례 수를 쓰고 끝날 때 차례 수와 입력·출력 토큰 수를 쓴다 [24].
-모델이 낸 글은 줄마다 한 줄씩 쓴다 [25].
-모델이 부른 도구는 `mcp__mulder__`를 뗀 이름만 쓰고 `submit_finding`이면 발견사항의 심각도와 제목을 쓴다 [26][25].
-그 밖에 도구 인자와 결과는 이 파일에 남지 않는다 [26].
-모델별 입력·출력 토큰 합계는 따로 `<case_id>.model_usage.json`에 쓴다 [27].
+모델이 낸 글은 줄마다 한 줄씩 쓰되 JSON 객체 하나로 된 긴 글은 요약 한 줄로 바꿔 쓴다 [25][26].
+앞뒤 공백을 뺀 글이 `{`로 시작해 `}`로 끝나고 100자를 넘는 글이 그 대상이다 [26].
+요약은 JSON에 `tasks`가 있으면 작업 수와 앞 5개 작업의 도구 이름이고 `results`가 있으면 성공한 수와 실패한 수다 [26].
+둘 다 없거나 JSON으로 읽지 못하면 `[JSON output]`만 쓴다 [26].
+모델이 부른 도구는 `mcp__mulder__`를 뗀 이름만 쓰고 `submit_finding`이면 발견사항의 심각도와 제목을 쓴다 [27][25].
+그 밖에 도구 인자와 결과는 이 파일에 남지 않는다 [27].
+모델별 입력·출력 토큰 합계는 따로 `<case_id>.model_usage.json`에 쓴다 [28].
 
 MCP를 거치지 않고 부른 도구 함수의 항목은 서버 기록에 남는다.
 
 다른 MCP 클라이언트로 서버에 붙으면 이 기록은 남지 않는다.
 MCP 도구 이름을 남기는 기록이 이 상세의 근거이며 함께 담기는 모델 대화와 토큰 합계는 근거가 아니다.
 
-**한계.** 오케스트레이터가 `execute_utility`로 여는 보조 모델 세션은 MCP 도구 호출을 `orchestrator.log`에 쓰지 않는다 [28].
-이 세션은 모델에게 `open_case`와 `wait_all`을 부르게 해 추출 배치가 끝나기를 기다린다 [29].
-보조 세션의 토큰 수는 `<case_id>.model_usage.json`의 모델별 합계에 더해진다 [28][27].
+**한계.** 오케스트레이터가 `execute_utility`로 여는 보조 모델 세션은 MCP 도구 호출을 `orchestrator.log`에 쓰지 않는다 [29].
+이 세션은 모델에게 `open_case`와 `wait_all`을 부르게 해 추출 배치가 끝나기를 기다린다 [30].
+보조 세션의 토큰 수는 `<case_id>.model_usage.json`의 모델별 합계에 더해진다 [29][28].
 
 ### 근거
 
@@ -636,7 +639,44 @@ def run_subprocess(
 
 [`src/mulder/orchestrator/display.py:295-307`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/display.py#L295-L307)
 
-[26] 모델의 도구 호출은 이름만, `submit_finding`은 심각도와 제목을 넘긴다.
+[26] JSON 객체 하나로 된 100자 초과 글은 `tasks`·`results` 요약이나 `[JSON output]` 한 줄만 대시보드 기록 함수에 넘긴다.
+
+```python
+                    if stripped.startswith("{") and stripped.endswith("}") and len(stripped) > 100:
+                        try:
+                            parsed = json.loads(stripped)
+                            if "tasks" in parsed:
+                                task_names = [
+                                    t.get("tool", "?") if isinstance(t, dict) else "?"
+                                    for t in parsed["tasks"][:5]
+                                ]
+                                summary = ", ".join(task_names)
+                                extra = (
+                                    f" +{len(parsed['tasks']) - 5} more"
+                                    if len(parsed["tasks"]) > 5
+                                    else ""
+                                )
+                                self._dashboard.log_tool(
+                                    f"{pfx}Plan: {len(parsed['tasks'])} tasks ({summary}{extra})"
+                                )
+                            elif "results" in parsed:
+                                results = parsed["results"]
+                                _ok = ("ok", "success")
+                                ok_count = sum(1 for r in results if r.get("status") in _ok)
+                                fail_count = len(results) - ok_count
+                                status = f"{ok_count}/{len(results)} ok"
+                                if fail_count:
+                                    status += f", {fail_count} failed"
+                                self._dashboard.log_tool(f"{pfx}Results: {status}")
+                            else:
+                                self._dashboard.log(f"{pfx}[JSON output]")
+                        except (json.JSONDecodeError, TypeError):
+                            self._dashboard.log(f"{pfx}[JSON output]")
+```
+
+[`src/mulder/orchestrator/session.py:773-802`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/session.py#L773-L802)
+
+[27] 모델의 도구 호출은 이름만, `submit_finding`은 심각도와 제목을 넘긴다.
 
 ```python
             elif isinstance(block, ToolUseBlock):
@@ -672,7 +712,7 @@ def run_subprocess(
 
 [`src/mulder/orchestrator/display.py:328-338`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/display.py#L328-L338)
 
-[27] 모델별 토큰 합계를 사건 ID가 붙은 파일에 쓴다.
+[28] 모델별 토큰 합계를 사건 ID가 붙은 파일에 쓴다.
 
 ```python
     def _write_model_usage(self) -> None:
@@ -700,7 +740,7 @@ def run_subprocess(
 
 [`src/mulder/orchestrator/runner.py:931-951`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/runner.py#L931-L951)
 
-[28] 보조 세션은 모델의 글을 모아 JSON만 꺼내고 로거에는 실패 경고만 쓴다: [`src/mulder/orchestrator/session.py:980-1073`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/session.py#L980-L1073).
+[29] 보조 세션은 모델의 글을 모아 JSON만 꺼내고 로거에는 실패 경고만 쓴다: [`src/mulder/orchestrator/session.py:980-1073`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/session.py#L980-L1073).
 
 ```python
         collected_text: list[str] = []
@@ -729,7 +769,7 @@ def run_subprocess(
 
 [`src/mulder/orchestrator/session.py:1013-1034`](https://github.com/calebevans/mulder/blob/3164843baf74c7fe69e7121dbd6150f8f77ce660/src/mulder/orchestrator/session.py#L1013-L1034)
 
-[29] 보조 세션은 추출 배치를 기다릴 때 연다.
+[30] 보조 세션은 추출 배치를 기다릴 때 연다.
 
 ```python
         ids_json = json.dumps(ids_list)
