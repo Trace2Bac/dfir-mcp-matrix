@@ -1,0 +1,165 @@
+---
+cell: P04
+details:
+- id: not_implemented
+---
+
+# P04 조사 단위 관리
+
+### 미구현
+
+**판단.** 서버에는 사건이나 세션처럼 조사를 묶는 단위가 없다.
+증거 폴더는 모듈을 불러올 때 환경변수 `DFIR_EVIDENCE_ROOT`에서 한 번 읽어 `EVIDENCE_ROOT`에 두고 값이 없으면 `/mnt/evidence`를 쓴다 [1].
+불러온 뒤 같은 프로세스에서 `DFIR_EVIDENCE_ROOT`를 바꿔도 도구는 처음 읽은 폴더를 썼다 [2].
+도구 73개 가운데 입력 schema에 사건이나 세션을 가리키는 인자를 둔 도구는 없다 [3].
+`correlate_events`가 받는 `hypothesis_id`는 응답에 그대로 되돌려 주는 값이고 서버는 이 값을 다른 호출과 잇지 않는다 [4].
+
+서버 코드가 위치를 정해 남기는 파일은 Plaso 저장 파일 하나이고 그 위치는 증거 폴더와 따로 정하는 `DFIR_DERIVED_ROOT` 아래다 [5].
+`DFIR_DERIVED_ROOT`가 없으면 시스템 임시 폴더 아래 `agentic-dfir-derived`를 쓴다 [5].
+그 아래 경로는 모델이 `output_storage_path`로 정하고 서버는 그 이름에 사건을 나타내는 값을 넣지 않는다 [6].
+증거, 파생물, 호출 기록을 한 폴더 아래에 두는 배치는 서버 코드에 없다.
+
+같은 저장소의 사용자 CLI와 클라이언트는 실행 단위로 폴더를 나눈다.
+`analyze.py`는 사례마다 `DFIR_EVIDENCE_ROOT`를 그 사례의 `evidence_root` 폴더로 바꾸고 출력을 `out/<tier>/<case-id>/<시각>/`에 둔다 [7].
+`--evidence`로 받은 폴더는 `--case-id`가 없으면 그 폴더의 부모 폴더 이름을 사례 이름으로 쓴다 [8].
+`dfir_agent`의 `--case`는 실행 이름이다 [9].
+결정적 모드는 이 값을 `AuditLogger`의 `run_id`로 넘기지만 기록 항목에는 `run_id` 필드가 없어 `audit.jsonl`에 남지 않는다 [9][10].
+live 모드는 이 값을 `live_summary.json`의 `case`에 적는다 [11].
+이 나눔은 클라이언트와 사용자 CLI가 하므로 서버를 다른 MCP 클라이언트로 부르면 적용되지 않는다.
+
+### 근거
+
+[1] 증거 폴더는 모듈을 불러올 때 한 번 정한다.
+
+```python
+EVIDENCE_ROOT = Path(os.environ.get("DFIR_EVIDENCE_ROOT", "/mnt/evidence"))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:60-60`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L60-L60)
+
+[2] (실행 확인) `DFIR_EVIDENCE_ROOT`를 작업 폴더로 두고 `dfir_mcp`를 불러온 뒤 같은 프로세스에서 이 환경변수를 `/nonexistent`로 바꾸고 `parse_bash_history`를 부르자 `EVIDENCE_ROOT`는 처음 폴더 그대로였고 도구는 그 폴더의 파일을 읽었다.
+
+[3] (실행 확인) 같은 프로세스의 `list_tools()`는 73개를 돌려주었다.
+입력 schema의 인자 이름에서 `case`·`session`·`investigation`·`hypothesis`를 찾자 `correlate_events`의 `hypothesis_id` 하나만 나왔다.
+
+[4] `correlate_events`는 `hypothesis_id`를 응답에 그대로 싣는다.
+
+```python
+    return {
+        "hypothesis_id": hypothesis_id,
+        "usb_event_count": len(usb_events),
+        "logon_event_count": len(logon_events),
+        "contradictions": flags,
+        "clean_correlations": max(
+            0, len(usb_events) * len(logon_events) - len(flags)),
+    }
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:147-154`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L147-L154)
+
+[5] Plaso 저장 파일의 허용 폴더다.
+
+```python
+def _derived_root() -> Path:
+    root = os.environ.get(DERIVED_ROOT_ENV)
+    if root:
+        return Path(root).expanduser().resolve()
+    return (Path(tempfile.gettempdir()) / "agentic-dfir-derived").resolve()
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:54-58`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L54-L58)
+
+[6] 저장 파일의 경로는 모델이 준 상대 경로를 그 폴더에 붙여 만든다.
+
+```python
+    root = _derived_root()
+    raw = Path(path_str).expanduser()
+    if raw.is_absolute():
+        candidate = raw.resolve()
+    else:
+        norm = path_str.replace("\\", "/")
+        parts = [p for p in norm.split("/") if p]
+        if not parts or any(p in (".", "..") for p in parts):
+            raise PathTraversalAttempt(f"invalid derived path: {path_str!r}")
+        candidate = (root / Path(*parts)).resolve()
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:73-82`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L73-L82)
+
+[7] `analyze.py`는 사례마다 증거 폴더 환경변수와 출력 폴더를 정한다.
+
+```python
+    # Wire the agent to this case's own evidence_root (once per case).
+    os.environ["DFIR_EVIDENCE_ROOT"] = str(case.evidence_root)
+```
+
+[`analyze.py:290-291`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L290-L291)
+
+```python
+    def _one_run() -> "tuple[Path, int]":
+        out_dir = REPO / "out" / case.tier / case.case_id / _timestamp()
+        # Housekeeping: rotate old runs for this case before adding a new one.
+        _rotate_out_dirs(out_dir.parent, keep=10)
+        out_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`analyze.py:315-319`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L315-L319)
+
+[8] `--evidence` 실행의 사례 이름이다.
+
+```python
+        evidence_root = Path(args.evidence).expanduser().resolve()
+        case_id = args.case_id or evidence_root.parent.name or "investigation"
+        targets = [Case(
+            tier="custom",
+            case_id=case_id,
+            ref=f"custom/{case_id}",
+            path=evidence_root.parent,
+            truth_path=evidence_root.parent / "truth.json",  # optional, unused
+            evidence_root=evidence_root,
+        )]
+```
+
+[`analyze.py:468-477`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L468-L477)
+
+[9] 결정적 모드는 `--case`를 `run_id`로 넘긴다.
+
+```python
+    audit = AuditLogger(audit_path, run_id=args.case)
+    progress = ProgressTracker(progress_path)
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:349-350`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L349-L350)
+
+[10] 기록 항목의 필드에는 `run_id`가 없다.
+
+```python
+@dataclass
+class AuditEntry:
+    ts: str
+    iteration: int
+    tool_name: str
+    inputs: dict
+    output_digest: str              # SHA-256 of full tool output (not the output itself)
+    token_count_in: int
+    token_count_out: int
+    finding_ids: list = field(default_factory=list)
+    audit_id: str = ""              # 8-char random hex; filled in by logger
+    prev_hash: str = GENESIS_PREV_HASH
+    entry_hash: str = ""            # SHA-256 of (prev_hash + canonical body); filled in by logger
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:32-44`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L32-L44)
+
+[11] live 모드의 요약 파일이다.
+
+```python
+    (state.out_dir / "live_summary.json").write_text(json.dumps({
+        "case": case,
+        "mode": "real-claude" if use_real else "dry-run",
+        "iterations": state.iteration,
+        "tool_call_count": len(state.tool_call_log),
+        "findings": state.findings,
+```
+
+[`dfir_agent/src/dfir_agent/live.py:711-716`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L711-L716)

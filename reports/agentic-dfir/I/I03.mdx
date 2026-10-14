@@ -1,0 +1,160 @@
+---
+cell: I03
+details:
+- id: not_applicable
+---
+
+# I03 외부 전송 범위 구성
+
+### 비적용
+
+**판단.** 서버 코드는 외부 서비스에 연결하지 않으므로 조사 자료를 보내지 않는다 [1].
+서버 모듈은 네트워크 모듈이나 HTTP 클라이언트 라이브러리를 불러오지 않는다 [1].
+
+서버가 실행하는 분석 도구는 스스로 외부에 요청을 보낼 수 있다.
+Volatility 3 2.28.0은 Windows 커널의 심볼 표를 로컬에서 찾지 못하면 메모리 이미지에서 찾은 커널의 PDB 이름과 GUID를 넣은 주소로 Microsoft 심볼 서버에 요청한다 [2].
+서버의 Volatility 3 래퍼는 이 요청을 끄는 `--offline`을 넘기지 않는다 [3].
+
+클라이언트 `dfir_agent`의 live 모드는 시스템 프롬프트, 도구 정의, 대화 전체를 Anthropic API에 보낸다 [4].
+대화에는 서버 도구가 돌려준 결과 글이 `tool_result`로 들어간다 [5].
+`_truncate_tool_result`는 결과 글이 24,000자를 넘으면 앞 24,000자만 두고 안내문을 붙이며 그 밖에는 고치지 않는다 [5][6].
+클라이언트 코드는 보내기 전에 결과 글의 값을 빼거나 가리지 않는다 [5][6].
+사용자 CLI `analyze.py`는 증거 폴더의 파일 경로 목록을 최대 200개까지 첫 사용자 메시지에 넣는다 [7].
+결정적 모드는 외부에 아무것도 보내지 않는다 [8].
+
+### 근거
+
+[1] 서버 모듈이 불러오는 모듈이다: [`dfir_mcp/src/dfir_mcp/__init__.py:32-45`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L32-L45), [`dfir_mcp/src/dfir_mcp/server_stdio.py:15-24`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L15-L24), [`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:37-51`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L37-L51), [`dfir_corr/src/dfir_corr/__init__.py:29-34`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L29-L34).
+함수 안에서 불러오는 모듈도 `sqlite3`, `base64`, `importlib`, `plistlib`, `duckdb`, `Registry`(python-registry), `yaml`뿐이다.
+
+[2] Volatility 3 2.28.0은 이미지에서 찾은 커널의 `pdb_name`·`GUID`로 심볼 표를 찾고 없으면 심볼 서버 주소 뒤에 PDB 이름과 GUID를 붙여 요청한다: [`volatility3/framework/automagic/pdbscan.py:133-144`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/automagic/pdbscan.py#L133-L144), [`volatility3/framework/symbols/windows/pdbutil.py:109-121`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L109-L121), [`volatility3/framework/symbols/windows/pdbconv.py:944-974`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbconv.py#L944-L974).
+
+[3] Volatility 3 래퍼의 인자 배열이다.
+
+```python
+    cmd = [
+        _vol_bin(),
+        "-q",                       # quiet — suppress progress on stderr
+        "-r", "csv",                # CSV renderer
+        "-f", str(sample),
+        plugin,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    result: SubprocessResult = run_tool(cmd, timeout=timeout)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:74-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L74-L84)
+
+[4] live 모드는 시스템 프롬프트, 도구 정의, 대화를 `messages.create`에 넘긴다.
+
+```python
+        resp = _messages_create(
+            client,
+            model=model,
+            # The final turn emits the full REPORT JSON: a findings array plus
+            # timeline, attack_chain, remediation, and a MITRE tactic summary.
+            # At 4096 a rich multi-finding report was being truncated mid-JSON,
+            # which made _extract_findings fall back to [] (a present-but-
+            # unparseable report scored as zero findings). 16384 leaves ample
+            # headroom for the largest reports the agent produces here.
+            max_tokens=16384,
+            # Prompt caching: the system prompt and the
+            # tool definitions are large and IDENTICAL on every iteration of
+            # the forensic reasoning loop. Marking the last one with
+            # cache_control: ephemeral lets the API cache everything up to
+            # that point — system + tools — so subsequent iterations re-read
+            # the cache instead of re-billing those input tokens (~90%
+            # cheaper on the cached prefix, and faster). The cache key is the
+            # exact prefix bytes, so this is safe: a cache miss just falls
+            # back to a normal full-price call. We put the marker on the LAST
+            # tool so the cached prefix spans system + every tool.
+            system=[{
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            tools=_with_cache_breakpoint(anthropic_tools),
+            messages=state.messages,
+        )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:433-460`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L433-L460)
+
+[5] 도구 결과 글은 길이 상한만 적용해 `tool_result`로 대화에 들어간다.
+
+```python
+            try:
+                mcp_result = await session.call_tool(tu.name, tu.input)
+                result_text = mcp_result.content[0].text \
+                    if mcp_result.content else "{}"
+                # Hybrid-architecture guardrail: cap oversized results so a
+                # single huge dump can't blow the context window or invite
+                # the model to hallucinate over a wall of raw rows.
+                result_text = _truncate_tool_result(result_text)
+            except Exception as e:
+                result_text = json.dumps({"error": type(e).__name__,
+                                          "detail": str(e)[:300]})
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tu.id,
+                "content": result_text,
+            })
+
+        state.messages.append({"role": "user", "content": tool_results})
+```
+
+[`dfir_agent/src/dfir_agent/live.py:499-516`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L499-L516)
+
+[6] `_truncate_tool_result`는 글자 수만 본다.
+
+```python
+_MCP_RESULT_CHAR_CAP = 24_000
+```
+
+[`dfir_agent/src/dfir_agent/live.py:162-162`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L162-L162)
+
+```python
+def _truncate_tool_result(text: str, cap: int = _MCP_RESULT_CHAR_CAP) -> str:
+    """Cap an oversized tool result and append a guidance notice.
+
+    Returns the text unchanged when it's within budget. When it exceeds
+    the cap, keeps the leading `cap` characters (the start of a JSON
+    document carries the schema + first records, which is what the model
+    needs to decide how to narrow) and appends the truncation notice.
+    """
+    if len(text) <= cap:
+        return text
+    return text[:cap] + _TRUNCATION_NOTICE
+```
+
+[`dfir_agent/src/dfir_agent/live.py:174-184`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L174-L184)
+
+[7] `analyze.py`는 증거 폴더의 파일 목록을 사례 안내 글에 넣는다: [`analyze.py:220-241`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L220-L241), [`analyze.py:268-281`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L268-L281), [`analyze.py:322-329`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L322-L329).
+
+[8] 결정적 모드는 등록부의 `call_tool`을 같은 프로세스에서 부르고 결과를 해시로만 기록한다.
+
+```python
+    def _call(self, tool_name: str, inputs: dict, *,
+              output_tokens: int = 500,
+              finding_ids: list | None = None) -> tuple[dict, str]:
+        """Invoke an MCP tool AND log it. Returns (output, audit_id).
+
+        finding_ids forward-declares which findings this call will support
+        so the audit chain is queryable via `dfir-audit trace <fid>`.
+        """
+        output = call_tool(tool_name, inputs)
+        aid = self.audit.log(
+            tool_name=tool_name,
+            inputs=inputs,
+            output=output,
+            iteration=self.iteration,
+            token_count_in=len(json.dumps(inputs)) // 4,   # rough proxy
+            token_count_out=output_tokens,
+            finding_ids=finding_ids or [],
+        )
+        return output, aid
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:100-118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L100-L118)

@@ -1,0 +1,171 @@
+---
+cell: L03
+details:
+- id: L03.03
+---
+
+# L03 기록 실패 처리
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 진입점 `dfir_mcp.server`의 `_handle`이 실패한 호출에 남기는 표준 오류 항목에 적용된다 [1].
+`_handle`은 로거에 항목을 쓴 뒤 그 결과와 관계없이 JSON-RPC 오류 응답을 보낸다 [1].
+항목은 `basicConfig`가 붙인 `StreamHandler`가 서버 프로세스의 표준 오류에 쓴다 [2][3].
+서버는 이 처리기의 오류 처리를 바꾸지 않는다 [2].
+CPython 3.12.15의 `StreamHandler.emit`은 쓰기나 비우기에서 난 예외를 `handleError`로 넘긴다 [4].
+`handleError`는 `raiseExceptions`가 기본값인 참이면 `--- Logging error ---`와 예외를 `sys.stderr`에 쓰려 하고 그 쓰기에서 `OSError`가 나면 아무것도 하지 않는다 [5].
+기록을 받는 곳과 실패를 알리는 곳이 같은 표준 오류여서 표준 오류에 쓰지 못하면 실패를 알리는 글도 남지 않는다 [3][5].
+서버 표준 오류를 `/dev/full`에 연결해 실행하자 항목을 쓰는 호출 3개를 포함한 요청 6개가 모두 평소와 같은 응답을 돌려줬고 응답에 기록 실패를 알리는 내용은 없었다 [6].
+이 실행의 종료 코드는 120이었다 [6].
+CPython은 끝날 때 표준 스트림을 비우지 못하면 종료 코드를 120으로 정한다 [7].
+이 종료 코드는 모든 요청을 처리한 뒤 프로세스가 끝날 때 정해지고 응답에는 실리지 않는다 [6][7].
+
+진입점 `dfir_mcp.server_stdio`는 호출 항목을 쓰지 않는다 [8].
+
+`AuditLogger.log`는 `audit.jsonl` 쓰기에서 난 예외를 처리하지 않는다 [9].
+결정적 모드는 도구를 실행한 뒤 이 함수를 부르므로 쓰기가 실패하면 그 예외로 실행이 끝나고 `progress.jsonl`과 `report.json`을 쓰지 않는다 [10][11].
+live 모드는 `live_tool_calls.jsonl` 쓰기 예외를 처리하지 않는다 [12].
+
+### 근거
+
+[1] `_handle`은 항목을 쓴 뒤 JSON-RPC 오류를 보낸다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[2] 서버는 `basicConfig`에 표준 오류만 주고 처리기를 따로 붙이지 않는다.
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [dfir-mcp] %(levelname)s %(message)s",
+)
+_log = logging.getLogger("dfir_mcp.server")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:28-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L28-L33)
+
+[3] CPython 3.12.15의 `basicConfig`는 `stream`을 받으면 그 스트림에 쓰는 `StreamHandler`를 만든다: [`Lib/logging/__init__.py:2110-2122`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L2110-L2122), [`Lib/logging/__init__.py:1117-1135`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1117-L1135).
+
+[4] `StreamHandler.emit`은 쓰기 예외를 `handleError`로 넘긴다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1148-L1168).
+
+[5] `handleError`는 표준 오류에 실패를 쓰고 그 쓰기의 `OSError`는 호출한 쪽으로 넘기지 않는다: [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1066-L1112), [`Lib/logging/__init__.py:65`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L65).
+
+[6] (실행 확인) 표준 오류를 `/dev/full`로 연결하고 JSON-RPC 요청 6개를 `python -m dfir_mcp.server`의 표준 입력에 넣었다.
+표준 출력에는 표준 오류를 따로 받은 실행과 같은 응답 6줄이 나왔다.
+등록부에 없는 도구, 없는 인자, 증거 폴더 밖 경로로 부른 세 호출도 평소와 같은 JSON-RPC 오류 응답을 받았다.
+프로세스의 종료 코드는 120이었다.
+
+[7] CPython 3.12.15는 끝날 때 `sys.stdout`·`sys.stderr` 비우기가 실패하면 `Py_FinalizeEx`가 음수를 돌려주고 이때 종료 코드를 120으로 둔다: [`Python/pylifecycle.c:1896-1897`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Python/pylifecycle.c#L1896-L1897), [`Modules/main.c:716-720`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Modules/main.c#L716-L720).
+
+[8] `handle_call_tool`은 예외를 오류 글로 바꾸고 로그를 쓰지 않는다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[9] `AuditLogger.log`는 파일을 덧붙이기로 열어 쓰고 `fsync`하며 예외를 처리하지 않는다.
+
+```python
+            # Append atomically with O_APPEND semantics.
+            # `default=str` MUST match canonical_body() and verify()
+            # so a non-JSON-native value in inputs/finding_ids does
+            # not crash log() and does not desync the chain hash.
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(entry), sort_keys=True, default=str) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            self._prev_hash = entry.entry_hash
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:139-148`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L139-L148)
+
+[10] `_call`은 `call_tool`을 먼저 부르고 그 뒤에 `AuditLogger.log`를 부른다.
+
+```python
+    def _call(self, tool_name: str, inputs: dict, *,
+              output_tokens: int = 500,
+              finding_ids: list | None = None) -> tuple[dict, str]:
+        """Invoke an MCP tool AND log it. Returns (output, audit_id).
+
+        finding_ids forward-declares which findings this call will support
+        so the audit chain is queryable via `dfir-audit trace <fid>`.
+        """
+        output = call_tool(tool_name, inputs)
+        aid = self.audit.log(
+            tool_name=tool_name,
+            inputs=inputs,
+            output=output,
+            iteration=self.iteration,
+            token_count_in=len(json.dumps(inputs)) // 4,   # rough proxy
+            token_count_out=output_tokens,
+            finding_ids=finding_ids or [],
+        )
+        return output, aid
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:100-118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L100-L118)
+
+[11] (실행 확인) 출력 폴더의 `audit.jsonl`을 `/dev/full`을 가리키는 심볼릭 링크로 두고 결정적 모드를 실행했다.
+실행은 `OSError: [Errno 28] No space left on device`로 끝났고 출력 폴더에 `progress.jsonl`과 `report.json`은 생기지 않았다.
+
+[12] `live_run`은 기록 파일을 `write_text`로 쓰고 예외를 처리하지 않는다.
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-710`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L710)

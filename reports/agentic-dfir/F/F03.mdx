@@ -1,0 +1,157 @@
+---
+cell: F03
+details:
+- id: not_applicable
+---
+
+# F03 서버 안 모델 입력 구성
+
+### 비적용
+
+**판단.** 서버는 처리 중에 모델을 부르지 않는다.
+서버 패키지 `dfir-mcp`의 필수 의존성은 DuckDB와 python-registry이고 선택 의존성은 MCP SDK뿐이다 [1].
+서버가 불러 쓰는 `dfir_corr`의 의존성은 DuckDB와 PyYAML이다 [2].
+`server_stdio.py`는 `list_tools`와 `call_tool` 처리기만 등록하고 MCP sampling으로 클라이언트 모델에게 생성을 요청하지 않는다 [3].
+`server.py`도 `initialize`, `tools/list`, `tools/call`과 알림 두 가지만 처리한다 [4].
+판정 결과의 해석 문장은 서버 코드에 정해 둔 문자열이다 [5].
+
+모델 API를 부르는 코드는 같은 저장소의 클라이언트 `dfir_agent`에만 있다 [6].
+`dfir_agent`의 live 모드는 서버를 하위 프로세스로 실행하고 Anthropic API로 모델을 불러 MCP 도구 목록을 넘긴다 [6].
+이 모델은 클라이언트 모델이고 서버의 처리 중에 불리지 않는다.
+
+### 근거
+
+[1] `dfir-mcp`의 의존성 목록.
+
+```toml
+dependencies = [
+    "duckdb>=1.5.3,<2.0",
+    "python-registry>=1.3.1",
+]
+
+[project.optional-dependencies]
+stdio = [
+    "mcp>=1.0.0,<2",
+]
+```
+
+[`dfir_mcp/pyproject.toml:10-18`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/pyproject.toml#L10-L18)
+
+[2] `dfir-corr`의 의존성 목록.
+
+```toml
+dependencies = [
+    "duckdb>=0.10.0,<2.0",
+    "PyYAML>=6.0",
+]
+```
+
+[`dfir_corr/pyproject.toml:13-16`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/pyproject.toml#L13-L16)
+
+[3] `server_stdio.py`는 도구 목록과 호출 처리기만 등록한다.
+
+```python
+# MCP Server instance. Name is what shows up to clients.
+app = Server("dfir-mcp")
+
+
+@app.list_tools()
+async def handle_list_tools() -> list[Tool]:
+    """Advertise every registered forensic function to the MCP client.
+
+    The client sees exactly the functions we register — nothing more,
+    nothing less. This is the architectural guardrail over the wire.
+    """
+    out = []
+    for spec in list_tools():
+        out.append(Tool(
+            name=spec["name"],
+            description=spec["description"],
+            inputSchema=spec["inputSchema"],
+        ))
+    return out
+
+
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:27-49`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L27-L49)
+
+[4] `server.py`가 처리하는 JSON-RPC 메서드.
+
+```python
+def _handle(req: dict) -> None:
+    method = req.get("method")
+    req_id = req.get("id")
+    params = req.get("params") or {}
+
+    if method == "initialize":
+        _send({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+            },
+        })
+    elif method == "tools/list":
+        _send({"jsonrpc": "2.0", "id": req_id,
+               "result": {"tools": list_tools()}})
+    elif method == "tools/call":
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:46-63`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L46-L63)
+
+```python
+    elif method in ("notifications/initialized", "notifications/cancelled"):
+        pass  # notifications have no id
+    else:
+        _error(req_id, -32601, f"method not found: {method}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:85-88`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L85-L88)
+
+[5] `detect_exfiltration`의 해석 문장은 정해 둔 문자열이다.
+
+```python
+    if chains:
+        signals.append({
+            "signal": "archive_then_upload_chain",
+            "count": len(chains),
+            "samples": chains[:10],
+            "severity": "critical",
+            "interpretation": "Archive created then uploaded within 1 hour — "
+                              "high-confidence exfil chain",
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1652-1660`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1652-L1660)
+
+[6] live 모드는 서버를 하위 프로세스로 실행하고 모델 API에 도구 목록을 넘긴다.
+
+```python
+    # Launch dfir-mcp as a stdio subprocess
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "dfir_mcp.server_stdio"],
+        env={**os.environ},
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:669-674`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L669-L674)
+
+```python
+        if use_real:
+            # Convert MCP tool schemas to Anthropic tool-use format
+            anthropic_tools = [{
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.inputSchema,
+            } for t in tools_resp.tools]
+            final_text = await _run_with_real_claude(
+                prompt, state, model, anthropic_tools, session,
+            )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:689-698`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L689-L698)

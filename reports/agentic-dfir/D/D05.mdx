@@ -1,0 +1,258 @@
+---
+cell: D05
+details:
+- id: D05.01
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 `sift_plaso_log2timeline`이 Plaso 저장 파일을 만드는 경로에 적용된다 [1].
+`log2timeline.py`가 0이 아닌 코드로 끝나거나 시간 제한을 넘으면 공통 실행 함수 `run_tool`이 `SiftToolFailedError`를 일으킨다 [2].
+실행 파일을 찾지 못하면 `_which`가 `SiftToolNotFoundError`를 일으킨다 [3].
+`sift_plaso_log2timeline`은 이 예외와 상위 폴더를 만들다 난 예외를 처리하지 않고 호출한 쪽으로 넘긴다 [1].
+`server_stdio`의 처리기는 예외를 `{"error": <예외 이름>, "detail": …}` 글로 바꿔 돌려준다 [4].
+처리기가 글 목록을 돌려주면 MCP Python SDK 1.29.1은 `isError`를 거짓으로 둔 결과를 만든다 [5].
+`server`는 같은 예외를 코드 `-32000`의 JSON-RPC 오류 응답으로 돌려준다 [6].
+그래서 저장이 실패한 호출에는 저장 파일 경로와 해시를 담은 응답이 나가지 않는다 [1][4][6].
+가짜 실행 파일이 1로 끝나게 하면 `server_stdio`는 `isError`가 거짓인 `{"error": "SiftToolFailedError", …}` 글을, `server`는 `-32000` 오류 응답을 돌려주었다 [7].
+
+Zimmerman 도구 래퍼와 `sift_plaso_psort`의 CSV는 호출 안에서 지우는 임시 폴더에 쓰는 중간 파일이고 보관하는 파생물이 아니다 [8].
+
+같은 저장소의 클라이언트와 사용자 CLI가 쓰는 파일은 서버 구현으로 세지 않고 사실로 적는다.
+`dfir_agent`의 결정적 모드는 `report.json`을, `analyze.py`는 `report.json`·`findings.json`·`summary.json`을 쓸 때 예외를 처리하지 않으므로 쓰기가 실패하면 명령이 오류로 끝난다 [9].
+
+**한계.** 실패한 호출이 쓰다 만 저장 파일은 지우지 않는다 [1][2].
+가짜 실행 파일이 저장 파일에 몇 글자를 쓴 뒤 1로 끝나거나 시간 제한을 넘긴 경우 모두 그 파일이 `DFIR_DERIVED_ROOT` 아래에 남았다 [7].
+그 경로로 다시 `sift_plaso_log2timeline`을 부르면 이미 있는 파일이라 거부된다 [1].
+`sift_plaso_psort`는 저장 파일이 끝까지 만들어졌는지 보지 않고 `psort.py`에 넘긴다 [10].
+`log2timeline.py`가 0으로 끝났는데 저장 파일이 없으면 서버는 오류 없이 `storage_sha256`이 `null`인 응답을 돌려준다 [2][11].
+이 응답의 `output_storage_path`는 없는 파일을 가리킨다 [11].
+
+### 근거
+
+[1] `sift_plaso_log2timeline`은 상위 폴더를 만들고 `run_tool`을 부르며 예외를 처리하지 않는다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L156)
+
+[2] `run_tool`은 시간 제한과 0이 아닌 종료 코드를 `SiftToolFailedError`로 바꾸고 출력 파일이 없으면 해시를 넣지 않는다.
+
+```python
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SiftToolFailedError(
+            f"SIFT tool timed out after {timeout}s: {cmd[0]}"
+        ) from e
+    except FileNotFoundError as e:
+        raise SiftToolNotFoundError(f"binary not found: {cmd[0]}") from e
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    output_files: dict[str, str] = {}
+    if capture_files:
+        for f in capture_files:
+            p = Path(f)
+            if p.is_file():
+                output_files[str(p)] = _sha256(p)
+
+    if proc.returncode != 0:
+        raise SiftToolFailedError(
+            f"{cmd[0]} exited with code {proc.returncode}: "
+            f"{proc.stderr[:200] if proc.stderr else '(no stderr)'}"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:199-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L199-L228)
+
+[3] 실행 파일을 찾지 못하면 `SiftToolNotFoundError`를 일으킨다.
+
+```python
+    found = shutil.which(binary)
+    if found:
+        return found
+    staged = _search_repo_bins(binary)
+    if staged:
+        return staged
+    raise SiftToolNotFoundError(
+        f"SIFT tool {binary!r} not found on PATH or in the installer-staged "
+        f"bin/ dirs. Set {env_var or 'a tool-specific env var'} to its "
+        f"absolute path, or run scripts/install.sh to stage it."
+    )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:152-162`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L152-L162)
+
+[4] `server_stdio`의 처리기는 예외를 오류 글로 바꿔 돌려준다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[5] MCP Python SDK 1.29.1의 저수준 `Server`는 처리기가 돌려준 글 목록을 `isError=False`인 결과로 만든다: [`src/mcp/server/lowlevel/server.py:541-583`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L541-L583).
+
+[6] `server`는 처리하지 못한 예외를 JSON-RPC 오류로 돌려준다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[7] (실행 확인) `DFIR_LOG2TIMELINE_BIN`에 `--storage_file` 경로에 글자를 쓰고 1로 끝나는 셸 스크립트와 글자를 쓰고 5초 기다리는 셸 스크립트를 주고 같은 프로세스 호출, MCP SDK 클라이언트 호출, 표준 입력 JSON-RPC 호출로 응답 모양과 호출 뒤 남은 파일을 확인했다.
+
+[8] 임시 폴더는 호출이 끝나면 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[9] 클라이언트와 사용자 CLI는 보고 파일을 예외 처리 없이 쓴다.
+
+```python
+    report = analyst.run()
+
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+    ok, msg = AuditLogger.verify(audit_path)
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:353-356`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L353-L356)
+
+```python
+    live_summary = out_dir / "live_summary.json"
+    findings, usage, iters = [], {}, None
+    if live_summary.is_file():
+        data = json.loads(live_summary.read_text())
+        findings = data.get("findings", [])
+        usage = data.get("usage", {})
+        iters = data.get("iterations")
+        (out_dir / "report.json").write_text(json.dumps(data, indent=2))
+    (out_dir / "findings.json").write_text(json.dumps(findings, indent=2))
+    import getpass as _gp
+    import platform as _pl
+    import socket as _sk
+    try:
+        _user = _gp.getuser()
+    except Exception:
+        _user = os.environ.get("USER", "?")
+    (out_dir / "summary.json").write_text(json.dumps({
+```
+
+[`analyze.py:361-377`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L361-L377)
+
+[10] `sift_plaso_psort`는 저장 파일이 있는지만 보고 해시한 뒤 `psort.py`를 실행한다.
+
+```python
+def _resolve_storage_input(storage_path: str) -> Path:
+    try:
+        return safe_evidence_input(storage_path)
+    except PathTraversalAttempt:
+        return _safe_derived_path(storage_path, must_exist=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:95-99`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L95-L99)
+
+```python
+    storage = _resolve_storage_input(storage_path)
+    storage_sha = _sha256(storage)
+
+    with _tempdir(prefix="dfir-psort-") as workdir:
+        out_file = workdir / f"timeline.{output_format}"
+        cmd = [
+            _psort_bin(),
+            "-o", output_format,
+            "-w", str(out_file),
+            str(storage),
+        ]
+        if filter_expression:
+            cmd.append(filter_expression)
+
+        result = run_tool(cmd, timeout=PSORT_TIMEOUT_SECONDS,
+                          capture_files=[out_file])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:205-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L205-L220)
+
+[11] (실행 확인) `DFIR_LOG2TIMELINE_BIN`에 아무것도 쓰지 않고 0으로 끝나는 셸 스크립트를 주자 `storage_sha256`이 `null`이고 `output_storage_path`가 없는 파일을 가리키는 응답이 오류 없이 돌아왔다.

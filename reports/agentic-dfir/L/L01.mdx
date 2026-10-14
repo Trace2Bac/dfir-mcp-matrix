@@ -1,0 +1,555 @@
+---
+cell: L01
+details:
+- id: L01.01
+- id: L01.04
+---
+
+# L01 기록 방식
+
+### L01.01 공통 요청 처리 단계에서 기록
+
+**구현.** 이 방식은 MCP SDK 없이 표준 입력의 JSON-RPC 줄을 직접 처리하는 진입점 `dfir_mcp.server`의 요청 처리 함수 `_handle`에 적용된다 [1].
+`_handle`은 `tools/call` 요청마다 등록부의 `call_tool`을 부르고 예외가 올라오면 로거 `dfir_mcp.server`에 항목 하나를 쓴다 [1].
+등록부에 없는 도구 이름이면 `call_tool`이 올린 `KeyError`를 받아 `INFO` 수준으로 `tool not found:`와 예외 메시지를 쓴다 [1].
+이 예외 메시지에는 요청한 도구 이름이 들어 있다 [2].
+그 밖의 예외는 `ERROR` 수준으로 `tool execution failed:`와 예외 종류, 예외 메시지를 쓰고 예외 추적 정보를 붙인다 [1].
+이 항목은 실패한 호출에만 남고 성공한 호출에는 남지 않는다 [1].
+서버는 모듈을 불러올 때 `logging.basicConfig`로 루트 로거를 `INFO` 수준과 표준 오류 출력으로 설정한다 [3].
+그래서 항목은 파일이 아니라 서버 프로세스의 표준 오류로 나가고 그 출력을 어디에 남길지는 서버를 실행한 쪽이 정한다 [3].
+JSON-RPC 요청 6개를 넣어 이 진입점을 실행하자 등록부에 없는 이름을 부른 호출, 없는 인자를 넣은 호출, 증거 폴더 밖 경로를 준 호출의 항목 3개가 표준 오류에 남았다 [4].
+세 항목에서 도구 이름은 예외 메시지(`'no_such_tool'`, `get_amcache: unexpected argument 'bogus'`)나 예외 추적 정보의 함수 이름(`in get_amcache`)으로 보였다 [4].
+
+MCP SDK의 저수준 `Server`를 쓰는 진입점 `dfir_mcp.server_stdio`에는 이 방식이 없다 [5].
+이 진입점의 `handle_call_tool`은 모든 예외를 오류 JSON 글로 바꿔 돌려주고 로그를 쓰지 않는다 [5].
+이 진입점은 로깅 처리기를 설정하지 않는다 [5].
+MCP Python SDK 1.29.1은 요청마다 요청 종류를 `INFO`로 쓰고 목록에 없는 도구 이름은 `WARNING`으로 쓴다 [6].
+처리기가 없는 로거의 항목은 CPython의 `lastResort` 처리기가 받아 `WARNING` 이상만 표준 오류에 쓴다 [7].
+SDK 클라이언트로 이 진입점에 같은 종류의 호출 5개를 보내자 표준 오류에는 `Tool 'no_such_tool' not listed, no validation will be performed` 한 줄만 남았다 [8].
+클라이언트 `dfir_agent`의 live 모드와 문서가 안내하는 `claude mcp add` 등록은 이 진입점을 실행한다 [9].
+
+외부 도구를 실행하는 공통 함수 `run_tool`은 항목을 쓰지 않고 실행 결과와 출력 파일 해시만 돌려준다 [10].
+이 함수의 설명 문구는 시간 제한과 함께 호출 기록(`audit logging`)을 한다고 적는다 [10].
+
+**한계.** `call_tool`이 예외 없이 오류 결과를 돌려주는 호출은 `dfir_mcp.server`에서도 항목을 남기지 않는다 [1].
+없는 파일 경로로 부른 `get_amcache`는 `file_not_found` 오류 결과를 돌려줬고 표준 오류에 항목이 남지 않았다 [4].
+
+### L01.04 클라이언트의 MCP 호출 기록
+
+**구현.** 이 방식은 같은 저장소의 클라이언트 `dfir_agent`로 조사할 때만 적용된다 [11].
+다른 MCP 클라이언트로 서버에 붙으면 이 기록은 남지 않는다.
+`dfir_agent`는 결정적 모드와 live 모드에서 서로 다른 파일에 기록한다 [11].
+
+결정적 모드(`--mode deterministic`, 기본값)는 MCP 전송 없이 등록부의 `call_tool`을 같은 프로세스에서 부른다 [12].
+부르는 도구는 코드에 정해 둔 `get_amcache` 1번과 `analyze_usb_history` 1~2번이다 [13].
+`DeterministicAnalyst._call`은 `call_tool`의 결과를 받은 뒤 `AuditLogger.log`로 `--out` 폴더의 `audit.jsonl`에 항목 하나를 덧붙인다 [12][11].
+항목에는 시각 `ts`, 반복 번호 `iteration`, 도구 이름 `tool_name`, 인자 `inputs`, 출력 해시 `output_digest`, 토큰 수, 발견사항 ID `finding_ids`, 항목 ID `audit_id`, 앞 항목 해시 `prev_hash`, 이 항목의 해시 `entry_hash`가 들어간다 [14].
+`inputs`는 `call_tool`에 넘긴 인자 `dict`를 그대로 담는다 [12].
+`output_digest`는 도구가 돌려준 `dict`를 키 정렬 JSON으로 바꾼 바이트의 SHA-256이고 출력 자체는 남지 않는다 [15].
+그래서 이 해시는 분석 도구의 원래 출력이 아니라 서버 도구가 파싱해 돌려준 결과의 해시다 [15].
+토큰 수는 인자 JSON 길이를 4로 나눈 값과 고정값 500이다 [12].
+`finding_ids`는 스크립트가 호출 전에 정해 둔 발견사항 ID다 [13].
+`AuditLogger`는 `--case` 값을 `run_id`로 받지만 항목에 쓰지 않는다 [11][16][14].
+같은 폴더로 다시 실행하면 파일 마지막 항목의 `entry_hash`를 이어 받아 같은 파일에 덧붙인다 [16].
+실행을 마치면 `AuditLogger.verify`로 연쇄를 검증하고 실패하면 종료 코드 1을 돌려준다 [11].
+결정적 모드를 실행하자 `audit.jsonl`에 항목 3개가 남았고 같은 폴더로 다시 실행하자 6개가 한 연쇄로 검증되었으며 `--case` 값은 어느 항목에도 없었다 [17].
+사용자 CLI `python -m dfir_audit`는 이 파일을 `verify`로 검증하고 `lookup`으로 `audit_id` 하나의 항목을, `trace`로 발견사항 ID를 담은 항목을, `summary`로 도구별·반복별 건수를 출력한다 [18].
+
+live 모드(`--mode live`)는 `dfir_mcp.server_stdio`를 하위 프로세스로 실행하고 MCP 세션으로 도구를 부른다 [9].
+모델이 낸 도구 호출마다 반복 번호, 도구 이름, 인자를 메모리 목록 `tool_call_log`에 넣은 뒤 `session.call_tool`을 부른다 [19].
+대화가 끝나면 `live_run`이 이 목록을 `--out` 폴더의 `live_tool_calls.jsonl`에 쓴다 [20].
+이 파일에는 결과, 오류 여부, 시각, 해시가 없다 [19][20].
+`--dry-run`이 모델 대신 부르는 정해 둔 호출 4개는 결과 글 앞 200자 `output_preview`도 남긴다 [21].
+live 모드는 `AuditLogger`를 쓰지 않는다 [20].
+`--dry-run`으로 실행하자 `live_tool_calls.jsonl`에 4줄이 남았고 `audit.jsonl`은 생기지 않았다 [22].
+사용자 CLI `analyze.py`는 `dfir_agent`를 live 모드로만 실행한다 [23].
+
+**한계.** 결정적 모드에서 `call_tool`이 예외를 올리면 `_call`은 `AuditLogger.log`를 부르지 않고 그 예외로 실행이 끝난다 [12].
+live 모드의 기록은 대화가 끝난 뒤 한 번에 쓰이므로 도중에 예외로 끝난 실행은 `live_tool_calls.jsonl`을 남기지 않는다 [20].
+이 파일은 `write_text`로 쓰여 같은 폴더에 있던 앞선 기록을 덮어쓴다 [20].
+`analyze.py`는 실행할 때마다 사례별 실행 폴더를 최근 10개만 두고 나머지를 지운다 [24].
+
+저장소 문서의 설명은 코드와 다음 점에서 다르다.
+
+- README는 모든 호출을 `dfir_audit`가 SHA-256 연쇄 JSONL 파일에 기록한다고 적지만 live 모드와 `analyze.py`의 실행은 `dfir_audit`를 쓰지 않는다 [25][20].
+- `analyze.py`의 설명은 실행 폴더에 `audit.jsonl`과 `progress.jsonl`이 생긴다고 적지만 live 모드는 두 파일을 쓰지 않는다 [23].
+- `docs/live-mode.md`는 모델의 모든 호출이 결과를 쓰기 전에 `live_tool_calls.jsonl`에 기록된다고 적지만 파일은 대화가 끝난 뒤 한 번 쓰인다 [26][20].
+- `dfir_audit/README.md`는 SIFT 어댑터 항목에 어댑터가 실행한 명령이 남는다고 적지만 항목에는 도구 이름과 인자만 있다 [27][14].
+
+### 근거
+
+[1] `_handle`은 `call_tool`이 올린 예외만 로거에 쓰고 JSON-RPC 오류를 보낸다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[2] `call_tool`은 등록부에 없는 이름이면 그 이름을 담은 `KeyError`를 올린다.
+
+```python
+def call_tool(name, arguments):
+    if name not in _REGISTRY:
+        raise KeyError(f"ToolNotFound: '{name}' is not exposed by dfir-mcp")
+    spec = _REGISTRY[name]
+    return spec.handler(**_validate_arguments(name, spec.schema, arguments))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:196-200`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L196-L200)
+
+[3] `dfir_mcp.server`는 모듈을 불러올 때 루트 로거를 `INFO` 수준의 표준 오류 출력으로 설정한다.
+
+```python
+# Server-side diagnostics go to stderr so they don't corrupt the
+# JSON-RPC stream on stdout. The MCP client still receives a clean
+# JSON-RPC error; this adds a full traceback on the server console
+# (the stdio subprocess) so an operator can see WHY a tool failed,
+# not just that it failed.
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [dfir-mcp] %(levelname)s %(message)s",
+)
+_log = logging.getLogger("dfir_mcp.server")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:23-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L23-L33)
+
+[4] (실행 확인) `DFIR_EVIDENCE_ROOT`를 시험 폴더로 두고 JSON-RPC 요청 6개(`initialize`, 성공하는 `get_amcache`, 등록부에 없는 `no_such_tool`, 없는 인자 `bogus`를 넣은 `get_amcache`, 없는 파일 경로의 `get_amcache`, `../../etc/passwd`를 준 `get_amcache`)를 `python -m dfir_mcp.server`의 표준 입력에 넣었다.
+표준 오류에는 `INFO tool not found: "ToolNotFound: 'no_such_tool' is not exposed by dfir-mcp"`, `ERROR tool execution failed: TypeError: get_amcache: unexpected argument 'bogus'`, `ERROR tool execution failed: PathTraversalAttempt: path escapes evidence root: '../../etc/passwd' -> …` 세 항목이 시각과 함께 남았다.
+두 `ERROR` 항목 뒤에는 `File ".../__init__.py", line 242, in get_amcache` 같은 줄을 담은 예외 추적 정보가 붙었다.
+성공한 호출과 `{"error": "file_not_found", …}` 결과를 돌려준 호출에는 표준 오류 항목이 없었다.
+
+[5] `dfir_mcp.server_stdio`는 로깅 모듈을 불러오지 않고 `handle_call_tool`은 예외를 오류 글로 바꾼다.
+
+```python
+from __future__ import annotations
+
+import asyncio
+import json
+
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+
+from . import call_tool, list_tools
+
+
+# MCP Server instance. Name is what shows up to clients.
+app = Server("dfir-mcp")
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:15-28`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L15-L28)
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[6] MCP Python SDK 1.29.1의 저수준 서버는 목록에 없는 도구를 `WARNING`으로, 요청 종류를 `INFO`로 쓴다: [`src/mcp/server/lowlevel/server.py:494`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L494), [`src/mcp/server/lowlevel/server.py:733`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L733).
+
+[7] CPython 3.12.15는 처리기를 찾지 못한 항목을 `WARNING` 수준의 `lastResort`에 넘기고 이 처리기는 `sys.stderr`에 쓴다: [`Lib/logging/__init__.py:1287-1305`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1287-L1305), [`Lib/logging/__init__.py:1746-1770`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1746-L1770).
+
+[8] (실행 확인) MCP Python SDK 1.29.1 클라이언트의 `stdio_client`에 `errlog` 파일을 주고 `python -m dfir_mcp.server_stdio`를 실행해 `get_amcache` 성공 호출, `no_such_tool`, 없는 인자 `bogus`, `../../etc/passwd` 경로, 필수 인자가 빠진 `get_amcache`를 불렀다.
+`errlog`에는 `Tool 'no_such_tool' not listed, no validation will be performed` 한 줄만 있었다.
+앞의 넷은 `isError`가 거짓인 결과로 돌아왔고 마지막 호출은 SDK의 입력 schema 검사가 `isError`가 참인 결과로 돌려줬다.
+
+[9] live 모드는 `dfir_mcp.server_stdio`를 하위 프로세스로 실행하고 `dfir_mcp/README.md`는 `claude mcp add`에 같은 진입점을 적는다: [`dfir_mcp/README.md:104-110`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/README.md#L104-L110).
+
+```python
+    # Launch dfir-mcp as a stdio subprocess
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "dfir_mcp.server_stdio"],
+        env={**os.environ},
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:669-674`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L669-L674)
+
+[10] `run_tool`의 설명은 호출 기록을 한다고 적지만 함수는 결과와 출력 파일 해시만 돌려준다.
+
+```python
+    """
+    Run a SIFT tool subprocess with timeout + audit logging.
+
+    Args:
+        cmd: Command list (NOT a string — no shell interpolation).
+        timeout: Hard kill after this many seconds.
+        cwd: Working directory. Defaults to None (process cwd).
+        capture_files: Output files to SHA-256 after the command runs.
+
+    Returns:
+        SubprocessResult with stdout/stderr/returncode/duration + output hashes.
+
+    Raises:
+        SiftToolFailedError: non-zero exit or timeout.
+    """
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:182-196`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L182-L196)
+
+```python
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    output_files: dict[str, str] = {}
+    if capture_files:
+        for f in capture_files:
+            p = Path(f)
+            if p.is_file():
+                output_files[str(p)] = _sha256(p)
+
+    if proc.returncode != 0:
+        raise SiftToolFailedError(
+            f"{cmd[0]} exited with code {proc.returncode}: "
+            f"{proc.stderr[:200] if proc.stderr else '(no stderr)'}"
+        )
+
+    return SubprocessResult(
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        returncode=proc.returncode,
+        duration_ms=duration_ms,
+        output_files=output_files,
+    )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:215-236`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L215-L236)
+
+[11] `main`은 live 모드를 `live_run`으로 넘기고 결정적 모드는 `--out` 폴더의 `audit.jsonl`로 `AuditLogger`를 만들어 실행 뒤 연쇄를 검증한다.
+
+```python
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == "live":
+        # Route to live controller (separate module to keep optional deps optional)
+        from .live import live_run
+        import asyncio
+        return asyncio.run(live_run(
+            case=args.case, out_dir=str(args.out), prompt=args.prompt,
+            model=args.model, max_iter=args.max_iterations, dry_run=args.dry_run,
+        ))
+
+    # Deterministic path (unchanged)
+    audit_path = args.out / "audit.jsonl"
+    progress_path = args.out / "progress.jsonl"
+    report_path = args.out / "report.json"
+
+    audit = AuditLogger(audit_path, run_id=args.case)
+    progress = ProgressTracker(progress_path)
+
+    analyst = DeterministicAnalyst(audit, progress, max_iter=args.max_iterations)
+    report = analyst.run()
+
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+    ok, msg = AuditLogger.verify(audit_path)
+    print(f"[dfir-agent] case={args.case}")
+    print(f"[dfir-agent] iterations: {report['iterations']}")
+    print(f"[dfir-agent] findings: {len(report['findings'])}")
+    print(f"[dfir-agent] audit chain: {msg}")
+    print(f"[dfir-agent] outputs in: {args.out}")
+    return 0 if ok else 1
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:333-362`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L333-L362)
+
+[12] `_call`은 `call_tool`의 결과를 받은 뒤 항목을 쓴다.
+
+```python
+    def _call(self, tool_name: str, inputs: dict, *,
+              output_tokens: int = 500,
+              finding_ids: list | None = None) -> tuple[dict, str]:
+        """Invoke an MCP tool AND log it. Returns (output, audit_id).
+
+        finding_ids forward-declares which findings this call will support
+        so the audit chain is queryable via `dfir-audit trace <fid>`.
+        """
+        output = call_tool(tool_name, inputs)
+        aid = self.audit.log(
+            tool_name=tool_name,
+            inputs=inputs,
+            output=output,
+            iteration=self.iteration,
+            token_count_in=len(json.dumps(inputs)) // 4,   # rough proxy
+            token_count_out=output_tokens,
+            finding_ids=finding_ids or [],
+        )
+        return output, aid
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:100-118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L100-L118)
+
+[13] 결정적 모드의 단계 함수는 정해 둔 도구와 인자, 발견사항 ID로 `_call`을 부른다: [`dfir_agent/src/dfir_agent/__init__.py:151-238`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L151-L238).
+
+[14] `AuditEntry`의 필드다.
+커밋된 참조 실행의 첫 항목은 [`examples/out/ref-01/audit.jsonl:1`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/examples/out/ref-01/audit.jsonl#L1)이다.
+
+```python
+@dataclass
+class AuditEntry:
+    ts: str
+    iteration: int
+    tool_name: str
+    inputs: dict
+    output_digest: str              # SHA-256 of full tool output (not the output itself)
+    token_count_in: int
+    token_count_out: int
+    finding_ids: list = field(default_factory=list)
+    audit_id: str = ""              # 8-char random hex; filled in by logger
+    prev_hash: str = GENESIS_PREV_HASH
+    entry_hash: str = ""            # SHA-256 of (prev_hash + canonical body); filled in by logger
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:32-44`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L32-L44)
+
+[15] `log`는 출력 전체를 키 정렬 JSON으로 바꿔 SHA-256을 계산한다.
+
+```python
+        # Hash the output (not the output itself — audit log must stay small)
+        output_bytes = json.dumps(output, sort_keys=True, default=str).encode()
+        output_digest = "sha256:" + hashlib.sha256(output_bytes).hexdigest()
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:119-121`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L119-L121)
+
+[16] `AuditLogger`는 `run_id`를 인스턴스에만 두고 파일이 있으면 마지막 줄의 `entry_hash`에서 연쇄를 잇는다.
+
+```python
+class AuditLogger:
+    """Append-only writer. One instance per run."""
+
+    def __init__(self, path: str | Path, run_id: str | None = None) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.run_id = run_id or secrets.token_hex(8)
+        self._prev_hash = self._load_tail_hash()
+        self._lock = threading.Lock()  # Critical section: prev_hash R / hash compute / file append / prev_hash W
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:58-66`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L58-L66)
+
+```python
+            lines = tail.splitlines()
+        if not lines:
+            return GENESIS_PREV_HASH
+        # Skip a trailing empty line if the file ends with \n
+        last = lines[-1] if lines[-1] else (lines[-2] if len(lines) > 1 else b"")
+        if not last:
+            return GENESIS_PREV_HASH
+        return json.loads(last)["entry_hash"]
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:94-101`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L94-L101)
+
+[17] (실행 확인) 저장소의 `examples/case-studies/self-evaluation/case-01/evidence_root`를 시험 폴더에 복사해 `DFIR_EVIDENCE_ROOT`로 주고 `python -m dfir_agent --case li-run --out <폴더> --mode deterministic`을 실행했다.
+`audit.jsonl`에는 `get_amcache` 1개와 `analyze_usb_history` 2개의 항목이 위 필드로 남았고 첫 항목의 `prev_hash`는 0 64개였다.
+같은 인자로 `call_tool("get_amcache", …)`를 다시 불러 계산한 SHA-256은 첫 항목의 `output_digest`와 같았다.
+`--case li-run2`로 같은 폴더에 다시 실행하자 항목이 6개가 되었고 `verify`는 `chain verified: 6 entries`를 출력했다.
+파일에서 `li-run` 문자열은 찾을 수 없었다.
+
+[18] `dfir_audit` CLI의 명령이다: [`dfir_audit/src/dfir_audit/cli.py:27-72`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/cli.py#L27-L72), [`dfir_audit/src/dfir_audit/cli.py:76-91`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/cli.py#L76-L91), [`dfir_audit/src/dfir_audit/verify.py:6-12`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/verify.py#L6-L12).
+
+[19] live 모드는 호출 전에 반복 번호, 도구 이름, 인자만 메모리 목록에 넣는다.
+
+```python
+        # Execute all tool calls via MCP session
+        tool_results = []
+        for tu in tool_use_blocks:
+            state.tool_call_log.append({
+                "iteration": state.iteration,
+                "tool": tu.name,
+                "input": tu.input,
+            })
+            try:
+                mcp_result = await session.call_tool(tu.name, tu.input)
+                result_text = mcp_result.content[0].text \
+                    if mcp_result.content else "{}"
+                # Hybrid-architecture guardrail: cap oversized results so a
+                # single huge dump can't blow the context window or invite
+                # the model to hallucinate over a wall of raw rows.
+                result_text = _truncate_tool_result(result_text)
+            except Exception as e:
+                result_text = json.dumps({"error": type(e).__name__,
+                                          "detail": str(e)[:300]})
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tu.id,
+                "content": result_text,
+            })
+
+        state.messages.append({"role": "user", "content": tool_results})
+```
+
+[`dfir_agent/src/dfir_agent/live.py:491-516`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L491-L516)
+
+[20] `live_run`은 대화가 끝난 뒤 `write_text`로 기록 파일을 쓰고 `live.py`는 `dfir_audit`를 불러오지 않는다.
+
+```python
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+from pathlib import Path
+```
+
+[`dfir_agent/src/dfir_agent/live.py:22-32`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L22-L32)
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-710`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L710)
+
+[21] `--dry-run`의 정해 둔 호출은 결과 글 앞 200자도 남긴다.
+
+```python
+        state.tool_call_log.append({
+            "iteration": state.iteration,
+            "tool": tool_name,
+            "input": args,
+            "output_preview": result_text[:200],
+        })
+```
+
+[`dfir_agent/src/dfir_agent/live.py:604-609`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L604-L609)
+
+[22] (실행 확인) `ANTHROPIC_API_KEY` 없이 `python -m dfir_agent --mode live --dry-run --case li-live --out <폴더>`를 실행했다.
+출력 폴더에는 `live_summary.json`, `live_tool_calls.jsonl`, `live_transcript.txt`만 생겼다.
+`live_tool_calls.jsonl`의 4줄은 `iteration`, `tool`, `input`, `output_preview`를 담았다.
+
+[23] `analyze.py`의 설명은 출력에 `audit.jsonl`·`progress.jsonl`을 적고 실행 함수는 `--mode live`로 `dfir_agent`를 부른다.
+
+```python
+This is **live mode only**: it drives the real Claude reasoning loop over the
+read-only MCP forensic tools, authenticating via the ANTHROPIC_API_KEY
+environment variable. If ANTHROPIC_API_KEY is not set it fails fast, before any
+expensive work, with an actionable message.
+
+It analyses a prepared evidence_root and does not fetch or build one. For the
+public external datasets (which ship as raw disk images), let the external
+evaluator do the one-shot download + verify + adapt:
+
+    python3 -m scripts.eval.external --case external-evaluation/case-01
+
+then analyze.py reads the evidence_root it produced. Cases are discovered
+dynamically from examples/case-studies/<tier>/case-*/. Each case is
+self-contained: README.md + truth.json + evidence_root/. Output per run:
+
+    out/<tier>/<case-id>/<timestamp>/
+        findings.json  report.json  summary.json
+        audit.jsonl    progress.jsonl   (+ live_* transcripts)
+```
+
+[`analyze.py:16-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L16-L33)
+
+```python
+    def _one_run() -> "tuple[Path, int]":
+        out_dir = REPO / "out" / case.tier / case.case_id / _timestamp()
+        # Housekeeping: rotate old runs for this case before adding a new one.
+        _rotate_out_dirs(out_dir.parent, keep=10)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[analyze] out={out_dir}")
+        from dfir_agent import main as agent_main
+        rc_run = agent_main([
+            "--case", case.ref,
+            "--out", str(out_dir),
+            "--mode", "live",
+            "--model", model,
+            "--max-iterations", str(max_iter),
+            "--prompt", brief,
+        ])
+        _normalize_outputs(case, out_dir, model)
+        return out_dir, rc_run
+```
+
+[`analyze.py:315-331`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L315-L331)
+
+[24] `_rotate_out_dirs`는 실행 폴더를 최근 `keep`개만 두고 지운다.
+
+```python
+def _rotate_out_dirs(case_out_root: Path, keep: int = 10) -> None:
+    """Keep only the most recent `keep` timestamped run dirs for one case.
+
+    Every analyze run writes out/<tier>/<case-id>/<timestamp>/ with a transcript,
+    tool-call log, findings, etc. Left unchecked this grows without bound — basic
+    housekeeping says rotate it. We keep the newest `keep` runs per case (by the
+    timestamp dir name, which sorts chronologically) and delete the rest. Only
+    timestamp-shaped dirs are touched; anything else is left alone. Best-effort:
+    a cleanup failure never blocks the run.
+    """
+    try:
+        if not case_out_root.is_dir():
+            return
+        runs = sorted(
+            (p for p in case_out_root.iterdir()
+             if p.is_dir() and p.name.isdigit() is False
+             and len(p.name) == 15 and "T" in p.name),
+            key=lambda p: p.name,
+        )
+        for old in runs[:-keep] if len(runs) > keep else []:
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception:  # noqa: BLE001 — housekeeping must not break the run
+        pass
+```
+
+[`analyze.py:195-217`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L195-L217)
+
+[25] README의 설명이다: [`README.md:66`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/README.md#L66).
+
+[26] live 모드 문서의 설명이다: [`docs/live-mode.md:236-237`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/docs/live-mode.md#L236-L237).
+
+[27] `dfir_audit` 문서의 설명이다: [`dfir_audit/README.md:17-21`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/README.md#L17-L21).

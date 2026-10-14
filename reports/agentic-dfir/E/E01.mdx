@@ -1,0 +1,201 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 환경변수 `DFIR_EVIDENCE_ROOT`가 가리키는 증거 폴더 아래의 파일과 폴더를 경로 인자로 받아 읽지만 증거를 식별하는 목록이나 등록 정보를 남기지 않는다 [1][2].
+증거를 등록하는 MCP 도구는 없다 [3].
+도구는 받은 경로를 실제 경로로 변환해 증거 폴더 안에 있는지만 확인하고 그 경로가 어느 증거 항목인지는 보지 않는다 [2].
+외부 도구 래퍼는 같은 확인 뒤에 경로가 있는지를 더 본다 [4].
+
+도구 응답 대부분은 호출마다 읽은 파일의 경로와 SHA-256을 `source`나 `metadata`에 싣는다 [5].
+서버는 이 값을 저장하지 않고 다음 호출에서 다시 쓰지 않는다 [5].
+`list_scheduled_tasks`는 Tasks 폴더의 파일마다 경로, 크기, SHA-256을 돌려주지만 이 목록도 호출마다 새로 만든다 [6].
+증거 폴더 전체의 파일 목록을 돌려주는 도구는 없다 [3].
+
+서버 진입점은 호출 기록을 쓰지 않는다 [7].
+같은 저장소의 클라이언트 `dfir_agent`의 결정적 모드는 호출 기록 `audit.jsonl`에 도구 이름과 인자를 남긴다 [8].
+그 항목에는 도구 출력 대신 출력 JSON의 SHA-256 `output_digest`만 남아 응답의 증거 해시는 기록에 값으로 남지 않는다 [8].
+경로 인자가 호출 기록에 남는 것은 등록 정보가 아니다.
+
+사용자 CLI `analyze.py`는 증거 폴더 아래 파일을 200개까지 상대 경로로 나열해 모델에게 주는 첫 지시에 넣는다 [9].
+이 목록은 실행마다 새로 만들고 파일로 남기지 않으며 서버가 읽지 않는다 [9].
+`analyze.py`의 오류 안내는 수집 어댑터 `dfir_collector_adapter`로 증거 폴더를 만들라고 적지만 그 어댑터는 이 저장소에 없다 [10].
+
+### 근거
+
+[1] 증거 폴더는 환경변수로 정한다.
+
+```python
+EVIDENCE_ROOT = Path(os.environ.get("DFIR_EVIDENCE_ROOT", "/mnt/evidence"))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:60-60`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L60-L60)
+
+[2] `_safe_resolve`는 받은 경로를 실제 경로로 변환해 증거 폴더 밖이면 거부하고 변환한 경로를 돌려준다.
+
+```python
+def _safe_resolve(path_str: str) -> Path:
+    if not isinstance(path_str, str) or not path_str:
+        raise PathTraversalAttempt(f"invalid path: {path_str!r}")
+    if "\x00" in path_str:
+        raise PathTraversalAttempt("null byte in path")
+    if len(path_str) > 1024:
+        raise PathTraversalAttempt(f"path too long: {len(path_str)} chars (max 1024)")
+    root = EVIDENCE_ROOT.resolve()
+    try:
+        requested = (EVIDENCE_ROOT / path_str).resolve()
+    except OSError as e:
+        # File-name-too-long, no-such-process, etc. — treat as path attack
+        raise PathTraversalAttempt(f"path resolution failed: {e}") from e
+    try:
+        requested.relative_to(root)
+    except ValueError as e:
+        raise PathTraversalAttempt(
+            f"path escapes evidence root: {path_str!r} -> {requested}"
+        ) from e
+    return requested
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:69-88`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L69-L88)
+
+[3] (실행 확인) 같은 프로세스의 `list_tools()`가 돌려준 73개 도구의 이름과 입력 schema를 보았고 증거를 등록하거나 증거 폴더 전체의 목록을 돌려주는 도구는 없었다.
+
+[4] 외부 도구 래퍼의 경로 확인이다.
+
+```python
+def safe_evidence_input(path_str: str) -> Path:
+    """
+    Resolve an evidence path under EVIDENCE_ROOT, with read-access verification.
+
+    All SIFT adapters MUST pass user-supplied paths through this function
+    before invoking subprocess. This is the boundary that makes path
+    traversal structurally impossible.
+    """
+    p = _safe_resolve(path_str)
+    if not p.exists():
+        raise PathTraversalAttempt(f"evidence path does not exist: {path_str!r}")
+    return p
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:239-250`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L239-L250)
+
+[5] 도구 응답의 `source`는 그 호출에서 읽은 파일의 경로와 해시다(예: `get_process_tree`).
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "process_count": len(by_pid), "tree": tree, "flags": flags}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:406-407`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L406-L407)
+
+[6] `list_scheduled_tasks`는 호출마다 Tasks 폴더를 훑는다.
+
+```python
+    items = []
+    for p in sorted(tasks_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        items.append({"path": str(p.relative_to(EVIDENCE_ROOT)),
+                      "size": p.stat().st_size, "sha256": _sha256(p)})
+    return {"count": len(items), "items": items}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:571-577`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L571-L577)
+
+[7] `server_stdio`의 도구 처리기는 도구를 부르고 결과 글만 돌려준다.
+
+```python
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:49-55`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L49-L55)
+
+[8] 결정적 모드의 호출 기록 항목은 인자와 출력 해시를 담는다.
+
+```python
+        # Hash the output (not the output itself — audit log must stay small)
+        output_bytes = json.dumps(output, sort_keys=True, default=str).encode()
+        output_digest = "sha256:" + hashlib.sha256(output_bytes).hexdigest()
+
+        with self._lock:
+            entry = AuditEntry(
+                ts=time.strftime("%Y-%m-%dT%H:%M:%S.", time.gmtime()) + f"{int(time.time()*1000)%1000:03d}Z",
+                iteration=iteration,
+                tool_name=tool_name,
+                inputs=inputs,
+                output_digest=output_digest,
+                token_count_in=token_count_in,
+                token_count_out=token_count_out,
+                finding_ids=finding_ids or [],
+                audit_id=secrets.token_hex(4),
+                prev_hash=self._prev_hash,
+            )
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:119-135`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L119-L135)
+
+[9] `analyze.py`는 증거 폴더의 파일 목록을 만들어 첫 지시에 넣는다.
+
+```python
+    if not root.is_dir():
+        return "(no evidence files found)"
+    files = sorted(p.relative_to(root).as_posix()
+                   for p in root.rglob("*") if p.is_file())
+    if not files:
+        return "(no evidence files found)"
+    shown = files[:limit]
+    out = "\n".join(f"  - {f}" for f in shown)
+    if len(files) > limit:
+        out += f"\n  ... and {len(files) - limit} more"
+    return out
+```
+
+[`analyze.py:231-241`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L231-L241)
+
+```python
+    tree = _evidence_tree(case.evidence_root)
+    lead = ""
+    if user_context and user_context.strip():
+        lead = ("Initial lead from the reporting analyst (treat as a starting "
+                "hypothesis to confirm or refute, not as ground truth):\n"
+                f"  {user_context.strip()}\n\n")
+    return (lead +
+            "You are investigating a security incident on this host. The "
+            "following evidence has been collected and is available to your "
+            "tools (paths are relative to the evidence root):\n\n"
+            f"{tree}\n\n"
+            "Examine this evidence, form and cross-validate hypotheses against "
+            "multiple data sources, and report your findings with their MITRE "
+            "ATT&CK technique IDs. Report only what the evidence supports.")
+```
+
+[`analyze.py:268-281`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L268-L281)
+
+[10] 증거 폴더가 없을 때의 안내다.
+
+```python
+    if case.tier == "custom":
+        # Real investigations: an arbitrary evidence_root, no ground truth.
+        if case.has_evidence:
+            return 0
+        print(f"Error: --evidence {case.evidence_root} does not exist or is "
+              f"empty.\nProduce it with the collector adapter first, e.g.:\n"
+              f"    python3 -m dfir_collector_adapter --source zip "
+              f"--input evidence.zip --output {case.evidence_root} "
+              f"--case-id {case.case_id}", file=sys.stderr)
+        return 3
+```
+
+[`analyze.py:125-134`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L125-L134)

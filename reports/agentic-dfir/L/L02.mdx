@@ -1,0 +1,168 @@
+---
+cell: L02
+details:
+- id: L02.05
+---
+
+# L02 기록 구성
+
+### L02.05 결과 상태·실행 시점 기록
+
+**구현.** 이 방식은 진입점 `dfir_mcp.server`의 `_handle`이 실패한 호출에 남기는 표준 오류 항목에 적용된다 [1].
+항목 형식은 `basicConfig`에 준 `%(asctime)s [dfir-mcp] %(levelname)s %(message)s`이다 [2].
+그래서 항목마다 시각, 수준, 메시지가 남는다 [2].
+등록부에 없는 도구 이름은 `INFO` 수준의 `tool not found:` 항목으로 남는다 [1].
+그 밖의 예외는 `ERROR` 수준의 `tool execution failed:` 항목으로 남고 예외 종류와 메시지 뒤에 예외 추적 정보가 붙는다 [1].
+그래서 항목 하나가 그 호출이 실패했다는 결과 상태, 실패 원인, 시각을 담는다 [1][2].
+항목은 `call_tool`이 예외를 올린 뒤에 쓰이므로 실패가 확정된 뒤의 상태다 [1].
+
+항목에는 도구 이름과 인자를 담는 칸이 따로 없다 [1].
+도구 이름은 예외 메시지에 실릴 때와 예외 추적 정보의 함수 이름으로만 보인다 [3][4].
+등록부에 없는 이름과 인자 검사 오류의 예외 메시지는 도구 이름을 담는다 [3].
+인자 값은 예외 메시지에 실릴 때만 남는다 [4].
+증거 폴더 밖 경로로 부른 `get_amcache`의 항목에는 모델이 준 경로 `'../../etc/passwd'`가 남았다 [4].
+결과의 크기, 행 수, 해시와 JSON-RPC 요청 `id`는 항목에 없다 [1].
+한 호출에서 나온 여러 줄을 잇는 호출 ID도 없다 [1].
+
+진입점 `dfir_mcp.server_stdio`는 호출 항목을 쓰지 않는다 [5].
+클라이언트 `dfir_agent`가 쓰는 `audit.jsonl`과 `live_tool_calls.jsonl`은 클라이언트 기록이다 [6].
+
+**한계.** 성공한 호출과 오류 결과를 예외 없이 돌려준 호출은 항목을 남기지 않는다 [1][4].
+그래서 기록에 항목이 없다는 사실로는 호출이 성공했는지 호출이 없었는지 구별하지 못한다.
+
+### 근거
+
+[1] `_handle`은 `call_tool`이 올린 예외만 로거에 쓰고 JSON-RPC 오류를 보낸다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[2] `dfir_mcp.server`는 시각, 수준, 메시지 형식으로 루트 로거를 설정한다.
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [dfir-mcp] %(levelname)s %(message)s",
+)
+_log = logging.getLogger("dfir_mcp.server")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:28-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L28-L33)
+
+[3] `call_tool`과 인자 검사는 도구 이름을 예외 메시지에 넣는다.
+
+```python
+def call_tool(name, arguments):
+    if name not in _REGISTRY:
+        raise KeyError(f"ToolNotFound: '{name}' is not exposed by dfir-mcp")
+    spec = _REGISTRY[name]
+    return spec.handler(**_validate_arguments(name, spec.schema, arguments))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:196-200`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L196-L200)
+
+```python
+    for key in arguments:
+        if key not in properties and not schema.get("additionalProperties", False):
+            raise TypeError(f"{tool_name}: unexpected argument {key!r}")
+
+    for key in required:
+        if key not in arguments:
+            raise TypeError(f"{tool_name}: missing required argument {key!r}")
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:159-165`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L159-L165)
+
+[4] (실행 확인) JSON-RPC 요청 6개를 `python -m dfir_mcp.server`에 넣자 표준 오류에 시각이 붙은 항목 3개가 남았다.
+`ERROR tool execution failed: PathTraversalAttempt: path escapes evidence root: '../../etc/passwd' -> …` 항목의 예외 추적 정보에는 `in get_amcache` 줄이 있었다.
+성공한 `get_amcache`와 `{"error": "file_not_found", …}` 결과를 돌려준 `get_amcache`에는 항목이 없었다.
+
+[5] `handle_call_tool`은 예외를 오류 글로 바꾸고 로그를 쓰지 않는다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[6] 클라이언트의 두 기록 파일을 쓰는 곳이다.
+
+```python
+    def _call(self, tool_name: str, inputs: dict, *,
+              output_tokens: int = 500,
+              finding_ids: list | None = None) -> tuple[dict, str]:
+        """Invoke an MCP tool AND log it. Returns (output, audit_id).
+
+        finding_ids forward-declares which findings this call will support
+        so the audit chain is queryable via `dfir-audit trace <fid>`.
+        """
+        output = call_tool(tool_name, inputs)
+        aid = self.audit.log(
+            tool_name=tool_name,
+            inputs=inputs,
+            output=output,
+            iteration=self.iteration,
+            token_count_in=len(json.dumps(inputs)) // 4,   # rough proxy
+            token_count_out=output_tokens,
+            finding_ids=finding_ids or [],
+        )
+        return output, aid
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:100-118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L100-L118)
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-710`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L710)

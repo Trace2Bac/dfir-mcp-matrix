@@ -1,0 +1,356 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 값을 응답에 싣고 그 가운데 비밀 값을 가리거나 빼는 처리를 두지 않는다 [1][2].
+기준 커밋의 저장소 전체에 값을 가리는 함수나 비밀 값 필드를 빼는 코드가 없다 [3].
+
+`parse_registry_hive`는 하이브와 키를 가리지 않고 키 아래 값을 모두 싣는다 [1].
+도구 설명은 읽을 하이브의 예로 SAM을 적는다 [1].
+이진 값은 base64 문자열 `data_base64`로 그대로 싣는다 [4].
+regipy 시험 자료의 SAM 하이브에서 사용자 키 `000001F4`를 읽자 값 `F`(80바이트)와 `V`(592바이트)가 base64로 모두 실렸다 [5].
+`sift_recmd_query_key`는 RECmd가 출력한 키의 값을 표준 출력 그대로 `raw_output`에 싣는다 [6].
+
+명령 줄과 로그 줄을 싣는 도구도 값을 가리지 않는다 [2][7].
+`parse_bash_history`는 명령 줄을 그대로 `commands`에 싣는다 [2].
+이 도구는 `--password=` 같은 꼴을 `password_in_command`로 표시하지만 표시한 명령의 글도 바꾸지 않고 싣는다 [2].
+`mysql --password=S3cretPass db` 줄은 `commands`와 `suspicious` 두 곳에 비밀번호가 보이는 채로 실렸다 [5].
+`analyze_unix_auth`는 sudo 명령 전체를, `parse_linux_text_log`는 로그 줄을 240자까지, `parse_systemd_journal`은 메시지를 500자까지 싣는다 [7].
+`detect_nodejs_install_hooks`는 `package.json`의 설치 스크립트를, `scan_pth_files_for_supply_chain_iocs`는 `.pth` 파일의 앞 5줄을 싣는다 [8].
+
+`detect_credential_file_access`는 SSH 키, 클라우드 자격증명, `.env` 파일의 내용을 읽지 않고 크기와 시각만 싣는다 [9].
+`parse_bash_history`는 증거 루트 안의 어느 텍스트 파일이든 빈 줄이 아닌 줄을 명령으로 싣는다 [2].
+그래서 같은 자격증명 파일을 이 도구로 읽으면 내용이 가림 없이 실린다 [2][9].
+
+`server`는 실패한 호출만 예외 종류와 메시지를 표준 오류에 남기고 `server_stdio`는 호출 기록을 남기지 않는다 [10][11].
+두 진입점 모두 보고서를 만들지 않는다 [10][11].
+`server`의 이 항목에도 값을 가리는 처리가 없다 [10].
+같은 저장소의 클라이언트 `dfir_agent`가 결정적 모드에서 쓰는 `audit.jsonl`은 도구 인자 값과 출력의 SHA-256 `output_digest`만 남기고 출력 값은 남기지 않는다 [12].
+live 모드 `--dry-run`의 `live_tool_calls.jsonl`은 결과 글 앞 200자를 `output_preview`로 가림 없이 남긴다 [13].
+
+### 근거
+
+[1] `parse_registry_hive`의 설명과 인자, 값을 모두 싣는 경로다.
+
+```python
+@tool(
+    name="parse_registry_hive",
+    description="Read-only registry hive value extraction. Opens a registry "
+                "hive (SOFTWARE, SYSTEM, SAM, NTUSER.DAT, etc.) via the "
+                "python-registry parser and extracts either a single value "
+                "or all values under a given key. Never writes. Path "
+                "canonicalized via _safe_resolve.",
+    schema={"type": "object", "properties": {
+        "hive_path": {"type": "string",
+                      "description": "Relative path within DFIR_EVIDENCE_ROOT "
+                                     "to the hive file."},
+        "key": {"type": "string",
+                "description": "Registry key path. Both forward and "
+                               "backslash separators accepted. Leading "
+                               "backslash optional. Example: "
+                               r"'Microsoft\\Windows NT\\CurrentVersion' or "
+                               "'Microsoft/Windows NT/CurrentVersion'."},
+        "value_name": {"type": "string",
+                       "description": "Optional — specific value name to "
+                                      "extract. If omitted, all values "
+                                      "under the key are returned."},
+        "limit": {"type": "integer", "default": 100, "maximum": 1000,
+                  "description": "Max values returned when value_name is "
+                                 "omitted."},
+    }, "required": ["hive_path", "key"]},
+)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3811-3836`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3811-L3836)
+
+```python
+    # Dump all values under key (up to limit)
+    values_out = []
+    total = 0
+    for v in node.values():
+        total += 1
+        if len(values_out) < limit:
+            values_out.append(_serialize_value(v))
+
+    # Subkey enumeration (just names, no recursion — bounded surface).
+    # Materialize once: registry-hive parsers expose subkeys() as a
+    # generator, so calling it three times (as the old subkey_count
+    # expression did) walked the tree three times — once for the name
+    # list, once for the hasattr check, once for the len(list(...))
+    # fallback. Pull a single list and reuse it for both the truncated
+    # display and the total count.
+    all_subkeys = list(node.subkeys())
+    subkeys = [s.name() for s in all_subkeys[:limit]]
+
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "key": norm_key,
+            "key_last_write": node.timestamp().isoformat() if node.timestamp() else None,
+            "values_total": total,
+            "values": values_out,
+            "subkeys": subkeys,
+            "subkey_count": len(all_subkeys)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3935-3959`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3935-L3959)
+
+[2] `parse_bash_history`는 명령 줄을 그대로 모으고 의심 패턴에 맞은 명령도 그대로 싣는다: [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:256`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L256), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:289-336`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L289-L336).
+
+```python
+    ("password_in_command",  re.compile(r"--password[=\s]\S{4,}|-p\s+['\"]?\w{4,}"), "T1552.001", "Possible cleartext credentials"),
+```
+
+[`dfir_mcp/src/dfir_mcp/_v04_expansion.py:256-256`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L256-L256)
+
+[3] 기준 커밋의 `*.py` 파일을 `git grep -i -E 'redact|sanitiz|mask|scrub'`로 찾은 결과에 증거 값을 가리는 코드가 없었다.
+`mask`가 들어간 서버 코드 줄은 Windows 접근 권한 마스크와 FSEvents 열 이름이었다.
+클라이언트 `dfir_agent/src/dfir_agent/auth.py`가 화면에 Anthropic API 키의 앞뒤만 보이게 출력하는 줄이 있으나 증거 값과 관계가 없다.
+
+```python
+        _mask = (_api[:14] + "…" + _api[-4:]) if len(_api) > 22 else (_api[:6] + "…")
+        print(f"API key :  SET     ·  {_mask}")
+```
+
+[`dfir_agent/src/dfir_agent/auth.py:467-468`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/auth.py#L467-L468)
+
+[4] `_serialize_value`는 이진 값을 base64로 바꿔 싣는다.
+
+```python
+    def _serialize_value(v):
+        """Convert python-registry value to a JSON-friendly dict.
+        Binary data is base64-encoded with explicit type marker; numeric
+        types pass through; strings are kept as-is.
+        """
+        try:
+            vtype = v.value_type_str()
+        except Exception:
+            vtype = "REG_UNKNOWN"
+        try:
+            raw = v.value()
+        except Exception as e:
+            return {"name": v.name(), "type": vtype, "error": str(e)[:100]}
+        if isinstance(raw, bytes):
+            import base64
+            return {"name": v.name(), "type": vtype,
+                    "data_base64": base64.b64encode(raw).decode("ascii"),
+                    "data_size": len(raw)}
+        if isinstance(raw, (int, float, str, bool)) or raw is None:
+            return {"name": v.name(), "type": vtype, "data": raw}
+        if isinstance(raw, list):
+            return {"name": v.name(), "type": vtype,
+                    "data": [str(x) for x in raw]}
+        return {"name": v.name(), "type": vtype, "data": str(raw)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3897-3920`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3897-L3920)
+
+[5] (실행 확인) 같은 프로세스 호출로 비밀 값이 든 입력을 읽었다(`runs.md` 실행 3).
+`parse_registry_hive`에 regipy 저장소 `1293544`의 `regipy_tests/data/SAM.xz`를 푼 하이브와 키 `SAM\Domains\Account\Users\000001F4`를 주자 `values`에 `F`(`data_size` 80)와 `V`(`data_size` 592)가 `data_base64`로 실렸다.
+`parse_bash_history`에 `mysql -u root -pS3cretPass db`와 `mysql --password=S3cretPass db`가 든 기록을 주자 두 명령이 `commands`에 그대로 실렸다.
+뒤 명령은 `suspicious`에도 `category` `password_in_command`, `interpretation` `Possible cleartext credentials`, `command` `mysql --password=S3cretPass db`로 실렸다.
+
+[6] `sift_recmd_query_key`는 RECmd의 표준 출력을 그대로 싣는다.
+
+```python
+def sift_recmd_query_key(hive_path: str, key_path: str) -> dict[str, Any]:
+    sample = safe_evidence_input(hive_path)
+    sample_sha = _sha256(sample) if sample.is_file() else None
+
+    cmd = [
+        _recmd_bin(),
+        "-f", str(sample),
+        "--kn", key_path,
+        "--nl",
+    ]
+    result = run_tool(cmd, timeout=RECMD_TIMEOUT_SECONDS)
+
+    return {
+        "raw_output": result.stdout,
+        "metadata": {
+            "tool": "recmd",
+            "hive_path": hive_path,
+            "hive_sha256": sample_sha,
+            "key_path": key_path,
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:138-159`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L138-L159)
+
+[7] 명령과 로그 줄을 싣는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:2215-2224`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2215-L2224), [`dfir_mcp/src/dfir_mcp/__init__.py:2343-2347`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2343-L2347), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:210-223`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L210-L223).
+
+[8] 파일 내용을 싣는 `_v05` 도구다.
+
+```python
+        if flags:
+            try:
+                sha = _sha256(path)
+            except Exception:
+                sha = None
+            findings.append({
+                "path": str(path),
+                "size": path.stat().st_size,
+                "sha256": sha,
+                "flags": flags,
+                "first_lines": content.splitlines()[:5],
+            })
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:204-215`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L204-L215)
+
+```python
+        scripts = data.get("scripts") or {}
+        if not isinstance(scripts, dict):
+            continue
+
+        suspicious_keys = ["preinstall", "postinstall", "install",
+                           "preuninstall", "postuninstall", "prepare"]
+        hits = {k: scripts[k] for k in suspicious_keys if k in scripts}
+        if not hits:
+            continue
+
+        severity = "high" if "preinstall" in hits or "postinstall" in hits else "medium"
+        findings.append({
+            "path": str(path),
+            "package_name": data.get("name"),
+            "version": data.get("version"),
+            "hooks": hits,
+            "severity": severity,
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:338-355`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L338-L355)
+
+[9] `detect_credential_file_access`는 정해 둔 파일의 `stat` 값만 읽는다.
+
+```python
+    found = []
+    for relpath in _CREDENTIAL_FILES:
+        p = root / relpath
+        if not p.is_file():
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        found.append({
+            "path": str(p),
+            "size": st.st_size,
+            "atime": st.st_atime,
+            "mtime": st.st_mtime,
+            "ctime": st.st_ctime,
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:456-471`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L456-L471)
+
+```python
+    # Also pick up .env files (developer secrets) up to 3 levels deep.
+    dotenv_hits = []
+    try:
+        for env_path in root.glob(".env"):
+            if env_path.is_file():
+                st = env_path.stat()
+                dotenv_hits.append({
+                    "path": str(env_path),
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+    except OSError:
+        pass
+
+    return {
+        "home_root": str(root),
+        "credential_files_present": len(found),
+        "credentials": found,
+        "dotenv_files": dotenv_hits,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:473-492`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L473-L492)
+
+[10] `server`는 표준 입력의 요청을 처리해 표준 출력에 응답을 쓰고 표준 오류에 진단 기록만 남긴다.
+
+```python
+# Server-side diagnostics go to stderr so they don't corrupt the
+# JSON-RPC stream on stdout. The MCP client still receives a clean
+# JSON-RPC error; this adds a full traceback on the server console
+# (the stdio subprocess) so an operator can see WHY a tool failed,
+# not just that it failed.
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [dfir-mcp] %(levelname)s %(message)s",
+)
+_log = logging.getLogger("dfir_mcp.server")
+
+
+def _send(msg: dict) -> None:
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def _error(req_id, code, message):
+    _send({"jsonrpc": "2.0", "id": req_id,
+           "error": {"code": code, "message": message}})
+
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:23-44`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L23-L44)
+
+[11] `server_stdio`는 도구 목록과 호출만 처리한다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[12] 저장소에 커밋된 참조 실행의 클라이언트 호출 기록이다.
+
+```text
+{"audit_id": "7f311676", "entry_hash": "ea08eeb3545d901a8b7e5a0154f42ef93d492975f8e5f9cabc25d5cab31b5db0", "finding_ids": ["F-001"], "inputs": {"hive_path": "disk/Windows/AppCompat/Programs/Amcache.hve"}, "iteration": 1, "output_digest": "sha256:46a1479e21342706e2df979e3b5e0fe31544dad6ffb29684cfa0cf1cd81c1cd4", "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000", "token_count_in": 15, "token_count_out": 500, "tool_name": "get_amcache", "ts": "2026-06-14T21:02:19.713Z"}
+{"audit_id": "e4f5009a", "entry_hash": "296db93f2711ea0c6330dc9035be828c916d765872baeba23d032632a01e1d2f", "finding_ids": ["F-013"], "inputs": {"setupapi_log": "disk/Windows/INF/setupapi.dev.log", "system_hive": "disk/Windows/System32/config/SYSTEM"}, "iteration": 3, "output_digest": "sha256:560d965573a84f8f9e8b8f4c026ee11fce528556820b54adaaa8fabe507d87bf", "prev_hash": "ea08eeb3545d901a8b7e5a0154f42ef93d492975f8e5f9cabc25d5cab31b5db0", "token_count_in": 26, "token_count_out": 500, "tool_name": "analyze_usb_history", "ts": "2026-06-14T21:02:19.723Z"}
+```
+
+[`examples/out/ref-01/audit.jsonl:1-2`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/examples/out/ref-01/audit.jsonl#L1-L2)
+
+[13] dry-run의 호출 기록에 결과 글 앞부분을 남긴다.
+
+```python
+        state.tool_call_log.append({
+            "iteration": state.iteration,
+            "tool": tool_name,
+            "input": args,
+            "output_preview": result_text[:200],
+        })
+```
+
+[`dfir_agent/src/dfir_agent/live.py:604-609`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L604-L609)

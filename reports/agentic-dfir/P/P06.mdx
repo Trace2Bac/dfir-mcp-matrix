@@ -1,0 +1,237 @@
+---
+cell: P06
+details:
+- id: not_implemented
+---
+
+# P06 조사 상태 유지
+
+### 미구현
+
+**판단.** 서버는 열린 사건, 작업 목록, 불러온 자료, 캐시 같은 조사 상태를 두지 않는다.
+도구는 호출마다 받은 경로의 증거를 다시 읽어 응답을 만들고 결과를 보관하지 않는다 [1].
+`correlate_timeline`과 `dfir_corr`는 호출마다 DuckDB를 `:memory:`로 열어 표를 만들고 호출이 끝나기 전에 닫는다 [2].
+`match_sigma_rules`는 호출마다 규칙 묶음 파일을 다시 읽고 `dfir_corr`도 상관 규칙 파일을 호출마다 다시 읽는다 [3].
+외부 도구 래퍼가 만든 임시 폴더는 그 호출 안에서 지운다 [4].
+
+요청 사이에 프로세스 메모리에 남는 값은 설정과 도구 등록부다.
+증거 폴더 `EVIDENCE_ROOT`는 모듈을 불러올 때 환경변수에서 한 번 읽는다 [5].
+도구 등록부 `_REGISTRY`는 도구 이름과 설명, 입력 schema, 처리 함수를 담는다 [6].
+두 값은 조사에서 부른 도구나 받은 결과를 담지 않고 파일이나 DB에 쓰지 않는다 [5][6].
+`DFIR_DERIVED_ROOT`와 외부 도구 경로 환경변수는 호출마다 다시 읽는다 [7].
+
+`sift_plaso_log2timeline`이 쓴 Plaso 저장 파일은 프로세스가 끝나도 `DFIR_DERIVED_ROOT` 아래에 남는다 [8].
+이 파일은 도구의 출력이고 서버는 그 경로를 기억하지 않는다 [8].
+`sift_plaso_psort`는 모델이 경로를 다시 줄 때만 그 파일을 읽는다 [9].
+
+같은 저장소의 클라이언트 `dfir_agent`는 조사 진행을 클라이언트 쪽에 둔다 [10][11].
+결정적 모드는 가설과 미해결 항목을 클라이언트 프로세스 메모리에 두고 단계마다 `progress.jsonl`에 덧붙인다 [10].
+live 모드는 모델과 주고받은 메시지와 도구 호출 목록을 클라이언트 프로세스 메모리의 `LiveRunState`에 두고 실행이 끝날 때 파일로 쓴다 [11].
+클라이언트는 이 파일들을 다음 실행에서 다시 읽지 않는다 [10][11].
+
+### 근거
+
+[1] 도구는 받은 경로를 실제 경로로 바꾼 뒤 그 호출 안에서 파일을 읽는다(예: `get_process_tree`).
+
+```python
+def get_process_tree(process_csv, root_pid=None):
+    p = _safe_resolve(process_csv)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+    rows = _read_csv(p)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:345-349`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L345-L349)
+
+[2] 호출 안에서 메모리 DuckDB를 열고 닫는다: [`dfir_corr/src/dfir_corr/__init__.py:216-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L216-L228), [`dfir_corr/src/dfir_corr/__init__.py:298`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L298), [`dfir_mcp/src/dfir_mcp/__init__.py:822-847`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L822-L847).
+
+[3] 규칙 파일을 호출마다 읽는다.
+
+```python
+def match_sigma_rules(event_log_path, limit=200):
+    p = _safe_resolve(event_log_path)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+
+    rules = _load_rules()
+    if not rules:
+        return {"error": "no_rules_loaded", "pack_root": str(_pack_root())}
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:191-198`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L191-L198)
+
+```python
+    # Apply caller-supplied or default rule overlays (operator-tunable
+    # contradiction patterns).
+    rules = rules if rules is not None else load_rules().get("rules", [])
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:266-268`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L266-L268)
+
+[4] `_tempdir`는 호출마다 폴더를 만들고 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[5] 증거 폴더는 모듈을 불러올 때 정한다.
+
+```python
+EVIDENCE_ROOT = Path(os.environ.get("DFIR_EVIDENCE_ROOT", "/mnt/evidence"))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:60-60`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L60-L60)
+
+[6] 도구 등록부와 등록 함수다.
+
+```python
+@dataclass
+class ToolSpec:
+    name: str
+    description: str
+    schema: dict
+    handler: Callable[..., dict]
+
+
+_REGISTRY: dict[str, ToolSpec] = {}
+
+
+def tool(name, description, schema):
+    def wrap(fn):
+        _REGISTRY[name] = ToolSpec(name=name, description=description,
+                                   schema=schema, handler=fn)
+        return fn
+    return wrap
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:99-115`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L99-L115)
+
+[7] 파생물 폴더와 실행 파일 경로는 부를 때마다 환경변수에서 읽는다.
+
+```python
+def _derived_root() -> Path:
+    root = os.environ.get(DERIVED_ROOT_ENV)
+    if root:
+        return Path(root).expanduser().resolve()
+    return (Path(tempfile.gettempdir()) / "agentic-dfir-derived").resolve()
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:54-58`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L54-L58)
+
+```python
+    if env_var:
+        override = os.environ.get(env_var)
+        if override:
+            override_path = Path(override)
+            if override_path.is_file() and os.access(override_path, os.X_OK):
+                return str(override_path)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:133-138`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L133-L138)
+
+[8] `sift_plaso_log2timeline`은 저장 파일 경로를 응답에 싣기만 한다.
+
+```python
+    return {
+        "metadata": {
+            "tool": "plaso/log2timeline",
+            "source_path": source_path,
+            "source_sha256": _sha256(source) if source.is_file() else None,
+            "output_storage_path": str(out_path),
+            "derived_root": str(_derived_root()),
+            "storage_sha256": result.output_files.get(str(out_path)),
+            "parsers": parsers,
+            "duration_ms": result.duration_ms,
+            "stderr_tail": result.stderr[-500:],
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:158-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L158-L170)
+
+[9] `sift_plaso_psort`는 받은 `storage_path`로 저장 파일을 찾는다.
+
+```python
+def _resolve_storage_input(storage_path: str) -> Path:
+    try:
+        return safe_evidence_input(storage_path)
+    except PathTraversalAttempt:
+        return _safe_derived_path(storage_path, must_exist=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:95-99`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L95-L99)
+
+```python
+def sift_plaso_psort(
+    storage_path: str,
+    output_format: str = "l2tcsv",
+    filter_expression: str = "",
+    limit: int = 10000,
+) -> dict[str, Any]:
+    storage = _resolve_storage_input(storage_path)
+    storage_sha = _sha256(storage)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:199-206`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L199-L206)
+
+[10] 결정적 모드의 상태와 진행 기록 쓰기다.
+
+```python
+    def __init__(self, audit: AuditLogger, progress: ProgressTracker, max_iter: int) -> None:
+        self.audit = audit
+        self.progress = progress
+        self.max_iter = max_iter
+        self.iteration = 0
+        self.findings: list[Finding] = []
+        self.unresolved: list[str] = []
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:91-97`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L91-L97)
+
+```python
+class ProgressTracker:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, snap: ProgressSnapshot) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(snap), default=str, sort_keys=True) + "\n")
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:57-64`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L57-L64)
+
+[11] live 모드의 실행 상태 객체와 끝날 때 쓰는 파일이다.
+
+```python
+@dataclass
+class LiveRunState:
+    case: str
+    out_dir: Path
+    max_iterations: int = 25
+    iteration: int = 0
+    messages: list[dict] = field(default_factory=list)
+    tool_call_log: list[dict] = field(default_factory=list)
+```
+
+[`dfir_agent/src/dfir_agent/live.py:397-404`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L397-L404)
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+    (state.out_dir / "live_summary.json").write_text(json.dumps({
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-711`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L711)

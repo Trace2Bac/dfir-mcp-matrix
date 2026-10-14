@@ -1,0 +1,213 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 서버에는 앞선 작업 상태, 조사 단계, 승인, 호출자 신원, 실행 자원으로 호출을 막거나 미루는 코드가 없다.
+두 진입점은 등록부에 있는 도구 이름과 인자 검사만 확인하고 바로 처리 함수를 부른다 [1][2].
+`sift_plaso_psort`는 증거 폴더나 `DFIR_DERIVED_ROOT` 아래에 `storage_path` 파일이 있어야 실행한다 [3].
+이 검사는 인자로 받은 경로가 있는지 보는 것이고 그 파일이 앞선 `sift_plaso_log2timeline` 호출이 만든 저장 파일인지는 대조하지 않는다 [3].
+`sift_plaso_log2timeline`은 출력 경로에 파일이 이미 있으면 `FileExistsError`로 실행하지 않는다 [4].
+이 조건은 이미 있는 결과를 덮어쓰지 않는 동작이고 호출마다 받는 승인이 아니다 [4].
+도구 설명에도 선행 호출이나 승인을 요구하는 문구는 없다.
+
+같은 저장소의 클라이언트 `dfir_agent`의 결정적 모드는 모델 없이 같은 프로세스에서 코드에 정한 단계 순서대로 `call_tool`을 부르고 `max_iterations`에 이르면 남은 단계를 건너뛴다 [5].
+이 순서와 상한은 클라이언트의 진행 방식이고 서버가 호출을 거부하는 조건이 아니다 [5].
+서버에는 사용자가 낸 승인 토큰이나 승인 기록을 요청과 대조하는 코드가 없다.
+`server_stdio.py`는 SDK의 stdio 전송으로만 실행되고 `server.py`는 표준 입력의 JSON-RPC 줄을 읽으므로 원격 MCP 연결을 받지 않는다 [6][2].
+메모리, CPU, 디스크 여유 공간을 확인하는 코드는 없다.
+
+동시 실행 수를 정하는 장치도 없다.
+MCP Python SDK 1.29.1의 저수준 `Server`는 받은 메시지마다 같은 이벤트 루프의 작업으로 처리기를 시작한다 [7].
+`server_stdio.py`의 `handle_call_tool`은 `async` 함수이지만 안에서 동기 함수 `call_tool`을 바로 부른다 [1].
+그래서 외부 도구의 `subprocess.run`을 포함한 한 호출이 끝날 때까지 다른 요청은 처리되지 않는다 [1][8].
+2초 동안 기다리는 시험용 실행 파일을 Volatility 3 실행 파일로 지정하고 `sift_vol3_windows_pslist` 호출 2개를 동시에 보내자 둘째 실행이 첫째가 끝난 2.02초 뒤에 시작해 두 응답이 4.04초 뒤에 왔다 [9].
+`server.py`는 표준 입력을 한 줄씩 읽어 처리를 마친 뒤 다음 줄을 읽는다 [2].
+이는 서버가 정한 제한이 아니라 처리기가 동기 함수를 이벤트 루프에서 바로 부르는 방식에서 생기는 동작이다.
+
+### 근거
+
+[1] `server_stdio.py`의 `handle_call_tool`은 `call_tool`을 바로 부르고 결과를 글로 돌려준다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[2] `server.py`는 표준 입력을 한 줄씩 읽어 `_handle`로 처리하고 `tools/call`이면 `call_tool`을 부른다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-71`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L71)
+
+```python
+def main() -> int:
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            req = json.loads(raw)
+        except json.JSONDecodeError:
+            _error(None, -32700, "parse error")
+            continue
+        _handle(req)
+    return 0
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:91-102`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L91-L102)
+
+[3] `sift_plaso_psort`는 저장 파일 경로를 증거 폴더에서 먼저 찾고 없으면 `DFIR_DERIVED_ROOT`에서 있는지만 확인한다.
+
+```python
+def _resolve_storage_input(storage_path: str) -> Path:
+    try:
+        return safe_evidence_input(storage_path)
+    except PathTraversalAttempt:
+        return _safe_derived_path(storage_path, must_exist=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:95-99`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L95-L99)
+
+```python
+def sift_plaso_psort(
+    storage_path: str,
+    output_format: str = "l2tcsv",
+    filter_expression: str = "",
+    limit: int = 10000,
+) -> dict[str, Any]:
+    storage = _resolve_storage_input(storage_path)
+    storage_sha = _sha256(storage)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:199-206`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L199-L206)
+
+[4] `sift_plaso_log2timeline`은 출력 경로에 파일이 있으면 실행하지 않는다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-145`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L145)
+
+[5] 결정적 모드는 같은 프로세스에서 `call_tool`을 부르고 단계마다 `max_iter`를 확인한다.
+
+```python
+    def _call(self, tool_name: str, inputs: dict, *,
+              output_tokens: int = 500,
+              finding_ids: list | None = None) -> tuple[dict, str]:
+        """Invoke an MCP tool AND log it. Returns (output, audit_id).
+
+        finding_ids forward-declares which findings this call will support
+        so the audit chain is queryable via `dfir-audit trace <fid>`.
+        """
+        output = call_tool(tool_name, inputs)
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:100-108`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L100-L108)
+
+```python
+    def run(self) -> dict:
+        # Hard cap: the controller refuses to exceed max_iter even if the
+        # playbook schedules additional phases. Exit path writes a closeout
+        # report so an early exit is still analyst-readable.
+        phases = [
+            self._phase_timeline,
+            self._phase_hypothesis,
+            self._phase_validate_usb,  # triggers self-correction
+            self._phase_finalize,
+        ]
+        for phase in phases:
+            if self.iteration >= self.max_iter:
+                self._forced_exit_closeout()
+                return self._report()
+            phase()
+        return self._report()
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:121-136`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L121-L136)
+
+[6] `server_stdio.py`는 `stdio_server`로만 실행된다.
+
+```python
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(
+            read_stream,
+            write_stream,
+            app.create_initialization_options(),
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:72-78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L72-L78)
+
+[7] MCP Python SDK 1.29.1의 저수준 `Server.run`은 받은 메시지마다 `tg.start_soon`으로 `_handle_message`를 시작한다([`src/mcp/server/lowlevel/server.py:679-690`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L679-L690)).
+
+[8] 외부 도구 래퍼는 `run_tool`에서 `subprocess.run`으로 실행이 끝날 때까지 기다린다.
+
+```python
+    import time
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SiftToolFailedError(
+            f"SIFT tool timed out after {timeout}s: {cmd[0]}"
+        ) from e
+    except FileNotFoundError as e:
+        raise SiftToolNotFoundError(f"binary not found: {cmd[0]}") from e
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:197-213`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L197-L213)
+
+[9] (실행 확인) MCP SDK 클라이언트로 `server_stdio.py`를 실행하고 2초를 기다리는 시험용 실행 파일을 `DFIR_VOLATILITY3_BIN`으로 지정해 `sift_vol3_windows_pslist` 호출 2개를 `asyncio.gather`로 동시에 보내 각 실행의 시작·종료 시각과 응답 시각을 기록했다.

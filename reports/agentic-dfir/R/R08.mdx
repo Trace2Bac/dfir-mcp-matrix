@@ -1,0 +1,348 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 부속 CSV나 JSON 사건의 시각 문자열을 읽는 네이티브 도구 다수와 외부 도구 래퍼에 적용된다 [1][2][3][4].
+`get_amcache`, `parse_shimcache`의 `last_modified`, `parse_shellbags`의 `first_interacted`·`last_interacted`는 CSV의 시각 문자열을 바꾸지 않고 싣는다 [1].
+`extract_mft_timeline`은 시간 범위를 거를 때만 시각을 읽어 바꾸고 응답의 `created`·`modified`·`accessed`에는 CSV 문자열을 싣는다 [2].
+`analyze_event_logs`·`parse_unified_log`의 `timestamp`, `analyze_windows_logons`·`analyze_kerberos_events`·`detect_brute_force_rdp`의 `ts`, `detect_persistence`의 `last_write`도 원래 문자열이다 [3].
+`analyze_usb_history`는 setupapi 기록의 시각 문자열을, `parse_linux_text_log`는 정규식이 잡은 시각 문자열을 `ts`에 싣는다 [3][5].
+`parse_linux_text_log`의 접근 기록 시각은 `10/Oct/2026:13:55:36 +0900`처럼 오프셋까지 원래 꼴로 실렸다 [5].
+외부 도구 래퍼는 도구 CSV의 시각 열을 바꾸지 않고 싣는다 [4].
+`detect_python_backdoor_persistence`와 `detect_credential_file_access`는 파일 시스템의 시각을 `os.stat`이 준 epoch 초 실수로 싣는다 [6].
+
+다른 도구는 시각을 바꾼 값만 싣고 원래 값을 함께 싣지 않는다 [7][8][9][10][11].
+`parse_auditd_log`·`parse_systemd_journal`·`parse_bash_history`·`parse_linux_shell_history`는 epoch 값을, `analyze_unix_auth`는 syslog 시각을, `analyze_web_access_log`는 접근 기록 시각을 ISO 꼴로 바꾼다 [7][8].
+`parse_macos_quarantine`은 CFAbsoluteTime을, SQLite를 직접 읽는 `parse_browser_history`·`parse_knowledgec`·`analyze_downloads`는 브라우저와 KnowledgeC의 시각 정수를 바꾼다 [9][10].
+`parse_registry_hive`의 `key_last_write`, `detect_webshell`의 `mtime`, `sift_mftecmd_timestomp`의 `si_created`·`fn_created`·`si_modified`도 바꾼 값이다 [11].
+`correlate_timeline`은 받은 시각을 DuckDB `TIMESTAMP`로 넣고 질의 결과를 문자열로 바꿔 싣는다 [12].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 `parse_linux_shell_history`, `parse_macos_quarantine`, Volatility 래퍼에 적용된다 [8][9][13].
+`parse_linux_shell_history`는 epoch 값을 UTC로 바꾸어 끝에 `Z`를 붙인다 [8].
+`parse_macos_quarantine`은 CFAbsoluteTime을 UTC인 2001-01-01에 더해 `+00:00`이 붙은 ISO 꼴로 싣는다 [9].
+이 도구는 CFAbsoluteTime이 0이거나 비어 있으면 2001-01-01로 바꾸지 않고 `timestamp`를 `null`로 싣는다 [9].
+Volatility 래퍼는 플러그인을 CSV 렌더러로 실행한다 [13].
+Volatility 3 2.28.0은 FILETIME과 Unix 시각을 UTC 시간대가 붙은 `datetime`으로 바꾸고 CSV 렌더러는 `datetime`을 `%Y-%m-%d %H:%M:%S.%f %Z` 꼴로 쓰므로 시각 끝에 `UTC`가 붙는다 [14][15].
+같은 epoch 줄을 읽은 `parse_linux_shell_history`의 값은 시스템 시간대와 관계없이 `2026-03-15T13:20:00Z`였고 `parse_macos_quarantine`의 값은 `2026-03-15T00:00:00+00:00`이었다 [16].
+
+**한계.** 서버가 바꾼 다른 시각에는 시간대 표시가 없다.
+`parse_systemd_journal`·`parse_bash_history`·`detect_webshell`은 `datetime.fromtimestamp`를 시간대 없이 불러 서버 프로세스의 지역 시각으로 바꾼다 [7][17].
+같은 epoch 값이 시스템 시간대 Asia/Seoul에서는 `2026-03-15T22:20:00`, `TZ=UTC`에서는 `2026-03-15T13:20:00`으로 실렸다 [16].
+같은 파일을 읽은 `parse_linux_shell_history`의 값은 두 경우 모두 `2026-03-15T13:20:00Z`였다 [16].
+`parse_auditd_log`는 UTC로 바꾼 뒤 시간대를 떼어 `2025-11-24T16:00:00.123000` 꼴로 싣는다 [7][16].
+SQLite를 직접 읽는 세 도구의 `datetime(…, 'unixepoch')`는 UTC 시각을 `2026-03-15 00:04:00` 꼴로 시간대 없이 돌려준다 [10][16].
+`parse_registry_hive`의 `key_last_write`는 python-registry 1.3.1이 시간대 없이 돌려준 UTC 값을 `isoformat()`으로 싣는다 [11][18].
+
+원래 값의 시간대를 버리거나 가정하는 곳이 있다.
+`analyze_web_access_log`는 `10/Oct/2026:13:55:36 +0900`에서 오프셋을 떼고 `2026-10-10T13:55:36`으로 싣는다 [19][16].
+`analyze_unix_auth`는 연도가 없는 syslog 시각에 인자 `assumed_year`, 시간 범위 시작의 연도, 파일 mtime의 UTC 연도, 현재 연도 가운데 앞에서부터 있는 값을 넣는다 [20].
+응답에는 어느 연도를 넣었는지와 시간대를 가정했다는 표시가 없다 [20].
+`sift_mftecmd_timestomp`는 MFTECmd 시각의 소수 초와 `+` 뒤 오프셋을 버리고 `isoformat()`으로 싣는다 [21].
+Volatility 3 2.28.0은 FILETIME을 초 단위로 버림한 뒤 바꾸므로 Volatility 래퍼의 시각은 소수 초 자리 6개가 늘 0이다 [14].
+SQLite를 직접 읽는 세 도구는 시각을 초 단위 문자열로 바꾸므로 원래 값의 1초 미만 자리가 응답에 남지 않는다 [22].
+
+시간 범위와 파생 값에 쓰는 `_parse_ts`는 끝의 `Z`를 떼고 정해 둔 꼴만 읽으며 오프셋이 붙은 시각은 읽지 못해 `None`으로 돌려준다 [23].
+시간 범위를 거르는 도구는 `None`이 된 항목을 거르지 않고 싣는다 [24].
+`analyze_windows_logons`에 `time_window_end` `2026-03-15T12:00:00`을 주자 시간대 없는 23:30 로그온은 빠지고 `+09:00`이 붙은 23:30 로그온은 실렸다 [16].
+이 도구는 시간대 없는 시각의 시(hour)로 `is_after_hours`를 정하고 읽지 못한 시각은 거짓으로 둔다 [24].
+
+`correlate_timeline`은 오프셋이 붙은 시각을 서버 프로세스의 지역 시각으로 바꾼 값으로 다루고 응답 시각에 시간대를 붙이지 않는다 [12][16].
+`2026-03-15T10:00:00+09:00`과 `2026-03-15T01:00:30Z`를 넣자 Asia/Seoul에서는 상관이 없었고 `TZ=UTC`에서는 `ts1`이 `2026-03-15 01:00:00`인 상관 1건이 나왔다 [16].
+DuckDB 1.5.5 소스에서 이 변환 위치는 확인하지 못했다.
+
+시각 필드 이름에 시간대나 단위를 밝히지 않는 곳도 있다.
+`parse_shimcache`는 CSV의 `LastModifiedTimeUTC` 열을 `last_modified`로, `detect_persistence`는 `LastWriteTimeUTC` 열을 `last_write`로 이름을 바꿔 싣는다 [1][3].
+`detect_python_backdoor_persistence`·`detect_credential_file_access`의 `atime`·`mtime`·`ctime`은 epoch 초라는 단위를 밝히지 않는다 [6].
+
+### 근거
+
+[1] `parse_shimcache`와 `parse_shellbags`는 CSV의 시각 열을 그대로 싣는다: [`dfir_mcp/src/dfir_mcp/__init__.py:321-326`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L321-L326), [`dfir_mcp/src/dfir_mcp/__init__.py:497-505`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L497-L505), [`dfir_mcp/src/dfir_mcp/__init__.py:262-267`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L262-L267).
+
+[2] `extract_mft_timeline`은 바꾼 시각으로 거르고 원래 문자열을 싣는다.
+
+```python
+    sdt, edt = _parse_ts(start), _parse_ts(end)
+    if sdt is None or edt is None:
+        return {"error": "bad_time_format"}
+    matched = []
+    for row in _read_csv(csv_path):
+        created = _parse_ts(row.get("Created0x10") or row.get("Created") or "")
+        if created is None or created < sdt or created > edt:
+            continue
+        matched.append({
+            "entry": row.get("Entry") or row.get("EntryNumber"),
+            "path": (row.get("ParentPath", "") + "\\" + row.get("FileName", "")).strip("\\"),
+            "created": row.get("Created0x10") or row.get("Created"),
+            "modified": row.get("LastModified0x10"),
+            "accessed": row.get("LastAccess0x10"),
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:531-545`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L531-L545)
+
+[3] 사건과 레지스트리 CSV의 시각 문자열을 그대로 싣는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:727-732`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L727-L732), [`dfir_mcp/src/dfir_mcp/__init__.py:986-992`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L986-L992), [`dfir_mcp/src/dfir_mcp/__init__.py:1809-1811`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1809-L1811), [`dfir_mcp/src/dfir_mcp/__init__.py:600-608`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L600-L608), [`dfir_mcp/src/dfir_mcp/__init__.py:457-465`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L457-L465).
+
+[4] 외부 도구 래퍼는 CSV 행을 `dict`로 읽어 그대로 싣는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:87-94`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L87-L94), [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:87-93`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L87-L93), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:150-168`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L150-L168).
+
+[5] `parse_linux_text_log`는 정규식이 잡은 그룹을 그대로 기록에 넣는다.
+
+```python
+            rec = {"line": lineno, "format": fmt, **{k: v for k, v in m.groupdict().items() if v is not None}}
+            if len(records) < max_records:
+                records.append(rec)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2339-2341`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2339-L2341)
+
+[6] 두 도구는 `stat` 결과의 시각 실수를 그대로 싣는다.
+
+```python
+                for child in sorted(candidate.iterdir())[:50]:
+                    try:
+                        st = child.stat()
+                        entries.append({
+                            "path": str(child),
+                            "type": "directory" if child.is_dir() else "file",
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                        })
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:403-411`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L403-L411)
+
+```python
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        found.append({
+            "path": str(p),
+            "size": st.st_size,
+            "atime": st.st_atime,
+            "mtime": st.st_mtime,
+            "ctime": st.st_ctime,
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:461-471`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L461-L471)
+
+[7] `_v04` 도구의 epoch 변환이다: [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:83-95`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L83-L95), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:190-199`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L190-L199), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:289-310`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L289-L310).
+
+[8] `parse_linux_shell_history`는 epoch 값을 UTC로 바꿔 `Z`를 붙인다.
+
+```python
+        ts_iso = None
+        if pending_ts is not None:
+            try:
+                ts_iso = datetime.fromtimestamp(pending_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except (OSError, OverflowError, ValueError):
+                ts_iso = None
+        entry = {"index": len(entries) + 1, "line": idx, "command": line, "ts": ts_iso}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2433-2439`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2433-L2439)
+
+[9] `parse_macos_quarantine`은 CFAbsoluteTime을 UTC `datetime`으로 바꾸고 0이면 `None`으로 둔다.
+
+```python
+    for r in rows:
+        ts_cfat = r["ts_cfat"]
+        if ts_cfat is None or ts_cfat == 0.0:
+            # Null / zero CFAbsoluteTime in the LSQuarantine row means the
+            # downloader didn't record a timestamp — NOT that the event
+            # happened at the CFAT epoch (2001-01-01). Surface it as
+            # unknown rather than misdating to 2001.
+            ts_dt = None
+            ts_iso = None
+        else:
+            ts_dt = CFAT_EPOCH + timedelta(seconds=ts_cfat)
+            ts_iso = ts_dt.isoformat()
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:157-168`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L157-L168)
+
+[10] SQLite 질의가 시각 정수를 `datetime(…, 'unixepoch')`로 바꾼다: [`dfir_mcp/src/dfir_mcp/__init__.py:1065-1068`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1065-L1068), [`dfir_mcp/src/dfir_mcp/__init__.py:1271-1300`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1271-L1300), [`dfir_mcp/src/dfir_mcp/__init__.py:1394-1406`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1394-L1406).
+
+[11] 바꾼 값만 싣는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:3930-3933`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3930-L3933), [`dfir_mcp/src/dfir_mcp/__init__.py:2886-2890`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2886-L2890), [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:186-205`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L186-L205).
+
+[12] `dfir_corr`는 시각을 읽어 DuckDB에 넣고 질의 결과의 시각을 `str()`로 싣는다: [`dfir_corr/src/dfir_corr/__init__.py:190-227`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L190-L227), [`dfir_corr/src/dfir_corr/__init__.py:299-308`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L299-L308).
+
+```python
+    return {
+        "normalized_event_count": len(normalized),
+        "correlations": [
+            {"source_a": r[0], "ts_a": str(r[1]), "actor_a": r[2],
+             "target_a": r[3], "type_a": r[4],
+             "source_b": r[5], "ts_b": str(r[6]), "actor_b": r[7],
+             "target_b": r[8], "type_b": r[9],
+             "delta_seconds": int(r[10])}
+            for r in correlations[:100]
+        ],
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:299-308`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L299-L308)
+
+[13] Volatility 래퍼는 플러그인을 `-r csv`로 실행한다.
+
+```python
+    cmd = [
+        _vol_bin(),
+        "-q",                       # quiet — suppress progress on stderr
+        "-r", "csv",                # CSV renderer
+        "-f", str(sample),
+        plugin,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:74-82`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L74-L82)
+
+[14] Volatility 3 2.28.0의 `wintime_to_datetime`은 FILETIME을 초 단위로 나눈 뒤 UTC `datetime`으로 바꾸고 `unixtime_to_datetime`도 UTC를 붙인다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28), [`volatility3/framework/renderers/conversion.py:52-64`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L52-L64).
+
+[15] Volatility 3 2.28.0의 CLI 렌더러는 `datetime`을 `%Y-%m-%d %H:%M:%S.%f %Z` 꼴로 쓰고 CSV 렌더러는 이 형식표를 쓴다: [`volatility3/cli/text_renderer.py:237-248`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L237-L248), [`volatility3/cli/text_renderer.py:349-394`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L349-L394).
+
+[16] (실행 확인) 같은 입력을 시스템 시간대 Asia/Seoul과 `TZ=UTC`로 두 번 불러 시각 값을 대조했다(`runs.md` 실행 3, 4, 6).
+epoch 1773580800은 `parse_bash_history`·`parse_systemd_journal`·`detect_webshell`에서 Asia/Seoul일 때 `2026-03-15T22:20:00`, `TZ=UTC`일 때 `2026-03-15T13:20:00`이었고 `parse_linux_shell_history`에서는 두 경우 모두 `2026-03-15T13:20:00Z`였다.
+`parse_auditd_log`는 `audit(1764000000.123:1001)`을 `2025-11-24T16:00:00.123000`으로 실었다.
+`parse_browser_history`는 Chromium DB의 방문 시각을 `2026-03-15 00:04:00`으로, `parse_macos_quarantine`은 `2026-03-15T00:00:00+00:00`으로 실었다.
+`analyze_web_access_log`의 `attack_hits[0].ts`는 `2026-10-10T13:55:36`이었다.
+`analyze_windows_logons`는 `time_window_end` `2026-03-15T12:00:00`에서 `+09:00`이 붙은 bob의 로그온만 실었고 `after_hours_interactive_count`는 0이었다.
+`correlate_timeline`에 `2026-03-15T10:00:00+09:00`(disk)과 `2026-03-15T01:00:30Z`(net)를 주자 Asia/Seoul에서는 상관 0건, `TZ=UTC`에서는 `ts1` `2026-03-15 01:00:00`인 1건이었다.
+
+[17] `detect_webshell`은 mtime을 시간대 없이 `fromtimestamp`로 바꾼다.
+
+```python
+        if signals:
+            findings.append({
+                "path": str(f.relative_to(EVIDENCE_ROOT)),
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "ext": ext,
+                "signals": signals,
+                "severity": "high" if "content_match" in signals
+                                     or "eval_base64_pattern" in signals
+                                     or any(s.startswith("suspicious_filename")
+                                            for s in signals)
+                            else "medium",
+            })
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2885-2897`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2885-L2897)
+
+[18] python-registry 1.3.1(PyPI 소스 배포본, [`python-registry` 1.3.1](https://pypi.org/project/python-registry/1.3.1/))의 `Registry/RegistryParse.py`는 키의 마지막 쓰기 시각을 1601-01-01부터 센 시간대 없는 `datetime`으로 돌려준다(119~125행 `parse_windows_timestamp`, 1517~1521행 `NKRecord.timestamp`).
+
+[19] `analyze_web_access_log`는 시각 문자열의 첫 칸만 읽는다.
+
+```python
+        else:
+            ip = m.group("ip")
+            # Parse apache-style timestamp "10/Oct/2026:13:55:36 +0000"
+            ts = None
+            try:
+                ts = datetime.strptime(m.group("ts").split()[0],
+                                       "%d/%b/%Y:%H:%M:%S")
+            except ValueError:
+                pass
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2690-2698`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2690-L2698)
+
+[20] `analyze_unix_auth`는 연도를 정하는 차례가 있고 응답에 그 값을 싣지 않는다: [`dfir_mcp/src/dfir_mcp/__init__.py:2150-2194`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2150-L2194), [`dfir_mcp/src/dfir_mcp/__init__.py:2258-2271`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2258-L2271).
+
+```python
+    return {
+        "source": {"path": str(p), "sha256": _sha256(p)},
+        "ssh_accept_count": len(ssh_accepts),
+        "ssh_failure_count": len(ssh_failures),
+        "ssh_invalid_user_count": len(ssh_invalid_users),
+        "sudo_success_count": len(sudo_success),
+        "sudo_fail_count": len(sudo_fail),
+        "su_count": len(su_events),
+        "brute_force_sources": brute_force_sources,
+        "brute_force_survivors": brute_force_survivors,
+        "dangerous_sudo_commands": dangerous_sudo,
+        "ssh_accepts": ssh_accepts[:100],
+        "ssh_failures_sample": ssh_failures[:100],
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2258-2271`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2258-L2271)
+
+[21] `_parse_ts_safe`는 소수 초와 오프셋을 버린다.
+
+```python
+def _parse_ts_safe(s: str) -> datetime | None:
+    """Best-effort timestamp parse from MFTECmd CSV format."""
+    if not s or not s.strip():
+        return None
+    s = s.split(".")[0].split("+")[0].strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:109-119`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L109-L119)
+
+[22] SQLite 질의가 시각을 초 단위 문자열로 바꾼다: [`dfir_mcp/src/dfir_mcp/__init__.py:1067`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1067), [`dfir_mcp/src/dfir_mcp/__init__.py:1272`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1272), [`dfir_mcp/src/dfir_mcp/__init__.py:1283`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1283), [`dfir_mcp/src/dfir_mcp/__init__.py:1293`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1293), [`dfir_mcp/src/dfir_mcp/__init__.py:1395`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1395).
+
+[23] `_parse_ts`는 끝의 `Z`를 떼고 정해 둔 꼴만 읽는다.
+
+```python
+_TS_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S",
+    "%Y/%m/%d %H:%M:%S.%f", "%Y/%m/%d %H:%M:%S",
+    "%m/%d/%Y %I:%M:%S %p",
+)
+
+
+def _parse_ts(s):
+    if not s:
+        return None
+    s = s.strip().rstrip("Z")
+    for fmt in _TS_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:203-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L203-L220)
+
+[24] `analyze_windows_logons`는 읽지 못한 시각을 거르지 않고 읽은 시각의 시(hour)로 `is_after_hours`를 정한다.
+
+```python
+        ts = _parse_ts(ev.get("TimeCreated") or ev.get("timestamp", ""))
+        if sdt and ts and ts < sdt:
+            continue
+        if edt and ts and ts > edt:
+            continue
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1795-1799`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1795-L1799)
+
+```python
+            "is_after_hours": False,
+        }
+        if ts:
+            hr = ts.hour
+            record["is_after_hours"] = (
+                hr < business_hours_start_hour or hr >= business_hours_end_hour
+            )
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1823-1829`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1823-L1829)

@@ -1,0 +1,295 @@
+---
+cell: D01
+details:
+- id: D01.01
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 `sift_plaso_log2timeline`이 만드는 Plaso 저장 파일과 Plaso가 쓰는 로그 파일에 적용된다 [1].
+`sift_plaso_log2timeline`은 호출 인자 `output_storage_path`로 정한 경로를 `--storage_file`로 넘겨 `log2timeline.py`를 실행한다 [1].
+저장 파일은 환경변수 `DFIR_DERIVED_ROOT`가 가리키는 폴더 아래에 남고 이 값이 없으면 시스템 임시 폴더 아래 `agentic-dfir-derived` 폴더에 남는다 [2].
+파일 내용은 `log2timeline.py`가 쓴 Plaso 저장 파일 그대로이고 서버는 그 파일을 가공하지 않는다 [1].
+응답에는 저장 파일의 경로와 SHA-256을 싣는다 [1].
+`sift_plaso_psort`는 증거 폴더나 `DFIR_DERIVED_ROOT` 아래의 저장 파일을 입력으로 받아 다시 읽는다 [3].
+가짜 실행 파일로 `sift_plaso_log2timeline`을 부른 뒤에도 저장 파일은 `DFIR_DERIVED_ROOT` 아래에 남았다 [4].
+서버 코드에는 저장 파일을 지우는 경로가 없다.
+보관 기간, 용량, 대상을 정하는 설정이나 코드도 없다.
+
+Plaso 20260720의 `log2timeline.py`와 `psort.py`는 `--logfile`을 받지 않으면 현재 폴더에 `<도구 이름>-<날짜>T<시각>.log.gz` 로그 파일을 만든다 [5].
+`log2timeline.py`의 작업 프로세스는 같은 폴더에 프로세스 이름을 앞에 붙인 로그 파일을 따로 만든다 [6].
+서버는 두 도구에 `--logfile`도 작업 폴더도 주지 않으므로 이 로그 파일은 서버 프로세스의 현재 폴더에 남는다 [1][3][7].
+서버 코드에는 이 로그 파일을 지우는 경로도 없다.
+
+그 밖의 도구는 결과를 응답으로만 돌려준다.
+Zimmerman 도구를 부르는 래퍼와 `sift_plaso_psort`는 공통 함수 `_tempdir`가 호출마다 만든 임시 폴더에 도구의 CSV를 쓰게 하고 그 CSV를 읽어 응답을 만든다 [8][9][3].
+`_tempdir`는 `tempfile.mkdtemp`로 폴더를 만들고 `finally`에서 `shutil.rmtree`로 폴더째 지운다 [8].
+가짜 `MFTECmd`로 `sift_mftecmd_parse`를 부르면 CSV를 쓴 임시 폴더는 호출이 끝난 뒤 남지 않았다 [10].
+Volatility 3·YARA 래퍼와 `sift_recmd_query_key`는 파일 출력 인자 없이 도구의 표준 출력만 받는다 [11].
+Volatility 3가 사용자 홈 폴더의 캐시 폴더에 쓰는 심볼 캐시는 증거에서 나온 파생물이 아니다 [12].
+`correlate_timeline`과 `dfir_corr`의 상관 분석은 DuckDB를 `:memory:`로 열어 표를 만들고 DB 파일을 만들지 않는다 [13].
+한 호출이 도구의 원래 출력과 그 가공본을 함께 남기는 경로는 없다.
+`sift_plaso_log2timeline`은 저장 파일만 남기고 `sift_plaso_psort`가 만든 CSV는 임시 폴더와 함께 지운다 [1][3][8].
+
+같은 저장소의 클라이언트와 사용자 CLI가 쓰는 파일은 서버 구현으로 세지 않고 사실로 적는다.
+`dfir_agent`의 결정적 모드는 사용자가 `--out`으로 준 폴더에 클라이언트 기록 `audit.jsonl`, 반복마다의 상태 `progress.jsonl`, 마지막 보고 `report.json`을 쓴다 [14].
+`audit.jsonl` 항목에는 도구 출력 자체가 아니라 출력 JSON의 SHA-256 `output_digest`가 남는다 [15].
+live 모드는 같은 폴더에 `live_transcript.txt`·`live_tool_calls.jsonl`·`live_summary.json`을 쓰고 `audit.jsonl`·`progress.jsonl`은 쓰지 않는다 [16].
+`analyze.py`는 live 모드를 `out/<tier>/<case-id>/<시각>/` 폴더로 실행하고 사건마다 최근 폴더 10개만 남기고 나머지를 지운다 [17].
+`analyze.py`의 문서 주석은 그 폴더에 `audit.jsonl`·`progress.jsonl`도 생긴다고 적는다 [18].
+저장소에 커밋된 참조 실행 `examples/out/ref-01/`에는 결정적 모드가 쓴 세 파일이 있다 [19].
+
+### 근거
+
+[1] `sift_plaso_log2timeline`은 저장 파일 경로를 검사한 뒤 `--storage_file`로 넘기고 응답에 경로와 해시를 싣는다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L156)
+
+```python
+    return {
+        "metadata": {
+            "tool": "plaso/log2timeline",
+            "source_path": source_path,
+            "source_sha256": _sha256(source) if source.is_file() else None,
+            "output_storage_path": str(out_path),
+            "derived_root": str(_derived_root()),
+            "storage_sha256": result.output_files.get(str(out_path)),
+            "parsers": parsers,
+            "duration_ms": result.duration_ms,
+            "stderr_tail": result.stderr[-500:],
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:158-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L158-L170)
+
+[2] 저장 파일의 허용 폴더는 `DFIR_DERIVED_ROOT`이고 없으면 시스템 임시 폴더 아래 `agentic-dfir-derived`다.
+
+```python
+DERIVED_ROOT_ENV = "DFIR_DERIVED_ROOT"
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:43-43`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L43-L43)
+
+```python
+def _derived_root() -> Path:
+    root = os.environ.get(DERIVED_ROOT_ENV)
+    if root:
+        return Path(root).expanduser().resolve()
+    return (Path(tempfile.gettempdir()) / "agentic-dfir-derived").resolve()
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:54-58`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L54-L58)
+
+[3] `sift_plaso_psort`는 저장 파일을 증거 폴더나 `DFIR_DERIVED_ROOT`에서 찾고 CSV를 임시 폴더에 쓰게 한다.
+
+```python
+def _resolve_storage_input(storage_path: str) -> Path:
+    try:
+        return safe_evidence_input(storage_path)
+    except PathTraversalAttempt:
+        return _safe_derived_path(storage_path, must_exist=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:95-99`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L95-L99)
+
+```python
+    storage = _resolve_storage_input(storage_path)
+    storage_sha = _sha256(storage)
+
+    with _tempdir(prefix="dfir-psort-") as workdir:
+        out_file = workdir / f"timeline.{output_format}"
+        cmd = [
+            _psort_bin(),
+            "-o", output_format,
+            "-w", str(out_file),
+            str(storage),
+        ]
+        if filter_expression:
+            cmd.append(filter_expression)
+
+        result = run_tool(cmd, timeout=PSORT_TIMEOUT_SECONDS,
+                          capture_files=[out_file])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:205-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L205-L220)
+
+[4] (실행 확인) `DFIR_LOG2TIMELINE_BIN`에 `--storage_file` 경로에 글자를 쓰고 0으로 끝나는 셸 스크립트를 주고 `sift_plaso_log2timeline`을 부른 뒤에도 `DFIR_DERIVED_ROOT/case1/t.plaso`가 남아 있었다.
+
+[5] Plaso 20260720은 `--logfile`이 비면 `<도구 이름>-YYYYMMDDThhmmss.log.gz`를 로그 파일 이름으로 정하고 그 이름으로 파일 처리기를 연다: [`plaso/cli/tools.py:181-194`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/tools.py#L181-L194), [`plaso/lib/loggers.py:31-55`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/lib/loggers.py#L31-L55), [`plaso/cli/log2timeline_tool.py:288-292`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/log2timeline_tool.py#L288-L292), [`plaso/cli/psort_tool.py:416-420`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/psort_tool.py#L416-L420).
+
+[6] Plaso 20260720의 작업 프로세스는 로그 파일 이름 앞에 프로세스 이름과 `_`를 붙인다: [`plaso/multi_process/base_process.py:65-73`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/multi_process/base_process.py#L65-L73).
+
+[7] 공통 실행 함수 `run_tool`은 `cwd`를 주지 않으면 서버 프로세스의 현재 폴더에서 도구를 실행한다.
+
+```python
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:199-207`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L199-L207)
+
+[8] `_tempdir`는 호출마다 임시 폴더를 만들고 `finally`에서 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[9] Zimmerman 도구 래퍼는 `_tempdir` 안을 CSV 출력 위치로 넘긴다: [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:69-78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L69-L78), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:63-74`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L63-L74), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:60-71`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L60-L71), [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:70-80`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L70-L80), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:83-94`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L83-L94).
+
+[10] (실행 확인) `DFIR_MFTECMD_BIN`에 `--csv` 폴더에 CSV를 쓰고 그 폴더 경로를 따로 적는 셸 스크립트를 주고 `sift_mftecmd_parse`를 부른 뒤 그 폴더가 없었고 실패한 호출을 포함한 모든 래퍼 호출 뒤 `TMPDIR`에 `dfir-` 폴더가 남지 않았다.
+
+[11] Volatility 3·YARA 래퍼와 `sift_recmd_query_key`는 출력 파일 인자 없이 표준 출력을 받는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:74-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L74-L84), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:86-92`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L86-L92), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:150-159`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L150-L159), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:142-148`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L142-L148).
+
+[12] Volatility 3 2.28.0은 사용자 홈 폴더 아래 캐시 폴더를 만들어 심볼과 식별자 캐시를 둔다: [`volatility3/framework/constants/__init__.py:28-50`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L50).
+
+[13] 상관 분석은 DuckDB 메모리 DB에 표를 만든다.
+
+```python
+        if normalized:
+            con = duckdb.connect(":memory:")
+            con.execute("""
+                CREATE TABLE ev (ts TIMESTAMP, source VARCHAR, actor VARCHAR,
+                                  target VARCHAR, type VARCHAR, raw VARCHAR)""")
+            con.executemany("INSERT INTO ev VALUES (?, ?, ?, ?, ?, ?)", normalized)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:822-827`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L822-L827)
+
+```python
+    con = duckdb.connect(":memory:")
+    con.execute("""
+        CREATE TABLE ev (
+            ts TIMESTAMP, source VARCHAR, actor VARCHAR,
+            target VARCHAR, type VARCHAR, raw VARCHAR
+        )
+    """)
+    con.executemany(
+        "INSERT INTO ev VALUES (?, ?, ?, ?, ?, ?)",
+        [(e["ts"], e["source"], e["actor"], e["target"],
+          e["type"], e["raw"]) for e in normalized],
+    )
+    con.execute("CREATE INDEX ev_ts ON ev(ts)")
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:216-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L216-L228)
+
+[14] 결정적 모드는 `--out` 폴더에 세 파일을 쓴다.
+
+```python
+    audit_path = args.out / "audit.jsonl"
+    progress_path = args.out / "progress.jsonl"
+    report_path = args.out / "report.json"
+
+    audit = AuditLogger(audit_path, run_id=args.case)
+    progress = ProgressTracker(progress_path)
+
+    analyst = DeterministicAnalyst(audit, progress, max_iter=args.max_iterations)
+    report = analyst.run()
+
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:345-355`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L345-L355)
+
+[15] 클라이언트 기록 항목은 도구 출력의 해시만 남긴다.
+
+```python
+        # Hash the output (not the output itself — audit log must stay small)
+        output_bytes = json.dumps(output, sort_keys=True, default=str).encode()
+        output_digest = "sha256:" + hashlib.sha256(output_bytes).hexdigest()
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:119-121`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L119-L121)
+
+[16] live 모드는 세 파일을 쓴다.
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+    (state.out_dir / "live_summary.json").write_text(json.dumps({
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-711`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L711)
+
+[17] `analyze.py`는 시각 이름의 실행 폴더를 만들고 사건마다 최근 10개만 남긴다.
+
+```python
+    try:
+        if not case_out_root.is_dir():
+            return
+        runs = sorted(
+            (p for p in case_out_root.iterdir()
+             if p.is_dir() and p.name.isdigit() is False
+             and len(p.name) == 15 and "T" in p.name),
+            key=lambda p: p.name,
+        )
+        for old in runs[:-keep] if len(runs) > keep else []:
+            shutil.rmtree(old, ignore_errors=True)
+```
+
+[`analyze.py:205-215`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L205-L215)
+
+```python
+    def _one_run() -> "tuple[Path, int]":
+        out_dir = REPO / "out" / case.tier / case.case_id / _timestamp()
+        # Housekeeping: rotate old runs for this case before adding a new one.
+        _rotate_out_dirs(out_dir.parent, keep=10)
+        out_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`analyze.py:315-319`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L315-L319)
+
+[18] `analyze.py`의 문서 주석은 실행 폴더에 생기는 파일을 적는다.
+
+```python
+    out/<tier>/<case-id>/<timestamp>/
+        findings.json  report.json  summary.json
+        audit.jsonl    progress.jsonl   (+ live_* transcripts)
+```
+
+[`analyze.py:31-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L31-L33)
+
+[19] 참조 실행 출력: [`examples/out/ref-01/`](https://github.com/Juwon1405/agentic-dfir/tree/a17e90b8a3c5ab5431f0da9f354f315082257f99/examples/out/ref-01).

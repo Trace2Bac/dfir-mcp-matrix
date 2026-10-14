@@ -1,0 +1,130 @@
+---
+cell: D03
+details:
+- id: D03.01
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 `sift_plaso_log2timeline`이 만든 Plaso 저장 파일에 적용된다 [1].
+`sift_plaso_log2timeline`은 저장 파일 경로를 공통 실행 함수 `run_tool`의 `capture_files`로 넘긴다 [1].
+`run_tool`은 도구가 끝난 뒤 그 경로가 파일이면 내용 전체의 SHA-256을 계산한다 [2].
+기준값은 저장 파일 내용 전체의 SHA-256 하나다 [1][2].
+서버는 이 값을 응답의 `storage_sha256`에만 싣고 파일이나 다른 저장소에 남기지 않는다 [1].
+`sift_plaso_psort`도 저장 파일을 읽기 전에 그 SHA-256을 계산해 응답의 `storage_sha256`에 싣는다 [3].
+`sift_plaso_psort`는 이 값을 만들 때의 값이나 다른 기준값과 대조하지 않는다 [3].
+저장 파일을 기준값과 대조하는 도구는 없다.
+서버는 Plaso 로그 파일의 해시를 계산하지 않는다.
+
+Zimmerman 도구 래퍼도 임시 폴더에 생긴 CSV의 SHA-256을 계산한다 [4].
+그 값은 `sift_mftecmd_parse`·`sift_evtxecmd_parse`·`sift_pecmd_parse`·`sift_amcacheparser_parse`의 응답에만 `csv_sha256`이나 `csv_outputs_sha256`으로 실린다 [4].
+그 CSV는 호출이 끝나면 임시 폴더와 함께 지워지므로 이 값과 대조할 파생물이 남지 않는다 [5].
+
+같은 저장소의 클라이언트 `dfir_agent`는 `report.json`을 쓴 뒤 클라이언트 기록 `audit.jsonl`의 연쇄 해시만 검증하고 `report.json`의 해시는 남기지 않는다 [6].
+
+**한계.** `log2timeline.py`가 0으로 끝났는데 저장 파일이 없으면 `storage_sha256`은 `null`이고 서버는 오류를 내지 않는다 [2][1].
+가짜 실행 파일로 이 경우를 실행하면 응답은 `storage_sha256`이 `null`인 성공 응답이었다 [7].
+
+### 근거
+
+[1] `sift_plaso_log2timeline`은 저장 파일을 `capture_files`로 넘기고 그 해시를 응답의 `storage_sha256`에 싣는다.
+
+```python
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+
+    return {
+        "metadata": {
+            "tool": "plaso/log2timeline",
+            "source_path": source_path,
+            "source_sha256": _sha256(source) if source.is_file() else None,
+            "output_storage_path": str(out_path),
+            "derived_root": str(_derived_root()),
+            "storage_sha256": result.output_files.get(str(out_path)),
+            "parsers": parsers,
+            "duration_ms": result.duration_ms,
+            "stderr_tail": result.stderr[-500:],
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:147-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L147-L170)
+
+[2] `run_tool`은 도구가 끝난 뒤 `capture_files`의 경로 가운데 파일인 것만 해시한다.
+
+```python
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    output_files: dict[str, str] = {}
+    if capture_files:
+        for f in capture_files:
+            p = Path(f)
+            if p.is_file():
+                output_files[str(p)] = _sha256(p)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:215-222`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L215-L222)
+
+[3] `sift_plaso_psort`는 저장 파일을 해시해 응답에 싣고 대조하지 않는다.
+
+```python
+    storage = _resolve_storage_input(storage_path)
+    storage_sha = _sha256(storage)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:205-206`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L205-L206)
+
+```python
+    return {
+        "events": rows,
+        "metadata": {
+            "tool": "plaso/psort",
+            "storage_path": storage_path,
+            "storage_sha256": storage_sha,
+            "output_format": output_format,
+            "filter_expression": filter_expression,
+            "rows_returned": len(rows),
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:231-242`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L231-L242)
+
+[4] Zimmerman 도구 래퍼는 임시 CSV의 해시를 계산한다: [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:95-106`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L95-L106), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:109-116`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L109-L116), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:86-91`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L86-L91), [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:85-87`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L85-L87), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:93-116`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L93-L116), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:141-160`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L141-L160), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:113-128`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L113-L128).
+
+[5] 임시 폴더는 호출이 끝나면 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[6] `dfir_agent`는 `report.json`을 쓰고 `audit.jsonl`만 검증한다.
+
+```python
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+    ok, msg = AuditLogger.verify(audit_path)
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:355-356`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L355-L356)
+
+[7] (실행 확인) `DFIR_LOG2TIMELINE_BIN`에 아무것도 쓰지 않고 0으로 끝나는 셸 스크립트를 주고 `sift_plaso_log2timeline`을 부르면 `storage_sha256`이 `null`인 응답이 오류 없이 돌아왔다.

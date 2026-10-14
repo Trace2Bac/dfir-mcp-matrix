@@ -1,0 +1,266 @@
+---
+cell: T06
+details:
+- id: T06.01
+---
+
+# T06 실행 환경정보 표시
+
+### T06.01 응답 메타데이터에 버전 표시
+
+**구현.** 이 방식은 `match_sigma_rules`에 적용된다 [1].
+`match_sigma_rules`는 규칙 묶음의 규칙으로 사건을 대조한 뒤 묶음의 목록 파일 `pack.yml`을 읽어 그 `version` 값을 응답의 `pack_version`에 싣는다 [1].
+응답은 일치한 규칙마다 규칙의 `id`, 제목, 파일 이름 `rule_file`도 싣는다 [1].
+기준 커밋의 `dfir_sigma/pack.yml`이 적은 `version`은 `v2`다 [2].
+환경변수 `DFIR_SIGMA_DIR`가 있으면 서버는 그 폴더를 규칙 묶음으로 읽고 `pack_version`도 그 폴더의 `pack.yml`에서 읽는다 [3].
+실행 확인에서 저장소의 묶음으로 부르면 `pack_version`에 `v2`가, `rule_count`에 11이 실렸다 [4].
+
+서버의 다른 결과에는 도구나 참조 자료의 버전이 실리지 않는다.
+외부 도구 래퍼 25개는 응답의 `metadata.tool`에 `volatility3`, `mftecmd`, `yara` 같은 도구 이름만 싣고 실행한 실행 파일의 버전을 싣지 않는다 [5].
+외부 도구가 0이 아닌 종료 코드로 끝나면 서버는 표준 오류의 앞 200자를 오류 문구에 넣는다 [6].
+실행 확인에서 Volatility 3 2.28.0이 실패한 호출의 오류 문구에는 Volatility가 출력한 `Volatility 3 Framework 2.28.0` 줄이 들어 있었다 [4].
+서버는 이 줄을 읽지 않고 문구째 넘긴다 [6].
+YARA 래퍼는 사용자가 준 규칙 파일의 경로만 싣고 규칙 파일의 해시나 버전을 싣지 않는다 [7].
+`correlate_timeline`은 `engine` 값 `duckdb`를 싣고 `parse_knowledgec`와 `parse_browser_history`는 SQLite 파일을 직접 읽었을 때 `engine` 값 `sqlite3_readonly`를 싣지만 라이브러리의 버전은 싣지 않는다 [8].
+`analyze_event_logs`와 `parse_unified_log`는 코드에 둔 규칙의 수만 `rules_loaded`로 싣는다 [9].
+`parse_registry_hive`는 python-registry로 하이브를 읽지만 응답에 그 버전을 싣지 않는다 [10].
+`dfir_corr` 패키지는 `__version__` 값 `2.0.0`을 두지만 상관 도구의 응답에는 이 값이 없다 [11][8].
+`sift_plaso_log2timeline`이 남기는 저장 파일은 log2timeline이 만들고 서버는 그 파일의 SHA-256과 경로만 응답에 싣는다 [12].
+
+서버 자신의 버전은 MCP 초기화 응답의 `serverInfo`에만 있다 [13][14].
+`server.py`는 `serverInfo.version`에 코드에 적은 `2.0.0`을 싣는다 [13].
+`server_stdio.py`는 MCP Python SDK의 저수준 `Server`를 이름만 주어 만든다 [14].
+MCP Python SDK 1.29.1은 서버 버전이 없으면 `mcp` 패키지의 버전을 `serverInfo.version`에 넣는다 [15].
+실행 확인에서 `server_stdio`의 `serverInfo.version`은 `1.29.1`이었고 `server.py`의 값은 `2.0.0`이었다 [4].
+서버 진입점은 호출 기록을 쓰지 않는다.
+같은 저장소의 `dfir_agent`가 쓰는 호출 기록은 참조 실행 출력에서 도구 이름, 인자, 출력 해시, 시각을 싣고 버전 필드가 없다 [16].
+서버는 처리 중에 모델을 부르지 않는다.
+
+**한계.** 서버는 규칙을 읽는 과정과 따로 `pack.yml`을 다시 읽어 `pack_version`을 정한다 [1][3].
+`pack.yml`이 없거나 YAML로 읽히지 않으면 서버는 기본 폴더 `rules`의 규칙으로 대조하고 `pack_version`을 `null`로 싣는다 [3][1].
+실행 확인에서 규칙 파일 하나를 YAML로 읽히지 않게 바꾸고 `pack.yml`을 지운 묶음으로 부르면 규칙 10개로 대조한 결과와 함께 `pack_version`이 `null`이었다 [4].
+`pack_version`은 `pack.yml`에 적힌 문자열이고 응답에 규칙 파일의 해시는 없다 [1].
+그래서 `pack_version`이 같은 채로 규칙 파일의 내용이 바뀌면 응답으로는 구별되지 않는다 [1].
+
+### 근거
+
+[1] 대조를 마친 뒤 `pack.yml`을 다시 읽어 `pack_version`을 싣고 일치한 규칙의 식별값을 싣는다.
+
+```python
+    matches = []
+    for ev in events:
+        for r in rules:
+            if _condition_matches(ev, r["detection"]):
+                tags = [t for t in (r.get("tags") or [])
+                        if str(t).startswith("attack.t")]
+                matches.append({
+                    "rule_id": r.get("id"),
+                    "rule_title": r.get("title"),
+                    "rule_file": r.get("_file"),
+                    "level": r.get("level"),
+                    "mitre": tags,
+                    "event": ev,
+                })
+
+    pack = _load_yaml(_pack_root() / "pack.yml") or {}
+    return {
+        "pack_version": pack.get("version"),
+        "rule_count": len(rules),
+        "event_count": len(events),
+        "match_count": len(matches),
+        "matches": matches,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:234-256`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L234-L256)
+
+[2] 규칙 묶음의 목록 파일이 적은 버전이다.
+
+```yaml
+version: v2
+name: dfir-detection-pack
+```
+
+[`dfir_sigma/pack.yml:19-20`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_sigma/pack.yml#L19-L20)
+
+[3] 규칙 묶음 폴더를 정하고 목록 파일의 `rules_dir`로 규칙 폴더를 정한다.
+
+```python
+_PACK_ROOT_ENV = "DFIR_SIGMA_DIR"
+_DEFAULT_PACK_ROOT = Path(__file__).resolve().parents[3] / "dfir_sigma"
+
+
+def _pack_root() -> Path:
+    override = os.environ.get(_PACK_ROOT_ENV)
+    return Path(override) if override else _DEFAULT_PACK_ROOT
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:37-43`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L37-L43)
+
+```python
+def _load_rules() -> list[dict]:
+    """Load every rule .yml under the highest-version pack's rules_dir."""
+    root = _pack_root()
+    manifest = _load_yaml(root / "pack.yml") or {}
+    rules_dir = root / (manifest.get("rules_dir", "rules"))
+    if not rules_dir.is_dir():
+        return []
+    rules = []
+    for f in sorted(rules_dir.glob("*.yml")):
+        r = _load_yaml(f)
+        if isinstance(r, dict) and r.get("detection"):
+            r["_file"] = f.name
+            rules.append(r)
+    return rules
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:57-70`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L57-L70)
+
+[4] (실행 확인) `match_sigma_rules`를 저장소의 규칙 묶음으로 한 번, 규칙 파일 하나를 바꾸고 `pack.yml`을 지운 묶음으로 한 번 불렀다.
+Volatility 3 2.28.0이 실패한 호출의 오류 문구와 두 진입점의 초기화 응답도 확인했다.
+
+[5] 외부 도구 래퍼의 `metadata`는 도구 이름, 입력 경로와 해시, 행 수, 걸린 시간만 싣는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:96-104`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L96-L104), [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:95-106`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L95-L106), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:147-160`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L147-L160), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:116-127`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L116-L127), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:105-116`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L105-L116), [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:111-122`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L111-L122), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:231-242`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L231-L242).
+
+[6] 종료 코드가 0이 아니면 표준 오류의 앞 200자를 담은 예외를 낸다.
+
+```python
+    if proc.returncode != 0:
+        raise SiftToolFailedError(
+            f"{cmd[0]} exited with code {proc.returncode}: "
+            f"{proc.stderr[:200] if proc.stderr else '(no stderr)'}"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:224-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L224-L228)
+
+[7] YARA 래퍼의 응답 `metadata`다.
+
+```python
+    return {
+        "matches": matches,
+        "metadata": {
+            "tool": "yara",
+            "rules_path": rules_path,
+            "target_path": target_path,
+            "target_sha256": _sha256(target) if target.is_file() else None,
+            "match_count": len(matches),
+            "duration_ms": duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:107-117`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L107-L117)
+
+[8] 상관 도구와 SQLite 경로의 `engine` 값이다: [`dfir_mcp/src/dfir_mcp/__init__.py:862-870`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L862-L870), [`dfir_mcp/src/dfir_mcp/__init__.py:1086-1089`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1086-L1089), [`dfir_mcp/src/dfir_mcp/__init__.py:1324-1329`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1324-L1329).
+
+[9] 코드에 둔 규칙의 수를 싣는다.
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "events_examined": len(events), "alerts": alerts,
+            "alerts_by_severity": by_sev, "rules_loaded": len(EVENT_RULES)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:740-742`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L740-L742)
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "events_examined": len(events), "events_matched_filter": filtered_count,
+            "alerts": alerts, "alerts_by_severity": by_sev,
+            "rules_loaded": len(MACOS_RULES)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1000-1003`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1000-L1003)
+
+[10] `parse_registry_hive`의 응답 필드다.
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "key": norm_key,
+            "key_last_write": node.timestamp().isoformat() if node.timestamp() else None,
+            "values_total": total,
+            "values": values_out,
+            "subkeys": subkeys,
+            "subkey_count": len(all_subkeys)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3953-3959`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3953-L3959)
+
+[11] `dfir_corr` 패키지의 버전 값이다.
+
+```python
+__version__ = "2.0.0"
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:36-36`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L36-L36)
+
+[12] log2timeline 실행 뒤 저장 파일의 해시와 경로를 싣는다.
+
+```python
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+
+    return {
+        "metadata": {
+            "tool": "plaso/log2timeline",
+            "source_path": source_path,
+            "source_sha256": _sha256(source) if source.is_file() else None,
+            "output_storage_path": str(out_path),
+            "derived_root": str(_derived_root()),
+            "storage_sha256": result.output_files.get(str(out_path)),
+            "parsers": parsers,
+            "duration_ms": result.duration_ms,
+            "stderr_tail": result.stderr[-500:],
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:155-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L155-L170)
+
+[13] `server.py`의 초기화 응답이다.
+
+```python
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "dfir-mcp", "version": "2.0.0"}
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:20-21`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L20-L21)
+
+```python
+    if method == "initialize":
+        _send({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+            },
+        })
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:51-59`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L51-L59)
+
+[14] `server_stdio.py`는 SDK 서버를 이름만 주어 만들고 SDK의 초기화 옵션으로 실행한다.
+
+```python
+# MCP Server instance. Name is what shows up to clients.
+app = Server("dfir-mcp")
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:27-28`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L27-L28)
+
+```python
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(
+            read_stream,
+            write_stream,
+            app.create_initialization_options(),
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:72-78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L72-L78)
+
+[15] MCP Python SDK 1.29.1은 서버 버전이 없으면 `mcp` 패키지 버전을 쓴다: [`src/mcp/server/lowlevel/server.py:164-191`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L164-L191).
+
+[16] 참조 실행이 남긴 `dfir_agent`의 호출 기록이다: [`examples/out/ref-01/audit.jsonl`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/examples/out/ref-01/audit.jsonl).

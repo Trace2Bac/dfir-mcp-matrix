@@ -1,0 +1,235 @@
+---
+cell: L04
+details:
+- id: not_implemented
+---
+
+# L04 기록 위변조 방지
+
+### 미구현
+
+**판단.** 서버 기록은 진입점 `dfir_mcp.server`의 `_handle`이 실패한 호출에 남기는 표준 오류 항목뿐이다 [1].
+진입점 `dfir_mcp.server_stdio`는 호출 항목을 쓰지 않는다 [2].
+서버는 기록 파일이나 DB를 만들지 않고 항목을 표준 오류로 내보낸다 [3].
+항목 형식은 시각, 수준, 메시지뿐이고 앞 항목의 해시나 일련번호가 없다 [3].
+표준 오류를 어디에 어떻게 남길지는 서버를 실행한 쪽이 정한다 [3].
+저장소의 검증 명령 `python -m dfir_audit verify`는 클라이언트 기록 `audit.jsonl`의 연쇄만 다시 계산하고 서버의 표준 오류 항목은 읽지 않는다 [4].
+그래서 서버 기록의 수정, 삭제, 순서 변경을 막거나 알아차리는 장치가 없다.
+
+클라이언트 `dfir_agent`의 결정적 모드가 쓰는 `audit.jsonl`에는 SHA-256 연쇄가 있다 [5].
+항목마다 앞 항목의 `entry_hash`를 `prev_hash`로 넣고 `prev_hash`를 포함한 본문의 SHA-256을 `entry_hash`로 둔다 [5].
+`verify`는 첫 항목부터 `prev_hash`와 `entry_hash`를 다시 계산해 처음 어긋난 줄을 알리고 종료 코드 1을 돌려준다 [4].
+연쇄 계산에는 키가 없다 [5].
+결정적 모드는 실행을 마칠 때 끝 값 앞 16자를 표준 출력에 쓸 뿐 `report.json`에는 끝 값이나 항목 수를 남기지 않는다 [6].
+`audit.jsonl`의 항목 하나를 고치거나 중간 줄을 지우거나 두 줄의 순서를 바꾸면 `verify`가 그 줄을 알렸다 [7].
+마지막 줄을 지운 파일, 빈 파일, 항목을 고친 뒤 모든 해시를 다시 계산한 파일은 `verify`를 통과했다 [7].
+`dfir_audit/README.md`는 내용 변경, 삭제, 순서 변경이 모두 연쇄 검증을 실패하게 한다고 적는다 [8].
+live 모드의 `live_tool_calls.jsonl`에는 해시나 일련번호가 없다 [9].
+
+### 근거
+
+[1] `_handle`은 `call_tool`이 올린 예외만 로거에 쓴다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[2] `handle_call_tool`은 예외를 오류 글로 바꾸고 로그를 쓰지 않는다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[3] `dfir_mcp.server`는 루트 로거를 시각, 수준, 메시지 형식의 표준 오류 출력으로 설정한다.
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stderr,
+    format="%(asctime)s [dfir-mcp] %(levelname)s %(message)s",
+)
+_log = logging.getLogger("dfir_mcp.server")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:28-33`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L28-L33)
+
+[4] `verify`는 `audit.jsonl`의 `prev_hash`와 `entry_hash`를 다시 계산하고 CLI는 결과에 따라 종료 코드를 돌려준다.
+
+```python
+    @staticmethod
+    def verify(path: str | Path) -> tuple[bool, str]:
+        """Walk the chain end-to-end. Returns (ok, message)."""
+        p = Path(path)
+        if not p.exists():
+            return False, f"audit log not found: {p}"
+
+        prev = GENESIS_PREV_HASH
+        n = 0
+        with p.open("r", encoding="utf-8") as f:
+            for lineno, raw in enumerate(f, 1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                obj = json.loads(raw)
+                if obj["prev_hash"] != prev:
+                    return False, f"line {lineno}: prev_hash mismatch (expected {prev[:10]}..., got {obj['prev_hash'][:10]}...)"
+                body = {k: v for k, v in obj.items() if k != "entry_hash"}
+                # `default=str` MUST match canonical_body() / log()
+                # so verify reproduces the same canonical bytes when
+                # inputs originally contained Path/datetime/etc.
+                canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+                recomputed = hashlib.sha256(canonical.encode()).hexdigest()
+                if recomputed != obj["entry_hash"]:
+                    return False, f"line {lineno}: entry_hash mismatch (audit_id={obj['audit_id']})"
+                prev = obj["entry_hash"]
+                n += 1
+        return True, f"chain verified: {n} entries, tail={prev[:16]}..."
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:151-178`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L151-L178)
+
+```python
+def cmd_verify(path):
+    ok, msg = AuditLogger.verify(path)
+    print(msg)
+    return 0 if ok else 1
+```
+
+[`dfir_audit/src/dfir_audit/cli.py:27-30`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/cli.py#L27-L30)
+
+[5] 항목 해시는 `entry_hash`를 뺀 본문을 정렬한 JSON의 SHA-256이고 본문에 `prev_hash`가 포함된다.
+
+```python
+    def canonical_body(self) -> str:
+        """Everything except entry_hash, in canonical JSON form.
+
+        `default=str` MUST match what AuditLogger.verify() uses below,
+        otherwise hash recomputation drifts when inputs contain a
+        non-JSON-native type (Path, datetime, etc.). Also matches the
+        log-time output_digest serialization for consistency.
+        """
+        body = {k: v for k, v in asdict(self).items() if k != "entry_hash"}
+        return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:46-55`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L46-L55)
+
+```python
+        with self._lock:
+            entry = AuditEntry(
+                ts=time.strftime("%Y-%m-%dT%H:%M:%S.", time.gmtime()) + f"{int(time.time()*1000)%1000:03d}Z",
+                iteration=iteration,
+                tool_name=tool_name,
+                inputs=inputs,
+                output_digest=output_digest,
+                token_count_in=token_count_in,
+                token_count_out=token_count_out,
+                finding_ids=finding_ids or [],
+                audit_id=secrets.token_hex(4),
+                prev_hash=self._prev_hash,
+            )
+            # Chain: hash(prev_hash || canonical_body)
+            entry.entry_hash = hashlib.sha256(entry.canonical_body().encode()).hexdigest()
+```
+
+[`dfir_audit/src/dfir_audit/__init__.py:123-137`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L123-L137)
+
+[6] 결정적 모드의 보고서 필드와 실행 끝의 출력이다.
+
+```python
+    def _report(self) -> dict:
+        # Guard: when --max-iterations is small enough that
+        # _phase_hypothesis() never ran, self._primary / self._alt are
+        # unset. _forced_exit_closeout() already uses getattr defaults;
+        # mirror that here so the deterministic path is also crash-safe.
+        primary = getattr(self, "_primary", None)
+        alt = getattr(self, "_alt", None)
+        return {
+            "primary_hypothesis": asdict(primary) if primary else None,
+            "alternative_hypothesis": asdict(alt) if alt else None,
+            "findings": [asdict(f) for f in self.findings],
+            "unresolved": self.unresolved,
+            "iterations": self.iteration,
+        }
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:289-302`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L289-L302)
+
+```python
+    report_path.write_text(json.dumps(report, indent=2, default=str))
+    ok, msg = AuditLogger.verify(audit_path)
+    print(f"[dfir-agent] case={args.case}")
+    print(f"[dfir-agent] iterations: {report['iterations']}")
+    print(f"[dfir-agent] findings: {len(report['findings'])}")
+    print(f"[dfir-agent] audit chain: {msg}")
+    print(f"[dfir-agent] outputs in: {args.out}")
+    return 0 if ok else 1
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:355-362`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L355-L362)
+
+[7] (실행 확인) 결정적 모드로 만든 3개 항목의 `audit.jsonl`을 고쳐 `python -m dfir_audit verify`를 실행했다.
+2번째 항목의 `inputs`를 고친 파일은 `line 2: entry_hash mismatch`, 2번째 줄을 지운 파일과 2·3번째 줄을 바꾼 파일은 `line 2: prev_hash mismatch`를 출력하고 종료 코드 1로 끝났다.
+마지막 줄을 지운 파일은 `chain verified: 2 entries`, 빈 파일은 `chain verified: 0 entries`를 출력하고 종료 코드 0으로 끝났다.
+2번째 항목을 고친 뒤 모든 `prev_hash`와 `entry_hash`를 같은 방식으로 다시 계산한 파일도 `chain verified: 3 entries`로 통과했다.
+JSON이 아닌 줄을 넣은 파일은 `JSONDecodeError` 예외로 끝났다.
+
+[8] `dfir_audit` 문서의 설명이다: [`dfir_audit/README.md:110`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/README.md#L110).
+
+[9] live 모드의 기록은 반복 번호, 도구 이름, 인자의 JSON 줄이다.
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-710`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L710)

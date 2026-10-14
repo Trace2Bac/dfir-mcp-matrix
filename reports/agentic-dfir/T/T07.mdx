@@ -1,0 +1,683 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.03
+- id: T07.04
+- id: T07.08
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 검사는 외부 도구 래퍼 25개, `parse_registry_hive`, `match_sigma_rules`에 적용된다 [1][2][3].
+래퍼는 명령을 만들 때 도구마다 정한 이름으로 `_which`를 불러 실행 파일을 찾고 찾지 못하면 `SiftToolNotFoundError`를 내어 실행하지 않는다 [1][4].
+`_which`는 파일이 있는지와 실행 권한이 있는지만 확인하고 시험 실행은 하지 않는다 [1].
+Volatility, Zimmerman 도구, `sift_plaso_psort` 래퍼는 입력 경로를 검사하고 입력 파일의 SHA-256을 계산한 뒤 실행 파일을 찾는다 [4].
+`sift_plaso_log2timeline`은 실행 파일을 찾기 전에 `DFIR_DERIVED_ROOT` 아래에 저장 파일의 상위 폴더를 만든다 [5].
+실행 확인에서 `log2timeline.py`가 없는 환경으로 이 도구를 부르면 `SiftToolNotFoundError`가 났고 저장 파일의 상위 폴더 `case1`은 이미 만들어져 있었다 [6].
+실행 파일을 찾은 뒤 실행할 때 운영체제가 그 파일을 찾지 못하면 실행기 `run_tool`이 `FileNotFoundError`를 `SiftToolNotFoundError`로 바꾼다 [7].
+
+`parse_registry_hive`는 python-registry를 도구 안에서 불러오고 불러오지 못하면 하이브를 읽지 않고 `registry_parser_missing`을 돌려준다 [2].
+`match_sigma_rules`는 대조하기 전에 규칙 묶음을 읽고 읽은 규칙이 하나도 없으면 대조하지 않고 `no_rules_loaded`를 돌려준다 [3].
+실행 확인에서 python-registry를 불러오지 못하게 한 프로세스와 빈 규칙 폴더로 두 도구를 부르면 각각 이 값이 돌아왔다 [6].
+
+상관 도구와 RECmd 배치 도구는 쓰는 모듈이나 참조 자료가 있는지 실행 전에 확인하지 않는다.
+`correlate_events`와 `correlate_timeline`은 `dfir_corr`를 도구 안에서 불러오고 `correlate_timeline`은 DuckDB도 불러온다 [8].
+불러오지 못한 예외는 도구 안에서 처리하지 않는다 [8].
+`sift_recmd_run_batch`는 RECmd에 배치 파일 이름만 넘기고 그 파일이 있는지 보지 않는다 [9].
+서버는 작업 폴더를 정하지 않고 RECmd를 실행하므로 RECmd는 이 이름을 서버 프로세스의 작업 폴더를 기준으로 찾는다 [9].
+RECmd 기준 날짜 커밋 `bcd0ac3`은 `--bn`에 준 파일이 없으면 오류를 기록하고 처리를 끝낸다 [10].
+이 경우 CSV가 만들어지지 않고 서버는 빈 `registry_findings`를 오류 없이 돌려준다 [9].
+`batch_name` 값 `USB`가 가리키는 `USB.reb`는 RECmd 같은 커밋의 `BatchExamples` 폴더에 없다 [9][11].
+Volatility 3 래퍼는 심볼 표가 있는지 실행 전에 확인하지 않고 심볼 표를 얻지 못한 실행은 다른 실행 실패와 같은 `SiftToolFailedError`로 끝난다 [12].
+
+**한계.** Plaso 래퍼는 `log2timeline.py`와 `psort.py`라는 이름의 실행 파일을 찾는다 [13].
+기준으로 삼은 Plaso 20260720 패키지는 실행 파일을 `log2timeline`과 `psort`라는 이름으로 설치한다 [14].
+`scripts/install.sh`는 `log2timeline.py`와 `psort.py`가 없으면 `pip`로 Plaso를 설치한다 [15].
+그래서 이 방법으로 Plaso를 설치한 환경에서는 Plaso가 있어도 서버가 실행 파일이 없다고 정한다 [13][14][15].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 알림은 외부 도구 래퍼 25개, `parse_registry_hive`, `match_sigma_rules`에 적용된다 [1][2][3].
+`_which`가 내는 `SiftToolNotFoundError`의 문구는 찾지 못한 실행 파일 이름, 경로를 지정할 환경변수 이름, `scripts/install.sh`를 실행하라는 안내를 담는다 [1].
+이 예외는 실행 실패와 시간 초과에 쓰는 `SiftToolFailedError`와 다른 종류다 [16].
+래퍼는 실행 파일을 찾는 단계의 예외를 처리하지 않으므로 두 진입점이 예외 종류 이름과 문구를 응답에 싣는다 [17][18].
+`server.py`는 JSON-RPC 오류 코드 -32000과 `SiftToolNotFoundError: <문구>`를 돌려준다 [17].
+`server_stdio.py`는 `{"error": "SiftToolNotFoundError", "detail": <문구 앞 500자>}` 글을 돌려준다 [18].
+실행 확인에서 `vol`과 `yara`가 없는 환경으로 두 진입점에서 래퍼를 부르면 이 응답이 왔다 [6].
+`parse_registry_hive`는 `registry_parser_missing`과 함께 `pip install python-registry` 안내를 `hint`에 싣는다 [2].
+`match_sigma_rules`는 `no_rules_loaded`와 함께 읽으려던 묶음 폴더를 `pack_root`에 싣는다 [3].
+
+서버는 도구가 없을 때 다른 도구로 바꿔 실행하지 않는다.
+`_common.py`의 설명은 모델이 서버의 파이썬 구현 도구로 바꿀 수 있다고 적는다 [19].
+같은 저장소의 `dfir_agent` live 모드 지시문도 `SiftToolNotFoundError`가 나면 같은 아티팩트를 다루는 다른 도구를 쓰라고 모델에게 적는다 [20].
+
+**한계.** 실행할 때 `run_tool`이 바꾼 `SiftToolNotFoundError`의 문구는 `binary not found: <경로>`이고 설치 안내가 없다 [7].
+YARA 래퍼는 `run_tool`의 예외를 모두 처리해 문구만 `metadata.error`에 싣고 예외 종류 이름을 싣지 않는다 [21].
+`match_sigma_rules`는 PyYAML을 불러오지 못하면 모든 규칙 파일을 읽지 못한 것으로 다룬다 [22].
+그래서 PyYAML이 없을 때도 규칙 묶음이 없을 때와 같은 `no_rules_loaded`를 돌려준다 [22][3].
+
+### T07.03 알림 없는 대체 실행
+
+**구현.** 이 대체는 외부 도구 래퍼 25개의 실행 파일 선택에 적용된다 [1].
+도구마다 정한 환경변수(`DFIR_VOLATILITY3_BIN` 등)가 실행할 수 없는 경로를 가리키면 `_which`는 그 값을 쓰지 않고 `PATH`와 저장소 폴더에서 같은 이름을 찾는다 [1].
+이 사실은 서버의 표준 오류에 경고 한 줄로만 남고 응답에는 실리지 않는다 [1][23].
+실행 확인에서 `DFIR_VOLATILITY3_BIN`에 없는 경로를 주고 `PATH`에 `vol`을 두면 표준 오류에 경고가 남고 `PATH`의 `vol`이 실행되었다 [6].
+그 호출의 오류 문구에는 실행된 `vol`의 경로만 있고 사용자가 지정한 경로를 쓰지 못했다는 사실은 없었다 [6].
+
+### T07.04 실행 환경별 경로 분기
+
+**구현.** 이 분기는 외부 도구 래퍼 25개에 적용된다 [1].
+`_which`는 환경변수가 가리키는 실행 파일, `shutil.which`로 찾은 `PATH`의 실행 파일, 설치 스크립트가 실행 파일을 두는 저장소 폴더 순서로 찾는다 [1].
+저장소 폴더는 `bin/`, `bin/zimmerman/`, 저장소 옆 `agentic-dfir-collector-adapter/bin`이고 있는 폴더만 본다 [24].
+이 폴더들에서는 이름 그대로, `.exe`를 붙인 이름, `.dll`을 붙인 이름을 폴더 바로 아래와 한두 단계 아래에서 찾는다 [24].
+`scripts/install.sh`는 Zimmerman 도구를 `bin/zimmerman/<도구>/`에 풀고 시스템에서 찾은 YARA 실행 파일을 `bin/yara`로 연결한다 [25].
+고른 실행 파일의 경로는 성공한 호출의 응답 `metadata`에 실리지 않는다 [23].
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `match_sigma_rules`의 규칙 파일에 적용된다 [22].
+`_load_rules`는 규칙 폴더의 `*.yml`을 하나씩 읽고 YAML로 읽히지 않거나 `detection`이 없는 파일을 빼고 나머지 규칙으로 대조한다 [22].
+응답은 읽은 규칙의 수 `rule_count`만 싣고 뺀 파일의 수나 이름을 싣지 않는다 [26].
+실행 확인에서 규칙 파일 11개 가운데 하나를 YAML로 읽히지 않게 바꾼 묶음으로 부르면 `rule_count`가 10이었고 그 규칙에 맞는 사건은 일치 목록에서 빠졌다 [6].
+
+`correlate_timeline`이 부르는 `dfir_corr.correlate_timeline`도 규칙 파일 `correlation-rules.yaml`이 없거나 PyYAML이 없거나 파일을 읽지 못하면 빈 규칙으로 기본 결합만 실행한다 [27].
+이때 `load_rules`가 남긴 `_error`는 결과에 실리지 않는다 [27].
+`correlate_timeline`의 응답은 `dfir_corr`의 결과에서 `correlations`만 옮기고 규칙 파일로 찾은 것을 포함한 `contradictions`는 옮기지 않는다 [28].
+그래서 이 규칙 파일이 있는지는 MCP 응답을 바꾸지 않는다 [28].
+실행 확인에서 같은 사건으로 `dfir_corr.correlate_timeline`을 직접 부르면 `contradictions`가 1건이었고 `correlate_timeline`의 응답에는 `contradictions` 키가 없었다 [6].
+
+### 근거
+
+[1] 환경변수, `PATH`, 저장소 폴더 순서로 실행 파일을 찾고 없으면 설치 안내를 담은 예외를 낸다.
+환경변수가 실행할 수 없는 경로이면 표준 오류에 경고를 남기고 다음 위치를 본다.
+
+```python
+    if env_var:
+        override = os.environ.get(env_var)
+        if override:
+            override_path = Path(override)
+            if override_path.is_file() and os.access(override_path, os.X_OK):
+                return str(override_path)
+            # The override is set but doesn't point at a runnable file. Don't
+            # fail here — a leftover/incorrect DFIR_*_BIN (e.g. pointing at
+            # /usr/local/bin/yara when yara is actually at /usr/bin/yara) would
+            # otherwise mask a binary that's right there on PATH. Warn once and
+            # fall through to the PATH / repo-bin lookups below.
+            import sys as _sys
+            print(
+                f"[dfir] warning: {env_var}={override!r} is set but not an "
+                f"executable file — ignoring it and looking on PATH instead. "
+                f"Unset {env_var} (or point it at the real binary) to silence "
+                f"this.",
+                file=_sys.stderr,
+            )
+    found = shutil.which(binary)
+    if found:
+        return found
+    staged = _search_repo_bins(binary)
+    if staged:
+        return staged
+    raise SiftToolNotFoundError(
+        f"SIFT tool {binary!r} not found on PATH or in the installer-staged "
+        f"bin/ dirs. Set {env_var or 'a tool-specific env var'} to its "
+        f"absolute path, or run scripts/install.sh to stage it."
+    )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:133-162`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L133-L162)
+
+[2] python-registry를 불러오지 못하면 `registry_parser_missing`을 돌려준다.
+
+```python
+    # python-registry is the read-only parser. Import lazily so dfir_mcp
+    # is importable in environments where the user hasn't installed it
+    # (the function will return a clear error in that case).
+    try:
+        from Registry import Registry as _Reg
+    except ImportError:
+        return {"error": "registry_parser_missing",
+                "hint": "pip install python-registry",
+                "source": {"path": str(p), "sha256": _sha256(p)}}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3842-3850`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3842-L3850)
+
+[3] 읽은 규칙이 없으면 `no_rules_loaded`를 돌려준다.
+
+```python
+def match_sigma_rules(event_log_path, limit=200):
+    p = _safe_resolve(event_log_path)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+
+    rules = _load_rules()
+    if not rules:
+        return {"error": "no_rules_loaded", "pack_root": str(_pack_root())}
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:191-198`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L191-L198)
+
+[4] 래퍼는 입력 경로를 검사하고 해시를 계산한 뒤 명령을 만들며 실행 파일을 찾는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:71-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L71-L84), [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:66-78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L66-L78), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:83-92`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L83-L92), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:205-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L205-L220).
+
+[5] 저장 파일의 상위 폴더를 만든 뒤 실행 파일을 찾는다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L156)
+
+[6] (실행 확인) 두 진입점과 같은 프로세스 호출로 실행 파일이 없는 래퍼, 환경변수가 잘못된 Volatility 래퍼, python-registry를 불러오지 못하게 한 `parse_registry_hive`를 불렀다.
+빈 규칙 폴더와 규칙 파일 하나를 바꾼 묶음으로 `match_sigma_rules`를, 같은 사건으로 `correlate_timeline`과 `dfir_corr.correlate_timeline`을 불렀다.
+
+[7] 실행할 때 `FileNotFoundError`가 나면 `SiftToolNotFoundError`로 바꾼다.
+
+```python
+    import time
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise SiftToolFailedError(
+            f"SIFT tool timed out after {timeout}s: {cmd[0]}"
+        ) from e
+    except FileNotFoundError as e:
+        raise SiftToolNotFoundError(f"binary not found: {cmd[0]}") from e
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:197-213`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L197-L213)
+
+[8] 상관 도구는 `dfir_corr`와 DuckDB를 도구 안에서 불러온다.
+
+```python
+def correlate_events(hypothesis_id, usb_events=None, logon_events=None,
+                     proximity_seconds=600):
+    # Delegates to dfir_corr.correlate_events. The MCP wire surface
+    # (this function's name, schema, and registration) is unchanged;
+    # only the implementation moved out of dfir_mcp into the
+    # extracted package in v0.7.1.
+    from dfir_corr import correlate_events as _impl
+    return _impl(hypothesis_id, usb_events, logon_events, proximity_seconds)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:759-766`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L759-L766)
+
+```python
+def correlate_timeline(events, rules=None, window_seconds=300):
+    # Core correlation is now in dfir_corr. The MCP layer keeps two
+    # things on top:
+    #   1. A small back-compat result shape (cross_source_correlations
+    #      + kvm_precedes_logon + engine field) so existing case
+    #      studies don't break.
+    #   2. The user-rule injection defense, which only makes sense at
+    #      the MCP boundary (the agent submits raw SQL fragments here
+    #      and we must reject DDL/DML/metafunctions before passing them
+    #      to DuckDB).
+    from dfir_corr import correlate_timeline as _impl
+    core = _impl(events, rules=None, window_seconds=window_seconds)
+
+    # Apply user-supplied rule strings under the strict allow-list.
+    # Identical defense logic to v0.7.0; kept here at the wire boundary.
+    import duckdb
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:780-795`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L780-L795)
+
+[9] 배치 이름을 파일 이름으로 바꿔 넘기고 CSV가 없으면 빈 행으로 응답한다.
+
+```python
+# Curated list of ASEP-relevant batch files shipped with RECmd.
+# These map to common persistence + DFIR enumeration patterns.
+_KNOWN_BATCHES = {
+    "ASEPs": "RECmd_Batch_MC.reb",   # Maxim Suhanov's ASEP enumerator
+    "kroll":  "Kroll_Batch.reb",     # Kroll's full DFIR batch
+    "USB":    "USB.reb",
+    "All":    "RECmd_Batch_MC.reb",  # alias
+}
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:38-45`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L38-L45)
+
+```python
+    sample = safe_evidence_input(hive_path)
+    sample_sha = _sha256(sample) if sample.is_file() else None
+    batch_file = _KNOWN_BATCHES.get(batch_name, _KNOWN_BATCHES["ASEPs"])
+
+    with _tempdir(prefix="dfir-recmd-") as workdir:
+        out_csv = workdir / "recmd.csv"
+        cmd = [
+            _recmd_bin(),
+            "-f", str(sample),
+            "--bn", batch_file,
+            "--csv", str(workdir),
+            "--csvf", "recmd.csv",
+            "--nl",  # no logo (suppress banner)
+        ]
+        result = run_tool(cmd, timeout=RECMD_TIMEOUT_SECONDS,
+                          capture_files=[out_csv])
+
+        rows: list[dict[str, Any]] = []
+        if out_csv.is_file():
+            with out_csv.open("r", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh)
+                for i, r in enumerate(reader):
+                    if i >= limit:
+                        break
+                    rows.append(dict(r))
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:79-103`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L79-L103)
+
+[10] RECmd는 배치 파일이 없으면 오류를 기록하고 처리를 끝낸다: [`RECmd/Program.cs:496-502`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L496-L502).
+
+[11] RECmd 기준 날짜 커밋의 배치 파일 목록이다: [`BatchExamples/`](https://github.com/EricZimmerman/RECmd/tree/bcd0ac33ed98de61ea6de551eef96052bddbbd49/BatchExamples).
+
+[12] Volatility 3 명령에는 심볼 위치 옵션이 없고 0이 아닌 종료 코드는 모두 `SiftToolFailedError`가 된다.
+
+```python
+    cmd = [
+        _vol_bin(),
+        "-q",                       # quiet — suppress progress on stderr
+        "-r", "csv",                # CSV renderer
+        "-f", str(sample),
+        plugin,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    result: SubprocessResult = run_tool(cmd, timeout=timeout)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:74-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L74-L84)
+
+```python
+    if proc.returncode != 0:
+        raise SiftToolFailedError(
+            f"{cmd[0]} exited with code {proc.returncode}: "
+            f"{proc.stderr[:200] if proc.stderr else '(no stderr)'}"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:224-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L224-L228)
+
+[13] Plaso 래퍼가 찾는 실행 파일 이름이다.
+
+```python
+def _log2timeline_bin() -> str:
+    return _which("log2timeline.py", env_var="DFIR_LOG2TIMELINE_BIN")
+
+
+def _psort_bin() -> str:
+    return _which("psort.py", env_var="DFIR_PSORT_BIN")
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:46-51`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L46-L51)
+
+[14] Plaso 20260720의 실행 파일 이름이다: [`pyproject.toml:84-89`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/pyproject.toml#L84-L89).
+
+[15] 설치 스크립트는 `.py` 이름이 없으면 Plaso를 `pip`로 설치한다.
+
+```bash
+# ---- 7. Volatility 3 + Plaso ----------------------------------------------
+if have vol && have log2timeline.py && have psort.py; then
+  skip_step "Volatility3 + Plaso" "already present"
+else
+  vol_plaso() {
+    have vol || _pip volatility3
+    { have log2timeline.py && have psort.py; } || _pip plaso
+  }
+  run_step "Volatility3 + Plaso (pip)" vol_plaso || true
+fi
+```
+
+[`scripts/install.sh:284-293`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/scripts/install.sh#L284-L293)
+
+[16] 실행 파일 부재와 실행 실패를 다른 예외로 둔다.
+
+```python
+class SiftToolNotFoundError(RuntimeError):
+    """Raised when a SIFT tool binary is not on PATH (or not at the configured path)."""
+
+
+class SiftToolFailedError(RuntimeError):
+    """Raised when a SIFT tool returned a non-zero exit code or hit a timeout."""
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:57-62`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L57-L62)
+
+[17] `server.py`는 도구 처리 중 예외를 JSON-RPC 오류로 돌려준다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[18] `server_stdio.py`는 예외 종류 이름과 문구 앞 500자를 글로 돌려준다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[19] 래퍼 모듈의 설명이다.
+
+```python
+  5. GRACEFUL DEGRADATION
+       When the SIFT tool is not installed, the wrapper raises
+       SiftToolNotFoundError with the install command. The agent can
+       fall back to dfir_mcp's native pure-Python implementation.
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:25-28`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L25-L28)
+
+[20] `dfir_agent` live 모드가 모델에게 주는 지시문이다.
+
+```python
+  2. SIFT Workstation tool adapters (prefix `sift_`). These wrap the
+     canonical SIFT toolchain — Volatility 3, MFTECmd, EvtxECmd, PECmd,
+     RECmd, AmcacheParser, YARA, Plaso. Use these when you need their
+     specific capability (e.g. memory forensics, batch ASEP enumeration,
+     YARA matching). If a SIFT binary is missing, the adapter raises
+     SiftToolNotFoundError — fall back to the native tool covering the
+     same artifact (e.g. native get_amcache instead of sift_amcacheparser_parse).
+```
+
+[`dfir_agent/src/dfir_agent/live.py:259-265`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L259-L265)
+
+[21] YARA 래퍼는 실행 중 예외를 `metadata.error` 문구로 돌려준다.
+
+```python
+    try:
+        result = run_tool(cmd, timeout=YARA_TIMEOUT_SECONDS)
+        matches = _parse_yara_output(result.stdout)
+        duration_ms = result.duration_ms
+    except Exception as e:
+        # YARA returns non-zero on syntax errors etc. Catch and report.
+        return {
+            "matches": [],
+            "metadata": {
+                "tool": "yara",
+                "error": str(e),
+                "rules_path": rules_path,
+                "target_path": target_path,
+            },
+        }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:91-105`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L91-L105)
+
+[22] PyYAML을 불러오지 못하거나 파일을 읽지 못하면 `None`을 돌려주고 그런 규칙 파일은 뺀다.
+
+```python
+def _load_yaml(path: Path):
+    try:
+        import yaml  # PyYAML; present in the env (pulled by other deps)
+    except Exception:  # pragma: no cover - yaml is available in our env
+        return None
+    try:
+        return yaml.safe_load(path.read_text())
+    except Exception:
+        return None
+
+
+def _load_rules() -> list[dict]:
+    """Load every rule .yml under the highest-version pack's rules_dir."""
+    root = _pack_root()
+    manifest = _load_yaml(root / "pack.yml") or {}
+    rules_dir = root / (manifest.get("rules_dir", "rules"))
+    if not rules_dir.is_dir():
+        return []
+    rules = []
+    for f in sorted(rules_dir.glob("*.yml")):
+        r = _load_yaml(f)
+        if isinstance(r, dict) and r.get("detection"):
+            r["_file"] = f.name
+            rules.append(r)
+    return rules
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:46-70`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L46-L70)
+
+[23] 래퍼의 응답 `metadata`에는 실행 파일 경로가 없다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:96-104`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L96-L104), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:107-117`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L107-L117), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:158-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L158-L170).
+
+[24] 설치 스크립트가 실행 파일을 두는 저장소 폴더를 찾는다.
+
+```python
+def _repo_bin_dirs() -> list[Path]:
+    """Directories the installer stages tool binaries into, searched after
+    PATH so an explicit system install or env override always wins. Covers
+    both the EZ Tools staging dir (bin/zimmerman/<Tool>/) and the adapter's
+    own bin/ (Velociraptor). Resolved relative to this file so it works from
+    any CWD and from a fresh clone without environment setup."""
+    # _common.py lives at .../dfir_mcp/src/dfir_mcp/sift_adapters/_common.py
+    # repo root is five parents up.
+    here = Path(__file__).resolve()
+    repo = here.parents[4]
+    dirs = [
+        repo / "bin",
+        repo / "bin" / "zimmerman",
+        # adapter checkout sits beside the main repo
+        repo.parent / "agentic-dfir-collector-adapter" / "bin",
+    ]
+    return [d for d in dirs if d.is_dir()]
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:75-91`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L75-L91)
+
+```python
+def _search_repo_bins(binary: str) -> str | None:
+    """Look for `binary` (or binary.dll / a single-file build) under the
+    installer-staged bin dirs. EZ Tools land at bin/zimmerman/<Tool>/<Tool>
+    (net9 self-contained single file) so we glob a couple levels deep."""
+    names = [binary, f"{binary}.exe", f"{binary}.dll"]
+    for d in _repo_bin_dirs():
+        # direct child
+        for n in names:
+            cand = d / n
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        # one/two levels deep (bin/zimmerman/MFTECmd/MFTECmd)
+        for n in names:
+            for cand in d.glob(f"*/{n}"):
+                if cand.is_file() and os.access(cand, os.X_OK):
+                    return str(cand)
+            for cand in d.glob(f"*/*/{n}"):
+                if cand.is_file() and os.access(cand, os.X_OK):
+                    return str(cand)
+    return None
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:94-113`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L94-L113)
+
+[25] 설치 스크립트는 YARA를 `bin/yara`로 연결하고 Zimmerman 도구를 `bin/zimmerman`에 푼다.
+
+```bash
+_stage_yara_into_bin() {
+  # Symlink a real yara binary into repo bin/ so _search_repo_bins() finds it
+  # regardless of PATH or env. Returns 0 if a binary was staged.
+  local found
+  found="$(_find_yara_binary)" || return 1
+  mkdir -p "${REPO_ROOT}/bin"
+  ln -sf "${found}" "${REPO_ROOT}/bin/yara"
+  return 0
+```
+
+[`scripts/install.sh:235-242`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/scripts/install.sh#L235-L242)
+
+```bash
+ez_stage() {
+  local EZ_DIR="${REPO_ROOT}/bin/zimmerman"
+  mkdir -p "${EZ_DIR}"
+  have unzip || { echo "unzip missing"; return 1; }
+  local got=0
+  for tool in "${EZ_TOOLS[@]}"; do
+    # idempotent: skip if already staged + executable
+    if compgen -G "${EZ_DIR}/${tool}/${tool}" >/dev/null 2>&1; then got=$((got+1)); continue; fi
+    local url="${EZ_BASE}/${tool}.zip"
+    local code; code="$(curl -s -o /dev/null -w '%{http_code}' -I "${url}" || echo 000)"
+    [[ "${code}" == "200" ]] || { echo "${tool}: HTTP ${code}"; continue; }
+    if curl -fsSL "${url}" -o "${EZ_DIR}/${tool}.zip"; then
+      unzip -oq "${EZ_DIR}/${tool}.zip" -d "${EZ_DIR}/${tool}" && rm -f "${EZ_DIR}/${tool}.zip"
+      find "${EZ_DIR}/${tool}" -maxdepth 2 -iname "${tool}*" -type f -exec chmod +x {} \; 2>/dev/null || true
+      got=$((got+1))
+    fi
+  done
+  echo "staged ${got}/${#EZ_TOOLS[@]} EZ tools"
+  [[ "${got}" -gt 0 ]]
+```
+
+[`scripts/install.sh:296-314`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/scripts/install.sh#L296-L314)
+
+[26] 응답은 읽은 규칙의 수만 싣는다.
+
+```python
+    pack = _load_yaml(_pack_root() / "pack.yml") or {}
+    return {
+        "pack_version": pack.get("version"),
+        "rule_count": len(rules),
+        "event_count": len(events),
+        "match_count": len(matches),
+        "matches": matches,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:249-256`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L249-L256)
+
+[27] 규칙 파일이 없거나 읽지 못하면 빈 규칙을 돌려주고 결합은 계속한다.
+
+```python
+def load_rules(path: Path | None = None) -> dict[str, Any]:
+    """Load the correlation rule pack. Caller may override with a custom
+    path for testing.
+
+    The default location is dfir_corr/correlation-rules.yaml at the
+    package root. If the file is missing or yaml is not installed, we
+    return an empty rule set rather than raising — the engine's
+    built-in joins still work, just without operator-tunable rules
+    layered on top."""
+    p = path or _RULES_PATH
+    if not p.exists():
+        return {"rules": [], "_loaded_from": None}
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return {"rules": [], "_loaded_from": None,
+                "_error": "pyyaml not installed; rule pack ignored"}
+    try:
+        data = yaml.safe_load(p.read_text()) or {}
+        data["_loaded_from"] = str(p)
+        return data
+    except Exception as exc:
+        return {"rules": [], "_loaded_from": str(p), "_error": str(exc)}
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:74-96`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L74-L96)
+
+```python
+    # Apply caller-supplied or default rule overlays (operator-tunable
+    # contradiction patterns).
+    rules = rules if rules is not None else load_rules().get("rules", [])
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:266-268`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L266-L268)
+
+[28] MCP 응답은 `correlations`만 옮긴다.
+
+```python
+    # Map dfir_corr's shape into the back-compat result shape that
+    # existing case studies expect.
+    cross_src = []
+    for c in core.get("correlations", []):
+        cross_src.append({
+            "s1": c["source_a"], "ts1": c["ts_a"], "a1": c["actor_a"],
+            "t1": c["target_a"], "ty1": c["type_a"],
+            "s2": c["source_b"], "ts2": c["ts_b"], "a2": c["actor_b"],
+            "t2": c["target_b"], "ty2": c["type_b"],
+            "delta_s": c["delta_seconds"],
+        })
+    kvm_patterns = [c for c in cross_src
+                    if c.get("ty1") == "usb_insert" and c.get("ty2") == "logon"]
+    return {
+        "event_count": core["normalized_event_count"],
+        "cross_source_correlations": cross_src[:100],
+        "cross_source_total": len(cross_src),
+        "kvm_precedes_logon": kvm_patterns,
+        "user_rule_matches": user_matches,
+        "engine": "duckdb",
+        "window_seconds": window_seconds,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:849-870`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L849-L870)

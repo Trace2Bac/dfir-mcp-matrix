@@ -1,0 +1,236 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 증거 파일을 직접 여는 기본 도구 경로와 외부 도구의 출력 위치에 적용된다 [1][2][3][4].
+기본 도구는 증거를 `read_text`·`read_bytes`나 읽기 모드의 `open`으로 읽는다 [1].
+SQLite DB는 `parse_knowledgec`·`parse_browser_history`·`analyze_downloads`가 `mode=ro&immutable=1` URI로, `parse_macos_quarantine`이 `mode=ro` URI로 연다 [2].
+서버 코드가 쓰기 위해 만드는 것은 외부 도구 래퍼의 호출마다의 임시 폴더와 Plaso 저장 파일의 폴더뿐이다 [3][4].
+MCP 도구 가운데 쓸 파일을 인자로 받는 도구는 `sift_plaso_log2timeline` 하나다 [3].
+
+외부 도구의 출력 위치는 증거 폴더와 다른 곳으로 정해 둔다.
+Zimmerman 도구와 `psort`의 CSV는 호출마다 만든 임시 폴더에 쓰게 한다 [4].
+`sift_plaso_log2timeline`의 저장 파일 경로는 `_safe_derived_path`가 `DFIR_DERIVED_ROOT` 아래로만 정한다 [5].
+상대 경로는 `.`·`..` 조각을 거부하고 절대 경로와 상대 경로 모두 실제 경로로 변환해 그 폴더 밖이면 거부한다 [5].
+같은 이름의 저장 파일이 이미 있으면 실행하지 않는다 [3].
+`_safe_derived_path`의 설명 문자열은 파생물을 증거 폴더에 다시 쓰지 않으려고 따로 둔 폴더라고 적는다 [5].
+
+**한계.** `parse_macos_quarantine`은 `immutable` 없이 `mode=ro`로만 연다 [2].
+WAL 모드 DB를 이렇게 열자 원본 폴더의 `-shm` 파일 내용이 바뀌었다 [6].
+`-shm`이 없던 경우에는 원본 폴더에 새 `-shm` 파일이 생겼다 [6].
+DB 파일과 `-wal` 파일은 바뀌지 않았다 [6].
+네 도구는 DB 경로를 퍼센트 인코딩하지 않고 `file:<경로>?mode=…` 문자열에 넣어 `sqlite3.connect`에 URI로 넘긴다 [2].
+실행 확인 환경의 CPython 3.12.15가 쓰는 SQLite 3.53.1은 URI에서 `#`을 만나면 그 뒤를 읽지 않고 파일 이름에서 처음 나온 `?`의 뒤를 옵션으로 읽는다 [7].
+CPython 3.12.15의 `sqlite3`는 SQLite에 읽기·쓰기와 만들기 플래그를 주고 연다 [8].
+그래서 경로에 `#`이 있으면 `#` 앞까지가 파일 이름이 되고 `mode=ro`가 적용되지 않아 그 이름의 파일이 원본 폴더에 새로 생긴다 [2][7][8].
+이름이 `know#ledge.db`인 DB로 `parse_knowledgec`를 부르자 같은 폴더에 0바이트 파일 `know`가 생겼고 도구는 `no such table` 오류를 돌려주었다 [6].
+`parse_macos_quarantine`도 `Quar#V2`를 받아 같은 폴더에 `Quar`를 만들었다 [6].
+경로에 `?`가 든 경우는 실행으로 확인하지 못했다 [7].
+`_safe_derived_path`는 `DFIR_DERIVED_ROOT`가 증거 폴더와 겹치는지 확인하지 않는다 [5].
+`DFIR_DERIVED_ROOT`를 증거 폴더 안으로 두자 `sift_plaso_log2timeline`은 실행 파일을 찾기 전에 증거 폴더 안에 저장 파일의 폴더를 만들었다 [9].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 증거 경로를 외부 실행 파일에 넘기는 외부 도구 래퍼 25개와 하이브 경로를 파서 라이브러리에 넘기는 `parse_registry_hive`에 적용된다 [10][11].
+래퍼는 받은 경로를 `safe_evidence_input`으로 확인한 뒤 Volatility 3·Zimmerman 도구·YARA·Plaso의 입력 인자로 넘기고 셸 없이 실행한다 [10][12].
+Volatility 3·YARA 래퍼와 `sift_recmd_query_key`는 출력 파일 인자를 넘기지 않고 표준 출력을 받는다 [10].
+이 경로에서 원본을 지키는 것은 외부 도구와 라이브러리가 증거를 읽기만 한다는 동작이다.
+
+Volatility 3 2.28.0의 `FileLayer`는 파일을 `rb` 모드로 연다 [13].
+Volatility 3는 심볼 캐시를 증거 옆이 아니라 자기 캐시 폴더에 쓴다 [14].
+Zimmerman 도구는 기준 날짜의 기본 브랜치 커밋에서 입력 파일을 `FileAccess.Read`로 연다 [15].
+MFTECmd는 `MFT` 라이브러리, PECmd는 `Prefetch` 라이브러리, AmcacheParser는 `Registry` 라이브러리를 거쳐 열고 EvtxECmd·RECmd는 도구 코드에서 연다 [15].
+RECmd와 AmcacheParser는 하이브가 더티이면 같은 폴더의 `<하이브 이름>.LOG?` 파일을 읽어 메모리에 올린 하이브에 적용한다 [16].
+YARA 4.5.8은 대상 파일을 `O_RDONLY`로 열고 `PROT_READ`·`MAP_PRIVATE`로 매핑한다 [17].
+Plaso 20260720의 `psort`는 분석 플러그인이 없으면 저장 파일을 읽기 전용으로 확인하고 래퍼는 분석 플러그인 인자를 넘기지 않는다 [18].
+`parse_registry_hive`는 하이브 경로를 `python-registry` 1.3.1의 `Registry.Registry`에 넘기고 이 라이브러리는 파일을 `rb`로 열어 내용 전체를 메모리로 읽는다 [11][19].
+
+증거 폴더를 읽기 전용으로 마운트하는 실행 경로는 저장소에 없다.
+README와 설계 문서는 에이전트를 시작하기 전에 증거를 OS 수준에서 읽기 전용으로 마운트한다고 적는다 [20].
+사용자 안내서는 사용자가 `mount -o ro,loop`나 `mount --bind -o ro`를 직접 실행하라고 적는다 [21].
+`scripts/install.sh`에서 `mount`가 나오는 줄은 `ewfmount` 패키지를 설명하는 주석 한 줄뿐이다 [22].
+사용자 CLI `analyze.py`는 저장소 안의 사례 폴더 `evidence_root`를 마운트 없이 `DFIR_EVIDENCE_ROOT`로 둔다 [23].
+
+**한계.** Plaso 20260720의 `log2timeline`이 받은 원본 이미지나 폴더를 읽기 모드로 여는지는 소스로 확인하지 못했다 [24].
+그래서 `sift_plaso_log2timeline` 경로의 실제 보호는 확인하지 못했다(실제 보호 미확인) [24].
+
+### 근거
+
+[1] 기본 도구가 증거를 읽는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:223-225`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L223-L225), [`dfir_mcp/src/dfir_mcp/__init__.py:439`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L439), [`dfir_mcp/src/dfir_mcp/__init__.py:691`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L691), [`dfir_mcp/src/dfir_mcp/__init__.py:91-96`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L91-L96), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:360-362`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L360-L362), [`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:187-188`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L187-L188), [`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:547`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L547).
+
+[2] SQLite DB를 여는 URI다: [`dfir_mcp/src/dfir_mcp/__init__.py:1061-1062`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1061-L1062), [`dfir_mcp/src/dfir_mcp/__init__.py:1262-1263`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1262-L1263), [`dfir_mcp/src/dfir_mcp/__init__.py:1388-1389`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1388-L1389), [`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:128`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L128).
+
+[3] `sift_plaso_log2timeline`은 저장 파일의 폴더를 만들고 같은 이름의 파일이 있으면 거부한다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-145`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L145)
+
+[4] Zimmerman 도구 래퍼와 `sift_plaso_psort`는 임시 폴더를 출력 위치로 넘긴다: [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:69-78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L69-L78), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:63-74`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L63-L74), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:60-71`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L60-L71), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:83-94`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L83-L94), [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:70-80`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L70-L80), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:208-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L208-L220).
+
+[5] `_safe_derived_path`는 저장 파일 경로를 `DFIR_DERIVED_ROOT` 아래로 제한하고 증거 폴더와 비교하지 않는다.
+
+```python
+def _safe_derived_path(path_str: str, *, must_exist: bool = False) -> Path:
+    """Resolve a Plaso storage path under DFIR_DERIVED_ROOT.
+
+    Plaso is the one adapter family that needs a persistent derived artifact
+    for later psort slicing. Derived artifacts must never be written back into
+    EVIDENCE_ROOT, so this helper constrains them to a separate root.
+    """
+    if not isinstance(path_str, str) or not path_str:
+        raise PathTraversalAttempt(f"invalid derived path: {path_str!r}")
+    if "\x00" in path_str:
+        raise PathTraversalAttempt("null byte in derived path")
+
+    root = _derived_root()
+    raw = Path(path_str).expanduser()
+    if raw.is_absolute():
+        candidate = raw.resolve()
+    else:
+        norm = path_str.replace("\\", "/")
+        parts = [p for p in norm.split("/") if p]
+        if not parts or any(p in (".", "..") for p in parts):
+            raise PathTraversalAttempt(f"invalid derived path: {path_str!r}")
+        candidate = (root / Path(*parts)).resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError as e:
+        raise PathTraversalAttempt(
+            f"derived path escapes {DERIVED_ROOT_ENV}: {path_str!r}"
+        ) from e
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:61-89`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L61-L89)
+
+[6] (실행 확인) 체크포인트하지 않은 행이 `-wal`에만 있는 WAL 모드 `QuarantineEventsV2`를 두 경우(`-shm` 있음, 없음)로 증거 폴더에 두고 `parse_macos_quarantine`을 불러 호출 전후 파일의 SHA-256을 비교했다.
+두 경우 모두 응답의 `total`은 1이었고 DB와 `-wal`의 해시는 같았으며 `-shm`은 해시가 바뀌거나 새로 생겼다.
+`ZOBJECT` 표만 둔 `kc/know#ledge.db`로 `parse_knowledgec`를 부르자 `sqlite_read_failed`와 `no such table: ZOBJECT`가 돌아왔고 `kc` 폴더에 0바이트 `know`가 생겼다.
+같은 방식으로 `q2/Quar#V2`를 `parse_macos_quarantine`에 주자 `q2` 폴더에 0바이트 `Quar`가 생겼다.
+
+[7] SQLite 3.53.1의 `sqlite3ParseUri`는 `#`에서 읽기를 멈추고 파일 이름의 첫 `?` 뒤를 옵션으로 읽으며 이름이 `mode`인 옵션만 열기 플래그를 바꾼다: [`src/main.c:3145-3194`](https://github.com/sqlite/sqlite/blob/ccd445d76a9362c63add000354fac84ba9022176/src/main.c#L3145-L3194), [`src/main.c:3231-3269`](https://github.com/sqlite/sqlite/blob/ccd445d76a9362c63add000354fac84ba9022176/src/main.c#L3231-L3269).
+
+[8] CPython 3.12.15의 `sqlite3`는 `sqlite3_open_v2`에 `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE`와 URI 플래그를 준다: [`Modules/_sqlite/connection.c:260-262`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Modules/_sqlite/connection.c#L260-L262).
+
+[9] (실행 확인) `DFIR_DERIVED_ROOT`를 증거 폴더 아래 `derived`로 두고 Plaso가 없는 환경에서 `sift_plaso_log2timeline`에 `output_storage_path` `case1/run.plaso`를 주자 `SiftToolNotFoundError`로 끝났고 증거 폴더 안에 `derived/case1` 폴더가 남았다.
+
+[10] 래퍼는 확인한 증거 경로를 외부 도구의 입력 인자로 넘긴다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:71-82`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L71-L82), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:83-89`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L83-L89), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:139-147`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L139-L147), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:147-153`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L147-L153).
+
+[11] `parse_registry_hive`는 하이브 경로를 `Registry.Registry`에 넘긴다.
+
+```python
+    try:
+        reg = _Reg.Registry(str(p))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3856-3857`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3856-L3857)
+
+[12] 공통 실행 함수 `run_tool`은 인자 목록을 셸 없이 `subprocess.run`으로 실행한다.
+
+```python
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            check=False,
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:199-207`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L199-L207)
+
+[13] Volatility 3 2.28.0의 `FileLayer`가 파일을 여는 모드다: [`volatility3/framework/layers/physical.py:119-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/physical.py#L119-L125).
+
+[14] Volatility 3 2.28.0의 캐시 폴더와 그 아래 심볼 폴더다: [`volatility3/framework/constants/__init__.py:28-38`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L38), [`volatility3/framework/constants/__init__.py:46-51`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L46-L51).
+
+[15] Zimmerman 도구가 입력 파일을 여는 곳이고 기준 날짜(2026-09-06)의 기본 브랜치 커밋이다: MFTECmd [`MFTECmd/Program.cs:1545`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L1545)와 [`MFT/MftFile.cs:9-18`](https://github.com/EricZimmerman/MFT/blob/58155d096a52b56f6ab47694027cd8ccc2ca8651/MFT/MftFile.cs#L9-L18), EvtxECmd [`EvtxECmd/Program.cs:1052`](https://github.com/EricZimmerman/evtx/blob/03a7a1fba32760f20841bea3c12099169f9ecf2d/EvtxECmd/Program.cs#L1052), PECmd [`PECmd/Program.cs:1303`](https://github.com/EricZimmerman/PECmd/blob/acdf082f1c2e946b0c358cdf6ef71607e00cfea0/PECmd/Program.cs#L1303)와 [`Prefetch/PrefetchFile.cs:83-88`](https://github.com/EricZimmerman/Prefetch/blob/27d87a095fe0bd4b07726aec867e1c0f1aef08f9/Prefetch/PrefetchFile.cs#L83-L88), RECmd [`RECmd/Program.cs:883-898`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L883-L898), AmcacheParser [`Amcache/AmcacheNew.cs:27-30`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/Amcache/AmcacheNew.cs#L27-L30)와 [`Registry/RegistryBase.cs:37-48`](https://github.com/EricZimmerman/Registry/blob/1b0b3c414569debb5ffcc629de28e3ff27145a42/Registry/RegistryBase.cs#L37-L48).
+
+[16] 더티 하이브의 로그를 찾아 메모리의 하이브에 적용하는 곳이다: [`RECmd/Program.cs:951-991`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L951-L991), [`Amcache/AmcacheNew.cs:63-108`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/Amcache/AmcacheNew.cs#L63-L108), [`Registry/RegistryHive.cs:298-319`](https://github.com/EricZimmerman/Registry/blob/1b0b3c414569debb5ffcc629de28e3ff27145a42/Registry/RegistryHive.cs#L298-L319).
+
+[17] YARA 4.5.8의 파일 매핑이다: [`libyara/filemap.c:315-327`](https://github.com/VirusTotal/yara/blob/84b0e3cc0e42f8f8e6b84d19c97ec3ac6ff8aee8/libyara/filemap.c#L315-L327), [`libyara/filemap.c:232-236`](https://github.com/VirusTotal/yara/blob/84b0e3cc0e42f8f8e6b84d19c97ec3ac6ff8aee8/libyara/filemap.c#L232-L236).
+
+[18] Plaso 20260720의 `psort`는 분석 플러그인이 없으면 읽기 전용으로 확인한다: [`plaso/cli/psort_tool.py:492-497`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/psort_tool.py#L492-L497), [`plaso/cli/psort_tool.py:110-111`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/psort_tool.py#L110-L111).
+래퍼가 넘기는 인자는 출력 형식, 출력 파일, 저장 파일, 거르는 식이다.
+
+```python
+        cmd = [
+            _psort_bin(),
+            "-o", output_format,
+            "-w", str(out_file),
+            str(storage),
+        ]
+        if filter_expression:
+            cmd.append(filter_expression)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:210-217`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L210-L217)
+
+[19] `python-registry` 1.3.1의 `Registry`는 경로를 받으면 `rb`로 열어 전부 읽는다: [`Registry/Registry.py:384-389`](https://github.com/williballenthin/python-registry/blob/de2d7704623493aeda31c47c953a87ed6cb5b73e/Registry/Registry.py#L384-L389).
+
+[20] 문서의 읽기 전용 마운트 문구다: [`README.md:66`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/README.md#L66), [`docs/architecture.md:78`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/docs/architecture.md#L78), [`docs/architecture.md:289`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/docs/architecture.md#L289).
+
+[21] 사용자 안내서의 마운트 절이다: [`docs/operator-guide.md:218-246`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/docs/operator-guide.md#L218-L246).
+
+[22] 설치 스크립트에서 `mount`가 나오는 줄이다.
+
+```bash
+# dnf/yum). sleuthkit (mmls/tsk_recover) and ewf-tools (ewfmount) are needed to
+# turn raw whole-disk images / E01s into an evidence tree for the external
+# benchmark cases. macOS is intentionally unsupported (see README): the Plaso /
+```
+
+[`scripts/install.sh:124-126`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/scripts/install.sh#L124-L126)
+
+[23] `analyze.py`는 사례 폴더의 `evidence_root`를 그대로 증거 폴더로 둔다.
+
+```python
+            cases.append(Case(
+                tier=tier,
+                case_id=case_dir.name,
+                ref=f"{tier}/{case_dir.name}",
+                path=case_dir,
+                truth_path=case_dir / "truth.json",
+                evidence_root=case_dir / "evidence_root",
+            ))
+```
+
+[`analyze.py:93-100`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L93-L100)
+
+```python
+    # Wire the agent to this case's own evidence_root (once per case).
+    os.environ["DFIR_EVIDENCE_ROOT"] = str(case.evidence_root)
+```
+
+[`analyze.py:290-291`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L290-L291)
+
+[24] `sift_plaso_log2timeline`은 받은 경로를 `log2timeline.py`의 마지막 인자로 넘긴다.
+
+```python
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:147-153`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L147-L153)

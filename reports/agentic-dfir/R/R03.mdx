@@ -1,0 +1,752 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 서버의 도구 73개 모두에 적용되지만 실패를 싣는 모양은 경로마다 다르다 [1][2][3].
+네이티브 도구 대부분은 입력 파일이 없거나 읽지 못하면 예외를 내지 않고 `error` 필드에 오류 종류 코드를 담은 `dict`를 돌려준다 [1].
+코드는 `file_not_found`, `amcache_csv_missing`·`shimcache_csv_missing`·`mft_csv_missing` 같은 부속 자료 없음, `sqlite_read_failed`, `read_failed`, `not_a_directory`, `hive_open_failed` 같은 값이다 [1].
+많은 경우 `path`, `hint`, 앞부분만 남긴 예외 문구 `detail`을 함께 싣는다 [1].
+`parse_macos_quarantine`·`detect_dns_tunneling`은 정상 응답과 같은 필드에 빈 목록과 0을 넣고 `error`에 문장을 싣는다 [4].
+
+경로 검사와 외부 도구 래퍼는 예외를 낸다 [5][6][7].
+`_safe_resolve`는 증거 루트를 벗어나는 경로에, 래퍼의 `safe_evidence_input`은 없는 경로에 `PathTraversalAttempt`를 낸다 [5][6].
+래퍼는 실행 파일을 찾지 못하면 `SiftToolNotFoundError`를, 종료 코드가 0이 아니거나 시간 제한을 넘으면 `SiftToolFailedError`를 낸다 [6][7].
+시간 제한을 넘은 실행과 0이 아닌 종료 코드는 같은 예외 종류이고 문구로만 구별된다 [7].
+등록부는 없는 도구에 `KeyError`를, schema에 없는 인자나 맞지 않는 자료형에 `TypeError`를, 허용 값과 상한을 벗어난 값에 `ValueError`를 낸다 [8].
+
+두 진입점은 이 예외를 다르게 싣는다 [2][3].
+`server_stdio`는 도구 예외를 `{"error": <예외 종류 이름>, "detail": <문구 앞 500자>}` JSON 글로 만들어 정상 결과로 돌려준다 [2].
+없는 도구는 `{"error": "ToolNotFound", …}`로 싣는다 [2].
+MCP Python SDK 1.29.1은 입력 schema 검사에 실패한 호출만 `isError`가 참인 결과로 바꾼다 [9].
+`server`는 없는 도구를 JSON-RPC 오류 -32601로, 다른 예외를 오류 -32000과 `<예외 종류>: <문구>`로 보낸다 [3].
+같은 호출 12개를 두 진입점으로 부르자 `server_stdio`에서는 schema 상한을 넘긴 호출 하나만 `isError`가 참이었고 `server`에서는 9개 호출이 JSON-RPC 오류였다 [10].
+
+외부 도구 래퍼의 정상 응답에는 상태 필드가 없다 [11].
+YARA 래퍼는 YARA 실행 중의 예외를 처리해 `matches`를 빈 목록으로 두고 `metadata.error`에 예외 문구를 싣는다 [12].
+서버는 실행 중인 호출의 진행을 알리지 않는다 [2][3].
+
+**한계.** `server_stdio`에서는 도구가 예외로 끝나도 `isError`가 거짓이다 [2][10].
+`detect_credential_access`는 Sysmon 사건 파일의 경로 검사나 읽기에서 예외가 나면 입력 경로 없이 `technique`과 `error`만 있는 항목을 `findings`에 넣고 이 항목을 `finding_count`와 `by_technique`에 센다 [13][14].
+`error` 필드의 값은 네이티브 도구에서는 오류 코드, `_v06` 도구에서는 문장, 예외를 바꾼 응답에서는 예외 종류 이름이다 [1][4][2].
+
+실패를 알리지 않는 경로가 있다.
+`detect_credential_access`는 `sysmon_events_json`의 파일이 없으면 그 입력을 알리지 않고 건너뛴다 [13].
+`detect_defense_evasion`은 `events_json`·`mft_csv`의 파일이 없으면 건너뛰고 MFT CSV를 읽다 예외가 나면 그때까지의 결과만 쓴다 [15].
+JSON 사건을 읽는 도구는 JSON으로 읽지 못한 줄을 알리지 않고 건너뛴다 [16].
+EvtxECmd·PECmd 래퍼, `sift_recmd_run_batch`, `sift_amcacheparser_parse`는 도구가 CSV를 만들지 않으면 빈 목록을 오류 표시 없이 싣는다 [17][18][19].
+`sift_mftecmd_timestomp`는 `sift_mftecmd_parse`가 CSV 없음을 알리는 `metadata.error`를 옮기지 않고 빈 `findings`를 싣는다 [20].
+`_run_evtxecmd`와 `_run_pecmd`가 남긴 표준 오류 끝부분은 래퍼의 응답에 옮겨지지 않는다 [17].
+`sift_plaso_psort`는 `output_format`이 `l2tcsv`가 아니면 psort 출력을 읽지 않고 빈 `events`를 싣는다 [21].
+
+`server`는 결과에 JSON으로 바꾸지 못하는 값이 있으면 도구가 끝난 호출도 오류로 보낸다 [3].
+`correlate_timeline`에 사용자 규칙을 주자 `server`는 `TypeError: Object of type datetime is not JSON serializable` 오류를 보냈다 [10].
+
+인자의 기본값이나 형식 때문에 늘 예외로 끝나는 호출이 있다.
+`parse_linux_cron_jobs`의 `evidence_root` 기본값 `/`는 경로 검사에서 증거 루트 밖으로 해석되어 인자 없이 부르면 `PathTraversalAttempt`로 끝난다 [22][10].
+`parse_macos_quarantine`은 UTC가 붙은 시각과 시간대 없는 시간 범위를 비교하므로 시간 범위를 주면 시각이 있는 행에서 `TypeError`로 끝난다 [23][24].
+`correlate_events`에 시간대가 붙은 시각과 없는 시각을 섞어 주면 `TypeError`로 끝난다 [25][24].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 네이티브 도구의 빈 결과, `parse_registry_hive`의 키·값 조회, YARA 래퍼에 적용된다 [1][26][12].
+네이티브 도구는 입력을 읽고 일치가 없으면 `error` 없이 빈 목록과 0인 건수를 싣고 입력이 없으면 `error`를 싣는다 [1].
+`parse_registry_hive`는 하이브를 연 뒤 키가 없으면 `key_not_found`, 값이 없으면 `value_not_found`를 싣는다 [26].
+이 코드는 파일이 없는 `file_not_found`, 하이브를 열지 못한 `hive_open_failed`, 키를 열다 다른 예외가 난 `key_open_failed`와 다르다 [26].
+`key_not_found` 응답에는 하이브의 루트 키 이름 `root_key_in_hive`와 키 경로를 쓰는 법을 적은 `hint`가 실린다 [26][24].
+YARA 래퍼는 일치가 없으면 `metadata.error` 없이 빈 `matches`를, YARA가 실패하면 빈 `matches`와 `metadata.error`를 싣는다 [12].
+`/bin/false`를 YARA 실행 파일로 지정하자 `matches`가 빈 목록이고 `metadata.error`가 `/bin/false exited with code 1: (no stderr)`인 응답이 왔다 [10].
+
+**한계.** 입력이 없는 것을 빈 결과와 같은 모양으로 싣는 도구가 있다.
+`list_scheduled_tasks`는 Tasks 폴더가 없으면 `items`를 빈 목록으로 두고 `note`에 문장을 싣는다 [27][24].
+`parse_macos_quarantine`·`detect_dns_tunneling`은 입력 파일이 없으면 `total` 0과 빈 목록을 싣고 `error` 문장으로만 구별한다 [4][24].
+YARA 래퍼의 두 경우도 `metadata.error`가 있는지로만 구별된다 [12].
+앞의 한계에 적은 대로 CSV를 만들지 못한 EvtxECmd·PECmd·RECmd·AmcacheParser 래퍼와 `sift_mftecmd_timestomp`, `l2tcsv`가 아닌 psort, 입력 파일이 없는 `detect_credential_access`·`detect_defense_evasion`은 일치 0건과 같은 응답을 싣는다 [17][18][21][13][15].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `correlate_timeline`의 사용자 규칙과 `parse_linux_cron_jobs`의 파일 읽기 실패에 적용된다 [28][29].
+`correlate_timeline`은 `rules`의 문자열마다 `user_rule_matches`에 항목 하나를 싣는다 [28].
+허용 문자 검사에 실패하면 `rule rejected: disallowed character`, 금지 낱말이 있으면 `rule rejected: forbidden SQL keyword`, DuckDB 질의가 실패하면 예외 문구 앞 200자를 그 규칙 문자열과 함께 `error`에 싣는다 [28].
+성공한 규칙은 `hits`와 `sample`을 싣는다 [28].
+`parse_linux_cron_jobs`는 읽지 못한 cron 파일마다 `path`·`kind`·`error`를 담은 항목을 `jobs`에 넣는다 [29].
+
+`grep_shell_history_for_c2`는 정규식으로 컴파일하지 못한 `extra_patterns`를 건너뛰고 `patterns_checked`에 쓴 정규식 수만 싣는다 [30].
+
+**한계.** `correlate_timeline`은 문자열이 아닌 `rules` 항목을 항목 없이 건너뛴다 [28].
+사건의 시각을 하나도 읽지 못하면 규칙을 실행하지 않아 `user_rule_matches`가 빈 목록이 된다 [28].
+`parse_linux_cron_jobs`의 실패 항목은 작업 항목과 같은 `jobs` 목록에 섞이고 `total`에도 세어진다 [29][31].
+`flagged_only`를 주면 실패 항목에는 `flags`가 없어 응답에서 빠진다 [31].
+없는 cron 위치는 항목 없이 `scanned_paths`에만 실린다 [31].
+
+### 근거
+
+[1] 네이티브 도구가 `error` 코드를 담은 `dict`를 돌려주는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:241-261`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L241-L261), [`dfir_mcp/src/dfir_mcp/__init__.py:1090-1093`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1090-L1093), [`dfir_mcp/src/dfir_mcp/__init__.py:2314-2320`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2314-L2320), [`dfir_mcp/src/dfir_mcp/__init__.py:2806-2811`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2806-L2811), [`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:164-168`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L164-L168).
+
+[2] `server_stdio`는 도구 예외를 예외 종류 이름과 문구 앞 500자를 담은 JSON 글로 만들어 돌려준다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[3] `server`는 결과를 인자 없는 `json.dumps`로 바꾸고 예외를 JSON-RPC 오류로 보낸다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[4] `parse_macos_quarantine`은 DB가 없으면 정상 응답과 같은 필드에 빈 값과 `error` 문장을 싣는다.
+
+```python
+    db_path = _safe_resolve(quarantine_db_path)
+    if not db_path.exists():
+        return {
+            "source": {"path": str(db_path), "sha256": ""},
+            "events": [],
+            "total": 0,
+            "next_cursor": None,
+            "error": f"quarantine db not found at {db_path}",
+        }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:110-118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L110-L118)
+
+```python
+    log_path = _safe_resolve(dns_log_path)
+    if not log_path.exists():
+        return {
+            "source": {"path": str(log_path), "sha256": ""},
+            "flagged_queries": [],
+            "high_volume_domains": [],
+            "total_queries_parsed": 0,
+            "total_flagged": 0,
+            "next_cursor": None,
+            "error": f"DNS log not found at {log_path}",
+        }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:530-540`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L530-L540)
+
+[5] `_safe_resolve`는 증거 루트를 벗어나는 경로에 `PathTraversalAttempt`를 낸다.
+
+```python
+def _safe_resolve(path_str: str) -> Path:
+    if not isinstance(path_str, str) or not path_str:
+        raise PathTraversalAttempt(f"invalid path: {path_str!r}")
+    if "\x00" in path_str:
+        raise PathTraversalAttempt("null byte in path")
+    if len(path_str) > 1024:
+        raise PathTraversalAttempt(f"path too long: {len(path_str)} chars (max 1024)")
+    root = EVIDENCE_ROOT.resolve()
+    try:
+        requested = (EVIDENCE_ROOT / path_str).resolve()
+    except OSError as e:
+        # File-name-too-long, no-such-process, etc. — treat as path attack
+        raise PathTraversalAttempt(f"path resolution failed: {e}") from e
+    try:
+        requested.relative_to(root)
+    except ValueError as e:
+        raise PathTraversalAttempt(
+            f"path escapes evidence root: {path_str!r} -> {requested}"
+        ) from e
+    return requested
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:69-88`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L69-L88)
+
+[6] 래퍼의 공통 함수는 실행 파일을 찾지 못하거나 입력 경로가 없으면 예외를 낸다.
+
+```python
+    found = shutil.which(binary)
+    if found:
+        return found
+    staged = _search_repo_bins(binary)
+    if staged:
+        return staged
+    raise SiftToolNotFoundError(
+        f"SIFT tool {binary!r} not found on PATH or in the installer-staged "
+        f"bin/ dirs. Set {env_var or 'a tool-specific env var'} to its "
+        f"absolute path, or run scripts/install.sh to stage it."
+    )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:152-162`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L152-L162)
+
+```python
+def safe_evidence_input(path_str: str) -> Path:
+    """
+    Resolve an evidence path under EVIDENCE_ROOT, with read-access verification.
+
+    All SIFT adapters MUST pass user-supplied paths through this function
+    before invoking subprocess. This is the boundary that makes path
+    traversal structurally impossible.
+    """
+    p = _safe_resolve(path_str)
+    if not p.exists():
+        raise PathTraversalAttempt(f"evidence path does not exist: {path_str!r}")
+    return p
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:239-250`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L239-L250)
+
+[7] `run_tool`은 시간 제한과 0이 아닌 종료 코드에 같은 `SiftToolFailedError`를 낸다.
+
+```python
+    except subprocess.TimeoutExpired as e:
+        raise SiftToolFailedError(
+            f"SIFT tool timed out after {timeout}s: {cmd[0]}"
+        ) from e
+    except FileNotFoundError as e:
+        raise SiftToolNotFoundError(f"binary not found: {cmd[0]}") from e
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:208-213`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L208-L213)
+
+```python
+    if proc.returncode != 0:
+        raise SiftToolFailedError(
+            f"{cmd[0]} exited with code {proc.returncode}: "
+            f"{proc.stderr[:200] if proc.stderr else '(no stderr)'}"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:224-228`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L224-L228)
+
+[8] 등록부는 없는 도구에 `KeyError`를 내고 인자 검사에서 `TypeError`·`ValueError`를 낸다: [`dfir_mcp/src/dfir_mcp/__init__.py:143-200`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L143-L200).
+
+[9] MCP Python SDK 1.29.1의 저수준 `Server`는 입력 schema 검사 실패를 `isError`가 참인 결과로 만들고 처리기가 돌려준 내용은 `isError`가 거짓인 결과에 싣는다: [`src/mcp/server/lowlevel/server.py:472-479`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L472-L479), [`src/mcp/server/lowlevel/server.py:527-590`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L527-L590).
+
+[10] (실행 확인) 같은 호출 12개를 `server_stdio`(SDK `ClientSession`)와 `server`(JSON-RPC 줄)로 불렀다(`runs.md` 실행 5).
+`server_stdio`에서 `isError`가 참인 호출은 `get_amcache` `limit` 501 하나였다.
+경로 탈출, 없는 도구, 실행 파일 없는 래퍼, 없는 입력 파일을 준 래퍼, 더미 이미지의 Volatility 실행, 인자 없는 `parse_linux_cron_jobs`는 `isError`가 거짓이고 글이 `{"error": "PathTraversalAttempt", …}`, `{"error": "ToolNotFound", …}`, `{"error": "SiftToolNotFoundError", …}`, `{"error": "SiftToolFailedError", …}` 꼴이었다.
+`server`에서는 같은 호출과 `limit` 501, 사용자 규칙을 준 `correlate_timeline`이 JSON-RPC 오류였고 없는 도구만 -32601, 나머지는 -32000이었다.
+인자 없는 `parse_linux_cron_jobs`의 문구는 `PathTraversalAttempt: path escapes evidence root: '/' -> /`였다.
+`DFIR_YARA_BIN=/bin/false`로 부른 `sift_yara_scan_file`은 두 진입점 모두 정상 결과로 `{"matches": [], "metadata": {"tool": "yara", "error": "/bin/false exited with code 1: (no stderr)", …}}`를 돌려줬다.
+
+[11] Volatility 래퍼의 정상 응답은 행과 `metadata`만 싣는다.
+
+```python
+    metadata = {
+        "plugin": plugin,
+        "image_path": image_path,
+        "image_sha256": sample_sha,
+        "row_count": len(rows),
+        "duration_ms": result.duration_ms,
+        "tool": "volatility3",
+    }
+    return rows, metadata
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:96-104`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L96-L104)
+
+[12] `sift_yara_scan_file`은 실행 중의 예외를 `metadata.error`로 싣고 일치가 없으면 빈 `matches`를 싣는다.
+
+```python
+    try:
+        result = run_tool(cmd, timeout=YARA_TIMEOUT_SECONDS)
+        matches = _parse_yara_output(result.stdout)
+        duration_ms = result.duration_ms
+    except Exception as e:
+        # YARA returns non-zero on syntax errors etc. Catch and report.
+        return {
+            "matches": [],
+            "metadata": {
+                "tool": "yara",
+                "error": str(e),
+                "rules_path": rules_path,
+                "target_path": target_path,
+            },
+        }
+
+    return {
+        "matches": matches,
+        "metadata": {
+            "tool": "yara",
+            "rules_path": rules_path,
+            "target_path": target_path,
+            "target_sha256": _sha256(target) if target.is_file() else None,
+            "match_count": len(matches),
+            "duration_ms": duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:91-117`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L91-L117)
+
+[13] `detect_credential_access`는 Sysmon 파일이 없으면 건너뛰고 예외가 나면 `error` 항목을 `findings`에 넣는다.
+
+```python
+    if sysmon_events_json:
+        try:
+            p = _safe_resolve(sysmon_events_json)
+            if p.exists():
+                text = p.read_text(encoding="utf-8", errors="replace")
+                events = []
+                try:
+                    parsed = json.loads(text)
+                    events = parsed if isinstance(parsed, list) else [parsed]
+                except json.JSONDecodeError:
+                    for line in text.splitlines():
+                        if line.strip():
+                            try:
+                                events.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3188-3203`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3188-L3203)
+
+```python
+        except Exception as e:
+            findings.append({"technique": "T1003", "error": str(e)[:200]})
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3252-3253`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3252-L3253)
+
+[14] 오류 항목도 `finding_count`와 `by_technique`에 센다.
+
+```python
+    by_technique = {}
+    for f in findings:
+        t = f.get("technique", "unknown")
+        by_technique[t] = by_technique.get(t, 0) + 1
+
+    max_sev = "info"
+    sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    for f in findings:
+        if sev_rank.get(f.get("severity", "info"), 0) > sev_rank.get(max_sev, 0):
+            max_sev = f["severity"]
+
+    return {"findings": findings, "finding_count": len(findings),
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3272-3283`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3272-L3283)
+
+[15] `detect_defense_evasion`은 파일이 없으면 건너뛰고 MFT CSV의 예외를 알리지 않는다.
+
+```python
+    if events_json:
+        p = _safe_resolve(events_json)
+        if p.exists():
+            text = p.read_text(encoding="utf-8", errors="replace")
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3532-3535`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3532-L3535)
+
+```python
+    if mft_csv:
+        p = _safe_resolve(mft_csv)
+        if p.exists():
+            anomalies = []
+            try:
+                for row in _read_csv(p):
+                    si = _parse_ts(row.get("Created0x10") or
+                                    row.get("SI_Created") or "")
+                    fn = _parse_ts(row.get("Created0x30") or
+                                    row.get("FN_Created") or "")
+                    if si is None or fn is None:
+                        continue
+                    delta = abs((si - fn).total_seconds())
+                    # timestomp: $SI modified, $FN stays original.
+                    # A $SI timestamp EARLIER than $FN by >tolerance is
+                    # a forensic anomaly.
+                    if si < fn and delta > timestomp_si_fn_tolerance_seconds:
+                        anomalies.append({
+                            "path": (row.get("ParentPath", "") + "\\" +
+                                      row.get("FileName", "")).strip("\\"),
+                            "si_created": row.get("Created0x10"),
+                            "fn_created": row.get("Created0x30"),
+                            "delta_seconds": int(delta),
+                        })
+            except Exception:
+                pass
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3595-3620`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3595-L3620)
+
+[16] `analyze_event_logs`는 JSON으로 읽지 못한 줄을 건너뛴다.
+
+```python
+    text = p.read_text(encoding="utf-8", errors="replace")
+    try:
+        events = json.loads(text)
+        if isinstance(events, dict):
+            events = events.get("events") or events.get("results") or [events]
+    except json.JSONDecodeError:
+        events = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:691-705`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L691-L705)
+
+[17] EvtxECmd와 PECmd의 내부 함수는 CSV가 없으면 `stderr_tail`을 담은 빈 결과를 만들고 래퍼는 `stderr_tail`을 옮기지 않는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:76-85`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L76-L85), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:145-160`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L145-L160), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:72-79`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L72-L79), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:113-127`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L113-L127).
+
+[18] `sift_recmd_run_batch`는 CSV가 없으면 빈 `rows`로 응답을 만든다.
+
+```python
+        rows: list[dict[str, Any]] = []
+        if out_csv.is_file():
+            with out_csv.open("r", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh)
+                for i, r in enumerate(reader):
+                    if i >= limit:
+                        break
+                    rows.append(dict(r))
+
+    return {
+        "registry_findings": rows,
+        "metadata": {
+            "tool": "recmd",
+            "hive_path": hive_path,
+            "hive_sha256": sample_sha,
+            "batch_name": batch_name,
+            "batch_file": batch_file,
+            "rows_returned": len(rows),
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:96-116`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L96-L116)
+
+[19] `sift_amcacheparser_parse`는 CSV가 없으면 빈 결과를 싣는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:80-122`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L80-L122).
+
+[20] `sift_mftecmd_timestomp`는 파싱 결과의 `rows`만 쓴다.
+
+```python
+        if not out_csv.is_file():
+            return {
+                "rows": [],
+                "metadata": {"tool": "mftecmd", "error": "no CSV produced",
+                             "stderr_tail": result.stderr[-500:]},
+            }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:80-85`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L80-L85)
+
+```python
+def sift_mftecmd_timestomp(
+    mft_path: str,
+    tolerance_seconds: int = 1,
+    executables_only: bool = False,
+) -> dict[str, Any]:
+    parsed = sift_mftecmd_parse(mft_path, limit=1_000_000)
+    findings: list[dict[str, Any]] = []
+
+    for row in parsed["rows"]:
+        path = row.get("FullPath") or row.get("ParentPath", "") + "\\" + row.get("FileName", "")
+        is_exec = any(path.lower().endswith(e) for e in _EXEC_EXTS)
+        if executables_only and not is_exec:
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:154-165`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L154-L165)
+
+[21] `sift_plaso_psort`는 `l2tcsv`일 때만 출력 파일을 읽는다.
+
+```python
+        rows: list[dict[str, Any]] = []
+        if out_file.is_file() and output_format == "l2tcsv":
+            with out_file.open("r", encoding="utf-8", errors="replace") as fh:
+                reader = csv.DictReader(fh)
+                for i, r in enumerate(reader):
+                    if i >= limit:
+                        break
+                    rows.append(dict(r))
+
+    return {
+        "events": rows,
+        "metadata": {
+            "tool": "plaso/psort",
+            "storage_path": storage_path,
+            "storage_sha256": storage_sha,
+            "output_format": output_format,
+            "filter_expression": filter_expression,
+            "rows_returned": len(rows),
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:222-242`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L222-L242)
+
+[22] `parse_linux_cron_jobs`의 `evidence_root` 기본값은 `/`이고 이 값을 `_safe_resolve`에 넘긴다.
+
+```python
+            "evidence_root": {
+                "type": "string",
+                "description": "Root path to scan (default '/'). Use evidence_root/ for mounted images.",
+                "default": "/",
+            },
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:378-382`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L378-L382)
+
+```python
+def parse_linux_cron_jobs(
+    evidence_root: str = "/",
+    flagged_only: bool = False,
+    cursor: int = 0,
+    limit: int = 500,
+):
+    root = _safe_resolve(evidence_root)
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:393-399`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L393-L399)
+
+[23] `parse_macos_quarantine`은 UTC를 붙인 행 시각을 `_parse_ts`가 만든 시간대 없는 값과 비교한다.
+
+```python
+    for r in rows:
+        ts_cfat = r["ts_cfat"]
+        if ts_cfat is None or ts_cfat == 0.0:
+            # Null / zero CFAbsoluteTime in the LSQuarantine row means the
+            # downloader didn't record a timestamp — NOT that the event
+            # happened at the CFAT epoch (2001-01-01). Surface it as
+            # unknown rather than misdating to 2001.
+            ts_dt = None
+            ts_iso = None
+        else:
+            ts_dt = CFAT_EPOCH + timedelta(seconds=ts_cfat)
+            ts_iso = ts_dt.isoformat()
+
+        # Window filtering only applies when we actually know the time.
+        if ts_dt is not None:
+            if start_dt and ts_dt < start_dt:
+                continue
+            if end_dt and ts_dt > end_dt:
+                continue
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:157-175`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L157-L175)
+
+[24] (실행 확인) 같은 프로세스에서 `call_tool`로 상태 응답을 확인했다(`runs.md` 실행 2, 6).
+`parse_macos_quarantine`에 `time_window_start` `2026-01-01T00:00:00`을 주자 `TypeError: can't compare offset-naive and offset-aware datetimes`가 났다.
+`correlate_events`에 `2026-03-15T10:00:00+09:00`인 USB 사건과 `2026-03-15T10:05:00`인 로그온을 주자 `TypeError: can't subtract offset-naive and offset-aware datetimes`가 났다.
+`parse_registry_hive`에 없는 키 `Nope\Key`를 주자 `error` `key_not_found`, `root_key_in_hive` `CMI-CreateHive{899121E8-11D8-44B6-ACEB-301713D5ED8C}`, `hint`, `source`가 실렸다.
+Tasks 폴더가 없는 증거 루트에서 `list_scheduled_tasks`는 `{"items": [], "note": "no Tasks directory in evidence tree"}`를 돌려줬다.
+없는 DB를 준 `parse_macos_quarantine`은 `events` `[]`, `total` 0, `next_cursor` `null`, `error` `quarantine db not found at …`을 돌려줬다.
+
+[25] `correlate_events`는 두 시각을 빼서 간격을 구한다.
+
+```python
+    for logon in logon_events:
+        l_ts = _parse_ts(logon.get("ts", ""))
+        if l_ts is None:
+            continue
+        for u in usb_events:
+            u_ts = _parse_ts(u.get("ts", ""))
+            if u_ts is None:
+                continue
+            delta = (l_ts - u_ts).total_seconds()
+            if 0 <= delta <= proximity_seconds and u.get("is_ip_kvm"):
+                flags.append({
+                    "rule": "ip_kvm_precedes_logon",
+                    "usb_event": u,
+                    "logon_event": logon,
+                    "delta_seconds": int(delta),
+                    "severity": "high",
+                    "status": "UNRESOLVED",
+                })
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:129-146`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L129-L146)
+
+[26] `parse_registry_hive`는 파일, 파서, 하이브, 키, 값 단계마다 다른 `error` 코드를 싣는다: [`dfir_mcp/src/dfir_mcp/__init__.py:3838-3895`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3838-L3895), [`dfir_mcp/src/dfir_mcp/__init__.py:3923-3929`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3923-L3929).
+
+```python
+    if value_name is not None:
+        try:
+            v = node.value(value_name)
+        except _Reg.RegistryValueNotFoundException:
+            return {"error": "value_not_found",
+                    "key": norm_key, "value_name": value_name,
+                    "source": {"path": str(p), "sha256": _sha256(p)}}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3923-3929`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3923-L3929)
+
+[27] `list_scheduled_tasks`는 Tasks 폴더가 없으면 빈 `items`와 `note`를 돌려준다.
+
+```python
+def list_scheduled_tasks():
+    for tasks_dir in [
+        EVIDENCE_ROOT / "disk" / "Windows" / "System32" / "Tasks",
+        EVIDENCE_ROOT / "Windows" / "System32" / "Tasks",
+    ]:
+        if tasks_dir.exists():
+            break
+    else:
+        return {"items": [], "note": "no Tasks directory in evidence tree"}
+    items = []
+    for p in sorted(tasks_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        items.append({"path": str(p.relative_to(EVIDENCE_ROOT)),
+                      "size": p.stat().st_size, "sha256": _sha256(p)})
+    return {"count": len(items), "items": items}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:562-577`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L562-L577)
+
+[28] `correlate_timeline`은 사용자 규칙마다 거부 사유나 질의 결과를 담은 항목을 만든다.
+
+```python
+        if normalized:
+            con = duckdb.connect(":memory:")
+            con.execute("""
+                CREATE TABLE ev (ts TIMESTAMP, source VARCHAR, actor VARCHAR,
+                                  target VARCHAR, type VARCHAR, raw VARCHAR)""")
+            con.executemany("INSERT INTO ev VALUES (?, ?, ?, ?, ?, ?)", normalized)
+            for rule in rules:
+                if not isinstance(rule, str):
+                    continue
+                if not _RULE_ALLOWED_RE.match(rule):
+                    user_matches.append({"rule": rule,
+                                         "error": "rule rejected: disallowed character"})
+                    continue
+                if _RULE_FORBIDDEN_TOKENS.search(rule):
+                    user_matches.append({"rule": rule,
+                                         "error": "rule rejected: forbidden SQL keyword"})
+                    continue
+                try:
+                    rows = con.execute(
+                        f"SELECT e1.source, e1.ts, e1.target, e2.source, e2.ts, e2.target "
+                        f"FROM ev e1 JOIN ev e2 ON {rule} LIMIT 50"
+                    ).fetchall()
+                    user_matches.append({"rule": rule, "hits": len(rows), "sample": rows[:5]})
+                except Exception as ex:
+                    user_matches.append({"rule": rule, "error": str(ex)[:200]})
+            con.close()
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:822-847`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L822-L847)
+
+[29] `_scan_cron_file`은 읽지 못한 파일을 `error` 항목으로 돌려준다.
+
+```python
+def _scan_cron_file(path: Path, kind: str):
+    """Parse a single cron file/directory entry and return list of jobs."""
+    jobs = []
+    if not path.exists():
+        return jobs
+
+    if path.is_dir():
+        for child in sorted(path.iterdir()):
+            if child.is_file():
+                jobs.extend(_scan_cron_file(child, kind))
+        return jobs
+
+    try:
+        content = path.read_text(errors="replace")
+    except (OSError, PermissionError) as e:
+        return [{"path": str(path), "kind": kind, "error": str(e)}]
+
+    sha = _sha256(path)
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:255-272`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L255-L272)
+
+[30] `grep_shell_history_for_c2`는 컴파일하지 못한 패턴을 건너뛴다.
+
+```python
+    patterns = list(_C2_PATTERNS)
+    for ep in (extra_patterns or []):
+        try:
+            patterns.append(re.compile(ep, re.IGNORECASE))
+        except re.error:
+            continue
+```
+
+[`dfir_mcp/src/dfir_mcp/_v05_supply_chain.py:522-527`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v05_supply_chain.py#L522-L527)
+
+[31] `parse_linux_cron_jobs`는 모든 항목을 한 목록에 모아 거르고 센다.
+
+```python
+    root = _safe_resolve(evidence_root)
+    all_jobs = []
+    scanned_paths = []
+
+    for relpath, kind in _CRON_FILE_LOCATIONS:
+        # join evidence_root with the standard path
+        joined = root / relpath.lstrip("/")
+        scanned_paths.append(str(joined))
+        all_jobs.extend(_scan_cron_file(joined, kind))
+
+    if flagged_only:
+        all_jobs = [j for j in all_jobs if j.get("flags")]
+
+    flagged_count = sum(1 for j in all_jobs if j.get("flags"))
+    total = len(all_jobs)
+    page = all_jobs[cursor:cursor + limit]
+    next_cursor = cursor + limit if cursor + limit < total else None
+
+    return {
+        "source": {"evidence_root": str(root), "scanned_paths": scanned_paths},
+        "jobs": page,
+        "total": total,
+        "flagged_count": flagged_count,
+        "next_cursor": next_cursor,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:399-423`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L399-L423)

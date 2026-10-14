@@ -1,0 +1,185 @@
+---
+cell: D06
+details:
+- id: D06.02
+- id: D06.04
+---
+
+# D06 산출물 식별·재생성 처리
+
+### D06.02 입력·작업별 고유 이름
+
+**구현.** 이 방식은 `sift_plaso_log2timeline`과 `sift_plaso_psort`가 실행하는 Plaso의 로그 파일 이름에 적용된다 [1][2].
+서버는 두 도구에 `--logfile`을 주지 않는다 [1][2].
+Plaso 20260720은 이때 로그 파일 이름을 `<도구 이름>-YYYYMMDDThhmmss.log.gz`로 지어 실행 시각을 초 단위로 넣는다 [3].
+`log2timeline.py`의 작업 프로세스 로그 파일도 같은 이름 앞에 프로세스 이름을 붙인다 [3].
+그래서 다시 실행하면 앞 실행의 로그 파일은 남고 새 로그 파일은 이름의 시각으로 구분된다 [3].
+이 이름 규칙은 서버 코드가 아니라 Plaso가 정한다.
+
+Plaso 저장 파일의 이름과 위치는 호출 인자 `output_storage_path`가 정하고 서버는 그 이름에 실행이나 입력마다 다른 값을 넣지 않는다 [4].
+Zimmerman 도구 래퍼와 `sift_plaso_psort`가 CSV를 쓰는 임시 폴더는 `mkdtemp`가 붙인 난수로 이름이 호출마다 다르지만 호출이 끝나면 지운다 [5].
+
+**한계.** 같은 도구를 같은 초에 다시 실행하면 로그 파일 이름이 같다 [3].
+Plaso 20260720은 주 프로세스와 작업 프로세스의 로그 파일을 처음에 쓰기 모드(`w`)로 열므로 이때 앞 로그 파일을 알리지 않고 덮어쓴다 [6].
+
+### D06.04 덮어쓰기 선택·충돌 감지
+
+**구현.** 이 방식은 `sift_plaso_log2timeline`의 저장 파일에 적용된다 [4].
+`sift_plaso_log2timeline`은 `output_storage_path`의 경로에 파일이나 폴더가 이미 있으면 `log2timeline.py`를 실행하지 않고 `FileExistsError`로 끝낸다 [4].
+오류 문장은 저장 파일이 이미 있으니 새 `output_storage_path`를 고르라고 알린다 [4].
+그래서 같은 경로로 다시 부르면 앞 저장 파일은 그대로 남고 새 저장 파일은 만들어지지 않는다 [4][7].
+앞 실행이 실패하며 남긴 쓰다 만 저장 파일이 있는 경로도 같은 방식으로 거부된다 [7].
+덮어쓰거나 앞 결과를 돌려주도록 고르는 인자는 없다 [8].
+
+같은 저장소의 클라이언트와 사용자 CLI가 쓰는 파일은 서버 구현으로 세지 않고 사실로 적는다.
+`dfir_agent`의 결정적 모드는 같은 `--out`으로 다시 실행하면 `audit.jsonl`·`progress.jsonl` 뒤에 이어 쓰고 `report.json`은 알리지 않고 덮어쓴다 [9][10].
+live 모드는 같은 폴더의 `live_transcript.txt`·`live_tool_calls.jsonl`·`live_summary.json`을 알리지 않고 덮어쓴다 [11].
+`analyze.py`는 실행마다 초 단위 시각을 이름으로 한 폴더를 새로 만들어 `--out`으로 넘긴다 [12].
+결과 발견사항이 0건이면 한 번 더 실행하고 두 실행이 같은 초에 시작하면 같은 폴더를 쓴다 [12].
+
+### 근거
+
+[1] `sift_plaso_log2timeline`은 `--logfile`과 작업 폴더 없이 `log2timeline.py`를 실행한다.
+
+```python
+    cmd = [
+        _log2timeline_bin(),
+        "--storage_file", str(out_path),
+    ]
+    if parsers:
+        cmd.extend(["--parsers", parsers])
+    cmd.append(str(source))
+
+    result = run_tool(cmd, timeout=timeout_seconds,
+                      capture_files=[out_path])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:147-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L147-L156)
+
+[2] `sift_plaso_psort`는 `--logfile`과 작업 폴더 없이 `psort.py`를 실행한다.
+
+```python
+    with _tempdir(prefix="dfir-psort-") as workdir:
+        out_file = workdir / f"timeline.{output_format}"
+        cmd = [
+            _psort_bin(),
+            "-o", output_format,
+            "-w", str(out_file),
+            str(storage),
+        ]
+        if filter_expression:
+            cmd.append(filter_expression)
+
+        result = run_tool(cmd, timeout=PSORT_TIMEOUT_SECONDS,
+                          capture_files=[out_file])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:208-220`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L208-L220)
+
+[3] Plaso 20260720의 기본 로그 파일 이름과 작업 프로세스 로그 파일 이름: [`plaso/cli/tools.py:181-194`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/tools.py#L181-L194), [`plaso/multi_process/base_process.py:65-73`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/multi_process/base_process.py#L65-L73).
+
+[4] `sift_plaso_log2timeline`은 이미 있는 경로를 거부한다.
+
+```python
+    source = safe_evidence_input(source_path)
+    out_path = _safe_derived_path(output_storage_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists():
+        raise FileExistsError(
+            f"derived storage already exists: {out_path}; choose a new output_storage_path"
+        )
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-145`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L145)
+
+[5] `_tempdir`는 `mkdtemp`로 폴더를 만들고 호출이 끝나면 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[6] Plaso 20260720의 `ConfigureLogging`은 기본 열기 모드가 `w`이고 주 프로세스와 작업 프로세스는 모드를 주지 않고 부른다: [`plaso/lib/loggers.py:31-55`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/lib/loggers.py#L31-L55), [`plaso/cli/log2timeline_tool.py:288-292`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/log2timeline_tool.py#L288-L292), [`plaso/cli/psort_tool.py:416-420`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/cli/psort_tool.py#L416-L420), [`plaso/multi_process/base_process.py:319-323`](https://github.com/log2timeline/plaso/blob/4ea03ef9a48dad5284c371ac9b537a184b3eea9c/plaso/multi_process/base_process.py#L319-L323).
+
+[7] (실행 확인) 가짜 실행 파일로 `case1/t.plaso`를 만든 뒤 같은 경로로 다시 부르거나 1로 끝나며 쓰다 만 `case1/fail.plaso`가 있는 경로로 부르면 `FileExistsError`가 났다.
+
+[8] 도구 schema에는 덮어쓰기를 고르는 인자가 없다.
+
+```python
+    schema={
+        "type": "object",
+        "properties": {
+            "source_path": {
+                "type": "string",
+                "description": "Disk image / mount / artifact path",
+            },
+            "output_storage_path": {
+                "type": "string",
+                "description": "Relative or absolute path under DFIR_DERIVED_ROOT for the .plaso file",
+            },
+            "parsers": {
+                "type": "string",
+                "description": "Comma-separated parser preset (e.g. 'mft,evtx,prefetch'). Empty = all.",
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "default": LOG2TIMELINE_TIMEOUT_SECONDS,
+            },
+        },
+        "required": ["source_path", "output_storage_path"],
+    },
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:110-131`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L110-L131)
+
+[9] 결정적 모드는 `audit.jsonl`과 `progress.jsonl`을 덧붙이기 모드로 열고 `report.json`은 `write_text`로 쓴다: [`dfir_audit/src/dfir_audit/__init__.py:143-146`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_audit/src/dfir_audit/__init__.py#L143-L146), [`dfir_agent/src/dfir_agent/__init__.py:62-64`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L62-L64), [`dfir_agent/src/dfir_agent/__init__.py:355`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L355).
+
+[10] (실행 확인) 같은 `--out`으로 결정적 모드를 두 번 실행하자 `audit.jsonl`은 3줄에서 6줄로, `progress.jsonl`은 4줄에서 8줄로 늘었고 `report.json`은 새 내용으로 바뀌었다.
+
+[11] live 모드는 세 파일을 `write_text`로 쓴다.
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+    (state.out_dir / "live_summary.json").write_text(json.dumps({
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-711`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L711)
+
+[12] `analyze.py`는 초 단위 시각 이름의 폴더를 만들고 발견사항이 0건이면 한 번 더 실행한다.
+
+```python
+def _timestamp() -> str:
+    return _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+```
+
+[`analyze.py:191-192`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L191-L192)
+
+```python
+    def _one_run() -> "tuple[Path, int]":
+        out_dir = REPO / "out" / case.tier / case.case_id / _timestamp()
+        # Housekeeping: rotate old runs for this case before adding a new one.
+        _rotate_out_dirs(out_dir.parent, keep=10)
+        out_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`analyze.py:315-319`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L315-L319)
+
+```python
+    if _findings_count(out_dir) == 0:
+        print("[analyze] findings=0 — non-determinism guard: 1 retry")
+        out_dir, rc = _one_run()
+```
+
+[`analyze.py:349-351`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L349-L351)

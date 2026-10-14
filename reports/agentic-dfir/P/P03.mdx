@@ -1,0 +1,291 @@
+---
+cell: P03
+details:
+- id: not_implemented
+---
+
+# P03 조사 진척 판단
+
+### 미구현
+
+**판단.** 서버는 대상별로 수행한 작업과 남은 작업을 표현하지 않고 완료 판단을 모델에 맡긴다.
+서버에는 증거 유형마다 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행을 적는 도구도 없다.
+서버는 호출 기록을 쓰지 않으므로 앞선 호출을 다시 읽어 집계할 자료도 없다 [1].
+
+도구 응답이 읽은 범위를 적는 곳은 그 호출 한 번의 결과에 그친다.
+`detect_persistence`는 읽은 부속 CSV의 경로를 `sources_examined`에 적고 찾지 못한 CSV는 적지 않는다 [2].
+`list_scheduled_tasks`는 Tasks 폴더가 없으면 `note`에 그 사실을 적는다 [3].
+`parse_linux_cron_jobs`는 훑은 경로 9곳을 `scanned_paths`에 적고 그 경로가 있었는지는 나누지 않는다 [4].
+`etc/crontab` 하나만 둔 증거 폴더에서도 `scanned_paths`에는 9곳이 모두 실렸다 [5].
+`parse_prefetch`는 파일 이름만 읽었을 때 실행 횟수와 불러온 모듈은 PECmd로 얻으라는 `note`를 붙인다 [6].
+`parse_linux_text_log`는 어느 형식에도 맞지 않은 줄 수를 `formats`의 `unparsed`로 센다 [7].
+이 값들은 대상별로 모이지 않고 서버가 다음 호출에서 다시 쓰지 않는다.
+
+같은 저장소의 클라이언트 `dfir_agent`는 진행을 클라이언트 쪽에 적는다 [8][9].
+결정적 모드는 단계마다 반복 번호, 단계 이름, 가설, 미해결 항목 `unresolved`, 메모를 `progress.jsonl`에 한 줄씩 덧붙인다 [8].
+반복 상한 `--max-iterations`에 닿으면 남은 단계를 건너뛰고 `forced_exit` 단계로 보고가 부분적이라는 문구를 `unresolved`에 적는다 [10].
+live 모드는 `progress.jsonl`과 호출 기록 `audit.jsonl`을 쓰지 않고 `live_transcript.txt`, `live_tool_calls.jsonl`, `live_summary.json`만 쓴다 [9].
+live 모드가 반복 상한에 닿으면 도구 없이 지금까지의 증거로 보고를 쓰라는 메시지를 한 번 더 보낸다 [11].
+플레이북의 단계별 `exit_criteria`는 live 모드의 시스템 지침에 옮겨지지 않는다 [12].
+저장소에 커밋된 참조 실행의 `progress.jsonl`에는 결정적 모드가 쓴 네 단계의 줄이 있다 [13].
+사용자 CLI `analyze.py`는 한 실행의 발견사항이 0건이면 같은 실행을 한 번 더 하고 그 결과를 마지막으로 쓴다 [14].
+이 기록과 판단은 클라이언트와 사용자 CLI가 하고 서버는 읽지 않으므로 다른 MCP 클라이언트로 붙으면 남지 않는다.
+
+### 근거
+
+[1] 서버 진입점은 도구를 부르고 결과를 돌려줄 뿐 호출을 기록하지 않는다.
+
+```python
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:49-55`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L49-L55)
+
+[2] `detect_persistence`는 찾은 CSV의 경로만 `sources_examined`에 더한다.
+
+```python
+    for hive in ("NTUSER.DAT", "SOFTWARE"):
+        for csv_path in (EVIDENCE_ROOT / f"disk/Windows/System32/config/{hive}.runkeys.csv",
+                         EVIDENCE_ROOT / f"{hive}.runkeys.csv"):
+            if csv_path.exists():
+                sources.append(str(csv_path.relative_to(EVIDENCE_ROOT)))
+                for r in _read_csv(csv_path):
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:590-595`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L590-L595)
+
+```python
+    high = [r for r in results if r["severity_hint"] == "high"]
+    return {"sources_examined": sources, "total_mechanisms": len(results),
+            "high_severity": high,
+            "by_mechanism": {
+                "registry_run_key": sum(1 for r in results if r["mechanism"] == "registry_run_key"),
+                "windows_service": sum(1 for r in results if r["mechanism"] == "windows_service"),
+                "scheduled_task": sum(1 for r in results if r["mechanism"] == "scheduled_task"),
+            }, "items": results}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:642-649`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L642-L649)
+
+[3] `list_scheduled_tasks`는 폴더가 없으면 빈 `items`와 `note`를 돌려준다.
+
+```python
+    for tasks_dir in [
+        EVIDENCE_ROOT / "disk" / "Windows" / "System32" / "Tasks",
+        EVIDENCE_ROOT / "Windows" / "System32" / "Tasks",
+    ]:
+        if tasks_dir.exists():
+            break
+    else:
+        return {"items": [], "note": "no Tasks directory in evidence tree"}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:563-570`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L563-L570)
+
+[4] `parse_linux_cron_jobs`는 정해 둔 경로를 모두 `scanned_paths`에 넣는다.
+
+```python
+    root = _safe_resolve(evidence_root)
+    all_jobs = []
+    scanned_paths = []
+
+    for relpath, kind in _CRON_FILE_LOCATIONS:
+        # join evidence_root with the standard path
+        joined = root / relpath.lstrip("/")
+        scanned_paths.append(str(joined))
+        all_jobs.extend(_scan_cron_file(joined, kind))
+
+    if flagged_only:
+        all_jobs = [j for j in all_jobs if j.get("flags")]
+
+    flagged_count = sum(1 for j in all_jobs if j.get("flags"))
+    total = len(all_jobs)
+    page = all_jobs[cursor:cursor + limit]
+    next_cursor = cursor + limit if cursor + limit < total else None
+
+    return {
+        "source": {"evidence_root": str(root), "scanned_paths": scanned_paths},
+        "jobs": page,
+        "total": total,
+        "flagged_count": flagged_count,
+        "next_cursor": next_cursor,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:399-423`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L399-L423)
+
+[5] (실행 확인) 증거 폴더에 `etc/crontab` 하나를 두고 `parse_linux_cron_jobs`를 `evidence_root` `.`로 부르자 `total`이 1이고 `scanned_paths`에 경로 9개가 실렸다.
+
+[6] `parse_prefetch`가 파일 이름만 읽은 응답의 `note`다.
+
+```python
+    m = re.match(r"^(.+)-([0-9A-F]{8})\.pf$", p.name, re.IGNORECASE)
+    if not m:
+        return {"error": "bad_prefetch_name", "name": p.name}
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "executable": m.group(1), "path_hash": m.group(2),
+            "size_bytes": p.stat().st_size,
+            "note": "native reader — run PECmd for run counts and loaded modules"}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:285-291`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L285-L291)
+
+[7] 맞는 형식이 없는 줄은 `unparsed`로 센다.
+
+```python
+        if not matched:
+            formats_seen["unparsed"] += 1
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2352-2353`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2352-L2353)
+
+[8] 결정적 모드의 진행 기록 항목과 쓰기다.
+
+```python
+@dataclass
+class ProgressSnapshot:
+    iteration: int
+    ts: str
+    phase: str
+    primary_hypothesis: Hypothesis | None
+    alternative_hypothesis: Hypothesis | None
+    unresolved: list = field(default_factory=list)
+    notes: str = ""
+
+
+class ProgressTracker:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, snap: ProgressSnapshot) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(asdict(snap), default=str, sort_keys=True) + "\n")
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:46-64`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L46-L64)
+
+[9] live 모드는 결정적 모드의 기록 경로에 닿기 전에 돌아가고 자기 파일 세 개를 쓴다.
+
+```python
+    if args.mode == "live":
+        # Route to live controller (separate module to keep optional deps optional)
+        from .live import live_run
+        import asyncio
+        return asyncio.run(live_run(
+            case=args.case, out_dir=str(args.out), prompt=args.prompt,
+            model=args.model, max_iter=args.max_iterations, dry_run=args.dry_run,
+        ))
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:335-342`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L335-L342)
+
+```python
+    # Write logs
+    (state.out_dir / "live_transcript.txt").write_text(final_text)
+    (state.out_dir / "live_tool_calls.jsonl").write_text(
+        "\n".join(json.dumps(c) for c in state.tool_call_log) + "\n"
+    )
+    (state.out_dir / "live_summary.json").write_text(json.dumps({
+```
+
+[`dfir_agent/src/dfir_agent/live.py:706-711`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L706-L711)
+
+[10] 반복 상한에 닿으면 남은 단계를 건너뛰고 `forced_exit`를 적는다.
+
+```python
+        for phase in phases:
+            if self.iteration >= self.max_iter:
+                self._forced_exit_closeout()
+                return self._report()
+            phase()
+        return self._report()
+
+    def _forced_exit_closeout(self) -> None:
+        self.progress.write(ProgressSnapshot(
+            iteration=self.iteration,
+            ts=_now(),
+            phase="forced_exit",
+            primary_hypothesis=getattr(self, "_primary", None),
+            alternative_hypothesis=getattr(self, "_alt", None),
+            unresolved=self.unresolved + [
+                f"Hit --max-iterations cap at iteration {self.iteration}. "
+                "Remaining phases skipped; report is partial."],
+            notes="Controller forced exit — max-iterations cap reached.",
+        ))
+```
+
+[`dfir_agent/src/dfir_agent/__init__.py:131-149`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/__init__.py#L131-L149)
+
+[11] live 모드가 반복 상한에 닿은 뒤 보내는 마지막 메시지다.
+
+```python
+    # Iteration budget exhausted while the model was still calling tools. Give
+    # it one final turn WITHOUT tools and an explicit instruction to stop
+    # investigating and synthesize the REPORT from the evidence gathered so far.
+    # Without this, a model that spends all max_iterations exploring (common on
+    # evidence-rich cases) returns no REPORT at all and scores zero findings —
+    # not because it found nothing, but because it never got asked to conclude.
+    state.messages.append({
+        "role": "user",
+        "content": (
+            "You have reached the investigation step limit. Do NOT request any "
+            "more tools. Based on the evidence you have already collected in "
+            "this conversation, produce your final analysis now as the "
+            "'REPORT:' JSON block specified in your instructions (findings "
+            "array with id/title/severity/mitre_tactics, plus timeline, "
+            "attack_chain, and remediation). Report only what the evidence so "
+            "far supports."
+        ),
+    })
+```
+
+[`dfir_agent/src/dfir_agent/live.py:518-535`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L518-L535)
+
+[12] live 모드는 플레이북 단계에서 이름, 설명, `mcp_calls`만 지침에 옮긴다.
+
+```python
+    seq = pb.get("sequence") or []
+    if not seq:
+        return fallback
+
+    name = pb.get("name", path.stem)
+    lines = [f"Your playbook ({name} — loaded from {path.name}):", ""]
+    for i, phase in enumerate(seq, 1):
+        # one-line rationale (first sentence) keeps the prompt tight
+        rat = " ".join(str(phase.get("rationale", "")).split())
+        if len(rat) > 160:
+            rat = rat[:157].rsplit(" ", 1)[0] + "…"
+        pname = str(phase.get("phase", f"phase_{i}")).replace("_", " ")
+        calls = phase.get("mcp_calls") or []
+        line = f"  {i}. {pname}"
+        if rat:
+            line += f" — {rat}"
+        lines.append(line)
+        if calls:
+            shown = ", ".join(calls[:6])
+            if len(calls) > 6:
+                shown += ", …"
+            lines.append(f"       tools: {shown}")
+```
+
+[`dfir_agent/src/dfir_agent/live.py:83-104`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_agent/src/dfir_agent/live.py#L83-L104)
+
+[13] 참조 실행의 진행 기록이다: [`examples/out/ref-01/progress.jsonl`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/examples/out/ref-01/progress.jsonl).
+
+[14] `analyze.py`는 발견사항이 0건인 실행을 한 번 다시 한다.
+
+```python
+    if _findings_count(out_dir) == 0:
+        print("[analyze] findings=0 — non-determinism guard: 1 retry")
+        out_dir, rc = _one_run()
+        print(f"[analyze] retry findings_count={_findings_count(out_dir)}")
+```
+
+[`analyze.py:349-352`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/analyze.py#L349-L352)

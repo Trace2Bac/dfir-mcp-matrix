@@ -1,0 +1,150 @@
+---
+cell: T09
+details:
+- id: not_applicable
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### 비적용
+
+**판단.** 서버는 가동 중인 대상 시스템에 접속하거나 그 상태를 바꾸는 도구를 두지 않는다.
+서버 코드로 분석하는 도구 48개는 `DFIR_EVIDENCE_ROOT` 아래의 증거 파일을 읽거나 모델이 인자로 넘긴 사건 목록을 분석한다 [1][2].
+외부 도구 래퍼 25개는 Volatility 3, Zimmerman 도구, YARA, Plaso를 증거 파일에 실행하고 그 출력을 읽는다 [3].
+서버 코드에는 원격 호스트나 외부 서비스에 연결을 여는 코드가 없다.
+`__init__.py`는 명령 실행, 파일 쓰기, 마운트, 파일 삭제, 네트워크 송신, 프로세스 실행과 종료 도구를 등록하지 않는다고 적는다 [4].
+
+서버가 쓰는 파일은 서버 자신의 작업 파일이다.
+MFTECmd, EvtxECmd, PECmd, AmcacheParser, RECmd 배치, psort 래퍼는 호출마다 임시 폴더를 만들어 도구 출력을 쓰고 호출이 끝나면 지운다 [5].
+`sift_plaso_log2timeline`은 Plaso 저장 파일의 경로를 `DFIR_DERIVED_ROOT` 안으로 제한하고 그 파일을 남긴다 [6].
+`parse_linux_cron_jobs`의 설명은 `evidence_root`의 기본값을 `/`로 적는다 [7].
+사용자가 `DFIR_EVIDENCE_ROOT`를 `/`로 두면 이 도구는 서버가 실행되는 호스트의 cron 파일을 읽지만 이때도 파일을 읽기만 한다 [7].
+같은 저장소의 `scripts/install.sh`는 사용자의 호스트에 도구를 설치하고 셸 별칭을 쓰지만 사용자가 실행하는 설치 스크립트이고 조사 대상 시스템에 대한 조치가 아니다 [8].
+그래서 조치 전후 상태, 변경 내역, 되돌림을 남길 대상 시스템 조치가 없다.
+
+### 근거
+
+[1] 서버 코드 도구는 `EVIDENCE_ROOT`를 환경변수에서 읽고 증거 경로를 `_safe_resolve`로 그 안으로 제한한다.
+
+```python
+EVIDENCE_ROOT = Path(os.environ.get("DFIR_EVIDENCE_ROOT", "/mnt/evidence"))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:60-60`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L60-L60)
+
+```python
+def _safe_resolve(path_str: str) -> Path:
+    if not isinstance(path_str, str) or not path_str:
+        raise PathTraversalAttempt(f"invalid path: {path_str!r}")
+    if "\x00" in path_str:
+        raise PathTraversalAttempt("null byte in path")
+    if len(path_str) > 1024:
+        raise PathTraversalAttempt(f"path too long: {len(path_str)} chars (max 1024)")
+    root = EVIDENCE_ROOT.resolve()
+    try:
+        requested = (EVIDENCE_ROOT / path_str).resolve()
+    except OSError as e:
+        # File-name-too-long, no-such-process, etc. — treat as path attack
+        raise PathTraversalAttempt(f"path resolution failed: {e}") from e
+    try:
+        requested.relative_to(root)
+    except ValueError as e:
+        raise PathTraversalAttempt(
+            f"path escapes evidence root: {path_str!r} -> {requested}"
+        ) from e
+    return requested
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:69-88`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L69-L88)
+
+[2] (실행 확인) 같은 프로세스에서 도구 등록부를 읽어 도구 73개와 모듈별 수(서버 코드 48개, 래퍼 25개)를 확인했다.
+
+[3] 래퍼가 실행하는 명령은 증거 파일을 입력으로 받는 분석 명령이다: [`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:71-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L71-L84), [`dfir_mcp/src/dfir_mcp/sift_adapters/yara.py:147-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/yara.py#L147-L156), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:79-94`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L79-L94), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:139-156`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L139-L156).
+
+[4] 등록하지 않는 기능을 적은 문서용 함수다.
+
+```python
+def __forbidden_never_registered():
+    """Intentionally NOT registered: execute_shell, write_file, mount,
+    delete_file, network_egress, spawn_process, kill_process. See
+    tests/test_mcp_bypass.py for the surface + negative-set verification."""
+    raise NotImplementedError("documentation only")
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3962-3966`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3962-L3966)
+
+[5] 호출마다 임시 폴더를 만들고 끝나면 지운다.
+
+```python
+@contextmanager
+def _tempdir(prefix: str = "dfir-sift-") -> Iterator[Path]:
+    """Create + clean up a per-call temporary working directory."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/_common.py:165-172`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/_common.py#L165-L172)
+
+[6] Plaso 저장 파일을 `DFIR_DERIVED_ROOT` 아래로 제한한다.
+
+```python
+def _derived_root() -> Path:
+    root = os.environ.get(DERIVED_ROOT_ENV)
+    if root:
+        return Path(root).expanduser().resolve()
+    return (Path(tempfile.gettempdir()) / "agentic-dfir-derived").resolve()
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:54-58`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L54-L58)
+
+```python
+    try:
+        candidate.relative_to(root)
+    except ValueError as e:
+        raise PathTraversalAttempt(
+            f"derived path escapes {DERIVED_ROOT_ENV}: {path_str!r}"
+        ) from e
+    if must_exist and not candidate.exists():
+        raise PathTraversalAttempt(f"derived path does not exist: {path_str!r}")
+    return candidate
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:84-92`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L84-L92)
+
+[7] `parse_linux_cron_jobs`는 기본값 `/`를 받아 `_safe_resolve`로 검사하고 cron 파일을 읽는다.
+
+```python
+        "properties": {
+            "evidence_root": {
+                "type": "string",
+                "description": "Root path to scan (default '/'). Use evidence_root/ for mounted images.",
+                "default": "/",
+            },
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:377-382`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L377-L382)
+
+```python
+def parse_linux_cron_jobs(
+    evidence_root: str = "/",
+    flagged_only: bool = False,
+    cursor: int = 0,
+    limit: int = 500,
+):
+    root = _safe_resolve(evidence_root)
+    all_jobs = []
+    scanned_paths = []
+
+    for relpath, kind in _CRON_FILE_LOCATIONS:
+        # join evidence_root with the standard path
+        joined = root / relpath.lstrip("/")
+        scanned_paths.append(str(joined))
+        all_jobs.extend(_scan_cron_file(joined, kind))
+```
+
+[`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:393-407`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L393-L407)
+
+[8] 설치 스크립트는 사용자가 실행하고 도구 설치와 셸 별칭 쓰기를 한다: [`scripts/install.sh`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/scripts/install.sh).

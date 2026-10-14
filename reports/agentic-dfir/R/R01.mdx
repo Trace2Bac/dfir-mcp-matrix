@@ -1,0 +1,915 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `sift_recmd_query_key`, PECmd JSON 부속 자료가 있을 때의 `parse_prefetch`, `match_sigma_rules`의 일치 항목 `event`에 적용된다 [1][2][3].
+`sift_recmd_query_key`는 RECmd를 `--kn`으로 실행하고 그 표준 출력 전체를 문자열 하나로 `raw_output`에 싣는다 [1].
+외부 도구 래퍼 25개 가운데 도구의 표준 출력을 파싱하지 않고 싣는 래퍼는 이 도구 하나다 [1].
+`parse_prefetch`는 `.pf` 파일과 이름이 같은 `.json` 부속 자료가 있으면 그 JSON을 읽어 `source` 키만 더하고 돌려준다 [2].
+`match_sigma_rules`는 규칙에 맞은 사건을 입력 파일에서 읽은 `dict` 그대로 `event`에 싣는다 [3].
+시험 사건 파일로 부르자 `event`에는 입력 줄의 키와 값이 그대로 실렸다 [4].
+
+**한계.** `parse_prefetch`는 부속 JSON에 `source` 키가 있으면 그 값을 서버가 만든 경로와 해시로 바꾼다 [2].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 증거 파일, 부속 자료, 외부 도구 출력을 읽어 결과를 만드는 도구 전체에 적용된다 [5][6].
+CSV를 읽는 도구는 `csv.DictReader`로 행마다 열 이름을 키로 한 `dict`를 만든다 [5][6].
+`get_amcache`는 Amcache CSV 부속 자료의 행을 열을 고르지 않고 싣는다 [7][4].
+Volatility 3, MFTECmd, EvtxECmd, AmcacheParser 래퍼와 `sift_pecmd_parse`·`sift_recmd_run_batch`·`sift_plaso_psort`도 도구가 쓴 CSV의 열을 모두 싣는다 [6][8].
+Volatility 래퍼는 플러그인을 `-r csv`로 실행하고 출력을 CSV로 읽지 못하면 줄마다 `{"line": …}`로 싣는다 [6].
+
+정해 둔 필드만 고르는 도구가 있다.
+`parse_shimcache`는 열 이름 후보 여러 개에서 값을 찾아 `entry_position`·`path`·`last_modified`·`executed` 네 필드를 만든다 [9].
+`extract_mft_timeline`은 `entry`·`path`·`created`·`modified`·`accessed`를 고르고 `path`는 `ParentPath`와 `FileName`을 이어 만든다 [10].
+`get_process_tree`는 `pid`·`ppid`·`image`·`cmdline`·`start_ts`·`user`를 고르고 부모와 자식 관계로 트리를 만든다 [11].
+`sift_pecmd_run_history`는 PECmd 행에서 실행 파일 이름, 실행 횟수, 실행 시각 8개, 크기, 해시만 고른다 [12].
+`analyze_unix_auth`·`analyze_web_access_log`·`parse_linux_text_log`·`parse_auditd_log`는 줄마다 정해 둔 정규식으로 필드를 나눈다 [13].
+`parse_browser_history`·`parse_knowledgec`·`parse_macos_quarantine`은 SQLite 질의로 고른 열만 읽는다 [14].
+
+`correlate_timeline`은 `dfir_corr.correlate_timeline`의 결과를 이전 버전의 응답 모양으로 바꾼다 [15].
+상관 항목의 키를 `s1`·`ts1`·`a1`·`t1`·`ty1`·`s2`·…·`delta_s`로 바꾸고 USB 삽입 뒤 로그온인 항목을 `kvm_precedes_logon`에 따로 모은다 [15].
+
+**한계.** `correlate_timeline`은 `dfir_corr`가 만든 `contradictions`와 `correlations_truncated_at`을 응답에 싣지 않는다 [15][16].
+`dfir_corr`의 모듈 설명은 모순을 `status`가 `UNRESOLVED`인 항목으로 돌려준다고 적는다 [16].
+같은 사건 300개로 `dfir_corr`를 직접 부르자 `contradictions`가 300개 나왔고 MCP 응답에는 그 키가 없었다 [4].
+
+`get_process_tree`는 PID나 부모 PID를 정수로 읽지 못한 행을 알리지 않고 건너뛴다 [11].
+PID 열이 없거나 비어 있는 행은 PID 0으로 읽는다 [11].
+같은 PID가 다시 나오면 뒤 행이 앞 행을 대신하므로 PID가 재사용된 프로세스는 하나만 남는다 [11].
+
+`parse_linux_text_log`의 접근 기록 정규식은 요청 줄을 공백으로 나누므로 URL에 공백이 있으면 그 뒤가 `proto`에 들어간다 [13].
+`GET /index.php?id=1 union select 1 HTTP/1.1` 줄은 `uri`가 `/index.php?id=1`, `proto`가 `union select 1 HTTP/1.1`로 실렸다 [4].
+`analyze_web_access_log`는 `log_format` 인자를 받지만 쓰지 않고 줄 모양으로 형식을 고른다 [17].
+combined 형식에 맞지 않는 줄은 IIS 기본 열 차례를 가정하고 정해 둔 위치의 칸을 IP, 메서드, 경로, 상태로 읽는다 [17].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 건수를 세는 도구와 값을 다른 형식으로 바꾸는 도구에 적용된다.
+`analyze_event_logs`·`parse_unified_log`는 경고를 등급별로 센 `alerts_by_severity`를 싣는다 [18].
+`parse_auditd_log`는 시스템 호출별, 기록 종류별 건수의 상위 10개를 `by_syscall`·`by_type`에 싣는다 [19].
+`parse_fsevents`는 플래그별 건수 `flag_statistics`를, `parse_knowledgec`는 앱별 건수의 상위 10개 `top_apps_by_event_count`를 싣는다 [20][21].
+`parse_linux_text_log`는 형식별, 등급별, 기법별 건수를 싣는다 [22].
+`analyze_windows_logons`는 로그온 유형별 건수와 원격 출발지 IP별 사용자 목록을 싣는다 [23].
+탐지 도구 다수는 신호나 발견사항의 수를 `stats`·`by_technique`에 싣는다 [24].
+
+값의 형식을 바꾸는 곳도 있다.
+`parse_registry_hive`는 이진 값을 base64 문자열 `data_base64`와 길이 `data_size`로, 목록 값은 문자열 목록으로, 그 밖의 값은 문자열로 바꾼다 [25].
+`parse_auditd_log`는 시스템 호출 번호를 표 `_SYSCALL_NAMES`에서 찾아 이름으로 바꾸고 표에 없는 번호는 숫자 그대로 둔다 [19].
+`analyze_windows_logons`는 로그온 유형 숫자를 표 `LOGON_TYPE_MEANING`에서 찾아 `logon_type_name`과 `logon_type_meaning`을 더한다 [23].
+`analyze_downloads`는 `Zone.Identifier`의 `ZoneId`를 영역 이름 `zone_meaning`으로 바꾸어 더한다 [26].
+
+두 진입점은 결과 `dict`를 JSON 글로 바꾸는 방식이 다르다 [27][28].
+`server_stdio`는 `json.dumps`에 `default=str`과 `indent=2`를 주어 JSON으로 바꾸지 못하는 값을 문자열로 싣는다 [27].
+`server`는 `json.dumps`를 인자 없이 불러 들여쓰기 없는 JSON을 만든다 [28].
+
+**한계.** 몇몇 건수는 전체가 아니라 상한으로 자른 뒤의 항목만 센다.
+`parse_fsevents`는 `limit`에 닿으면 읽기를 멈추므로 `flag_statistics`는 실린 사건의 플래그만 센다 [20].
+`parse_knowledgec`의 두 경로와 `parse_auditd_log`도 `limit`까지 모은 항목으로 앱별, 시스템 호출별 건수를 센다 [21][19].
+`analyze_event_logs`는 경고가 `limit_alerts`에 닿으면 사건 읽기를 멈추고 그때까지의 경고로 `alerts_by_severity`를 센다 [18].
+7045 사건 10개에 `limit_alerts` 3을 주자 `alerts_by_severity`의 `medium`은 3이었다 [4].
+`parse_unified_log`도 경고가 `limit`에 닿으면 멈추고 그때까지의 경고로 `alerts_by_severity`를 센다 [29].
+`parse_shellbags`의 `network_share_access_count`는 `limit`까지 실은 항목만 센다 [30].
+
+`parse_auditd_log`의 `_SYSCALL_NAMES`는 기록의 `arch` 값을 보지 않고 같은 번호 대응을 쓴다 [19].
+`detect_ransomware_behavior`의 `stats.ransom_notes_created`는 랜섬 노트 파일 수가 아니라 `ransom_note_written` 발견사항의 수라서 0이나 1이다 [31].
+`detect_defense_evasion`의 `stats.mft_mismatches`도 불일치 항목 수가 아니라 `mft_si_fn_mismatch` 발견사항의 수다 [32].
+
+`server`는 JSON으로 바꾸지 못하는 값이 결과에 있으면 결과 전체를 오류로 돌려준다 [28].
+`correlate_timeline`의 사용자 규칙 결과 `sample`에는 DuckDB가 돌려준 `datetime`이 들어간다 [33].
+같은 규칙으로 부르자 `server_stdio`는 시각을 문자열로 실은 결과를, `server`는 `TypeError: Object of type datetime is not JSON serializable` 오류를 돌려줬다 [4].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 외부 도구 래퍼의 `metadata`와 부속 자료나 SQLite를 읽는 네이티브 도구 일부에 적용된다 [6][8][9].
+외부 도구 래퍼는 `metadata.tool`에 실행한 도구 이름을 싣는다 [6][8].
+Volatility 래퍼는 실행한 플러그인 이름을 `metadata.plugin`에 싣는다 [6].
+`sift_mftecmd_parse`·`sift_evtxecmd_parse`·`sift_pecmd_parse`는 도구가 쓴 CSV의 SHA-256을 `csv_sha256`에, AmcacheParser 래퍼는 CSV 파일 이름마다의 SHA-256을 `csv_outputs_sha256`에 싣는다 [8].
+`sift_evtxecmd_filter_eids`·`sift_pecmd_run_history`·`sift_mftecmd_timestomp`는 도구가 쓴 CSV의 해시를 싣지 않는다 [34].
+`sift_recmd_run_batch`는 인자로 받은 `batch_name`과 실제로 쓴 batch 파일 `batch_file`을 함께 싣는다 [35].
+`sift_evtxecmd_filter_eids`는 거른 사건 ID 목록 `filter_eids`를, `sift_plaso_psort`는 `output_format`과 `filter_expression`을 싣는다 [8].
+
+네이티브 도구 가운데 `parse_shimcache`·`parse_shellbags`와 부속 CSV를 읽은 `parse_knowledgec`·`parse_browser_history`는 읽은 부속 자료의 증거 루트 기준 경로를 `sidecar`에 싣는다 [9][36][21][14].
+SQLite 파일을 직접 읽은 `parse_knowledgec`·`parse_browser_history`는 `engine`에 `sqlite3_readonly`를 적는다 [21][14].
+`analyze_downloads`는 항목마다 읽은 원천을 `source`(`browser_db_sidecar`·`browser_db_native`·`zone_identifier_ads`)에 적는다 [26].
+`parse_bash_history`는 고른 형식을 `format_detected`에, `match_sigma_rules`는 규칙 묶음 버전 `pack_version`과 규칙 수를 싣는다 [37][3].
+
+**한계.** `get_amcache`, 부속 JSON을 읽은 `parse_prefetch`, `extract_mft_timeline`은 받은 파일 옆의 부속 자료를 읽어 결과를 만들지만 그 부속 자료의 경로를 싣지 않는다 [7][2][10].
+세 도구의 `source`는 받은 파일의 경로와 SHA-256이다 [7][2][10].
+`get_amcache`의 `source`는 `Amcache.hve`의 경로와 해시였고 항목은 `Amcache.csv`의 행이었다 [4].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `sift_evtxecmd_filter_eids`에 적용된다 [38].
+`event_ids`를 주지 않거나 빈 목록으로 주면 서버가 정해 둔 사건 ID 20개 `_DEFAULT_HEAVY_HITTERS`에 맞는 행만 싣는다 [38].
+목록은 Security 로그온·프로세스·서비스·예약 작업·계정·Kerberos·공유 사건 ID 15개와 Sysmon 1·3·11·13, PowerShell 4104다 [38].
+맞지 않는 행은 CSV를 읽는 동안 버린다 [38][39].
+도구 설명은 기본 목록을 침입의 약 80%를 잡는 사건 ID라고 적는다 [38].
+
+**한계.** 서버는 행의 `EventId` 값만 대조하고 채널이나 제공자는 보지 않는다 [38].
+그래서 설명이 Sysmon 사건으로 적은 1·3·11·13은 다른 채널의 같은 번호 사건도 남긴다 [38].
+
+### 근거
+
+[1] `sift_recmd_query_key`는 RECmd의 표준 출력을 `raw_output`에 그대로 싣는다.
+
+```python
+def sift_recmd_query_key(hive_path: str, key_path: str) -> dict[str, Any]:
+    sample = safe_evidence_input(hive_path)
+    sample_sha = _sha256(sample) if sample.is_file() else None
+
+    cmd = [
+        _recmd_bin(),
+        "-f", str(sample),
+        "--kn", key_path,
+        "--nl",
+    ]
+    result = run_tool(cmd, timeout=RECMD_TIMEOUT_SECONDS)
+
+    return {
+        "raw_output": result.stdout,
+        "metadata": {
+            "tool": "recmd",
+            "hive_path": hive_path,
+            "hive_sha256": sample_sha,
+            "key_path": key_path,
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:138-159`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L138-L159)
+
+[2] `parse_prefetch`는 부속 JSON이 있으면 읽어 `source`를 더해 돌려주고 없으면 파일 이름에서 실행 파일 이름과 해시를 꺼낸다.
+
+```python
+def parse_prefetch(prefetch_path):
+    p = _safe_resolve(prefetch_path)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+    sidecar = p.with_suffix(".json")
+    if sidecar.exists():
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        data["source"] = {"path": str(p), "sha256": _sha256(p)}
+        return data
+    m = re.match(r"^(.+)-([0-9A-F]{8})\.pf$", p.name, re.IGNORECASE)
+    if not m:
+        return {"error": "bad_prefetch_name", "name": p.name}
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "executable": m.group(1), "path_hash": m.group(2),
+            "size_bytes": p.stat().st_size,
+            "note": "native reader — run PECmd for run counts and loaded modules"}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:276-291`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L276-L291)
+
+[3] `match_sigma_rules`는 일치 항목에 규칙 정보와 사건 원문을 싣고 규칙 묶음 버전과 수를 더한다.
+
+```python
+    matches = []
+    for ev in events:
+        for r in rules:
+            if _condition_matches(ev, r["detection"]):
+                tags = [t for t in (r.get("tags") or [])
+                        if str(t).startswith("attack.t")]
+                matches.append({
+                    "rule_id": r.get("id"),
+                    "rule_title": r.get("title"),
+                    "rule_file": r.get("_file"),
+                    "level": r.get("level"),
+                    "mitre": tags,
+                    "event": ev,
+                })
+
+    pack = _load_yaml(_pack_root() / "pack.yml") or {}
+    return {
+        "pack_version": pack.get("version"),
+        "rule_count": len(rules),
+        "event_count": len(events),
+        "match_count": len(matches),
+        "matches": matches,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v07_sigma.py:234-256`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v07_sigma.py#L234-L256)
+
+[4] (실행 확인) 같은 프로세스에서 `call_tool`로, 그리고 두 진입점으로 시험 입력을 넣어 응답을 확인했다(`runs.md` 실행 1, 3, 5).
+`match_sigma_rules`의 `event`는 입력 JSONL 줄과 같았고 `get_amcache`의 항목은 CSV 열 4개를 모두 실었으며 `source.path`는 `…/am/Amcache.hve`였다.
+`dfir_corr.correlate_timeline`은 `contradictions` 300개를 돌려줬고 같은 입력의 `correlate_timeline` 응답 키는 `cross_source_correlations`·`cross_source_total`·`engine`·`event_count`·`kvm_precedes_logon`·`user_rule_matches`·`window_seconds`였다.
+`parse_linux_text_log`의 첫 기록은 `uri` `/index.php?id=1`, `proto` `union select 1 HTTP/1.1`이었다.
+`analyze_event_logs`에 `limit_alerts` 3을 주자 `events_examined` 10, `alerts` 3개, `alerts_by_severity.medium` 3이었다.
+`correlate_timeline`에 `rules` `["e1.actor = e2.actor"]`를 주자 `server_stdio`의 `sample` 시각은 `"2026-03-15 10:00:00"`이었고 `server`는 JSON-RPC 오류 -32000 `TypeError: Object of type datetime is not JSON serializable`을 돌려줬다.
+
+[5] 네이티브 도구가 부속 CSV를 읽는 공통 함수다.
+
+```python
+def _read_csv(p: Path) -> list[dict]:
+    with p.open(newline="", encoding="utf-8", errors="replace") as f:
+        return list(csv.DictReader(f))
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:223-225`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L223-L225)
+
+[6] Volatility 래퍼는 플러그인을 `-r csv`로 실행해 CSV 행을 `dict`로 읽고 도구 이름과 플러그인 이름을 `metadata`에 싣는다.
+
+```python
+        "-q",                       # quiet — suppress progress on stderr
+        "-r", "csv",                # CSV renderer
+        "-f", str(sample),
+        plugin,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    result: SubprocessResult = run_tool(cmd, timeout=timeout)
+
+    # Parse CSV output. Vol3 emits a single header row + data rows.
+    rows: list[dict[str, Any]] = []
+    if result.stdout.strip():
+        try:
+            reader = csv.DictReader(io.StringIO(result.stdout))
+            rows = [dict(r) for r in reader]
+        except csv.Error:
+            # Some plugins (e.g., bash history) emit non-CSV — keep raw lines
+            rows = [{"line": line} for line in result.stdout.splitlines() if line.strip()]
+
+    metadata = {
+        "plugin": plugin,
+        "image_path": image_path,
+        "image_sha256": sample_sha,
+        "row_count": len(rows),
+        "duration_ms": result.duration_ms,
+        "tool": "volatility3",
+    }
+    return rows, metadata
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py:76-104`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/volatility3.py#L76-L104)
+
+[7] `get_amcache`는 부속 CSV 행을 그대로 싣고 `source`에는 하이브 경로와 해시를 싣는다.
+
+```python
+def get_amcache(hive_path, cursor=0, limit=100):
+    p = _safe_resolve(hive_path)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+    csv_sidecar = p.with_suffix(".csv")
+    if not csv_sidecar.exists():
+        # Refuse to synthesize. A forensic tool MUST NOT return invented
+        # records — an analyst seeing 'sample-0.exe ... sample-41.exe'
+        # could plausibly mistake them for real evidence. Match the
+        # pattern used elsewhere (e.g. _v05_supply_chain) and surface
+        # the missing sidecar as an explicit error.
+        return {
+            "error": "amcache_csv_missing",
+            "path": str(p),
+            "hint": (
+                "AmcacheParser sidecar not found alongside the hive. "
+                "Run AmcacheParser.exe --csv <out_dir> -f <hive> and "
+                "place the resulting CSV next to the hive with the "
+                "same stem (e.g. Amcache.csv next to Amcache.hve)."
+            ),
+        }
+    items = _read_csv(csv_sidecar)
+    total = len(items)
+    s, e = cursor, min(cursor + limit, total)
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "total": total, "cursor_next": e if e < total else None,
+            "items": items[s:e]}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:241-267`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L241-L267)
+
+[8] Zimmerman 도구와 psort 래퍼는 CSV 행을 모두 싣고 `metadata`에 도구 이름과 CSV 해시를 싣는다: [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:87-106`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L87-L106), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:141-160`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L141-L160), [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:213-226`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L213-L226), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:113-127`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L113-L127), [`dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py:85-122`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/amcacheparser.py#L85-L122), [`dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py:222-242`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/plaso.py#L222-L242), [`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:96-103`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L96-L103).
+
+[9] `parse_shimcache`는 열 이름 후보에서 네 필드를 만들고 부속 CSV의 경로를 `sidecar`에 싣는다.
+
+```python
+    rows = _read_csv(sidecar)
+    items = [{
+        "entry_position": r.get("CacheEntryPosition") or r.get("Position"),
+        "path": r.get("Path"),
+        "last_modified": r.get("LastModifiedTimeUTC") or r.get("LastModified"),
+        "executed": r.get("Executed") or r.get("Executed?") or "",
+    } for r in rows]
+    total = len(items)
+    s, e = cursor, min(cursor + limit, total)
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "sidecar": str(sidecar.relative_to(EVIDENCE_ROOT)),
+            "total": total, "cursor_next": e if e < total else None,
+            "items": items[s:e]}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:320-332`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L320-L332)
+
+[10] `extract_mft_timeline`은 받은 파일이나 같은 이름의 `.csv`를 읽어 다섯 필드를 고르고 `source`에는 받은 파일을 싣는다.
+
+```python
+def extract_mft_timeline(mft_path, start, end, cursor=0, limit=500):
+    p = _safe_resolve(mft_path)
+    if not p.exists():
+        return {"error": "file_not_found", "path": str(p)}
+    csv_path = p if p.suffix.lower() == ".csv" else p.with_suffix(".csv")
+    if not csv_path.exists():
+        return {"error": "mft_csv_missing",
+                "hint": f"run MFTECmd.exe -f {p} --csv <dir>",
+                "source": {"path": str(p), "sha256": _sha256(p)}}
+    sdt, edt = _parse_ts(start), _parse_ts(end)
+    if sdt is None or edt is None:
+        return {"error": "bad_time_format"}
+    matched = []
+    for row in _read_csv(csv_path):
+        created = _parse_ts(row.get("Created0x10") or row.get("Created") or "")
+        if created is None or created < sdt or created > edt:
+            continue
+        matched.append({
+            "entry": row.get("Entry") or row.get("EntryNumber"),
+            "path": (row.get("ParentPath", "") + "\\" + row.get("FileName", "")).strip("\\"),
+            "created": row.get("Created0x10") or row.get("Created"),
+            "modified": row.get("LastModified0x10"),
+            "accessed": row.get("LastAccess0x10"),
+        })
+    total = len(matched)
+    s, e = cursor, min(cursor + limit, total)
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "window": {"start": start, "end": end}, "total": total,
+            "cursor_next": e if e < total else None, "items": matched[s:e]}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:522-550`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L522-L550)
+
+[11] `get_process_tree`는 PID를 정수로 읽지 못한 행을 건너뛰고 PID를 키로 한 `dict`에 행을 넣는다.
+
+```python
+    rows = _read_csv(p)
+    by_pid = {}
+    children = {}
+    for r in rows:
+        try:
+            pid = int(r.get("PID") or r.get("Pid") or r.get("ProcessId") or 0)
+            ppid = int(r.get("ParentPID") or r.get("ParentProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        by_pid[pid] = {
+            "pid": pid, "ppid": ppid,
+            "image": r.get("Image") or r.get("ProcessName") or r.get("Name"),
+            "cmdline": r.get("CommandLine") or r.get("Cmdline") or "",
+            "start_ts": r.get("StartTime") or r.get("UtcTime"),
+            "user": r.get("User") or r.get("Username"),
+        }
+        children.setdefault(ppid, []).append(pid)
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:349-365`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L349-L365)
+
+[12] `sift_pecmd_run_history`는 PECmd 행에서 몇 필드만 고른다.
+
+```python
+    for row in parsed["rows"]:
+        runs = []
+        for k in ("LastRun", "PreviousRun0", "PreviousRun1", "PreviousRun2",
+                  "PreviousRun3", "PreviousRun4", "PreviousRun5", "PreviousRun6"):
+            v = row.get(k, "").strip()
+            if v:
+                runs.append(v)
+        history.append({
+            "executable": row.get("ExecutableName", ""),
+            # RunCount is overwhelmingly numeric in PECmd CSVs, but
+            # an older .NET locale or a corrupted CSV can emit "N/A"
+            # or other non-numeric tokens. A bare int() would crash
+            # the whole adapter mid-batch and lose all subsequent
+            # rows — defend the call.
+            "run_count": _safe_int(row.get("RunCount")),
+            "runs": runs,
+            "size_bytes": row.get("Size", ""),
+            "hash": row.get("Hash", ""),
+        })
+    history.sort(key=lambda h: -h["run_count"])
+    history = history[:limit]
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:150-170`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L150-L170)
+
+[13] 줄을 정규식으로 나누는 곳이다: [`dfir_mcp/src/dfir_mcp/__init__.py:2105-2118`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2105-L2118), [`dfir_mcp/src/dfir_mcp/__init__.py:2276-2286`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2276-L2286), [`dfir_mcp/src/dfir_mcp/__init__.py:2647-2653`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2647-L2653), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:34-35`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L34-L35).
+
+[14] `parse_browser_history`는 부속 CSV가 있으면 정해 둔 열을 고르고 없으면 브라우저마다 정한 SQLite 질의로 열을 고른다: [`dfir_mcp/src/dfir_mcp/__init__.py:1227-1333`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1227-L1333).
+`parse_knowledgec`와 `parse_macos_quarantine`의 질의다: [`dfir_mcp/src/dfir_mcp/__init__.py:1065-1076`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1065-L1076), [`dfir_mcp/src/dfir_mcp/_v06_macos_linux.py:133-146`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v06_macos_linux.py#L133-L146).
+
+[15] `correlate_timeline`은 `dfir_corr`의 `correlations`만 옮겨 이전 모양의 키로 바꾼다.
+
+```python
+    # Map dfir_corr's shape into the back-compat result shape that
+    # existing case studies expect.
+    cross_src = []
+    for c in core.get("correlations", []):
+        cross_src.append({
+            "s1": c["source_a"], "ts1": c["ts_a"], "a1": c["actor_a"],
+            "t1": c["target_a"], "ty1": c["type_a"],
+            "s2": c["source_b"], "ts2": c["ts_b"], "a2": c["actor_b"],
+            "t2": c["target_b"], "ty2": c["type_b"],
+            "delta_s": c["delta_seconds"],
+        })
+    kvm_patterns = [c for c in cross_src
+                    if c.get("ty1") == "usb_insert" and c.get("ty2") == "logon"]
+    return {
+        "event_count": core["normalized_event_count"],
+        "cross_source_correlations": cross_src[:100],
+        "cross_source_total": len(cross_src),
+        "kvm_precedes_logon": kvm_patterns,
+        "user_rule_matches": user_matches,
+        "engine": "duckdb",
+        "window_seconds": window_seconds,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:849-870`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L849-L870)
+
+[16] `dfir_corr`의 모듈 설명과 `correlate_timeline`의 반환값이다.
+
+```python
+Design contract:
+
+  - No I/O. All inputs come in as Python data structures.
+  - No agent state. Each call is independent.
+  - Contradictions are returned as records with status='UNRESOLVED',
+    never auto-resolved.
+  - Rules are loaded from correlation-rules.yaml (shipped alongside
+    this package). The rule pack is operator-tunable without touching
+    Python.
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:13-21`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L13-L21)
+
+```python
+    return {
+        "normalized_event_count": len(normalized),
+        "correlations": [
+            {"source_a": r[0], "ts_a": str(r[1]), "actor_a": r[2],
+             "target_a": r[3], "type_a": r[4],
+             "source_b": r[5], "ts_b": str(r[6]), "actor_b": r[7],
+             "target_b": r[8], "type_b": r[9],
+             "delta_seconds": int(r[10])}
+            for r in correlations[:100]
+        ],
+        "correlations_truncated_at": 100 if len(correlations) > 100 else None,
+        "contradictions": contradictions,
+        "window_seconds": window_seconds,
+    }
+```
+
+[`dfir_corr/src/dfir_corr/__init__.py:299-312`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_corr/src/dfir_corr/__init__.py#L299-L312)
+
+[17] `analyze_web_access_log`는 `log_format`을 쓰지 않고 combined 정규식에 맞지 않는 줄을 정해 둔 칸 위치로 읽는다.
+
+```python
+    # NOTE: previously named `format=` which shadowed the Python builtin
+    # and was silently ignored in the body. Renamed to log_format so the
+    # parameter is honest about what it does (currently the body uses
+    # auto-detect via the regex below, irrespective of value — kept for
+    # forward-compat with W3C/Common/Combined explicit forcing).
+    _ = log_format  # accepted, currently informational
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2635-2640`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2635-L2640)
+
+```python
+        m = combined_re.match(line)
+        if not m:
+            # Try IIS W3C (space-separated fields after the header)
+            if line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            # Heuristic pick — IIS default column order
+            try:
+                ts_str = f"{parts[0]} {parts[1]}"
+                ts = _parse_ts(ts_str)
+                ip = parts[-4] if len(parts) > 4 else parts[2]
+                method = parts[3]
+                path = parts[4] + ("?" + parts[5] if parts[5] != "-" else "")
+                status = parts[-5]
+                ua = "-"
+            except (IndexError, ValueError):
+                continue
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2671-2689`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2671-L2689)
+
+[18] `analyze_event_logs`는 경고 수가 `limit_alerts`에 닿으면 멈추고 남은 경고로 등급별 건수를 센다.
+
+```python
+            alerts.append({
+                "rule_id": rule["id"], "severity": rule["severity"],
+                "description": rule["description"],
+                "event_id": eid, "channel": channel,
+                "timestamp": ev.get("TimeCreated") or ev.get("timestamp"),
+            })
+            if len(alerts) >= limit_alerts:
+                break
+        if len(alerts) >= limit_alerts:
+            break
+
+    by_sev = {s: sum(1 for a in alerts if a["severity"] == s)
+              for s in ("critical", "high", "medium", "low", "info")}
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "events_examined": len(events), "alerts": alerts,
+            "alerts_by_severity": by_sev, "rules_loaded": len(EVENT_RULES)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:727-742`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L727-L742)
+
+[19] `parse_auditd_log`는 번호를 이름으로 바꾸고 `limit`까지 모은 사건으로 상위 10개 건수를 센다: [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:37-43`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L37-L43), [`dfir_mcp/src/dfir_mcp/_v04_expansion.py:97-138`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L97-L138).
+
+```python
+_SYSCALL_NAMES = {
+    "59": "execve", "322": "execveat", "2": "open", "257": "openat",
+    "82": "rename", "263": "unlinkat", "87": "unlink",
+    "1": "write", "92": "chown", "94": "lchown",
+    "260": "fchownat", "90": "chmod", "268": "fchmodat",
+    "41": "socket", "42": "connect", "49": "bind",
+}
+```
+
+[`dfir_mcp/src/dfir_mcp/_v04_expansion.py:37-43`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L37-L43)
+
+[20] `parse_fsevents`는 걸러 남긴 사건의 플래그만 세고 `limit`에서 멈춘다.
+
+```python
+    for r in rows:
+        path = r.get("path") or r.get("Path") or ""
+        flags_str = r.get("flags") or r.get("Flags") or r.get("mask") or ""
+        flags = [f.strip() for f in flags_str.split(",") if f.strip()]
+
+        if path_contains and path_contains not in path:
+            continue
+        if flag_filter and not any(f in flags for f in flag_filter):
+            continue
+
+        for f in flags:
+            flag_stats[f] = flag_stats.get(f, 0) + 1
+
+        events.append({
+            "event_id": r.get("id") or r.get("EventID"),
+            "path": path,
+            "flags": flags,
+        })
+        if len(events) >= limit:
+            break
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1125-1144`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1125-L1144)
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "total_rows": len(rows), "returned": len(events),
+            "flag_statistics": flag_stats,
+            "suspicious_path_count": len(suspicious),
+            "suspicious_samples": suspicious[:20],
+            "events": events}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:1154-1159`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1154-L1159)
+
+[21] `parse_knowledgec`는 부속 CSV와 SQLite 경로에서 각각 앱별 건수를 센다: [`dfir_mcp/src/dfir_mcp/__init__.py:1028-1093`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1028-L1093).
+
+[22] `parse_linux_text_log`는 형식별, 등급별, 기법별 건수를 싣는다.
+
+```python
+    max_sev = next((s for s in ("critical","high","medium","low") if by_severity.get(s)), "info")
+    return {
+        "source": {"path": str(p), "sha256": _sha256(p)},
+        "lines_examined": sum(formats_seen.values()),
+        "records_parsed": len(records),
+        "records": records[:max_records],
+        "formats": dict(formats_seen),
+        "suspicious_hits": suspicious,
+        "by_severity": dict(by_severity),
+        "by_technique": dict(by_technique),
+        "max_severity": max_sev,
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:2367-2378`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L2367-L2378)
+
+[23] `analyze_windows_logons`는 로그온 유형 표로 이름과 뜻을 더하고 유형별 건수와 원격 출발지를 센다: [`dfir_mcp/src/dfir_mcp/__init__.py:1712-1724`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1712-L1724), [`dfir_mcp/src/dfir_mcp/__init__.py:1801-1824`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1801-L1824), [`dfir_mcp/src/dfir_mcp/__init__.py:1870-1903`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1870-L1903).
+
+[24] 탐지 도구의 건수 필드다: [`dfir_mcp/src/dfir_mcp/__init__.py:1686-1694`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1686-L1694), [`dfir_mcp/src/dfir_mcp/__init__.py:3272-3286`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3272-L3286), [`dfir_mcp/src/dfir_mcp/__init__.py:3767-3784`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3767-L3784).
+
+[25] `parse_registry_hive`의 값 변환 함수다.
+
+```python
+    def _serialize_value(v):
+        """Convert python-registry value to a JSON-friendly dict.
+        Binary data is base64-encoded with explicit type marker; numeric
+        types pass through; strings are kept as-is.
+        """
+        try:
+            vtype = v.value_type_str()
+        except Exception:
+            vtype = "REG_UNKNOWN"
+        try:
+            raw = v.value()
+        except Exception as e:
+            return {"name": v.name(), "type": vtype, "error": str(e)[:100]}
+        if isinstance(raw, bytes):
+            import base64
+            return {"name": v.name(), "type": vtype,
+                    "data_base64": base64.b64encode(raw).decode("ascii"),
+                    "data_size": len(raw)}
+        if isinstance(raw, (int, float, str, bool)) or raw is None:
+            return {"name": v.name(), "type": vtype, "data": raw}
+        if isinstance(raw, list):
+            return {"name": v.name(), "type": vtype,
+                    "data": [str(x) for x in raw]}
+        return {"name": v.name(), "type": vtype, "data": str(raw)}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3897-3920`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3897-L3920)
+
+[26] `analyze_downloads`는 항목마다 원천을 적고 `ZoneId`를 영역 이름으로 바꾼다: [`dfir_mcp/src/dfir_mcp/__init__.py:1364-1464`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L1364-L1464).
+
+[27] `server_stdio`는 결과를 `default=str`, `indent=2`로 JSON 글로 바꾼다.
+
+```python
+@app.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Execute a registered function. Any attempt to call something not in
+    _REGISTRY raises the same KeyError the in-process path would raise."""
+    try:
+        result = call_tool(name, arguments or {})
+        return [TextContent(
+            type="text",
+            text=json.dumps(result, default=str, indent=2),
+        )]
+    except KeyError as e:
+        # Surface the ToolNotFound error as a structured result so the
+        # agent can reason about it rather than crashing.
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": "ToolNotFound", "detail": str(e)}),
+        )]
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": type(e).__name__, "detail": str(e)[:500]}),
+        )]
+```
+
+[`dfir_mcp/src/dfir_mcp/server_stdio.py:48-69`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server_stdio.py#L48-L69)
+
+[28] `server`는 결과를 인자 없는 `json.dumps`로 바꾸고 예외를 JSON-RPC 오류로 보낸다.
+
+```python
+    elif method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        try:
+            out = call_tool(name, args)
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {
+                "content": [{"type": "text", "text": json.dumps(out)}],
+                "isError": False,
+            }})
+        except KeyError as e:
+            # Unknown/unregistered tool — return MCP-level error, not exception.
+            # This is an expected, benign condition (the guardrail working),
+            # so log at INFO without a traceback.
+            _log.info("tool not found: %s", e)
+            _error(req_id, -32601, str(e))
+        except Exception as e:
+            # Unexpected failure inside a tool. Log the full traceback to
+            # stderr so the operator can diagnose it; the client still gets
+            # a clean JSON-RPC error with no stack details leaked over the wire.
+            _log.error("tool execution failed: %s: %s",
+                       type(e).__name__, e, exc_info=True)
+            _error(req_id, -32000, f"{type(e).__name__}: {e}")
+```
+
+[`dfir_mcp/src/dfir_mcp/server.py:63-84`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/server.py#L63-L84)
+
+[29] `parse_unified_log`는 경고가 `limit`에 닿으면 멈춘다.
+
+```python
+            if len(alerts) >= limit:
+                break
+        if len(alerts) >= limit:
+            break
+
+    by_sev = {s: sum(1 for a in alerts if a["severity"] == s)
+              for s in ("critical", "high", "medium", "low", "info")}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:993-999`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L993-L999)
+
+[30] `parse_shellbags`는 `limit`까지 자른 항목으로 공유 폴더 접근 수를 센다.
+
+```python
+    for r in rows[:limit]:
+        path = r.get("AbsolutePath") or r.get("Path") or ""
+        items.append({
+            "path": path,
+            "first_interacted": r.get("FirstInteracted"),
+            "last_interacted": r.get("LastInteracted"),
+            "is_network_share": path.startswith("\\\\") or "UNC\\" in path,
+            "is_removable": bool(re.match(r"^[D-Z]:\\", path)),
+        })
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "sidecar": str(sidecar.relative_to(EVIDENCE_ROOT)),
+            "total": len(rows), "items": items,
+            "network_share_access_count": sum(1 for i in items if i["is_network_share"])}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:497-509`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L497-L509)
+
+[31] `ransom_notes_created`는 발견사항 목록에서 `ransom_note_written` 규칙의 수를 센다.
+
+```python
+    return {"findings": findings, "finding_count": len(findings),
+            "max_severity": max_sev,
+            "stats": {
+                "anti_recovery_hits": len(anti_recov_hits),
+                "service_stop_events": len(stop_events),
+                "ransom_notes_created": len([f for f in findings
+                    if f.get("rule") == "ransom_note_written"]),
+                "mass_renames": len(rename_hits),
+            }}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3482-3490`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3482-L3490)
+
+[32] `detect_defense_evasion`의 `mft_mismatches`는 발견사항 수다.
+
+```python
+            if anomalies:
+                findings.append({
+                    "technique": "T1070.006",
+                    "rule": "mft_si_fn_mismatch",
+                    "count": len(anomalies),
+                    "samples": anomalies[:20],
+                    "severity": "high",
+                    "interpretation": "MFT $SI earlier than $FN — "
+                                       "classic timestomping artifact",
+                })
+
+    max_sev = "info"
+    sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+    for f in findings:
+        if sev_rank.get(f.get("severity", "info"), 0) > sev_rank.get(max_sev, 0):
+            max_sev = f["severity"]
+
+    return {"findings": findings, "finding_count": len(findings),
+            "max_severity": max_sev,
+            "stats": {
+                "event_log_clearings": sum(1 for f in findings
+                    if f.get("rule") in ("event_log_cleared", "log_clear_command")),
+                "timestomp_commands": sum(1 for f in findings
+                    if f.get("rule") == "timestomp_command"),
+                "mft_mismatches": sum(1 for f in findings
+                    if f.get("rule") == "mft_si_fn_mismatch"),
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:3621-3646`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L3621-L3646)
+
+[33] `correlate_timeline`은 사용자 규칙 질의의 행 앞 5개를 `sample`에 그대로 넣는다.
+
+```python
+                try:
+                    rows = con.execute(
+                        f"SELECT e1.source, e1.ts, e1.target, e2.source, e2.ts, e2.target "
+                        f"FROM ev e1 JOIN ev e2 ON {rule} LIMIT 50"
+                    ).fetchall()
+                    user_matches.append({"rule": rule, "hits": len(rows), "sample": rows[:5]})
+                except Exception as ex:
+                    user_matches.append({"rule": rule, "error": str(ex)[:200]})
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:839-846`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L839-L846)
+
+[34] 세 래퍼의 `metadata`에는 CSV 해시가 없다: [`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:213-226`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L213-L226), [`dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py:172-180`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/pecmd.py#L172-L180), [`dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py:213-223`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/mftecmd.py#L213-L223).
+
+[35] `sift_recmd_run_batch`는 모르는 `batch_name`이면 ASEPs batch를 쓰고 두 이름을 함께 싣는다.
+
+```python
+    batch_file = _KNOWN_BATCHES.get(batch_name, _KNOWN_BATCHES["ASEPs"])
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:81-81`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L81-L81)
+
+```python
+    return {
+        "registry_findings": rows,
+        "metadata": {
+            "tool": "recmd",
+            "hive_path": hive_path,
+            "hive_sha256": sample_sha,
+            "batch_name": batch_name,
+            "batch_file": batch_file,
+            "rows_returned": len(rows),
+            "duration_ms": result.duration_ms,
+        },
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py:105-116`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/recmd.py#L105-L116)
+
+[36] `parse_shellbags`는 부속 CSV 경로를 `sidecar`에 싣는다.
+
+```python
+    return {"source": {"path": str(p), "sha256": _sha256(p)},
+            "sidecar": str(sidecar.relative_to(EVIDENCE_ROOT)),
+            "total": len(rows), "items": items,
+            "network_share_access_count": sum(1 for i in items if i["is_network_share"])}
+```
+
+[`dfir_mcp/src/dfir_mcp/__init__.py:506-509`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/__init__.py#L506-L509)
+
+[37] `parse_bash_history`는 고른 형식을 `format_detected`에 싣는다.
+
+```python
+    return {
+        "format_detected": log_format,
+        "total_commands": len(commands),
+        "suspicious_count": len(suspicious_hits),
+        "suspicious": suspicious_hits[:limit],
+        "commands": commands[:limit],
+        "source": {"path": str(p), "sha256": _sha256(p)},
+        "platform": "linux/macos",
+    }
+```
+
+[`dfir_mcp/src/dfir_mcp/_v04_expansion.py:328-336`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/_v04_expansion.py#L328-L336)
+
+[38] `sift_evtxecmd_filter_eids`는 `event_ids`가 비면 기본 목록을 쓰고 행의 `EventId`만 대조한다.
+
+```python
+# The "heavy 12" EIDs from [Cheatsheet] evtx-threat-hunting-2026.md
+_DEFAULT_HEAVY_HITTERS = [
+    "4624", "4625", "4634", "4647", "4648", "4672", "4688",
+    "4697", "4698", "4702", "4720", "4732", "4769", "5140", "5145",
+    # Sysmon
+    "1", "3", "11", "13",
+    # PowerShell
+    "4104",
+]
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:163-171`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L163-L171)
+
+```python
+def sift_evtxecmd_filter_eids(
+    evtx_path: str,
+    event_ids: list[str] | None = None,
+    limit: int = 10000,
+) -> dict[str, Any]:
+    keep_eids = set(event_ids) if event_ids else set(_DEFAULT_HEAVY_HITTERS)
+
+    # OOM-safe: push the EID predicate down into the streaming reader so
+    # non-matching rows are discarded the instant they're read, never
+    # accumulated. Only up to `limit` matching rows are materialized.
+    def _keep(row: dict) -> bool:
+        # EvtxECmd CSV column is "EventId" (no underscore, capital I)
+        eid = str(row.get("EventId") or row.get("EventID") or "").strip()
+        return eid in keep_eids
+
+    parsed = _run_evtxecmd(evtx_path, max_rows=limit, row_filter=_keep)
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:195-210`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L195-L210)
+
+[39] `_run_evtxecmd`는 `row_filter`에 맞지 않는 행을 읽는 즉시 버린다.
+
+```python
+        rows: list[dict[str, Any]] = []
+        total_scanned = 0
+        truncated = False
+        with out_csv.open("r", encoding="utf-8", errors="replace") as fh:
+            reader = csv.DictReader(fh)
+            for r in reader:
+                total_scanned += 1
+                if row_filter is not None and not row_filter(r):
+                    continue
+                if max_rows is None or len(rows) < max_rows:
+                    rows.append(dict(r))
+                elif max_rows is not None:
+                    # We've collected our budget; keep counting total but
+                    # stop materializing. For an unfiltered read we can
+                    # stop scanning entirely (total would just be the file
+                    # length, which the caller rarely needs precisely once
+                    # truncated); for a filtered read we keep scanning so
+                    # the matched-vs-scanned ratio stays meaningful.
+                    truncated = True
+                    if row_filter is None:
+                        break
+```
+
+[`dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py:87-107`](https://github.com/Juwon1405/agentic-dfir/blob/a17e90b8a3c5ab5431f0da9f354f315082257f99/dfir_mcp/src/dfir_mcp/sift_adapters/evtxecmd.py#L87-L107)
