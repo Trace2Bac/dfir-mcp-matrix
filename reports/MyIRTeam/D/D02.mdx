@@ -1,0 +1,192 @@
+---
+cell: D02
+details:
+- id: not_implemented
+---
+
+# D02 파생물 추적
+
+### 미구현
+
+**판단.** 서버가 남기는 파생물은 수집 ZIP과 그 해시 파일, 증거 폴더를 복사하지 않고 분석할 때 분석 도구가 증거 폴더에 쓰는 CSV, 분석 도구의 로그 파일이다.
+서버는 이 파생물을 그것을 만든 호출이나 사용한 입력과 잇는 값을 파생물에도 서버 기록에도 남기지 않는다.
+네 서버의 코드에는 호출 기록을 쓰는 곳이 없다.
+
+호출과 입력을 가리키는 값은 응답에만 실린다.
+공통 모듈은 응답마다 새 난수로 `evidence_id`와 `snapshot_id`를 짓고 도구 결과의 `provenance`에서 `evidence_digest`·`source_folder`·`exit_code` 같은 값을 옮겨 싣는다 [1].
+`ir-collect`의 분석 응답은 `provenance`에 `IR_Collect.exe`가 낸 `evidence_digest`, 분석한 폴더나 ZIP의 경로, 분석 도구의 SHA-256을 싣는다 [2].
+`collect_triage_package`의 응답은 `evidence_id`, ZIP 경로, ZIP의 SHA-256, 분석 도구의 SHA-256을 싣는다 [3].
+서버는 이 응답을 파일이나 DB에 남기지 않는다 [1][3].
+
+`IR_Collect.exe` 0.24.2의 `-analyze`는 파생 CSV를 만들기 전에 입력 파일마다 해시를 계산해 요약 JSON의 `evidence`와 `evidence_digest`에 싣는다 [4].
+`ir-collect`는 그 요약 JSON을 호출마다 만든 작업 폴더에 받아 읽은 뒤 폴더째 지우고 응답에는 `evidence_digest`와 `evidence` 항목 수만 남긴다 [2][5].
+증거 폴더에 쓰인 파생 CSV의 이름은 고정 이름이거나 로그 이름 뒤에 `_filtered.csv`를 붙인 것이고 그 안이나 곁에 호출, 입력 파일, 해시를 적은 값이 없다 [6].
+
+로그 파일에 들어가는 값도 호출과 잇지 않는다.
+Hayabusa 3.10.0의 오류 로그 파일은 첫 줄에 명령줄 전체를 적어 서버가 넘긴 증거 경로와 출력 경로가 들어 있다 [7].
+이 줄은 Hayabusa가 쓰는 것이고 서버는 그 파일을 읽지 않으며 MCP 호출을 가리키는 값도 없다 [7][8].
+`IR_Collect.exe` 0.24.2의 `logs/ir_collect.log` 줄은 시각, 수준, 문장만 담는다 [9].
+
+수집 ZIP의 이름은 호출 인자 `evidence_id`이고 인자가 비어 있으면 서버가 지은 `triage_<난수>`다 [10].
+`IR_Collect.exe` 0.24.2는 ZIP으로 묶기 전에 수집 폴더에 `collection_coverage.json`을 쓰고 여기에 생성 시각, 호스트 이름, `evidence_id`, 단계별 수집 상태를 적는다 [11].
+이 파일은 `IR_Collect.exe`가 쓰는 것이고 서버는 그 값을 읽지 않으며 MCP 호출을 가리키는 값도 없다 [11][3].
+ZIP 안의 내용과 `<ID>.zip.sha256`은 `IR_Collect.exe`가 쓰고 서버는 그 안에 호출을 가리키는 값을 넣지 않는다 [3][12].
+앞 도구의 파생물을 뒤 도구가 입력으로 쓸 때 그 관계를 기록하는 코드는 없다.
+`collect_triage_package` 응답의 `next_step`은 ZIP을 증거 폴더에 옮긴 뒤 `analyze_triage_zip`으로 분석하라고 안내할 뿐이다 [3].
+
+### 근거
+
+[1] 공통 응답 형식은 응답마다 새 ID를 짓고 도구 결과의 `provenance` 일부를 옮긴다.
+
+```python
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "evidence_id": "ev_" + uuid.uuid4().hex,
+        "tool": tool,
+        "target": {
+            "type": target_type,
+            "identifier": _bounded_identifier(target_identifier),
+        },
+        "collected_at_utc": collected_at_utc or utc_now(),
+        "snapshot_id": str(snapshot_id or ("snap_" + uuid.uuid4().hex)),
+        "status": effective_status,
+        "data": data,
+        "errors": [*(errors or []), *inferred_errors],
+        "limitations": [*(limitations or []), *inferred_limitations],
+        "provenance": _provenance_from_data(tool, data),
+    }
+```
+
+[`myirteam_common/evidence.py:237-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L237-L252)
+
+`provenance`에서 옮기는 값: [`myirteam_common/evidence.py:187-212`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L187-L212).
+
+[2] `ir-collect`의 요약 응답은 `IR_Collect.exe`의 `evidence_digest`와 서버가 붙인 출처 값을 `provenance`에 싣는다.
+
+```python
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": {
+            "tool_name": data.get("tool_name"),
+            "tool_version": data.get("tool_version"),
+            "export_schema": data.get("export_schema"),
+            "generated_at": data.get("generated_at"),
+            "evidence_digest": data.get("evidence_digest"),
+            **provenance,
+        },
+```
+
+[`ir-collect-mcp/server.py:595-605`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L595-L605)
+
+`evidence` 항목 수만 남기는 줄: [`ir-collect-mcp/server.py:623`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L623).
+
+[3] `collect_triage_package`의 응답 내용이다.
+
+```python
+    sidecar = out_dir / (eid + ".zip.sha256")
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "evidence_id": eid,
+        "zip_path": str(zip_path),
+        "size_bytes": zip_path.stat().st_size,
+        "sha256": sha256_file(zip_path),
+        "sha256_sidecar_present": sidecar.is_file(),
+        "is_administrator": is_admin(),
+        "exit_code": rc,
+        "analyzer_sha256": integrity["sha256"],
+        "warning": ("LIVE-RESPONSE collection: this read live artifacts and wrote output ON this host "
+                    "(not zero-footprint). Full coverage ($MFT, registry hives, SRUM) requires elevation; "
+                    "without admin the collection still completes but is partial."),
+        "next_step": (
+            "To analyze: verify any SHA-256 sidecar, place the ZIP under "
+            "IRCOLLECT_EVIDENCE_ROOTS, then call analyze_triage_zip without manual extraction."
+        ),
+        "disclaimer": "Collection changes the host; this tool is opt-in and never part of default automated flows.",
+    }
+```
+
+[`ir-collect-mcp/server.py:981-1001`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L981-L1001)
+
+[4] `IR_Collect.exe` 0.24.2는 파생 CSV를 만들기 전에 입력 파일을 해시하고 요약에 싣는다: [`src/Analysis/CaseManager.cs:462-469`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L462-L469), [`src/Analysis/AnalysisCli.cs:120-121`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/AnalysisCli.cs#L120-L121).
+
+[5] 요약 JSON을 작업 폴더에서 읽고 끝나면 폴더를 지운다.
+
+```python
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+        if not out_path.is_file():
+            return {
+                "error": "IR_Collect produced no summary JSON (analysis failed).",
+                "exit_code": rc,
+                "stdout": out_txt[:2000],
+                "stderr": err_txt[:2000],
+            }
+        try:
+            data = read_json_file(out_path)
+        except (ValueError, OSError) as exc:
+            return {"error": f"could not read/parse summary JSON: {exc}", "exit_code": rc}
+```
+
+[`ir-collect-mcp/server.py:772-784`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L772-L784)
+
+지우는 줄: [`ir-collect-mcp/server.py:799-800`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L799-L800).
+
+[6] `IR_Collect.exe` 0.24.2가 증거 폴더에 쓰는 CSV의 이름과 쓰는 곳이다: [`src/Analysis/RawArtifactCsvDeriver.cs:28-72`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/RawArtifactCsvDeriver.cs#L28-L72), [`src/Analysis/CaseManager.cs:603-631`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L603-L631), [`src/Utils/ShellBagsParser.cs:56-87`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/ShellBagsParser.cs#L56-L87).
+
+[7] Hayabusa 3.10.0의 오류 로그는 첫 줄에 명령줄 전체를 적는다: [`src/detections/message.rs:453-483`](https://github.com/Yamato-Security/hayabusa/blob/3e96ff790e532fb8b3422005aa750b6f9ef40943/src/detections/message.rs#L453-L483).
+
+[8] 서버가 Hayabusa에 넘기는 인자에는 증거 경로와 출력 경로가 들어 있다.
+
+```python
+    run_dir = cfg.work_dir / ("run_" + uuid.uuid4().hex)
+    output_path = run_dir / "timeline.jsonl"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        input_flag = "-f" if source_kind == "file" else "-d"
+        args = [
+            "json-timeline",
+            input_flag,
+            str(source),
+            "-L",
+            "-o",
+            str(output_path),
+            "-w",
+            "-q",
+            "-N",
+            "-K",
+            "-O",
+            "-C",
+            "-m",
+            level,
+            "-p",
+            "standard",
+        ]
+        exit_code, stdout, stderr = run_hayabusa(cfg, args)
+```
+
+[`artifact-forensic-mcp/server.py:2415-2438`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2415-L2438)
+
+[9] `IR_Collect.exe` 0.24.2의 로그 줄 형식이다: [`src/Utils/Logger.cs:58-64`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/Logger.cs#L58-L64).
+
+[10] 비어 있는 `evidence_id`는 서버가 난수로 짓는다.
+
+```python
+def safe_evidence_id(evidence_id: str) -> str:
+    """Validate/normalize an evidence id used as the ZIP basename. Empty -> generated.
+    Rejects path separators, traversal, and unsafe characters."""
+    eid = (evidence_id or "").strip()
+    if not eid:
+        return "triage_" + uuid.uuid4().hex[:8]
+    if not EVIDENCE_ID_RE.match(eid):
+        raise ValueError("evidence_id must be 1-64 chars of letters/digits/dot/dash/underscore, "
+                         "with no path separators.")
+    return eid
+```
+
+[`ir-collect-mcp/server.py:342-351`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L342-L351)
+
+[11] `IR_Collect.exe` 0.24.2는 묶기 전에 `collection_coverage.json`을 쓰고 생성 시각, 호스트 이름, `evidence_id`, 수집 사용자, 단계별 상태를 담는다: [`src/Collector.cs:224-228`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L224-L228), [`src/Collector.cs:325-333`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L325-L333), [`src/Collector.cs:807-832`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L807-L832), [`src/CollectionCoverage.cs:33-60`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/CollectionCoverage.cs#L33-L60), [`src/ArtifactNames.cs:33`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/ArtifactNames.cs#L33).
+
+[12] `IR_Collect.exe` 0.24.2가 ZIP과 해시 파일을 쓰는 곳이다: [`src/Collector.cs:261-279`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L261-L279).

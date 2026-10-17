@@ -1,0 +1,208 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 세 증거 서버는 증거에서 나온 값을 응답에 싣고 그 가운데 비밀 값을 가리거나 빼는 처리를 두지 않는다.
+네 서버와 공통 모듈의 코드에는 값을 가리는 함수가 없다 [1].
+서버 코드에는 호출 기록이나 보고서를 파일로 쓰는 곳이 없으므로 증거 값이 나가는 곳은 응답이다 [1].
+
+`local-forensic`은 대상 호스트에서 읽은 글을 그대로 싣는다 [2][3][4].
+사건 조회는 사건마다 메시지 12,000자와 `properties` 값 전체를 싣고 PowerShell 채널의 4103·4104 사건도 `collect_ir_event_bundle`이 읽는 고정 목록에 포함된다 [2].
+`list_running_processes`는 프로세스의 명령 줄 전체를, `list_scheduled_tasks`는 작업의 실행 인자를, `list_wmi_subscriptions`는 명령 줄 템플릿과 스크립트 본문 `ScriptText`를 싣는다 [3].
+`collect_autoruns`·`list_open_handles`는 Sysinternals 출력을 그대로 돌려준다 [4].
+`list_local_users_and_admins`는 `Get-LocalUser`에서 계정 이름, 상태, 시각, SID, 설명만 고른다 [5].
+
+`artifact-forensic`은 EZ Tools CSV의 열 값을 2,000자까지, Hayabusa 레코드를 그대로 싣는다 [6][7].
+레지스트리 하이브는 RECmd 배치 파일이 고른 키의 값 `ValueData`가 그대로 실린다 [6][8].
+`inspect_binary_file`은 파일에서 뽑은 출력 가능 문자열을 500개까지 싣는다 [9].
+
+`ir-collect`는 IR_Collect 요약의 Guided Hunt `evidence` 줄을 그대로 싣는다 [10].
+이 줄에는 사실의 사용자, 경로와 120자를 넘으면 앞 117자로 자른 상세 설명이 들어 있다 [11].
+IR_Collect 0.24.2에는 IP 주소, 메일 주소, 경로를 가리는 `SummaryPayloadAiRedactor`가 있다 [12].
+이 함수는 GUI의 AI 내보내기에서만 쓰이고 서버가 실행하는 `-analyze`는 가림 없이 요약을 쓴다 [12][13].
+
+`evidence_v1`과 `legacy` 형식은 이 결과를 똑같이 싣는다 [14].
+
+### 근거
+
+[1] 기준 커밋의 서버 코드와 공통 모듈에서 `redact`·`mask`·`secret`·`credential`을 찾으면 서버 코드에는 일치가 없다.
+`logging`, `write_text`, 쓰기 모드의 `open`을 찾으면 외부 도구가 쓰는 임시 출력과 ZIP 항목 사본 외에는 일치가 없다.
+키워드는 `.gitignore`와 `SECURITY.md`의 문구에서만 일치한다: [`SECURITY.md`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/SECURITY.md).
+
+[2] 사건 조회는 메시지를 12,000자로 자르고 `properties`를 그대로 싣는다.
+```python
+    $rows = foreach ($event in ($events | Sort-Object TimeCreated)) {
+        $message = $null
+        try { $message = $event.FormatDescription() } catch { $message = $event.Message }
+        if ($message -and $message.Length -gt 12000) { $message = $message.Substring(0, 12000) + "...[TRUNCATED]" }
+        $properties = @($event.Properties | ForEach-Object { $_.Value })
+        [PSCustomObject]@{
+            record_id = $event.RecordId
+            time_created_utc = if ($event.TimeCreated) { $event.TimeCreated.ToUniversalTime().ToString('o') } else { $null }
+            event_id = $event.Id
+            level = $event.LevelDisplayName
+            provider = $event.ProviderName
+            machine_name = $event.MachineName
+            message = $message
+            properties = $properties
+        }
+```
+
+[`mcp-server/autoruns_mcp.py:330-344`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L330-L344)
+`collect_ir_event_bundle`의 기본 목록에 PowerShell 4103·4104가 있다: [`mcp-server/autoruns_mcp.py:795-804`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L795-L804).
+
+[3] 프로세스 명령 줄, 작업 인자, WMI 소비자 본문을 고르는 곳이다: [`mcp-server/autoruns_mcp.py:597-598`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L597-L598), [`mcp-server/autoruns_mcp.py:978-980`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L978-L980), [`mcp-server/autoruns_mcp.py:1024-1027`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1024-L1027).
+
+[4] Sysinternals 출력은 실행기가 돌려준 글 그대로 결과가 된다.
+```python
+    stdout = decode_output(result.stdout)
+    stderr = decode_output(result.stderr)
+    output = stdout if stdout.strip() else stderr
+
+    if result.returncode != 0:
+        details = output.strip() or "No tool output was returned."
+        return f"Error: {tool_name} exited with code {result.returncode}.\n{details}"
+
+    # Preserve the primary tool stream. A non-zero exit code is handled above;
+    # stderr on a successful Sysinternals run is commonly banner text.
+    return output
+```
+
+[`mcp-server/autoruns_mcp.py:135-145`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L135-L145)
+
+[5] `list_local_users_and_admins`가 고르는 속성이다.
+```python
+$errors = @(); $users = @(); $admins = @()
+try { $users = @(Get-LocalUser -ErrorAction Stop | Select-Object Name, Enabled, LastLogon, PasswordRequired, PasswordExpires, UserMayChangePassword, SID, Description) } catch { $errors += "Get-LocalUser: $($_.Exception.Message)" }
+try {
+    $adminGroup = Get-LocalGroup -SID 'S-1-5-32-544' -ErrorAction Stop
+    $admins = @(Get-LocalGroupMember -Group $adminGroup.Name -ErrorAction Stop | Select-Object Name, ObjectClass, PrincipalSource, SID)
+} catch { $errors += "Get-LocalGroupMember: $($_.Exception.Message)" }
+[PSCustomObject]@{ users = $users; administrators = $admins; errors = $errors } | ConvertTo-Json -Compress -Depth 6
+```
+
+[`mcp-server/autoruns_mcp.py:1123-1129`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1123-L1129)
+
+[6] EZ Tools CSV의 열 값은 2,000자 상한만 적용해 싣는다.
+```python
+                for row in reader:
+                    record_count += 1
+                    if len(records) < max_records:
+                        records.append(
+                            {
+                                "source_csv": path.name,
+                                **{
+                                    str(field): _bounded_text(row.get(field))
+                                    for field in fields
+                                },
+                            }
+                        )
+```
+
+[`artifact-forensic-mcp/server.py:1578-1589`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1578-L1589)
+
+[7] Hayabusa JSONL 레코드는 객체 그대로 모은다.
+```python
+            try:
+                row = json.loads(raw_line.decode("utf-8-sig"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number}: {exc}")
+                continue
+            if not isinstance(row, dict):
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number}: expected a JSON object")
+                continue
+            valid_count += 1
+            if len(records) < max_records:
+                records.append(row)
+```
+
+[`artifact-forensic-mcp/server.py:2226-2238`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2226-L2238)
+
+[8] RECmd(`bcd0ac3`)의 배치 출력은 `ValueData`·`ValueData2`·`ValueData3` 열을 가진다: [`RECmd/BatchCsvOut.cs:8-28`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/BatchCsvOut.cs#L8-L28).
+
+[9] `extract_bounded_strings`는 ASCII·UTF-16LE 문자열을 모은다.
+```python
+def extract_bounded_strings(path: Path, max_strings: int) -> dict[str, Any]:
+    values: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    truncated = False
+    carry = b""
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            data = carry + chunk
+            for encoding, pattern in (("ascii", ASCII_STRING_RE), ("utf-16le", UTF16LE_STRING_RE)):
+                for match in pattern.finditer(data):
+                    raw = match.group(0)
+                    text = raw.decode(encoding, errors="replace")
+                    key = (encoding, text)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if len(values) >= max_strings:
+                        truncated = True
+                        break
+                    values.append({"encoding": encoding, "value": _bounded_text(text, 500) or ""})
+                if truncated:
+                    break
+            if truncated:
+                break
+            carry = data[-4096:]
+    return {"strings": values, "returned_string_count": len(values), "truncated": truncated}
+```
+
+[`artifact-forensic-mcp/server.py:518-543`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L518-L543)
+
+[10] `shape_summary`는 일치의 `evidence`를 8줄까지 그대로 옮긴다.
+```python
+        rule_matches.append({
+            "id": m.get("id"),
+            "title": m.get("title"),
+            "severity": m.get("severity"),
+            "attack_tactic": m.get("attack_tactic"),
+            "attack_technique_id": m.get("attack_technique_id"),
+            "attack_technique_name": m.get("attack_technique_name"),
+            "summary": m.get("summary"),
+            "evidence": (m.get("evidence") or [])[:MAX_EVIDENCE_PER_RULE],
+            "fact_id_count": len(m.get("fact_ids") or []),
+            "suggested_hypothesis_id": m.get("suggested_hypothesis_id"),
+            "assessment_status": "UNCONFIRMED",
+            "requires_correlation": True,
+        })
+```
+
+[`ir-collect-mcp/server.py:560-573`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L560-L573)
+
+[11] IR_Collect 0.24.2의 `BuildEvidenceLine`은 상세 설명을 117자로 줄여 사용자, 경로와 함께 이어 쓴다: [`src/Analysis/GuidedHunt.cs:574-610`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L574-L610).
+
+[12] IR_Collect 0.24.2의 `SummaryPayloadAiRedactor`와 그 호출 위치다: [`src/Analysis/SummaryPayloadAiRedactor.cs:11-55`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/SummaryPayloadAiRedactor.cs#L11-L55), [`src/MainForm.cs:1719-1722`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/MainForm.cs#L1719-L1722).
+
+[13] `-analyze`는 `SummaryExport.Serialize`로 요약을 그대로 쓴다: [`src/Analysis/AnalysisCli.cs:54-62`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/AnalysisCli.cs#L54-L62).
+
+[14] `format_tool_response`는 결과를 바꾸지 않고 `legacy`면 그대로, 아니면 `data`에 넣어 돌려준다.
+```python
+    normalized = normalize_response_format(response_format)
+    if normalized is None:
+        return {
+            "error": f"Unsupported response_format: {response_format!r}.",
+            "allowed_response_formats": list(ALLOWED_RESPONSE_FORMATS),
+        }
+    if normalized == LEGACY_RESPONSE_FORMAT:
+        return data
+    return build_evidence_envelope(
+        tool=tool,
+        target_type=target_type,
+        target_identifier=target_identifier,
+        data=data,
+        snapshot_id=snapshot_id,
+    )
+```
+
+[`myirteam_common/evidence.py:264-278`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L264-L278)

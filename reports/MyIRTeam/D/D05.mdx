@@ -1,0 +1,224 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 `collect_triage_package`가 수집 ZIP을 남기는 경로, `ir-collect`의 분석 도구에서 `IR_Collect.exe`가 파생 CSV를 쓰는 경로, `artifact-forensic`의 Hayabusa 분석에서 Hayabusa가 오류 로그를 쓰는 경로에 적용된다 [1][2][3].
+
+`collect_triage_package`는 수집 폴더를 만들지 못하면 `error`를 담은 결과로 끝낸다 [1].
+`IR_Collect.exe`를 실행한 뒤 수집 폴더에 `<evidence_id>.zip`이 없으면 `error`, 종료 코드, 표준 출력과 표준 오류의 끝 2,000자를 돌려준다 [1].
+공통 응답 형식은 결과에 `error`가 있으면 응답의 `status`를 `FAILED`로 두고 그 문장을 `errors`에 싣는다 [4].
+ZIP이 있으면 크기와 SHA-256을 구하는 `stat`·`sha256_file`에서 난 `OSError`를 처리하지 않아 예외가 MCP SDK까지 올라간다 [5].
+MCP Python SDK 1.28.1은 도구에서 올라온 예외를 `isError`가 참인 결과로 돌려준다 [6][7].
+작업 폴더를 만들 수 없게 해 `analyze_artifact_folder`에서 예외가 나게 하자 응답은 `isError`가 참이고 글은 `Error executing tool analyze_artifact_folder:`로 시작했다 [6].
+`IR_Collect.exe`가 해시 파일을 쓰지 못하면 응답의 `sha256_sidecar_present`가 거짓으로 나가지만 같은 이름의 해시 파일이 앞 실행에서 남아 있으면 참으로 나간다 [5][8].
+
+`IR_Collect.exe` 0.24.2는 원시 하이브와 SRUM DB에서 CSV를 만들다 실패하면 그 사실을 `load_warnings`에 적는다 [2].
+EVTX 필터 CSV를 만들지 못한 로그가 있으면 다시 만든 수와 전체 수를 적은 경고를 `load_warnings`에 더한다 [9].
+`ir-collect`는 요약의 `load_warnings`를 앞 50개까지 응답에 옮긴다 [10].
+시험용 실행 파일이 요약에 경고 한 줄을 넣게 하자 그 줄은 응답의 `load_warnings`에 실렸다 [11].
+
+Hayabusa 3.10.0은 오류 로그 파일을 만들지 못하면 panic으로 끝나 0이 아닌 종료 코드를 낸다 [3].
+`artifact-forensic`은 타임라인 JSONL이 있으면 그 종료 코드로 응답의 `status`를 `DEGRADED`로 두고 경고를 싣지만 실패한 것이 오류 로그 쓰기라는 사실은 싣지 않는다 [12].
+
+호출 안에서 지우는 작업 폴더의 출력은 보관하는 파생물이 아니다.
+그 출력이 생기지 않으면 `ir-collect`는 `IR_Collect.exe`의 종료 코드와 출력 일부를 담은 오류를, `artifact-forensic`은 도구 이름과 출력이 없다는 오류를 돌려준다 [13][14].
+
+**한계.** 서버는 수집 ZIP이 있는지만 보고 이번 실행이 쓴 파일인지 가리지 않는다 [1].
+`IR_Collect.exe` 0.24.2는 ZIP으로 묶기 직전에만 같은 이름의 ZIP을 지운다 [8].
+그래서 묶기 전에 수집이 예외로 끝나면 앞 실행이 남긴 같은 이름의 ZIP이 그대로 있고 서버는 그 ZIP의 크기와 해시를 담은 결과를 돌려준다 [1][8][15].
+`IR_Collect.exe` 0.24.2는 수집 단계나 ZIP 해시 계산이 실패해도 ZIP을 남기고 종료 코드 2로 끝난다 [8][15].
+해시 파일을 쓰다 예외가 나면 ZIP을 남긴 채 종료 코드 1로 끝난다 [8][15].
+두 경우 모두 서버는 `exit_code`를 결과에 싣지만 실패를 적은 표준 출력은 버리고 응답의 `status`는 `SUCCESS`로 나간다 [5][4].
+`evidence_id`에 `.`가 들어가면 `IR_Collect.exe`는 그 글자를 `_`로 바꾼 이름으로 ZIP을 쓰고 서버는 바꾸지 않은 이름을 찾으므로 ZIP이 생겨도 오류를 돌려준다 [1][16].
+`load_warnings`에 경고가 있어도 응답의 `status`는 `SUCCESS`로 나간다 [4][11].
+수집 경로는 `collect_triage_package`를 켜지 않아 실행하지 않았고 서버 코드와 `IR_Collect.exe` 소스로만 확인했다 [1][8].
+Hayabusa가 오류 로그를 쓰지 못하는 경로도 실행하지 않았고 Hayabusa 소스로만 확인했다 [3].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `ir-collect`의 분석 도구에 `work_on_copy`를 거짓으로 줄 때 `IR_Collect.exe`가 증거 폴더에 쓰는 `Registry/shellbags.csv`와 `IR_Collect.exe`가 실행 파일 폴더에 쓰는 로그 파일에 적용된다 [17][18].
+`IR_Collect.exe` 0.24.2는 `Registry/shellbags.csv`를 쓰다 실패하면 그 결과를 버리고 `load_warnings`에도 로그 파일에도 적지 않는다 [17].
+`IR_Collect.exe`는 로그 파일 `logs/ir_collect.log`에 쓰다 난 예외도 버린다 [18].
+서버는 이때도 `SUCCESS` 응답을 돌려준다 [4].
+
+### 근거
+
+[1] `collect_triage_package`는 수집 폴더를 만들지 못하거나 ZIP이 없으면 오류로 끝낸다.
+
+```python
+    out_dir = cfg.collect_dir or (cfg.work_dir / "collections")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"error": f"could not create collection dir {out_dir}: {exc}"}
+
+    # IR_Collect -c writes <evidence_id>.zip into the current directory, so run it with cwd=out_dir.
+    rc, out_txt, err_txt = run_ircollect(cfg, ["-c", eid], cwd=out_dir, timeout=cfg.collect_timeout)
+    zip_path = out_dir / (eid + ".zip")
+    if not zip_path.is_file():
+        return {"error": "collection produced no ZIP (it may have failed, lacked privileges, or been blocked "
+                         "by a ForensicStrict profile).", "exit_code": rc,
+                "stdout": out_txt[-2000:], "stderr": err_txt[-2000:]}
+
+    sidecar = out_dir / (eid + ".zip.sha256")
+```
+
+[`ir-collect-mcp/server.py:967-981`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L967-L981)
+
+[2] `IR_Collect.exe` 0.24.2는 원시 아티팩트 CSV를 만들다 난 실패를 경고 목록에 적는다: [`src/Analysis/RawArtifactCsvDeriver.cs:20-26`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/RawArtifactCsvDeriver.cs#L20-L26), [`src/Analysis/RawArtifactCsvDeriver.cs:94-97`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/RawArtifactCsvDeriver.cs#L94-L97), [`src/Analysis/CaseManager.cs:475`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L475).
+
+[3] Hayabusa 3.10.0은 타임라인 출력을 마친 뒤 오류 로그 파일을 `File::create(path).unwrap()`으로 만들어 실패하면 panic으로 끝난다: [`src/detections/message.rs:465`](https://github.com/Yamato-Security/hayabusa/blob/3e96ff790e532fb8b3422005aa750b6f9ef40943/src/detections/message.rs#L465), [`src/main.rs:1138-1144`](https://github.com/Yamato-Security/hayabusa/blob/3e96ff790e532fb8b3422005aa750b6f9ef40943/src/main.rs#L1138-L1144).
+
+[4] 결과에 `error`가 있으면 `FAILED`, `status`가 `DEGRADED`나 `PARTIAL`이면 `DEGRADED`로 정하고 `load_warnings`와 `exit_code`는 보지 않는다: [`myirteam_common/evidence.py:79-105`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L105).
+
+```python
+def infer_status_and_messages(data: Any) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Infer transport status without making a security assessment."""
+    errors: list[dict[str, Any]] = []
+    limitations = _top_level_note(data)
+
+    if isinstance(data, str):
+        stripped = data.strip()
+        if _is_error_text(stripped):
+            errors.append(_message("TOOL_ERROR", stripped))
+            return "FAILED", errors, limitations
+        return "SUCCESS", errors, limitations
+
+    if not isinstance(data, dict):
+        return "SUCCESS", errors, limitations
+
+    if data.get("error"):
+        errors.append(_message("TOOL_ERROR", data.get("error")))
+        details = data.get("details")
+        if details:
+            errors.append(_message("TOOL_ERROR_DETAILS", details))
+        return "FAILED", errors, limitations
+
+    explicit = str(data.get("status") or "").upper()
+    if explicit in {"FAILED", "ERROR"}:
+        errors.append(_message("TOOL_STATUS_FAILED", data.get("message") or explicit))
+        return "FAILED", errors, limitations
+    degraded = explicit in {"DEGRADED", "PARTIAL"}
+```
+
+[`myirteam_common/evidence.py:79-105`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L105)
+
+[5] ZIP이 있으면 크기와 해시를 구해 결과를 만든다.
+
+```python
+    sidecar = out_dir / (eid + ".zip.sha256")
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "evidence_id": eid,
+        "zip_path": str(zip_path),
+        "size_bytes": zip_path.stat().st_size,
+        "sha256": sha256_file(zip_path),
+        "sha256_sidecar_present": sidecar.is_file(),
+        "is_administrator": is_admin(),
+        "exit_code": rc,
+        "analyzer_sha256": integrity["sha256"],
+```
+
+[`ir-collect-mcp/server.py:981-992`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L981-L992)
+
+[6] (실행 확인) `IRCOLLECT_WORK_DIR`를 파일 아래 경로로 주고 `portable_mcp.py`로 실행한 `ir-collect`의 `analyze_artifact_folder`를 MCP 클라이언트로 불렀다.
+
+[7] MCP Python SDK 1.28.1은 도구 함수의 예외를 `Error executing tool <이름>:` 글의 `ToolError`로 바꾸고 저수준 처리기는 그 예외를 `isError`가 참인 결과로 만든다: [`src/mcp/server/fastmcp/tools/base.py:117`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/tools/base.py#L117), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L473-L480), [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L589-L590).
+
+[8] `IR_Collect.exe` 0.24.2는 묶기 직전에 같은 이름의 ZIP을 지우고 해시 계산이 실패하면 실패한 단계에 더하며 해시 파일 쓰기 예외는 처리하지 않는다: [`src/Collector.cs:261-279`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L261-L279), [`src/Collector.cs:1016-1033`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L1016-L1033), [`src/Collector.cs:928-944`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L928-L944).
+
+[9] EVTX 필터 CSV를 만들지 못한 로그가 있으면 경고를 더한다: [`src/Analysis/CaseManager.cs:618-641`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L618-L641).
+
+[10] 요약의 `load_warnings`를 앞 50개까지 옮긴다.
+
+```python
+        "parser_notes": (data.get("parser_notes") or [])[:MAX_NOTES],
+        "load_warnings": (data.get("load_warnings") or [])[:MAX_NOTES],
+```
+
+[`ir-collect-mcp/server.py:621-622`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L621-L622)
+
+[11] (실행 확인) 시험용 `IR_Collect.exe`가 `load_warnings`에 한 줄을 넣은 요약을 쓰게 하고 `analyze_artifact_folder_impl`의 결과와 `evidence_v1` 응답의 `status`를 확인했다.
+
+[12] `artifact-forensic`은 Hayabusa의 종료 코드가 0이 아니면 경고를 더하고 `status`를 `DEGRADED`로 둔다.
+
+```python
+        warnings: list[str] = []
+        if exit_code != 0:
+            warnings.append(f"Hayabusa returned non-zero exit code {exit_code}.")
+        if parsed["parse_errors"]:
+            warnings.append("One or more JSONL rows could not be parsed.")
+        if source_kind == "file" and source_digest_after != source_digest_before:
+            warnings.append("The source EVTX changed during Hayabusa analysis.")
+        return {
+            "schema_version": "1.0",
+            "status": "DEGRADED" if warnings else "SUCCESS",
+```
+
+[`artifact-forensic-mcp/server.py:2457-2466`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2457-L2466)
+
+[13] `IR_Collect.exe`가 요약 JSON을 쓰지 않으면 오류를 돌려준다.
+
+```python
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+        if not out_path.is_file():
+            return {
+                "error": "IR_Collect produced no summary JSON (analysis failed).",
+                "exit_code": rc,
+                "stdout": out_txt[:2000],
+                "stderr": err_txt[:2000],
+            }
+```
+
+[`ir-collect-mcp/server.py:772-780`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L772-L780)
+
+[14] Zimmerman 도구가 CSV를 쓰지 않으면 오류를 돌려준다.
+
+```python
+        parsed = read_csv_outputs(run_dir, record_limit)
+        source_digest_after = sha256_file(source)
+        if not parsed["output_files"]:
+            detail = (execution["stderr"] or execution["stdout"]).strip()[:4000]
+            return {
+                "error": f"{descriptor['label']} did not produce CSV output.",
+                "details": detail or f"exit code: {execution['exit_code']}",
+                "integrity": integrity,
+            }
+```
+
+[`artifact-forensic-mcp/server.py:1696-1704`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1696-L1704)
+
+Hayabusa의 출력이 없을 때: [`artifact-forensic-mcp/server.py:2438-2453`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2438-L2453).
+
+[15] `IR_Collect.exe` 0.24.2의 `-c`는 실패한 단계가 있으면 종료 코드 2, 예외로 끝나면 1을 낸다: [`src/Program.cs:61-124`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Program.cs#L61-L124), [`src/Collector.cs:92-100`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L92-L100).
+
+[16] `IR_Collect.exe` 0.24.2는 ID의 글자를 바꿔 파일 이름을 짓는다: [`src/Collector.cs:970-987`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L970-L987).
+서버의 ID 검사: [`ir-collect-mcp/server.py:342-351`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L342-L351).
+
+```python
+def safe_evidence_id(evidence_id: str) -> str:
+    """Validate/normalize an evidence id used as the ZIP basename. Empty -> generated.
+    Rejects path separators, traversal, and unsafe characters."""
+    eid = (evidence_id or "").strip()
+    if not eid:
+        return "triage_" + uuid.uuid4().hex[:8]
+    if not EVIDENCE_ID_RE.match(eid):
+        raise ValueError("evidence_id must be 1-64 chars of letters/digits/dot/dash/underscore, "
+                         "with no path separators.")
+    return eid
+```
+
+[`ir-collect-mcp/server.py:342-351`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L342-L351)
+
+[17] `IR_Collect.exe` 0.24.2의 `LoadCaseFromFolder`는 `TryEnsureShellBagsCsv`의 반환값과 상세를 쓰지 않고 이 함수는 쓰기 실패를 반환값으로만 알린다: [`src/Analysis/CaseManager.cs:538-545`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L538-L545), [`src/Utils/ShellBagsParser.cs:83-93`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/ShellBagsParser.cs#L83-L93).
+
+[18] `IR_Collect.exe` 0.24.2의 `Logger.Write`는 로그 파일 쓰기 예외를 빈 `catch`로 처리해 버린다: [`src/Utils/Logger.cs:58-79`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/Logger.cs#L58-L79).

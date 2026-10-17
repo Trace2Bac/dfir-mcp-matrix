@@ -1,0 +1,405 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 `ir-collect`와 `artifact-forensic`의 서버 코드가 증거 파일을 직접 여는 경로와 `ir-collect`가 `IR_Collect.exe`에 입력을 넘기는 경로에 적용된다 [1][2][3].
+서버 코드는 증거를 읽기 모드로만 연다.
+두 서버의 해시 계산, `inspect_binary_file`의 머리 바이트·PE 구조·문자열 읽기는 `rb`로 연다 [1][4].
+해시 목록 파일은 `read_bytes`로 읽고 ZIP은 Python `zipfile`의 기본 읽기 모드로 연다 [5][6].
+증거를 읽는 이 경로들에는 증거 파일에 쓰는 호출이 없다 [1][4][5][6].
+
+`ir-collect`의 `analyze_artifact_folder`, `correlate_hosts`, `expand_investigation_graph`는 `work_on_copy`가 참(기본값)이면 증거 폴더를 작업 폴더에 복사하고 사본을 `IR_Collect.exe`에 넘긴다 [2][7].
+`IR_Collect.exe` 0.24.2는 받은 폴더에 SRUM·Amcache·ShimCache CSV, 필터한 이벤트 로그 CSV, ShellBags CSV를 쓴다 [8].
+관리자 권한으로 실행되면 받은 폴더의 `Amcache.hve`와 `SYSTEM` 하이브를 `reg load`로 호스트 레지스트리에 연결해 읽는다 [9].
+그래서 이 쓰기와 연결은 사본에 적용된다 [2].
+복사할 곳이 증거 폴더 안이면 복사하지 않고 오류를 돌려준다 [3].
+`analyze_triage_zip`은 ZIP을 작업 폴더에 풀고 풀어 낸 폴더를 넘긴다 [10].
+`artifact-forensic`의 ZIP 항목 도구는 항목을 작업 폴더에 꺼내고 사본을 분석 도구에 넘긴다 [11].
+기본값으로 원본 폴더 목록이 호출 전후 같았고 시험용 `IR_Collect.exe`가 쓴 파일은 사본에만 생겼다 [12].
+사본과 풀어 낸 파일은 이미 있으면 실패하는 방식으로 새로 만든다 [3][13].
+
+서버가 증거 밖에 쓰는 곳은 작업 폴더와 `collect_triage_package`의 수집 폴더다 [14][15].
+작업 폴더 `IRCOLLECT_WORK_DIR`·`ARTIFACT_WORK_DIR`가 증거 폴더와 겹치는지는 확인하지 않는다 [14].
+EZ Tools의 CSV 출력은 `--csv`로 작업 폴더 아래 새 폴더에 쓰게 한다 [16].
+
+**한계.** `work_on_copy`를 거짓으로 주면 `ir-collect`는 원본 폴더를 `IR_Collect.exe`에 넘기고 `provenance.warning`에 경고 문장만 싣는다 [17][7].
+이때 `IR_Collect.exe`의 파생 CSV는 원본 폴더에 쓰이고 관리자 권한이면 원본 하이브가 `reg load`로 연결된다 [8][9].
+시험용 `IR_Collect.exe`가 입력 폴더에 파일을 쓰게 한 실행에서 `work_on_copy`를 거짓으로 주자 그 파일이 원본 폴더에 남았다 [12].
+Windows가 `reg load`로 연결한 하이브 파일에 쓰는지는 확인하지 못했다 [9].
+도구 설명은 이 인자를 아주 큰 폴더의 복사를 피할 때만 쓰라고 적는다 [18].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 `artifact-forensic`이 원본 파일의 경로를 분석 도구에 넘기는 도구와 `local-forensic`의 호스트 조회 도구에 적용된다 [16][19][20].
+`parse_windows_artifact_with_eztools`, `analyze_evtx_with_hayabusa`, `analyze_file_with_capa`, `scan_file_with_yara`는 증거 폴더 아래 원본 파일이나 폴더의 경로를 그대로 분석 도구에 넘긴다 [16][19].
+원본을 지키는 것은 서버 개요의 버전 기준 소스에서 분석 도구가 입력을 읽기 모드로 연다는 동작이다.
+
+- EvtxECmd는 `FileStream`을 `FileAccess.Read`로 연다 [21].
+- PECmd는 Prefetch 라이브러리 2026.5.2의 `PrefetchFile.Open`에 경로를 넘기고 이 함수는 `FileAccess.Read`로 연다 [22].
+- RECmd는 하이브를 `FileAccess.Read`로 직접 열어 Registry 라이브러리 2026.5.0에 바이트로 넘긴다 [23].
+- AmcacheParser는 이 라이브러리의 경로 생성자로 하이브를 `FileAccess.Read`로 연다 [24].
+- 두 도구 모두 트랜잭션 로그는 `File.ReadAllBytes`로 읽어 메모리에서 적용한다 [23][24].
+- MFTECmd는 앞 50바이트를 `FileAccess.Read`로 읽어 종류를 정하고 MFT 라이브러리 2026.5.1의 `$MFT`·`$J`·`$Boot`·`$SDS`와 폴더 인덱스 읽기 함수도 `FileAccess.Read`로 연다 [25].
+- Hayabusa 3.10.0은 hayabusa-evtx의 `EvtxParser::from_path`로 EVTX를 `File::open`으로 연다 [26].
+- capa 7.1.0은 형식 확인에서 입력을 `rb`와 `read_bytes`로 읽는다 [27].
+- YARA-X 1.19.0은 `fs::File::open`으로, YARA 4.5.5는 Windows에서 `CreateFileA`에 `GENERIC_READ`를 주어 연다 [28][29].
+
+`local-forensic`에서 원본은 서버를 실행한 Windows 호스트다 [30].
+이 서버의 PowerShell 글은 코드에 정해 두었고 `Get-WinEvent`, `Get-CimInstance`, `Get-Item`, `Get-FileHash` 같은 조회 명령만 부른다 [30].
+모델은 채널 이름, 이벤트 ID, 시간 범위, 이름 필터, 파일 경로 같은 값만 넘기고 이 값은 환경변수로 글에 들어간다 [30].
+Sysinternals 도구 `autorunsc`, `sigcheck`, `tcpvcon`, `handle`은 코드에 정한 옵션에 `-accepteula`를 붙여 실행한다 [31].
+호스트를 바꾸지 않는 것은 이 Windows 명령과 Sysinternals 도구의 동작에 맡긴다.
+
+`ir-collect`의 `collect_triage_package`는 서버를 실행한 호스트에서 `IR_Collect.exe -c`로 수집한다 [15].
+수집 폴더는 이 호스트의 `IRCOLLECT_COLLECT_DIR`이고 값이 없으면 작업 폴더 아래 `collections`다 [15][32].
+`IR_Collect.exe` 0.24.2는 수집 폴더에 `IR_Output_<evidence_id>` 폴더를 만들고 수집한 파일을 쓴다 [33].
+수집을 마치면 같은 폴더에 `<evidence_id>.zip`과 `<evidence_id>.zip.sha256`을 쓴다 [33].
+`IR_Collect.exe`는 설정 `DeleteOutputDirAfterZip`이 끄지 않으면 `IR_Output_<evidence_id>` 폴더를 지운다 [33].
+응답의 `warning`은 이 수집이 호스트에 출력을 쓴다고 적는다 [34].
+이 도구는 환경변수 `IRCOLLECT_ALLOW_COLLECTION`과 호출 인자 `acknowledge_live_response`가 모두 켜져야 실행된다 [35].
+두 확인을 거친 뒤 호스트에 쓰는 것을 막는 코드는 없다 [15][35].
+이 도구는 실행해 확인하지 않았다.
+
+증거를 읽기 전용으로 마운트하거나 서버를 읽기 전용 환경에서 실행하는 경로는 저장소에 없다.
+
+**한계.** capa 7.1.0이 쓰는 vivisect는 버전이 `>=1.1.1`로만 정해져 있어 vivisect가 입력을 여는 모드는 확인하지 못했다(실제 보호 미확인) [36].
+capa는 환경변수 `CAPA_SAVE_WORKSPACE`가 켜져 있으면 vivisect 작업 공간을 저장한다 [37].
+서버는 분석 도구에 자기 환경변수를 그대로 물려주므로 이 값을 끄지 않는다 [38].
+capa 7.1.0은 작업 공간 저장이 `IOError`로 실패하면 입력 파일의 폴더에 쓸 수 없어 저장하지 않는다는 기록을 남긴다 [37].
+실제 저장 경로는 vivisect가 정하므로 확인하지 못했다(실제 보호 미확인).
+Sysinternals 도구는 소스가 공개되지 않았고 Microsoft 문서는 옵션만 설명한다 [39].
+그래서 `autorunsc`, `sigcheck`, `tcpvcon`, `handle`이 호스트의 파일과 레지스트리를 읽기만 하는지와 `-accepteula`가 호스트에 무엇을 남기는지는 확인하지 못했다(실제 보호 미확인) [39].
+Handle 문서는 실행에 관리자 권한이 필요하다고 적는다 [39].
+PowerShell 조회 명령이 호스트에 남기는 것도 확인하지 못했다.
+RECmd·AmcacheParser·EvtxECmd는 입력 파일을 열지 못하고 관리자 권한이면 원시 디스크 읽기로 다시 읽는다 [23][24][40].
+MFTECmd는 앞 50바이트를 읽지 못하면 원시 디스크 읽기로 다시 읽는다 [41].
+원시 디스크 읽기에서 입력을 여는 모드는 확인하지 못했다.
+
+### 근거
+
+[1] 두 서버의 해시 계산은 `rb`로 연다.
+```python
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+```
+
+[`artifact-forensic-mcp/server.py:300-305`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L300-L305)
+```python
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+```
+
+[`ir-collect-mcp/server.py:203-208`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L203-L208)
+
+[2] `analyze_artifact_folder_impl`은 사본을 만들어 `-analyze`에 넘긴다.
+```python
+    work = _new_work_dir(cfg)
+    try:
+        target = src
+        copy_summary = None
+        if work_on_copy:
+            target = work / ("input_" + src.name)
+            try:
+                copy_summary = _safe_copy_evidence_tree(src, target)
+            except (OSError, ValueError) as exc:
+                return {"error": f"could not safely copy evidence folder: {exc}"}
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+```
+
+[`ir-collect-mcp/server.py:762-773`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L762-L773)
+
+[3] `_safe_copy_evidence_tree`는 복사할 곳이 원본 안이면 거부하고 새 폴더로만 복사한다.
+```python
+def _safe_copy_evidence_tree(source: Path, destination: Path) -> dict[str, int]:
+    """Copy a directory without following symlinks or Windows junctions."""
+    source = source.resolve()
+    destination = destination.resolve()
+    if _path_is_link_or_junction(source):
+        raise ValueError(f"evidence folder cannot be a symbolic link or junction: {source}")
+    if destination == source or destination.is_relative_to(source):
+        raise ValueError("private work destination must not be inside the evidence source tree.")
+    destination.mkdir(parents=True, exist_ok=False)
+```
+
+[`ir-collect-mcp/server.py:405-413`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L405-L413)
+
+[4] `inspect_binary_file`의 읽기 함수는 `rb`로 연다: [`artifact-forensic-mcp/server.py:322`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L322), [`artifact-forensic-mcp/server.py:414`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L414), [`artifact-forensic-mcp/server.py:523`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L523), [`artifact-forensic-mcp/server.py:560`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L560).
+
+[5] 해시 목록은 `read_bytes`로 읽는다.
+```python
+def parse_sha256_manifest(path: Path) -> dict[str, Any]:
+    if path.stat().st_size > MAX_HASH_MANIFEST_BYTES:
+        raise ValueError(
+            f"hash manifest exceeds the {MAX_HASH_MANIFEST_BYTES}-byte safety limit: {path}"
+        )
+    text = decode_output(path.read_bytes())
+```
+
+[`artifact-forensic-mcp/server.py:609-614`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L609-L614)
+
+[6] ZIP은 모드를 주지 않고 연다: [`ir-collect-mcp/server.py:458`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L458), [`artifact-forensic-mcp/server.py:1388`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1388), [`artifact-forensic-mcp/server.py:1864`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1864).
+
+[7] 여러 폴더를 받는 도구도 `work_on_copy`에 따라 사본이나 원본을 넘긴다.
+```python
+def _prepare_folders(cfg: Config, folder_paths: list[str], work: Path, work_on_copy: bool) -> list[Path]:
+    """Validate each folder against the allowlist and (optionally) copy to work dir."""
+    if not folder_paths:
+        raise ValueError("no folders provided.")
+    targets: list[Path] = []
+    for i, fp in enumerate(folder_paths):
+        src = validate_evidence_dir(fp, cfg)  # raises ValueError
+        if work_on_copy:
+            dst = work / f"input_{i}_{src.name}"
+            _safe_copy_evidence_tree(src, dst)
+            targets.append(dst)
+        else:
+            targets.append(src)
+    return targets
+```
+
+[`ir-collect-mcp/server.py:693-706`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L693-L706)
+
+[8] `IR_Collect.exe` 0.24.2는 폴더를 불러올 때 파생 CSV를 그 폴더에 쓴다: [`src/Analysis/CaseManager.cs:427-476`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L427-L476), [`src/Analysis/CaseManager.cs:536-545`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L536-L545), [`src/Analysis/RawArtifactCsvDeriver.cs:9-70`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/RawArtifactCsvDeriver.cs#L9-L70).
+
+[9] `IR_Collect.exe` 0.24.2의 Amcache·ShimCache 파서는 받은 하이브 경로를 `reg load`로 연결한다: [`src/Utils/AmcacheParser.cs:54-75`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/AmcacheParser.cs#L54-L75), [`src/Utils/ShimCacheParser.cs:62-90`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Utils/ShimCacheParser.cs#L62-L90).
+
+[10] `analyze_triage_zip_impl`은 풀어 낸 폴더를 넘긴다.
+```python
+    work = _new_work_dir(cfg)
+    try:
+        extract_dir = work / "extracted"
+        try:
+            extraction = _safe_extract_zip(
+                p,
+                extract_dir,
+                max_zip_bytes=cfg.max_zip_bytes,
+                max_member_bytes=cfg.max_zip_member_bytes,
+                max_total_bytes=cfg.max_zip_total_bytes,
+            )
+        except (zipfile.BadZipFile, ValueError, OSError) as exc:
+            return {"error": f"could not extract ZIP: {exc}"}
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(extract_dir), str(out_path)])
+```
+
+[`ir-collect-mcp/server.py:819-833`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L819-L833)
+
+[11] ZIP 항목 분석은 꺼낸 사본 폴더만 증거 폴더로 둔 설정으로 분석 함수를 부른다.
+```python
+    try:
+        extracted = extract_archive_member_copies(
+            cfg,
+            source,
+            member_path,
+            companion_member_paths,
+        )
+        primary = extracted["primary"]
+        member_cfg = replace(
+            cfg,
+            evidence_roots=(extracted["member_root"].resolve(),),
+            max_file_bytes=cfg.max_archive_member_bytes,
+        )
+        result = analyzer(member_cfg, str(primary["extracted_path"]))
+        member_digest_after = sha256_file(primary["extracted_path"])
+```
+
+[`artifact-forensic-mcp/server.py:1927-1941`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1927-L1941)
+
+[12] (실행 확인) 입력 폴더에 파일을 쓰는 시험용 `IR_Collect.exe`를 두고 `analyze_artifact_folder_impl`을 `work_on_copy` 기본값과 거짓으로 불러 원본 폴더의 파일 목록을 비교했다.
+
+[13] 풀어 내거나 꺼내는 파일은 `xb`로 연다: [`ir-collect-mcp/server.py:509`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L509), [`artifact-forensic-mcp/server.py:1824`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1824), [`artifact-forensic-mcp/server.py:1863`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1863).
+
+[14] 작업 폴더는 환경변수나 `%TEMP%`에서 정하고 증거 폴더와 대조하지 않는다: [`ir-collect-mcp/server.py:136-137`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L136-L137), [`artifact-forensic-mcp/server.py:173`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L173), [`artifact-forensic-mcp/server.py:266`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L266).
+
+[15] 수집 ZIP은 수집 폴더에 쓴다.
+```python
+    out_dir = cfg.collect_dir or (cfg.work_dir / "collections")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"error": f"could not create collection dir {out_dir}: {exc}"}
+
+    # IR_Collect -c writes <evidence_id>.zip into the current directory, so run it with cwd=out_dir.
+    rc, out_txt, err_txt = run_ircollect(cfg, ["-c", eid], cwd=out_dir, timeout=cfg.collect_timeout)
+    zip_path = out_dir / (eid + ".zip")
+```
+
+[`ir-collect-mcp/server.py:967-975`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L967-L975)
+
+[16] EZ Tools에는 원본 경로와 작업 폴더의 출력 경로를 넘긴다.
+```python
+    run_dir = cfg.work_dir / ("eztool_" + uuid.uuid4().hex)
+    source_digest_before = sha256_file(source)
+    args = ["-f", str(source)]
+    if normalized == "prefetch":
+        args.append("-q")
+    if normalized == "registry" and batch_path is not None:
+        args.extend(["--bn", str(batch_path)])
+        if not use_registry_transaction_logs:
+            args.append("--nl")
+    args.extend(["--csv", str(run_dir), "--csvf", "result.csv"])
+```
+
+[`artifact-forensic-mcp/server.py:1678-1687`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1678-L1687)
+
+[17] `work_on_copy`가 거짓이면 경고 문장만 더한다.
+```python
+        if not work_on_copy:
+            result.setdefault("provenance", {})["warning"] = (
+                "work_on_copy=False: IR_Collect may have written derived CSVs into the source folder."
+            )
+```
+
+[`ir-collect-mcp/server.py:794-797`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L794-L797)
+
+[18] `analyze_artifact_folder`의 설명이다.
+```python
+    """Run IR_Collect offline analysis on an ALREADY-COLLECTED artifact folder (a
+    KAPE/triage output, an unzipped IR_Collect case, or a folder of collector CSVs)
+    and return validated facts plus ATT&CK-mapped Guided Hunt leads. Never touches a
+    live host. The folder must resolve under the configured evidence roots. By
+    default the folder is copied to a work dir before analysis (work_on_copy=True)
+    so the original evidence is never mutated by IR_Collect's derived-CSV writes;
+    set work_on_copy=False only to avoid copying a very large folder ($MFT).
+
+    Guided Hunt rule matches are investigative LEADS, not verdicts. Set
+    response_format='evidence_v1' for the common Evidence Envelope."""
+```
+
+[`ir-collect-mcp/server.py:1030-1039`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L1030-L1039)
+
+[19] Hayabusa·capa·YARA에 원본 경로를 넘긴다: [`artifact-forensic-mcp/server.py:2419-2437`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2419-L2437), [`artifact-forensic-mcp/server.py:2531-2536`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2531-L2536), [`artifact-forensic-mcp/server.py:2668-2699`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2668-L2699).
+
+[20] `local-forensic`의 도구는 PowerShell과 Sysinternals 실행 함수를 거친다.
+[`mcp-server/autoruns_mcp.py:105-202`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L105-L202)
+
+[21] EvtxECmd(`634edf4`)는 입력을 읽기로 연다: [`EvtxECmd/Program.cs:1048-1053`](https://github.com/EricZimmerman/evtx/blob/634edf49d4aa53d32a0f339a8cfaa2824e7fde46/EvtxECmd/Program.cs#L1048-L1053).
+
+[22] PECmd(`12bb864`)는 `PrefetchFile.Open`을 부르고 Prefetch 2026.5.2는 읽기로 연다: [`PECmd/Program.cs:1405`](https://github.com/EricZimmerman/PECmd/blob/12bb864ca2baf7621e610ae94ba4a14e56e1c23c/PECmd/Program.cs#L1405), [`Prefetch/PrefetchFile.cs:83-87`](https://github.com/EricZimmerman/Prefetch/blob/54a3ac0d6d0006d3836c9bd368dfe32cbcaa131d/Prefetch/PrefetchFile.cs#L83-L87).
+
+[23] RECmd(`bcd0ac3`)는 하이브를 읽기로 열고 dirty 하이브면 같은 폴더의 로그를 적용하며 `IOException`이면 원시 읽기로 다시 읽는다: [`RECmd/Program.cs:883-949`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L883-L949), [`RECmd/Program.cs:951-994`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L951-L994), Registry 2026.5.0 [`Registry/RegistryHive.cs:298-319`](https://github.com/EricZimmerman/Registry/blob/15203c155e68bbe69729186011b343f25f4239f9/Registry/RegistryHive.cs#L298-L319).
+
+[24] AmcacheParser(`434d34c`)는 Registry 2026.5.0의 경로 생성자로 하이브를 열고 이 생성자는 읽기로 연다: [`Amcache/AmcacheNew.cs:25-61`](https://github.com/EricZimmerman/AmcacheParser/blob/434d34c22b77bf0b8896f02e2d513bf87bd95380/Amcache/AmcacheNew.cs#L25-L61), [`Registry/RegistryBase.cs:37-48`](https://github.com/EricZimmerman/Registry/blob/15203c155e68bbe69729186011b343f25f4239f9/Registry/RegistryBase.cs#L37-L48).
+
+[25] MFTECmd(`6aadd87`)의 종류 판별과 MFT 2026.5.1의 읽기 함수는 읽기로 연다: [`MFTECmd/Program.cs:2739-2758`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L2739-L2758), [`MFT/MftFile.cs:16`](https://github.com/EricZimmerman/MFT/blob/d6e6deee60dcb11f52bcf2940cb07a202fa35a6c/MFT/MftFile.cs#L16), [`Usn/UsnFile.cs:19-39`](https://github.com/EricZimmerman/MFT/blob/d6e6deee60dcb11f52bcf2940cb07a202fa35a6c/Usn/UsnFile.cs#L19-L39), [`Boot/BootFile.cs:14`](https://github.com/EricZimmerman/MFT/blob/d6e6deee60dcb11f52bcf2940cb07a202fa35a6c/Boot/BootFile.cs#L14), [`SDS/SdsFile.cs:15`](https://github.com/EricZimmerman/MFT/blob/d6e6deee60dcb11f52bcf2940cb07a202fa35a6c/SDS/SdsFile.cs#L15), [`I30/I30File.cs:14`](https://github.com/EricZimmerman/MFT/blob/d6e6deee60dcb11f52bcf2940cb07a202fa35a6c/I30/I30File.cs#L14).
+
+[26] Hayabusa(`3e96ff7`)는 `EvtxParser::from_path`를 부르고 hayabusa-evtx(`730edad`)는 `File::open`으로 연다: [`src/main.rs:2980`](https://github.com/Yamato-Security/hayabusa/blob/3e96ff790e532fb8b3422005aa750b6f9ef40943/src/main.rs#L2980), [`src/evtx_parser.rs:267-273`](https://github.com/Yamato-Security/hayabusa-evtx/blob/730edad702b43c5e5c8c5680afdbc5ffd2691353/src/evtx_parser.rs#L267-L273).
+
+[27] capa 7.1.0의 형식 확인은 입력을 읽기로 연다: [`capa/loader.py:67-99`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/loader.py#L67-L99).
+
+[28] YARA-X 1.19.0은 `fs::File::open`으로 연다: [`lib/src/scanner/mod.rs:561-567`](https://github.com/VirusTotal/yara-x/blob/fe40349ea12c5ccb89aae9f304b979c4fb410f66/lib/src/scanner/mod.rs#L561-L567).
+
+[29] YARA 4.5.5는 `GENERIC_READ`·`O_RDONLY`로 연다: [`libyara/filemap.c:293-327`](https://github.com/VirusTotal/yara/blob/f44a8958e88daa75d765a52a68876f2286d57a51/libyara/filemap.c#L293-L327).
+
+[30] `local-forensic`의 PowerShell 글은 조회 명령만 부르고 모델의 값은 환경변수로 넘긴다: [`mcp-server/autoruns_mcp.py:314-382`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L314-L382), [`mcp-server/autoruns_mcp.py:594-619`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L594-L619), [`mcp-server/autoruns_mcp.py:1196-1251`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1196-L1251).
+
+[31] `run_sysinternals_tool`은 정해 둔 도구 4개에 `-accepteula`를 붙여 실행한다.
+```python
+def run_sysinternals_tool(
+    tool_name: str,
+    args: list[str],
+    timeout_seconds: int = 180,
+) -> str:
+    """Run a bundled Sysinternals tool and return its text output."""
+    try:
+        tool_path = safe_tool_path(tool_name)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if not tool_path.is_file():
+        return f"Error: required tool not found: {tool_path}"
+
+    cmd = [str(tool_path), "-accepteula", *args]
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            creationflags=creationflags,
+        )
+```
+
+[`mcp-server/autoruns_mcp.py:105-129`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L105-L129)
+
+[32] 수집 폴더는 `IRCOLLECT_COLLECT_DIR`에서 정하고 값이 없으면 작업 폴더 아래 `collections`다.
+```python
+    collect_dir_raw = os.environ.get("IRCOLLECT_COLLECT_DIR", "")
+    collect_dir = _resolve(collect_dir_raw) if collect_dir_raw.strip() else (work_dir / "collections")
+```
+
+[`ir-collect-mcp/server.py:143-144`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L143-L144)
+
+[33] `IR_Collect.exe` 0.24.2의 `-c`는 현재 폴더에 `IR_Output_<evidence_id>` 폴더를 만들어 수집한 파일을 쓰고 ZIP과 `.sha256` 파일을 쓴 뒤 설정에 따라 그 폴더를 지운다: [`src/Program.cs:61-86`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Program.cs#L61-L86), [`src/Collector.cs:92-100`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L92-L100), [`src/Collector.cs:261-310`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L261-L310).
+
+[34] `collect_triage_package_impl`의 응답 `warning`과 `disclaimer`는 수집이 호스트를 바꾼다고 적는다.
+```python
+        "warning": ("LIVE-RESPONSE collection: this read live artifacts and wrote output ON this host "
+                    "(not zero-footprint). Full coverage ($MFT, registry hives, SRUM) requires elevation; "
+                    "without admin the collection still completes but is partial."),
+        "next_step": (
+            "To analyze: verify any SHA-256 sidecar, place the ZIP under "
+            "IRCOLLECT_EVIDENCE_ROOTS, then call analyze_triage_zip without manual extraction."
+        ),
+        "disclaimer": "Collection changes the host; this tool is opt-in and never part of default automated flows.",
+```
+
+[`ir-collect-mcp/server.py:993-1000`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L993-L1000)
+
+[35] `collect_triage_package_impl`은 환경변수와 호출 인자 두 확인만 거친다.
+```python
+    # Gate 1 (deployment): off unless the operator explicitly enabled collection.
+    if not cfg.allow_collection:
+        return {"error": "Live collection is disabled by deployment. Set IRCOLLECT_ALLOW_COLLECTION=1 to "
+                         "enable this high-impact, host-changing tool.", "gated": True}
+    # Gate 2 (invocation): the caller must affirmatively acknowledge the live-response action.
+    if not acknowledge_live_response:
+        return {"error": "Live-response collection changes this host and needs elevation for full coverage. "
+                         "Re-call with acknowledge_live_response=true to proceed.",
+                "requires_acknowledgement": True}
+```
+
+[`ir-collect-mcp/server.py:950-958`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L950-L958)
+
+[36] capa 7.1.0의 vivisect 의존성이다: [`pyproject.toml:89-90`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/pyproject.toml#L89-L90).
+
+[37] capa 7.1.0은 `CAPA_SAVE_WORKSPACE`가 켜지면 작업 공간을 저장한다: [`capa/main.py:728`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/main.py#L728), [`capa/loader.py:267-278`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/loader.py#L267-L278).
+
+[38] `run_static_tool`은 환경을 따로 정하지 않고 분석 도구를 실행한다.
+```python
+    with open(stdout_path, "wb") as stdout_handle, open(stderr_path, "wb") as stderr_handle:
+        process = subprocess.Popen(
+            [str(path), *args],
+            cwd=str(path.parent),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            stdin=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
+        )
+```
+
+[`artifact-forensic-mcp/server.py:1179-1187`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1179-L1187)
+
+[39] Microsoft 문서: Handle [`handle.md`](https://github.com/MicrosoftDocs/sysinternals/blob/333a4fb4567eaad9457bfd8d094ea838d33f1937/sysinternals/downloads/handle.md), Sigcheck [`sigcheck.md`](https://github.com/MicrosoftDocs/sysinternals/blob/ddc34ef9963df344b6184a84dc964a976cee07ed/sysinternals/downloads/sigcheck.md), Autoruns [`autoruns.md`](https://github.com/MicrosoftDocs/sysinternals/blob/abc3a6933d904d0bd53b0a8651fe774ed3ca9c96/sysinternals/downloads/autoruns.md), TCPView·Tcpvcon [`tcpview.md`](https://github.com/MicrosoftDocs/sysinternals/blob/97e31f44dcffc4f32fd955c6bf138fdbca737402/sysinternals/downloads/tcpview.md).
+
+[40] EvtxECmd(`634edf4`)는 파일을 열지 못하면 관리자 권한을 확인한 뒤 원시 읽기로 다시 연다: [`EvtxECmd/Program.cs:1050-1090`](https://github.com/EricZimmerman/evtx/blob/634edf49d4aa53d32a0f339a8cfaa2824e7fde46/EvtxECmd/Program.cs#L1050-L1090).
+
+[41] MFTECmd(`6aadd87`)는 앞 50바이트를 읽지 못하면 `Helper.GetRawFiles`로 다시 읽는다: [`MFTECmd/Program.cs:2751-2770`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L2751-L2770).

@@ -1,0 +1,250 @@
+---
+cell: P03
+details:
+- id: P03.03
+---
+
+# P03 조사 진척 판단
+
+### P03.03 미조사 범위·생략 사유 보고
+
+**구현.** 이 방식은 `artifact-forensic`의 ZIP 목록·ZIP 항목 도구와 목록·해시 도구, `ir-collect`의 IR_Collect 분석 도구, 세 증거 서버의 `evidence_v1` 응답에 적용된다 [1][2][3][4][5][6].
+`inventory_archive_members`는 `evtx`, `prefetch`, `amcache`, `registry`, `ntfs`, `executable` 유형마다 `artifact_coverage`를 싣는다 [1].
+유형마다 이름으로 찾은 항목이 있는지(`PRESENT`·`NOT_OBSERVED`), 분석할 수 있는 항목 수, 안전 조건 때문에 막힌 항목 수를 적고 `parse_status`는 `NOT_ATTEMPTED`로 둔다 [1].
+막힌 항목의 사유는 항목마다 `safe_path`, `is_symlink`, `encrypted`, `duplicate_name`, `oversized`, `high_compression_ratio`로 싣고 그 수를 `warnings`에 적는다 [7].
+목록을 `max_members`에서 자르면 그 사실을 `warnings`와 `truncated`에 싣는다 [8].
+항목을 꺼내 분석하는 ZIP 도구는 고른 유형 하나의 `artifact_coverage`에 `parse_status`를 `PARSED`, `PARSED_WITH_LIMITATIONS`, `FAILED` 가운데 하나로 적는다 [2].
+항목을 꺼내지 못하면 `collection_status`를 `UNCONFIRMED`로 둔다 [2].
+다른 폴더의 로그를 주어 꺼내기가 실패한 호출에서 응답은 `collection_status` `UNCONFIRMED`와 `parse_status` `FAILED`를 실었다 [9].
+
+`inventory_evidence_path`는 목록을 `max_files`에서 자른 것, 해시 바이트 한도를 넘어 해시하지 않은 것, 링크와 증거 폴더 밖을 가리키는 항목을 건너뛴 수를 `warnings`에 적는다 [3].
+`verify_sha256_manifest`는 줄 수 상한으로 자른 것, 형식이 틀린 줄, 바이트 한도로 건너뛴 항목(`SKIPPED`)을 응답에 적는다 [4].
+
+`ir-collect`의 IR_Collect 분석 도구는 `coverage_reporting`을 싣는다 [5].
+출처별·개체 유형별 건수가 있으면 `AVAILABLE`, 사실이 0건이면 `EMPTY_ANALYSIS`, 건수가 없으면 `UNAVAILABLE`로 적고 `UNAVAILABLE`이 자료가 없다는 뜻이 아니라는 문장을 붙인다 [5].
+`artifact_coverage`에는 늘 `NOT_PROVIDED_BY_SUMMARY_SCHEMA`를 적는다 [5].
+`IR_Collect.exe`가 낸 `parser_notes`와 `load_warnings`는 50개까지 옮긴다 [5].
+
+`evidence_v1` 응답을 만드는 공통 모듈은 도구 결과에서 실패한 하위 질의, 실패한 결과 행, 모듈 목록을 다 읽지 못한 프로세스, 결과의 `errors` 목록을 찾아 `errors`와 `limitations`에 "Evidence coverage is incomplete." 같은 영향 문장과 함께 싣고 `status`를 `DEGRADED`로 둔다 [6].
+`local-forensic`의 `collect_ir_event_bundle`처럼 채널마다 질의하는 도구는 실패한 채널 수가 이 경로로 응답에 실린다 [6][10].
+
+서버에 대상별로 해야 할 작업 목록이나 완료 조건을 두고 수행 기록과 대조하는 코드는 없다.
+워크플로 문서의 `completion_criteria`는 모델에게 주는 글이고 서버는 그 조건을 확인하지 않는다 [11].
+모델이 진행 기록을 적는 도구도 없다.
+
+**한계.** `inventory_archive_members`의 `PRESENT`·`NOT_OBSERVED`는 항목 이름만으로 정한다 [1][12].
+그래서 정해 둔 이름이 아닌 자료는 ZIP에 있어도 `NOT_OBSERVED`가 된다 [12].
+`IR_Collect.exe` 0.24.2의 `summary_v3`에는 수집 단계별 완료·실패·건너뜀을 담는 `collection_coverage`와 `artifacts_count`가 있다 [13].
+서버의 응답 모양은 이 두 값을 옮기지 않고 `artifact_coverage`에 `NOT_PROVIDED_BY_SUMMARY_SCHEMA`를 적는다 [5][13].
+`IR_Collect.exe` 0.24.2는 `Amcache.hve`·`SYSTEM`에서 CSV를 만들지 못하면 관리자 권한으로 다시 실행하라는 문장을 `load_warnings`에 넣는다 [14].
+공통 모듈은 `load_warnings`를 보지 않으므로 이런 생략이 있어도 `evidence_v1` 응답의 `status`를 `DEGRADED`로 바꾸지 않고 `limitations`에도 싣지 않는다 [5][6].
+
+### 근거
+
+[1] `inventory_archive_members_impl`은 유형별 `artifact_coverage`를 만든다.
+```python
+    artifact_coverage = {
+        artifact_type: {
+            "collection_status": (
+                "PRESENT" if candidate_counts.get(artifact_type, 0) else "NOT_OBSERVED"
+            ),
+            "candidate_count": candidate_counts.get(artifact_type, 0),
+            "parse_eligible_count": eligible_candidate_counts.get(artifact_type, 0),
+            "blocked_candidate_count": (
+                candidate_counts.get(artifact_type, 0)
+                - eligible_candidate_counts.get(artifact_type, 0)
+            ),
+            "parse_status": "NOT_ATTEMPTED",
+        }
+        for artifact_type in ARCHIVE_COVERAGE_TYPES
+    }
+```
+
+[`artifact-forensic-mcp/server.py:1509-1523`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1509-L1523)
+
+[2] ZIP 항목 분석은 결과에 따라 `parse_status`와 `collection_status`를 정한다.
+```python
+    if "error" in result:
+        parse_status = "FAILED"
+    elif result.get("status") == "DEGRADED":
+        parse_status = "PARSED_WITH_LIMITATIONS"
+    else:
+        parse_status = "PARSED"
+    result["artifact_coverage"] = {
+        coverage_type: {
+            "collection_status": "PRESENT" if primary_metadata is not None else "UNCONFIRMED",
+            "selected_member": normalized_member,
+            "parse_status": parse_status,
+            "companion_member_count": len(companion_metadata),
+        }
+    }
+```
+
+[`artifact-forensic-mcp/server.py:2031-2044`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2031-L2044)
+
+[3] `inventory_evidence_path_impl`은 자른 것과 건너뛴 것을 `warnings`에 적는다.
+```python
+    warnings: list[str] = []
+    if len(candidates) > file_limit:
+        warnings.append(f"File inventory was truncated at max_files={file_limit}.")
+    if hash_budget_exhausted:
+        warnings.append(
+            f"SHA-256 hashing stopped at the {MAX_INVENTORY_HASH_BYTES}-byte safety budget."
+        )
+    if skipped_links:
+        warnings.append(f"Skipped {skipped_links} symbolic-link entries.")
+    if skipped_outside:
+        warnings.append(f"Skipped {skipped_outside} entries resolving outside evidence roots.")
+```
+
+[`artifact-forensic-mcp/server.py:1332-1342`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1332-L1342)
+
+[4] `verify_sha256_manifest_impl`은 자른 것, 형식이 틀린 줄, 상태별 수를 `warnings`에 적는다.
+```python
+    warnings: list[str] = []
+    if len(entries) > entry_limit:
+        warnings.append(f"Manifest entries were truncated at max_entries={entry_limit}.")
+    if invalid_lines:
+        warnings.append("One or more manifest lines were invalid.")
+    for status in ("MISMATCH", "MISSING", "INVALID", "SKIPPED"):
+        if status_counts[status]:
+            warnings.append(f"{status_counts[status]} entries have status {status}.")
+```
+
+[`artifact-forensic-mcp/server.py:766-773`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L766-L773)
+[`artifact-forensic-mcp/server.py:727-738`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L727-L738)
+
+[5] `shape_summary`는 건수의 상태를 정하고 `artifact_coverage`에 고정 값을 적는다.
+```python
+    if fact_source_counts:
+        fact_source_status = "AVAILABLE"
+    elif isinstance(fact_count, int) and fact_count == 0:
+        fact_source_status = "EMPTY_ANALYSIS"
+    else:
+        fact_source_status = "UNAVAILABLE"
+    if entity_type_counts:
+        entity_type_status = "AVAILABLE"
+    elif isinstance(fact_count, int) and fact_count == 0:
+        entity_type_status = "EMPTY_ANALYSIS"
+    else:
+        entity_type_status = "UNAVAILABLE"
+```
+
+[`ir-collect-mcp/server.py:583-594`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L583-L594)
+```python
+        "coverage_reporting": {
+            "fact_source_counts": fact_source_status,
+            "entity_type_counts": entity_type_status,
+            "artifact_coverage": "NOT_PROVIDED_BY_SUMMARY_SCHEMA",
+            "note": (
+                "UNAVAILABLE means the summary omitted usable counts; it does not mean the "
+                "artifact type was absent. Use artifact-forensic inventory for raw ZIP coverage."
+            ),
+        },
+        "guided_hunt": {"rule_matches": rule_matches, "hypothesis_templates": hypotheses},
+        "parser_notes": (data.get("parser_notes") or [])[:MAX_NOTES],
+        "load_warnings": (data.get("load_warnings") or [])[:MAX_NOTES],
+```
+
+[`ir-collect-mcp/server.py:611-622`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L611-L622)
+
+[6] `infer_status_and_messages`는 하위 결과의 실패와 제한을 `errors`와 `limitations`로 옮긴다.
+[`myirteam_common/evidence.py:79-184`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L184)
+
+[7] 항목마다 안전 조건을 적고 막힌 항목의 수를 `warnings`에 더한다.
+[`artifact-forensic-mcp/server.py:1418-1506`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1418-L1506)
+
+[8] `inventory_archive_members_impl`은 목록을 자르면 경고를 더하고 `truncated`를 싣는다.
+```python
+    warnings: list[str] = []
+    if len(infos) > member_limit:
+        warnings.append(f"Archive inventory was truncated at max_members={member_limit}.")
+```
+
+[`artifact-forensic-mcp/server.py:1485-1487`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1485-L1487)
+```python
+        "truncated": len(infos) > len(records),
+```
+
+[`artifact-forensic-mcp/server.py:1548-1548`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1548-L1548)
+
+[9] (실행 확인) 시험용 ZIP으로 `inventory_archive_members_impl`과 `parse_archive_member_with_eztools_impl`을 같은 프로세스에서 불렀다.
+
+[10] `collect_ir_event_bundle`은 채널별 결과를 `queries`에 싣는다.
+```python
+    results = [
+        collect_event_log_internal(channel, ids, start, end, limit)
+        for channel, ids in queries
+    ]
+
+    response = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "start_time_utc": start or "DEFAULT_LAST_24_HOURS",
+        "end_time_utc": end or None,
+        "max_events_per_channel": limit,
+        "queries": results,
+        "note": "Event presence and detections require analyst correlation; missing channels are evidence limitations.",
+    }
+```
+
+[`mcp-server/autoruns_mcp.py:805-818`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L805-L818)
+
+[11] 워크플로 문서의 완료 조건이다.
+```json
+  "completion_criteria": [
+    "IR_Collect engine identity and integrity status are recorded.",
+    "When a ZIP sidecar is supplied, its SHA-256 verification status is recorded before analysis.",
+    "Each analyzed input retains tool version, evidence digest, copy status, and warnings.",
+    "Triage ZIP analysis records safe-extraction limits plus source ZIP SHA-256 before and after.",
+    "Missing source/entity count maps are labeled UNAVAILABLE and are not interpreted as artifact absence.",
+    "When ZIP coverage is materially ambiguous, archive member inventory and any selected member parse retain archive/member digests and copy status.",
+    "ZIP inventory reports per-artifact collection status, eligible and blocked candidate counts, while selected member tools report parse status.",
+    "ZIP members are enriched only through ZIP-member analyzers; Registry companions are limited to explicitly selected same-directory hive.LOG1/hive.LOG2 files.",
+    "Guided Hunt matches remain labeled as investigative leads.",
+    "Applicable cross-host and graph results are qualified by evidence provenance.",
+    "Conclusion, confidence, counter-evidence, and evidence gaps are reported."
+  ],
+```
+
+[`workflows/deep-analysis.json:307-319`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/workflows/deep-analysis.json#L307-L319)
+
+[12] 유형 분류는 이름만 보고 응답의 설명도 내용을 확인하지 않는다고 적는다.
+```python
+def archive_member_candidate_types(member_path: str) -> list[str]:
+    """Classify names only for analyst routing; this does not validate contents."""
+    pure = PurePosixPath(member_path)
+    name = pure.name.lower()
+    suffix = pure.suffix.lower()
+    candidates: list[str] = []
+    if suffix == ".evtx":
+        candidates.append("evtx")
+    if suffix == ".pf":
+        candidates.append("prefetch")
+    if name == "amcache.hve":
+        candidates.append("amcache")
+    if name in {
+        "system",
+        "software",
+        "sam",
+        "security",
+        "default",
+        "ntuser.dat",
+        "usrclass.dat",
+    }:
+        candidates.append("registry")
+    if name in {"$mft", "mft_dump.bin", "mft.bin", "$j", "$boot", "$sds", "$i30"}:
+        candidates.append("ntfs")
+    if name.endswith((".log1", ".log2")):
+        candidates.append("registry_log")
+    if suffix in EXECUTABLE_MEMBER_SUFFIXES:
+        candidates.append("executable")
+    return candidates
+```
+
+[`artifact-forensic-mcp/server.py:930-958`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L930-L958)
+[`artifact-forensic-mcp/server.py:1551-1554`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1551-L1554)
+
+[13] `IR_Collect.exe` 0.24.2의 `summary_v3`는 `artifacts_count`와 `collection_coverage`를 싣고 `collection_coverage`는 단계별 상태를 담는다: [`src/Analysis/SummaryExport.cs:32-45`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/SummaryExport.cs#L32-L45), [`src/Analysis/AnalysisCli.cs:94-123`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/AnalysisCli.cs#L94-L123), [`src/CollectionCoverage.cs:11-82`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/CollectionCoverage.cs#L11-L82).
+
+[14] `IR_Collect.exe` 0.24.2는 폴더를 불러올 때 하이브에서 CSV를 만들지 못하면 그 사유를 `load_warnings`에 넣는다: [`src/Analysis/RawArtifactCsvDeriver.cs:44-72`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/RawArtifactCsvDeriver.cs#L44-L72), [`src/Analysis/CaseManager.cs:475`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L475).

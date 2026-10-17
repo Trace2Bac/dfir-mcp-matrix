@@ -1,0 +1,553 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.03
+- id: T07.04
+- id: T07.08
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 방식은 `artifact-forensic`의 분석 도구 실행 파일과 RECmd 배치 파일, YARA 룰, `ir-collect`의 `IR_Collect.exe`, `local-forensic`의 Sysinternals 도구와 PowerShell에 적용된다 [1][2][3][4][5][6].
+`artifact-forensic`는 분석을 실행하기 전에 `executable_integrity`로 실행 파일이 있는지 보고 SHA-256을 계산한다 [1].
+기대 해시가 없거나 계산한 해시와 다르면 실행하지 않는다 [1].
+Hayabusa, capa, YARA·YARA-X, EZ Tools 5개가 모두 이 확인을 거친다 [1][7].
+기대 해시는 `<도구>_EXPECTED_SHA256` 환경변수의 값이고 이 값이 없고 실행 파일이 저장소의 기본 경로에 있으면 코드에 적은 값이다 [8].
+RECmd로 하이브를 읽을 때는 고른 배치 파일이 저장소의 `BatchExamples` 폴더에 있는지 보고 SHA-256을 코드에 적은 값과 대조한 뒤에 실행한다 [2].
+YARA 도구는 `rules_path`가 `YARA_RULE_ROOTS` 아래에 있는지, `.yar`·`.yara` 파일이 1개 이상 64개 이하로 있는지 확인한 뒤에 실행한다 [3].
+
+`ir-collect`의 분석 도구와 `collect_triage_package`는 실행 직전에 `ircollect_integrity_status`로 `IR_Collect.exe`가 있는지 보고 기대 해시가 있으면 SHA-256을 대조한다 [4].
+기대 해시는 `IRCOLLECT_EXPECTED_SHA256`의 값이고 이 값이 없고 실행 파일이 기본 경로에 있으면 코드에 적은 값이다 [9].
+`IRCOLLECT_EXE`로 다른 경로를 주고 `IRCOLLECT_EXPECTED_SHA256`을 주지 않으면 실행 파일이 있는지만 확인한다 [9][4].
+`ingest_analysis_report`는 `IR_Collect.exe`를 실행하지 않으므로 이 확인을 거치지 않는다 [10].
+
+`local-forensic`의 `run_sysinternals_tool`은 도구 이름이 정해 둔 4개 가운데 하나인지 보고 저장소의 `Sysinternals Suite` 폴더에 그 파일이 있는지 확인한 뒤에 실행한다 [5].
+`run_powershell_json`은 `find_powershell`로 PowerShell 실행 파일을 `PATH`에서 찾고 찾지 못하면 실행하지 않는다 [6][11].
+실행 확인에서 capa, Hayabusa, YARA·YARA-X, `IR_Collect.exe`, Sysinternals 도구가 없는 설정과 PowerShell을 찾지 못하게 바꾼 설정으로 부르면 모두 실행 없이 오류로 끝났다 [12].
+
+**한계.** Hayabusa가 쓰는 룰 파일 `encoded_rules.yml`과 `rules_config_files.txt`는 `get_artifact_forensic_info`만 확인하고 분석 도구는 실행 전에 확인하지 않는다 [13][14].
+서버는 EvtxECmd에 `--maps`를 넘기지 않고 EvtxECmd가 쓰는 `Maps` 폴더가 있는지도 실행 전에 확인하지 않는다 [15].
+EvtxECmd 2026.5.0은 맵 폴더가 없으면 경고를 남기고 맵 없이 처리를 계속한다 [16].
+`local-forensic`의 PowerShell 스크립트가 부르는 cmdlet이 있는지는 실행 전에 확인하지 않는다 [11].
+`run_sysinternals_tool`은 파일이 있는지만 보고 실행할 수 있는 파일인지는 확인하지 않는다 [5].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 방식은 실행 전 확인을 거치는 모든 실행에 적용된다 [1][4][5][11].
+`artifact-forensic`는 실행 파일이 없으면 `<도구> executable not found: <경로>`를, 기대 해시가 없으면 `<도구> exists but no expected SHA-256 is configured.`를 `error`에 싣고 확인 결과를 `integrity`에 함께 싣는다 [1][17].
+YARA 도구는 쓸 수 있는 백엔드가 없으면 YARA-X와 YARA 각각의 오류를 적은 `No verified YARA backend is available.` 문구를 돌려준다 [18].
+`ir-collect`는 `IR_Collect.exe not found at <경로>. Set IRCOLLECT_EXE.`처럼 경로를 정하는 환경변수를 적은 문구를 돌려준다 [4].
+`local-forensic`은 Sysinternals 도구가 없으면 `Error: required tool not found: <경로>`를, PowerShell이 없으면 `PowerShell executable was not found.`를 돌려준다 [5][11].
+`evidence_v1` 응답에서 이 문구를 결과 최상위에 그대로 돌려주는 도구는 `errors`의 `TOOL_ERROR` 항목과 `FAILED` 상태가 된다 [19].
+PowerShell 결과를 `result`나 `host` 안에 담는 `local-forensic`의 `get_forensic_context`·`get_file_metadata`·`collect_event_log_events`·`list_wmi_subscriptions`·`collect_defender_context`·`list_local_users_and_admins`·`collect_network_context`와 채널마다 결과를 담는 `collect_ir_event_bundle`은 같은 문구가 있어도 `DEGRADED` 상태가 된다 [19][20].
+실행 확인에서 Sysinternals 도구가 없을 때 `collect_autoruns`와 PowerShell이 없을 때 `list_services`의 응답 상태는 `FAILED`였고 `artifact-forensic`와 `ir-collect`는 위 문구를 `error`에 실었다 [12].
+
+도구가 있는지를 따로 알려 주는 도구도 있다.
+`get_artifact_forensic_info`는 도구마다 `available`과 확인 결과를 싣고 없는 필수 도구를 `Required analyzer unavailable: <도구>.` 경고로 적어 상태를 `DEGRADED`로 둔다 [13].
+`get_external_tool_inventory`는 manifest의 도구마다 `exists`와 기대 해시와 대조한 결과를 싣는다 [21].
+`get_ircollect_info`는 `IR_Collect.exe`가 없으면 `error`를 싣는다 [22].
+`get_forensic_context`는 Sysinternals 도구마다 `exists`를 싣는다 [23].
+서버는 도구를 내려받거나 설치하지 않고 `get_external_tool_inventory`의 응답도 그 사실을 적는다 [24].
+
+**한계.** `run_sysinternals_tool`은 실행 파일을 시작하지 못한 `OSError`를 `Error executing <도구> (Path: <경로>): <문구>` 문구로 돌려준다 [5].
+`evidence_v1`은 `Error:`나 `File not found:`로 시작하는 글만 실패로 읽으므로 이 문구가 담긴 응답의 상태는 `SUCCESS`가 된다 [19][25].
+실행 확인에서 실행 파일이 아닌 파일을 `autorunsc.exe` 자리에 두고 실행을 `OSError`로 끝나게 바꾸면 `collect_autoruns`의 응답 상태는 `SUCCESS`였고 `errors`가 비어 있었다 [12].
+
+### T07.03 알림 없는 대체 실행
+
+**구현.** 이 방식은 `artifact-forensic`의 YARA 백엔드 선택과 `local-forensic`의 PowerShell 선택에 적용된다 [18][6].
+`scan_file_with_yara`와 `scan_archive_member_with_yara`는 `backend`가 기본값 `auto`이면 YARA-X를 먼저 확인하고 YARA-X가 없거나 해시가 맞지 않으면 YARA를 쓴다 [18].
+응답의 `backend`와 `provenance.tool_name`에는 실제로 쓴 백엔드가 실리지만 YARA-X를 쓰지 못한 사실과 그 이유는 실리지 않는다 [26].
+실행 확인에서 YARA-X가 없고 시험용 YARA만 있을 때 `auto`로 부르면 `backend`가 `yara`였고 `warnings`가 비어 있었다 [12].
+두 백엔드의 결과 모양은 다르다.
+YARA-X 결과는 일치한 룰마다 `identifier`, `namespace`, `tags`, `metadata`를 싣는다 [26].
+YARA 결과는 출력 한 줄을 `raw_match_line` 하나로 싣고 `provenance.output_format`을 `bounded_text`로 둔다 [26].
+도구 설명은 검증된 백엔드로 검사한다고만 적고 이 차례와 결과 모양의 차이를 적지 않는다 [27].
+
+`local-forensic`의 `find_powershell`은 `pwsh.exe`가 없으면 `powershell.exe`를 쓴다 [6].
+PowerShell로 읽는 도구의 응답에는 어느 PowerShell로 실행했는지 실리지 않는다 [11].
+
+### T07.04 실행 환경별 경로 분기
+
+**구현.** 이 방식은 `local-forensic`의 PowerShell 선택과 `artifact-forensic`의 YARA 백엔드 선택에 적용된다 [6][18].
+`find_powershell`은 `PATH`에서 `pwsh.exe`, `powershell.exe`, `pwsh`, `powershell` 차례로 찾아 처음 찾은 실행 파일을 쓴다 [6].
+YARA 백엔드는 `backend`가 `auto`이면 YARA-X, YARA 차례로 확인을 통과한 첫 실행 파일을 쓴다 [18].
+`backend`에 `yara`나 `yara_x`를 주면 그 백엔드만 확인하고 확인에 실패하면 다른 백엔드로 바꾸지 않는다 [18].
+실행 확인에서 YARA-X가 없을 때 `backend`를 `yara_x`로 주면 YARA를 쓰지 않고 `YARA-X executable not found` 오류가 왔다 [12].
+
+다른 도구는 실행 파일을 찾는 경로가 하나다.
+`artifact-forensic`와 `ir-collect`는 도구마다 환경변수의 경로를 쓰고 환경변수가 없으면 저장소 `External Tools` 아래의 정해 둔 경로를 쓴다 [8][9].
+`local-forensic`의 Sysinternals 도구는 저장소의 `Sysinternals Suite` 폴더에서만 찾는다 [5].
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `local-forensic`의 `collect_defender_context`, `list_local_users_and_admins`, `collect_network_context`, `get_forensic_context`, `get_file_metadata`, `list_scheduled_tasks`, `list_wmi_subscriptions`에 적용된다 [28][23][29][30][31].
+앞의 세 도구의 PowerShell 스크립트는 cmdlet마다 따로 실행하고 실패하면 `<cmdlet>: <문구>`를 `errors`에 더한 뒤 나머지 cmdlet을 계속 실행한다 [28].
+cmdlet이 없어 실패한 경우와 다른 이유로 실패한 경우를 나누지 않는다 [28].
+`evidence_v1` 응답은 결과 안의 `errors`가 비어 있지 않으면 앞 10개를 이은 문구를 `limitations`의 `NESTED_TOOL_LIMITATION` 항목으로 싣고 상태를 `DEGRADED`로 둔다 [19].
+실행 확인에서 `Get-LocalGroupMember`만 실패한 결과를 돌려주는 PowerShell 대체로 `list_local_users_and_admins`를 부르면 상태가 `DEGRADED`였고 실패 문구가 `limitations`에 실렸다 [32].
+
+**한계.** 다음 경로는 일부를 빼고 계속하면서 뺀 사실을 응답에 싣지 않는다.
+
+- `get_forensic_context`는 버전을 읽는 PowerShell 실행이 실패해도 `file_version`과 `product_version`을 `null`로 두고 실패를 싣지 않는다 [23].
+- `get_file_metadata`는 대체 데이터 스트림을 읽지 못하면 `alternate_data_streams`를 빈 목록으로 둔다 [29].
+- `list_scheduled_tasks`는 작업 하나의 `Get-ScheduledTaskInfo`가 실패하면 그 작업의 마지막 실행 시각, 다음 실행 시각, 마지막 결과를 `null`로 둔다 [30].
+- `list_wmi_subscriptions`는 이벤트 필터 조회만 실패로 다루고 소비자와 연결 조회는 `-ErrorAction SilentlyContinue`로 실행해 실패하면 빈 목록으로 둔다 [31].
+
+실행 확인에서 버전 조회만 실패하게 바꾼 PowerShell 대체로 `get_forensic_context`를 부르면 상태는 `SUCCESS`였고 `errors`와 `limitations`가 비어 있었다 [32].
+
+### 근거
+
+[1] `executable_integrity`는 실행 파일이 있는지와 기대 해시를 확인한다.
+
+```python
+def executable_integrity(
+    path: Path,
+    expected_sha256: str | None,
+    label: str,
+    *,
+    require_pin: bool = False,
+) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "status": "FAILED",
+            "error": f"{label} executable not found: {path}",
+            "path": str(path),
+            "verified": False,
+        }
+    actual = sha256_file(path)
+    if require_pin and not expected_sha256:
+        return {
+            "status": "FAILED",
+            "error": f"{label} exists but no expected SHA-256 is configured.",
+            "path": str(path),
+            "sha256": actual,
+            "expected_sha256": None,
+            "verified": False,
+        }
+    if expected_sha256 and actual.lower() != expected_sha256.lower():
+        return {
+            "status": "FAILED",
+            "error": f"{label} SHA-256 does not match the configured value.",
+            "path": str(path),
+            "sha256": actual,
+            "expected_sha256": expected_sha256,
+            "verified": False,
+        }
+    return {
+        "status": "SUCCESS",
+        "path": str(path),
+        "sha256": actual,
+        "expected_sha256": expected_sha256,
+        "verified": bool(expected_sha256),
+    }
+```
+
+[`artifact-forensic-mcp/server.py:1065-1104`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1065-L1104)
+
+[2] RECmd 배치 파일은 있는지 보고 해시를 대조한다.
+
+```python
+    if normalized == "registry":
+        normalized_profile = str(profile or "dfir").strip().lower()
+        batch_spec = RECMD_PROFILES.get(normalized_profile)
+        if batch_spec is None:
+            return {"error": f"profile must be one of: {', '.join(sorted(RECMD_PROFILES))}"}
+        batch_name, expected_batch_sha256 = batch_spec
+        batch_path = (DEFAULT_RECMD_BATCH_DIR / batch_name).resolve()
+        if not batch_path.is_relative_to(DEFAULT_RECMD_BATCH_DIR.resolve()) or not batch_path.is_file():
+            return {"error": f"bundled RECmd profile is missing or unsafe: {batch_path}"}
+        actual_batch_sha256 = sha256_file(batch_path)
+        if actual_batch_sha256.lower() != expected_batch_sha256.lower():
+            return {"error": f"bundled RECmd profile SHA-256 mismatch: {batch_path.name}"}
+```
+
+[`artifact-forensic-mcp/server.py:1662-1673`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1662-L1673)
+
+[3] YARA 룰 경로와 룰 파일 수를 확인한다.
+
+```python
+def validate_rule_files(path_str: str, cfg: Config) -> list[Path]:
+    if not path_str or not path_str.strip():
+        raise ValueError("rules_path is empty.")
+    path = _resolve(path_str)
+    if not cfg.rule_roots:
+        raise ValueError("no YARA rule roots configured (set YARA_RULE_ROOTS).")
+    if not is_under_roots(path, cfg.rule_roots):
+        raise ValueError(f"rules path is outside the configured YARA rule roots: {path}")
+    if path.is_symlink():
+        raise ValueError(f"symbolic-link rule paths are not accepted: {path}")
+    if path.is_file():
+        candidates = [path]
+    elif path.is_dir():
+        candidates = sorted(
+            item.resolve()
+            for item in path.rglob("*")
+            if item.is_file() and not item.is_symlink() and item.suffix.lower() in {".yar", ".yara"}
+        )
+    else:
+        raise ValueError(f"rules path does not exist: {path}")
+    candidates = [item for item in candidates if item.suffix.lower() in {".yar", ".yara"}]
+    if not candidates:
+        raise ValueError(f"no .yar or .yara source files found: {path}")
+    if len(candidates) > MAX_RULE_FILES:
+        raise ValueError(f"rules path contains {len(candidates)} files; maximum is {MAX_RULE_FILES}.")
+    if any(not is_under_roots(item, cfg.rule_roots) for item in candidates):
+        raise ValueError("one or more resolved rule files escaped the configured rule roots.")
+    return candidates
+```
+
+[`artifact-forensic-mcp/server.py:1008-1035`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1008-L1035)
+
+[4] `ircollect_integrity_status`는 실행 직전에 `IR_Collect.exe`가 있는지와 해시를 확인한다.
+
+```python
+def ircollect_integrity_status(cfg: Config) -> dict[str, Any]:
+    """Verify the analysis executable immediately before an engine operation."""
+    if not cfg.exe_path.is_file():
+        return {
+            "status": "FAILED",
+            "error": f"IR_Collect.exe not found at {cfg.exe_path}. Set IRCOLLECT_EXE.",
+        }
+    try:
+        digest = sha256_file(cfg.exe_path)
+    except OSError as exc:
+        return {"status": "FAILED", "error": f"could not hash IR_Collect.exe: {exc}"}
+    if cfg.expected_sha256 and digest.lower() != cfg.expected_sha256.lower():
+        return {
+            "status": "FAILED",
+            "error": "IR_Collect.exe SHA-256 does not match IRCOLLECT_EXPECTED_SHA256.",
+            "sha256": digest,
+            "expected_sha256": cfg.expected_sha256,
+            "verified": False,
+        }
+    return {
+        "status": "SUCCESS",
+        "sha256": digest,
+        "expected_sha256": cfg.expected_sha256,
+        "verified": True if cfg.expected_sha256 else None,
+    }
+```
+
+[`ir-collect-mcp/server.py:211-235`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L211-L235)
+
+[5] `run_sysinternals_tool`은 도구 이름과 파일이 있는지 확인하고 실행 결과를 글로 돌려준다: [`mcp-server/autoruns_mcp.py:99-145`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L99-L145).
+
+[6] `find_powershell`은 정해 둔 차례로 PowerShell을 찾는다.
+
+```python
+def find_powershell() -> str | None:
+    for candidate in ("pwsh.exe", "powershell.exe", "pwsh", "powershell"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+```
+
+[`mcp-server/autoruns_mcp.py:148-153`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L148-L153)
+
+[7] 분석 함수마다 실행 전에 실행 파일을 확인한다: [`artifact-forensic-mcp/server.py:1652-1659`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1652-L1659), [`artifact-forensic-mcp/server.py:2411-2413`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2411-L2413), [`artifact-forensic-mcp/server.py:2519-2526`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2519-L2526), [`artifact-forensic-mcp/server.py:2615-2626`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2615-L2626).
+
+[8] 실행 파일 경로와 기대 해시는 환경변수로 정하고 기본 경로이면 코드에 적은 해시를 쓴다.
+
+```python
+    exe_path = _resolve(os.environ.get("HAYABUSA_EXE", str(DEFAULT_HAYABUSA_EXE)))
+    expected = os.environ.get("HAYABUSA_EXPECTED_SHA256", "").strip().lower() or None
+    if expected is None and exe_path == DEFAULT_HAYABUSA_EXE.resolve():
+        expected = BUNDLED_HAYABUSA_SHA256
+
+    capa_path = _resolve(os.environ.get("CAPA_EXE", str(DEFAULT_CAPA_EXE)))
+    capa_expected = os.environ.get("CAPA_EXPECTED_SHA256", "").strip().lower() or None
+    if capa_expected is None and capa_path == DEFAULT_CAPA_EXE.resolve():
+        capa_expected = BUNDLED_CAPA_SHA256
+
+    yara_path = _resolve(os.environ.get("YARA_EXE", str(DEFAULT_YARA_EXE)))
+    yara_expected = os.environ.get("YARA_EXPECTED_SHA256", "").strip().lower() or None
+    if yara_expected is None and yara_path == DEFAULT_YARA_EXE.resolve():
+        yara_expected = BUNDLED_YARA_SHA256
+
+    yarax_path = _resolve(os.environ.get("YARAX_EXE", str(DEFAULT_YARAX_EXE)))
+    yarax_expected = os.environ.get("YARAX_EXPECTED_SHA256", "").strip().lower() or None
+    if yarax_expected is None and yarax_path == DEFAULT_YARAX_EXE.resolve():
+        yarax_expected = BUNDLED_YARAX_SHA256
+
+    eztool_values: dict[str, tuple[Path, str | None]] = {}
+    for name, env_prefix, default_path, bundled_hash in (
+        ("evtxecmd", "EVTXECMD", DEFAULT_EVTXECMD_EXE, BUNDLED_EVTXECMD_SHA256),
+        ("pecmd", "PECMD", DEFAULT_PECMD_EXE, BUNDLED_PECMD_SHA256),
+        (
+            "amcacheparser",
+            "AMCACHEPARSER",
+            DEFAULT_AMCACHEPARSER_EXE,
+            BUNDLED_AMCACHEPARSER_SHA256,
+        ),
+        ("recmd", "RECMD", DEFAULT_RECMD_EXE, BUNDLED_RECMD_SHA256),
+        ("mftecmd", "MFTECMD", DEFAULT_MFTECMD_EXE, BUNDLED_MFTECMD_SHA256),
+    ):
+        tool_path = _resolve(os.environ.get(f"{env_prefix}_EXE", str(default_path)))
+        tool_hash = os.environ.get(f"{env_prefix}_EXPECTED_SHA256", "").strip().lower() or None
+        if tool_hash is None and tool_path == default_path.resolve():
+            tool_hash = bundled_hash
+        eztool_values[name] = (tool_path, tool_hash)
+```
+
+[`artifact-forensic-mcp/server.py:224-261`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L224-L261)
+
+[9] `ir-collect`의 실행 파일 경로와 기대 해시를 정한다.
+
+```python
+    exe_path = _resolve(exe_raw)
+    expected_sha256 = os.environ.get("IRCOLLECT_EXPECTED_SHA256", "").strip().lower() or None
+    if expected_sha256 is None and exe_path == DEFAULT_IRCOLLECT_EXE.resolve():
+        expected_sha256 = BUNDLED_IRCOLLECT_SHA256
+```
+
+[`ir-collect-mcp/server.py:173-176`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L173-L176)
+
+[10] `ingest_analysis_report`는 실행 파일을 실행하지 않고 보고서 파일만 읽는다.
+
+```python
+def ingest_analysis_report_impl(cfg: Config, report_path: str) -> dict[str, Any]:
+    try:
+        p = validate_evidence_file(report_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    try:
+        data = read_json_file(p)
+    except (ValueError, OSError) as exc:
+        return {"error": f"could not read/parse JSON report: {exc}"}
+    if not isinstance(data, dict):
+        return {"error": "report is not a JSON object."}
+    schema = data.get("export_schema")
+    shaper = SHAPERS.get(schema)
+    if shaper is None:
+        return {"error": f"unrecognized or missing export_schema: {schema!r}. Supported: {list(SUPPORTED_SCHEMAS)}"}
+    return shaper(data, {"ingested": True, "source_report": str(p)})
+```
+
+[`ir-collect-mcp/server.py:867-882`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L867-L882)
+
+[11] `run_powershell_json`은 PowerShell이 없으면 오류를 돌려주고 받은 스크립트를 그대로 실행한다: [`mcp-server/autoruns_mcp.py:156-202`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L156-L202).
+
+[12] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 설정의 실행 파일 경로를 없는 파일이나 받은 인자를 기록하는 시험용 실행 파일로 바꾸고 `local-forensic`의 PowerShell 찾기와 Sysinternals 실행을 시험용 대체로 바꿔 도구 함수를 불렀다.
+
+[13] `get_artifact_forensic_info`는 도구마다 확인 결과를 싣고 Hayabusa 룰 파일이 있는지를 따로 싣는다: [`artifact-forensic-mcp/server.py:2269-2393`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2269-L2393).
+
+[14] Hayabusa 분석은 실행 파일만 확인하고 실행한다: [`artifact-forensic-mcp/server.py:2396-2453`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2396-L2453).
+
+[15] 서버가 EvtxECmd에 넘기는 인자에는 맵 위치가 없다.
+
+```python
+    args = ["-f", str(source)]
+    if normalized == "prefetch":
+        args.append("-q")
+    if normalized == "registry" and batch_path is not None:
+        args.extend(["--bn", str(batch_path)])
+        if not use_registry_transaction_logs:
+            args.append("--nl")
+    args.extend(["--csv", str(run_dir), "--csvf", "result.csv"])
+```
+
+[`artifact-forensic-mcp/server.py:1680-1687`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1680-L1687)
+
+[16] EvtxECmd 2026.5.0은 맵 폴더가 없으면 경고만 남긴다: [`EvtxECmd/Program.cs:620-623`](https://github.com/EricZimmerman/evtx/blob/634edf49d4aa53d32a0f339a8cfaa2824e7fde46/EvtxECmd/Program.cs#L620-L623).
+
+[17] 확인에 실패하면 `error`와 `integrity`를 함께 돌려준다.
+
+```python
+    integrity = executable_integrity(
+        cfg.capa_exe_path,
+        cfg.capa_expected_sha256,
+        "capa",
+        require_pin=True,
+    )
+    if integrity["status"] == "FAILED":
+        return {"error": integrity["error"], "integrity": integrity}
+```
+
+[`artifact-forensic-mcp/server.py:2519-2526`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2519-L2526)
+
+[18] `select_yara_backend`는 요청한 백엔드나 정해 둔 차례로 백엔드를 고른다.
+
+```python
+def select_yara_backend(cfg: Config, requested: str) -> tuple[str, Path, dict[str, Any]]:
+    normalized = str(requested or "auto").strip().lower().replace("-", "_")
+    if normalized not in {"auto", "yara", "yara_x", "yarax"}:
+        raise ValueError("backend must be one of: auto, yara, yara_x.")
+
+    yarax_integrity = executable_integrity(
+        cfg.yarax_exe_path,
+        cfg.yarax_expected_sha256,
+        "YARA-X",
+        require_pin=True,
+    )
+    yara_integrity = executable_integrity(
+        cfg.yara_exe_path,
+        cfg.yara_expected_sha256,
+        "YARA",
+        require_pin=True,
+    )
+    if normalized in {"yara_x", "yarax"}:
+        if yarax_integrity["status"] != "SUCCESS":
+            raise ValueError(yarax_integrity["error"])
+        return "yara_x", cfg.yarax_exe_path, yarax_integrity
+    if normalized == "yara":
+        if yara_integrity["status"] != "SUCCESS":
+            raise ValueError(yara_integrity["error"])
+        return "yara", cfg.yara_exe_path, yara_integrity
+    if yarax_integrity["status"] == "SUCCESS":
+        return "yara_x", cfg.yarax_exe_path, yarax_integrity
+    if yara_integrity["status"] == "SUCCESS":
+        return "yara", cfg.yara_exe_path, yara_integrity
+    raise ValueError(
+        "No verified YARA backend is available. "
+        f"YARA-X: {yarax_integrity.get('error')}; YARA: {yara_integrity.get('error')}"
+    )
+```
+
+[`artifact-forensic-mcp/server.py:2610-2642`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2610-L2642)
+
+[19] `evidence_v1`의 상태는 결과의 `error`, 상태 값, 안쪽 결과의 `errors`로 정한다: [`myirteam_common/evidence.py:79-126`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L126).
+
+[20] (실행 확인) `local-forensic` 모듈을 같은 프로세스에서 불러 PowerShell 실행 함수를 `PowerShell command failed.` 오류를 돌려주는 대체로, Sysinternals 실행 함수를 종료 코드 1 오류 글을 돌려주는 대체로 바꾼 뒤 도구 함수를 불렀다.
+
+[21] `get_external_tool_inventory`는 도구마다 있는지와 해시 대조 결과를 싣는다.
+
+```python
+    inventory = []
+    for entry in manifest.get("tools", []):
+        relative = str(entry.get("stable_relative_path", "")).replace("/", os.sep)
+        path = (BASE_DIR / relative).resolve(strict=False)
+        row = {
+            "id": entry.get("id"),
+            "purpose": entry.get("purpose"),
+            "risk": entry.get("risk"),
+            "path": str(path),
+            "exists": path.is_file(),
+            "expected_sha256": entry.get("sha256"),
+        }
+        if path.is_file():
+            row["size_bytes"] = path.stat().st_size
+            row["sha256"] = sha256_file(path)
+            expected = str(entry.get("sha256") or "").lower()
+            row["sha256_matches_manifest"] = bool(expected) and row["sha256"].lower() == expected
+        inventory.append(row)
+```
+
+[`mcp-server/autoruns_mcp.py:1310-1327`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1310-L1327)
+
+[22] `get_ircollect_info`는 실행 파일이 없으면 `error`를 싣는다.
+
+```python
+def ircollect_info_impl(cfg: Config) -> dict[str, Any]:
+    exe = cfg.exe_path
+    exists = exe.is_file()
+    info: dict[str, Any] = {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "exe": {"path": str(exe), "exists": exists},
+        "supported_schemas": list(SUPPORTED_SCHEMAS),
+        "evidence_roots": [str(r) for r in cfg.evidence_roots],
+        "zip_safety_limits": {
+            "max_zip_bytes": cfg.max_zip_bytes,
+            "max_member_bytes": cfg.max_zip_member_bytes,
+            "max_total_bytes": cfg.max_zip_total_bytes,
+            "max_members": MAX_ZIP_MEMBERS,
+            "max_compression_ratio": MAX_ZIP_COMPRESSION_RATIO,
+        },
+        "notes": [],
+    }
+    if not exists:
+        info["error"] = f"IR_Collect.exe not found at {exe}. Set IRCOLLECT_EXE."
+        return info
+```
+
+[`ir-collect-mcp/server.py:712-732`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L712-L732)
+
+[23] `get_forensic_context`는 도구마다 `exists`를 싣고 버전 조회 결과의 오류는 응답에 넣지 않는다: [`mcp-server/autoruns_mcp.py:457-511`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L457-L511).
+
+[24] 응답 문구와 manifest 정책은 내려받기를 하지 않는다고 적는다([`External Tools/external_tools_manifest.json:3-11`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/External%20Tools/external_tools_manifest.json#L3-L11)).
+
+```python
+        "note": "The MCP server never downloads or updates external tools.",
+```
+
+[`mcp-server/autoruns_mcp.py:1334-1334`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1334-L1334)
+
+[25] 실패로 읽는 글은 두 접두어로 시작하는 글이다.
+
+```python
+def _is_error_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.strip().lower()
+    return lowered.startswith("error:") or lowered.startswith("file not found:")
+```
+
+[`myirteam_common/evidence.py:60-64`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L60-L64)
+
+[26] YARA-X와 YARA의 결과 모양과 응답 필드가 다르다: [`artifact-forensic-mcp/server.py:2168-2199`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2168-L2199), [`artifact-forensic-mcp/server.py:2710-2730`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2710-L2730), [`artifact-forensic-mcp/server.py:2748-2782`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2748-L2782).
+
+[27] YARA 도구의 설명은 검증된 백엔드를 쓴다고만 적는다.
+
+```python
+@mcp.tool()
+def scan_file_with_yara(
+    input_path: str,
+    rules_path: str,
+    backend: str = "auto",
+    max_matches: int = 200,
+    response_format: str = EVIDENCE_RESPONSE_FORMAT,
+) -> Any:
+    """Scan one allowlisted file with allowlisted YARA rules and a verified backend."""
+```
+
+[`artifact-forensic-mcp/server.py:3191-3199`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L3191-L3199)
+
+[28] 세 도구의 스크립트는 cmdlet마다 실패를 `errors`에 더하고 계속한다: [`mcp-server/autoruns_mcp.py:1063-1066`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1063-L1066), [`mcp-server/autoruns_mcp.py:1123-1129`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1123-L1129), [`mcp-server/autoruns_mcp.py:1154-1162`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1154-L1162).
+
+[29] `get_file_metadata`는 대체 데이터 스트림을 읽다 난 오류를 버린다.
+
+```python
+    $streams = @()
+    try { $streams = @(Get-Item -LiteralPath $path -Stream * -ErrorAction Stop | Select-Object Stream, Length) } catch {}
+```
+
+[`mcp-server/autoruns_mcp.py:1206-1207`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1206-L1207)
+
+[30] `list_scheduled_tasks`는 작업 정보를 읽다 난 오류를 버린다.
+
+```python
+    $rows = foreach ($task in ($tasks | Select-Object -First $maxTasks)) {
+        $info = $null
+        try { $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop } catch {}
+```
+
+[`mcp-server/autoruns_mcp.py:966-968`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L966-L968)
+
+[31] `list_wmi_subscriptions`는 소비자와 연결 조회의 오류를 버린다.
+
+```python
+try {
+    $filters = @(Get-CimInstance -Namespace root/subscription -ClassName __EventFilter -ErrorAction Stop | Select-Object Name, Query, QueryLanguage, EventNamespace)
+    $commandConsumers = @(Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer -ErrorAction SilentlyContinue | Select-Object Name, CommandLineTemplate, ExecutablePath, WorkingDirectory)
+    $scriptConsumers = @(Get-CimInstance -Namespace root/subscription -ClassName ActiveScriptEventConsumer -ErrorAction SilentlyContinue | Select-Object Name, ScriptingEngine, ScriptFileName, ScriptText)
+    $bindings = @(Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding -ErrorAction SilentlyContinue | Select-Object Filter, Consumer)
+    [PSCustomObject]@{
+        filters = $filters
+        command_line_consumers = $commandConsumers
+        active_script_consumers = $scriptConsumers
+        bindings = $bindings
+    } | ConvertTo-Json -Compress -Depth 7
+} catch {
+    [PSCustomObject]@{ error = $_.Exception.Message } | ConvertTo-Json -Compress
+}
+```
+
+[`mcp-server/autoruns_mcp.py:1023-1036`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1023-L1036)
+
+[32] (실행 확인) `local-forensic` 모듈을 같은 프로세스에서 불러 PowerShell 실행을 정해 둔 결과를 돌려주는 시험용 대체로 바꾸고 도구 함수를 불렀다.

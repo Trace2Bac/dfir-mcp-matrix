@@ -1,0 +1,570 @@
+---
+cell: P01
+details:
+- id: P01.01
+- id: P01.02
+- id: P01.03
+- id: P01.04
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 이 방식은 `artifact-forensic`의 EVTX·EZ Tools 도구, ZIP 목록 도구, ZIP 항목 도구와 `ir-collect`의 `analyze_triage_zip`에 적용된다 [1][2][3][4][5].
+`analyze_evtx_with_hayabusa`는 받은 경로가 파일이면 확장자가 `.evtx`일 때만 받고 폴더이면 그 아래 어디에든 `.evtx` 파일이 하나라도 있을 때만 받는다 [1].
+`parse_windows_artifact_with_eztools`는 `evtx`·`prefetch`·`amcache` 유형의 입력을 확장자 `.evtx`·`.pf`와 파일 이름 `Amcache.hve`로 알아본다 [2].
+`inventory_archive_members`는 ZIP 항목의 내용을 읽지 않고 이름만으로 `candidate_artifact_types`를 정한다 [3].
+확장자 `.evtx`는 `evtx`, `.pf`는 `prefetch`, 이름 `amcache.hve`는 `amcache`, `system`·`software`·`sam`·`security`·`default`·`ntuser.dat`·`usrclass.dat`는 `registry`가 된다 [3].
+`$mft`·`mft_dump.bin`·`$j` 같은 이름 7개는 `ntfs`, `.log1`·`.log2`로 끝나는 이름은 `registry_log`, 실행 파일 확장자 7개는 `executable`이 된다 [3].
+이 도구는 이 분류로 유형별 `collection_status`를 `PRESENT`나 `NOT_OBSERVED`로 적고 응답의 `disclaimer`에 이 분류가 내용을 확인하지 않은 경로 안내라고 적는다 [6].
+항목을 꺼내는 ZIP 항목 도구 5개는 꺼낸 항목의 `candidate_artifact_types`도 같은 함수로 정해 응답에 싣는다 [7].
+`analyze_triage_zip`과 `artifact-forensic`의 ZIP 도구는 확장자가 `.zip`이 아닌 파일을 받지 않는다 [4][5].
+
+`ir-collect`의 폴더·ZIP 분석에서 폴더 안 자료의 종류는 `IR_Collect.exe` 0.24.2가 파일 이름과 확장자로 정한다 [8].
+서버 코드는 `IR_Collect.exe`에 넘기는 폴더 안의 파일을 판별하지 않는다 [9].
+
+**한계.** 이름과 확장자가 맞으면 서버는 내용을 확인하지 않고 그 형식의 분석 도구를 실행한다 [1][2].
+`inventory_archive_members`는 정해 둔 이름 밖의 하이브(`COMPONENTS`, `BCD` 등)나 이름을 바꾼 자료를 그 유형으로 세지 않는다 [3].
+그런 자료만 있는 ZIP에서 그 유형의 `collection_status`는 `NOT_OBSERVED`가 된다 [6].
+
+### P01.02 메타데이터 조회
+
+**구현.** 이 방식은 `artifact-forensic`의 `analyze_evtx_with_hayabusa`에 적용된다 [1].
+받은 경로가 파일이면 Hayabusa에 `-f`로, 폴더이면 `-d`로 넘긴다 [10].
+서버가 증거의 OS나 파티션을 판별하는 코드는 없다.
+`local-forensic`의 `get_forensic_context`는 서버를 실행한 호스트의 OS 이름·버전·빌드와 아키텍처를 응답에 싣는다 [11].
+서버는 이 값으로 도구나 질의를 고르지 않는다 [11].
+
+### P01.03 내용·헤더 검사
+
+**구현.** 이 방식은 `artifact-forensic`의 `inspect_binary_file`·`inspect_archive_member_binary`, `ir-collect`의 `ingest_analysis_report`, ZIP을 여는 도구에 적용된다 [12][13][14].
+`inspect_binary_file`은 파일 앞 64바이트를 읽어 앞 두 바이트가 `MZ`인 파일만 PE 구조를 읽는다 [12].
+PE 서명이나 헤더를 확인하지 못하면 `is_pe`가 거짓인 결과와 경고를 싣는다 [12][15].
+같은 64바이트의 서명으로 정한 `detected_format`은 분석 결과로 응답에 실린다 [12].
+서버는 이 값으로 다른 처리를 고르지 않는다 [12].
+`MZ`만 있는 202바이트 파일로 부르자 `detected_format`은 `dos_or_windows_pe`, `pe.is_pe`는 거짓, `status`는 `DEGRADED`였다 [16].
+`inspect_archive_member_binary`는 ZIP 항목의 사본에 같은 함수를 부른다 [17].
+`ingest_analysis_report`는 JSON 보고서의 `export_schema` 값이 `summary_v3`·`correlation_v1`·`graph_v1` 가운데 무엇인지로 응답을 만드는 함수를 고르고 값이 없거나 다르면 거부한다 [13].
+`analyze_triage_zip`, `inventory_archive_members`, ZIP 항목 도구는 파일을 Python `zipfile`로 열고 ZIP 구조로 읽히지 않으면 오류를 돌려준다 [14].
+확장자가 `.zip`인 글자 파일을 `analyze_triage_zip`에 주자 "could not extract ZIP: File is not a zip file" 오류가 돌아왔다 [16].
+
+분석 도구가 스스로 하는 형식 확인도 있다.
+capa 7.1.0은 입력 앞 256바이트로 지원 형식인지 확인하고 아니면 `UnsupportedFormatError`를 낸다 [18].
+MFTECmd는 `-f` 파일의 앞 50바이트 서명으로 `$MFT`·`$J`·`$Boot`·`$SDS`와 폴더 인덱스 파일을 가린다 [19].
+
+**한계.** `ingest_analysis_report`는 `export_schema` 값만 보고 나머지 구조는 확인하지 않는다 [13][20].
+도구 설명은 보고서의 schema를 판별하고 검사한다고 적는다 [21].
+`export_schema`가 `graph_v1`이고 `nodes`에 정수 두 개만 둔 JSON을 주자 오류 없이 그 값이 응답의 `nodes`에 실렸다 [16].
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** 이 방식은 `artifact-forensic`의 `parse_windows_artifact_with_eztools`와 `parse_archive_member_with_eztools`에 적용된다 [2][22].
+모델이 `artifact_type`으로 고른 EZ Tools 도구를 입력 파일의 이름과 대조한다 [2].
+`evtx`(EvtxECmd)는 확장자 `.evtx`, `prefetch`(PECmd)는 `.pf`, `amcache`(AmcacheParser)는 파일 이름 `Amcache.hve`가 아니면 도구를 실행하지 않고 오류를 돌려준다 [2].
+`parse_archive_member_with_eztools`는 항목을 원래 파일 이름으로 작업 폴더에 꺼낸 뒤 같은 함수를 부르므로 항목 이름으로 같은 대조를 한다 [22][23].
+`prefetch`로 `.evtx` 파일을 주거나 `amcache`로 `SYSTEM` 하이브를 주자 대체 실행 파일이 실행되지 않고 오류가 돌아왔고 ZIP 항목에서도 같았다 [16].
+
+부속 입력도 대조한다.
+`companion_member_paths`는 `artifact_type`이 `registry`일 때만 받는다 [22].
+받은 항목은 고른 하이브와 같은 폴더의 `<하이브 이름>.LOG1`·`.LOG2`여야 하고 아니면 아무것도 꺼내지 않고 오류를 돌려준다 [24].
+다른 폴더의 `.LOG1`을 주거나 `evtx` 유형에 로그를 주자 오류가 돌아왔다 [16].
+
+다른 도구는 고른 방법을 입력과 대조하지 않는다.
+capa와 YARA 도구는 받은 파일의 형식과 관계없이 실행한다 [25].
+`myirteam-core`의 `resolve_investigation_intent`는 증거 경로를 열지 않고 요청 글의 낱말이나 호출자가 준 `input_kind`로 워크플로를 고르며 경로 인자는 비어 있는지만 본다 [26].
+
+**한계.** `registry`와 `ntfs`는 입력의 이름이나 확장자를 대조하지 않는다 [2].
+글자 파일을 `registry`와 `ntfs`로 주자 대체 RECmd와 MFTECmd가 실행되었다 [16].
+`registry`의 프로필(`dfir`, `registry_aseps`, `system_aseps`, `software_aseps`, `user_activity`)은 하이브의 종류와 대조하지 않는다 [2].
+대조는 이름만 보므로 이름이 맞으면 내용이 다른 형식인 파일에도 도구를 실행한다 [2].
+
+### 근거
+
+[1] `validate_input_path`는 파일이면 `.evtx` 확장자를, 폴더이면 그 아래 `.evtx` 파일이 있는지를 본다.
+```python
+def validate_input_path(path_str: str, cfg: Config) -> tuple[Path, str]:
+    if not path_str or not path_str.strip():
+        raise ValueError("input_path is empty.")
+    path = _resolve(path_str)
+    if not cfg.evidence_roots:
+        raise ValueError("no evidence roots configured (set ARTIFACT_EVIDENCE_ROOTS).")
+    if not is_under_roots(path, cfg.evidence_roots):
+        raise ValueError(f"path is outside the configured evidence roots: {path}")
+    if path.is_file():
+        if path.suffix.lower() != ".evtx":
+            raise ValueError(f"only .evtx files are accepted: {path}")
+        return path, "file"
+    if path.is_dir():
+        if not any(path.rglob("*.evtx")):
+            raise ValueError(f"folder contains no .evtx files: {path}")
+        return path, "directory"
+    raise ValueError(f"input path does not exist: {path}")
+```
+
+[`artifact-forensic-mcp/server.py:827-843`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L827-L843)
+
+[2] `parse_windows_artifact_with_eztools_impl`은 유형별로 이름을 대조하고 `registry`만 프로필 이름으로 배치 파일을 고른다.
+```python
+    normalized = descriptor["artifact_type"]
+    if normalized == "evtx" and source.suffix.lower() != ".evtx":
+        return {"error": f"artifact_type=evtx requires a .evtx file: {source}"}
+    if normalized == "prefetch" and source.suffix.lower() != ".pf":
+        return {"error": f"artifact_type=prefetch requires a .pf file: {source}"}
+    if normalized == "amcache" and source.name.lower() != "amcache.hve":
+        return {"error": f"artifact_type=amcache requires a file named Amcache.hve: {source}"}
+
+    integrity = executable_integrity(
+        descriptor["path"],
+        descriptor["expected_sha256"],
+        descriptor["label"],
+        require_pin=True,
+    )
+    if integrity["status"] == "FAILED":
+        return {"error": integrity["error"], "integrity": integrity}
+
+    batch_path = None
+    if normalized == "registry":
+        normalized_profile = str(profile or "dfir").strip().lower()
+        batch_spec = RECMD_PROFILES.get(normalized_profile)
+        if batch_spec is None:
+            return {"error": f"profile must be one of: {', '.join(sorted(RECMD_PROFILES))}"}
+        batch_name, expected_batch_sha256 = batch_spec
+        batch_path = (DEFAULT_RECMD_BATCH_DIR / batch_name).resolve()
+        if not batch_path.is_relative_to(DEFAULT_RECMD_BATCH_DIR.resolve()) or not batch_path.is_file():
+            return {"error": f"bundled RECmd profile is missing or unsafe: {batch_path}"}
+```
+
+[`artifact-forensic-mcp/server.py:1644-1670`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1644-L1670)
+
+[3] `archive_member_candidate_types`는 항목 이름만으로 유형을 정한다.
+```python
+def archive_member_candidate_types(member_path: str) -> list[str]:
+    """Classify names only for analyst routing; this does not validate contents."""
+    pure = PurePosixPath(member_path)
+    name = pure.name.lower()
+    suffix = pure.suffix.lower()
+    candidates: list[str] = []
+    if suffix == ".evtx":
+        candidates.append("evtx")
+    if suffix == ".pf":
+        candidates.append("prefetch")
+    if name == "amcache.hve":
+        candidates.append("amcache")
+    if name in {
+        "system",
+        "software",
+        "sam",
+        "security",
+        "default",
+        "ntuser.dat",
+        "usrclass.dat",
+    }:
+        candidates.append("registry")
+    if name in {"$mft", "mft_dump.bin", "mft.bin", "$j", "$boot", "$sds", "$i30"}:
+        candidates.append("ntfs")
+    if name.endswith((".log1", ".log2")):
+        candidates.append("registry_log")
+    if suffix in EXECUTABLE_MEMBER_SUFFIXES:
+        candidates.append("executable")
+    return candidates
+```
+
+[`artifact-forensic-mcp/server.py:930-958`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L930-L958)
+
+[4] `analyze_triage_zip_impl`은 `.zip` 확장자가 아니면 거부한다.
+```python
+    try:
+        p = validate_evidence_file(zip_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if p.suffix.lower() != ".zip":
+        return {"error": f"not a .zip file: {p}"}
+```
+
+[`ir-collect-mcp/server.py:807-812`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L807-L812)
+
+[5] `validate_archive_file`은 `.zip`이 아닌 파일을 거부한다.
+```python
+def validate_archive_file(path_str: str, cfg: Config) -> Path:
+    """Validate one allowlisted ZIP without applying the standalone-artifact cap."""
+    source = validate_evidence_path(path_str, cfg)
+    if not source.is_file() or source.is_symlink():
+        raise ValueError(f"archive path is not a regular file: {source}")
+    if source.suffix.lower() != ".zip":
+        raise ValueError(f"archive path is not a .zip file: {source}")
+    size = source.stat().st_size
+    if size > cfg.max_archive_bytes:
+        raise ValueError(
+            f"archive is {size} bytes, above ARTIFACT_MAX_ARCHIVE_BYTES="
+            f"{cfg.max_archive_bytes}."
+        )
+    return source
+```
+
+[`artifact-forensic-mcp/server.py:880-893`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L880-L893)
+
+[6] `inventory_archive_members_impl`은 이름 분류로 유형별 `collection_status`를 정하고 분류가 경로 안내라고 적는다.
+```python
+    artifact_coverage = {
+        artifact_type: {
+            "collection_status": (
+                "PRESENT" if candidate_counts.get(artifact_type, 0) else "NOT_OBSERVED"
+            ),
+            "candidate_count": candidate_counts.get(artifact_type, 0),
+            "parse_eligible_count": eligible_candidate_counts.get(artifact_type, 0),
+            "blocked_candidate_count": (
+                candidate_counts.get(artifact_type, 0)
+                - eligible_candidate_counts.get(artifact_type, 0)
+            ),
+            "parse_status": "NOT_ATTEMPTED",
+        }
+        for artifact_type in ARCHIVE_COVERAGE_TYPES
+    }
+```
+
+[`artifact-forensic-mcp/server.py:1509-1523`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1509-L1523)
+[`artifact-forensic-mcp/server.py:1551-1554`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1551-L1554)
+
+[7] 꺼낸 항목의 기록에 이름 분류를 싣는다.
+```python
+    return {
+        "member_path": normalized_member,
+        "member_size_bytes": info.file_size,
+        "member_compressed_size_bytes": info.compress_size,
+        "member_crc32": f"{info.CRC:08x}",
+        "candidate_artifact_types": archive_member_candidate_types(normalized_member),
+        "member_sha256": digest.hexdigest(),
+        "extracted_path": destination,
+    }
+```
+
+[`artifact-forensic-mcp/server.py:1842-1850`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1842-L1850)
+
+[8] `IR_Collect.exe` 0.24.2의 `LoadCaseFromFolder`는 폴더의 파일을 확장자와 이름으로 골라 자료 목록에 넣는다: [`src/Analysis/CaseManager.cs:480-505`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L480-L505).
+
+[9] 폴더 분석은 폴더를 검사하고 복사한 뒤 `-analyze`에 넘긴다.
+```python
+    try:
+        src = validate_evidence_dir(folder_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    work = _new_work_dir(cfg)
+    try:
+        target = src
+        copy_summary = None
+        if work_on_copy:
+            target = work / ("input_" + src.name)
+            try:
+                copy_summary = _safe_copy_evidence_tree(src, target)
+            except (OSError, ValueError) as exc:
+                return {"error": f"could not safely copy evidence folder: {exc}"}
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+```
+
+[`ir-collect-mcp/server.py:757-773`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L757-L773)
+
+[10] Hayabusa에 넘기는 입력 인자는 경로의 종류로 정한다.
+```python
+        input_flag = "-f" if source_kind == "file" else "-d"
+        args = [
+            "json-timeline",
+            input_flag,
+            str(source),
+```
+
+[`artifact-forensic-mcp/server.py:2419-2423`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2419-L2423)
+
+[11] `get_forensic_context`는 호스트 정보를 응답에 싣기만 한다.
+[`mcp-server/autoruns_mcp.py:433-511`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L433-L511)
+
+[12] `detect_file_format`은 머리 바이트의 서명으로 형식을 가리고 `inspect_binary_file_impl`은 `MZ`일 때만 PE 구조를 읽는다.
+```python
+def detect_file_format(header: bytes) -> str:
+    if header.startswith(b"MZ"):
+        return "dos_or_windows_pe"
+    if header.startswith(b"\x7fELF"):
+        return "elf"
+    if header.startswith(b"%PDF-"):
+        return "pdf"
+    if header.startswith(b"PK\x03\x04"):
+        return "zip_or_ooxml"
+    if header.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7zip"
+    if header.startswith(b"\x1f\x8b"):
+        return "gzip"
+    if header.startswith(b"Rar!\x1a\x07"):
+        return "rar"
+    if header.startswith(b"SQLite format 3\x00"):
+        return "sqlite3"
+    if header.startswith(b"regf"):
+        return "windows_registry_hive"
+    if header.startswith(b"ElfFile\x00"):
+        return "windows_evtx"
+    if header.startswith((b"#!", b"@echo off", b"@ECHO OFF")):
+        return "script_text"
+    return "unknown"
+```
+
+[`artifact-forensic-mcp/server.py:367-390`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L367-L390)
+```python
+        before = file_hashes_and_entropy(source)
+        with open(source, "rb") as handle:
+            header = handle.read(64)
+        detected_format = detect_file_format(header)
+        pe = parse_pe_structure(source) if header.startswith(b"MZ") else None
+```
+
+[`artifact-forensic-mcp/server.py:559-563`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L559-L563)
+
+[13] `ingest_analysis_report_impl`은 `export_schema`로 응답을 만드는 함수를 고른다.
+```python
+def ingest_analysis_report_impl(cfg: Config, report_path: str) -> dict[str, Any]:
+    try:
+        p = validate_evidence_file(report_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    try:
+        data = read_json_file(p)
+    except (ValueError, OSError) as exc:
+        return {"error": f"could not read/parse JSON report: {exc}"}
+    if not isinstance(data, dict):
+        return {"error": "report is not a JSON object."}
+    schema = data.get("export_schema")
+    shaper = SHAPERS.get(schema)
+    if shaper is None:
+        return {"error": f"unrecognized or missing export_schema: {schema!r}. Supported: {list(SUPPORTED_SCHEMAS)}"}
+    return shaper(data, {"ingested": True, "source_report": str(p)})
+```
+
+[`ir-collect-mcp/server.py:867-882`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L867-L882)
+
+[14] ZIP 도구는 `zipfile`로 열고 열지 못하면 오류를 돌려준다: [`ir-collect-mcp/server.py:821-831`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L821-L831), [`artifact-forensic-mcp/server.py:1387-1389`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1387-L1389), [`artifact-forensic-mcp/server.py:1477-1478`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1477-L1478), [`artifact-forensic-mcp/server.py:1864-1865`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1864-L1865), [`artifact-forensic-mcp/server.py:1942-1943`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1942-L1943).
+
+[15] PE 서명과 헤더를 확인하지 못하면 `is_pe`가 거짓인 결과를 돌려주고 경고를 더한다.
+```python
+    file_size = path.stat().st_size
+    with open(path, "rb") as handle:
+        dos_header = handle.read(64)
+        if len(dos_header) < 64 or not dos_header.startswith(b"MZ"):
+            return {"is_pe": False, "parse_error": "missing DOS MZ header"}
+        pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
+        if pe_offset < 64 or pe_offset + 24 > file_size:
+            return {"is_pe": False, "parse_error": "PE header offset is outside the file"}
+        handle.seek(pe_offset)
+        signature = handle.read(4)
+        if signature != b"PE\x00\x00":
+            return {"is_pe": False, "parse_error": "missing PE signature"}
+```
+
+[`artifact-forensic-mcp/server.py:413-424`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L413-L424)
+```python
+    warnings: list[str] = []
+    if before["hashes"]["sha256"] != sha256_after:
+        warnings.append("The source artifact changed during inspection.")
+    if pe and not pe.get("is_pe"):
+        warnings.append(f"MZ file could not be validated as PE: {pe.get('parse_error')}")
+```
+
+[`artifact-forensic-mcp/server.py:573-577`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L573-L577)
+
+[16] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 EZ Tools와 `IR_Collect.exe` 자리에 받은 인자를 기록하는 시험용 실행 파일을 두고 이름이 맞지 않는 입력, 글자 파일, `MZ`만 있는 파일, 형식이 틀린 ZIP과 보고서, 다른 폴더의 로그로 해당 도구를 불렀다.
+
+[17] `inspect_archive_member_binary_impl`은 항목 사본에 `inspect_binary_file_impl`을 부른다.
+```python
+def inspect_archive_member_binary_impl(
+    cfg: Config,
+    archive_path: str,
+    member_path: str,
+    include_strings: bool = True,
+    max_strings: int = 100,
+) -> dict[str, Any]:
+    """Inspect one exact ZIP member as a bounded binary-analysis copy."""
+    return run_archive_member_analysis_impl(
+        cfg,
+        archive_path,
+        member_path,
+        lambda member_cfg, extracted_path: inspect_binary_file_impl(
+            member_cfg,
+            extracted_path,
+            include_strings,
+            max_strings,
+        ),
+        analysis_mode="offline_zip_member_binary_inspection",
+        coverage_type="file",
+    )
+```
+
+[`artifact-forensic-mcp/server.py:2791-2811`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2791-L2811)
+
+[18] capa 7.1.0은 입력 앞 0x100바이트로 형식을 확인하고 지원하지 않으면 `UnsupportedFormatError`를 낸다: [`capa/loader.py:67-72`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/loader.py#L67-L72), [`capa/loader.py:257-262`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/loader.py#L257-L262).
+
+[19] MFTECmd(`6aadd87`)의 `GetFileType`은 파일 앞 50바이트의 서명으로 종류를 정한다: [`MFTECmd/Program.cs:2739-2758`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L2739-L2758).
+
+[20] `shape_graph`는 `nodes`·`edges`가 `list`인지만 보고 앞부분을 그대로 싣는다.
+```python
+def shape_graph(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw graph_v1 payload (multi-hop investigation graph)."""
+    nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, provenance),
+        "seed_type": data.get("seed_type"),
+        "seed_value": data.get("seed_value"),
+        "max_depth": data.get("max_depth"),
+        "per_hop_fanout": data.get("per_hop_fanout"),
+        "host_count": data.get("host_count"),
+        "node_count": data.get("node_count"),
+        "edge_count": data.get("edge_count"),
+        "nodes": nodes[:MAX_NODES],
+        "edges": edges[:MAX_EDGES],
+        "truncated": len(nodes) > MAX_NODES or len(edges) > MAX_EDGES,
+        "disclaimer": "Graph nodes/edges are factual entity relationships, not verdicts.",
+    }
+```
+
+[`ir-collect-mcp/server.py:662-681`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L662-L681)
+
+[21] `ingest_analysis_report`의 설명은 schema를 판별하고 검사한다고 적는다.
+```python
+@mcp.tool()
+def ingest_analysis_report(
+    report_path: str,
+    response_format: str = EVIDENCE_RESPONSE_FORMAT,
+) -> Any:
+    """Ingest an EXISTING IR_Collect JSON report (summary_v3 / correlation_v1 /
+    graph_v1) produced elsewhere, as one evidence source. Detects the schema,
+    validates it, caps size, and returns it normalized. Pure read — does not run
+    the engine, so it works cross-platform without IR_Collect.exe. The report path
+    must resolve under the configured evidence roots. Set response_format='evidence_v1'
+    for the common Evidence Envelope."""
+```
+
+[`ir-collect-mcp/server.py:1068-1078`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L1068-L1078)
+
+[22] `parse_archive_member_with_eztools_impl`은 로그 경로를 `registry`에만 받고 꺼낸 사본에 같은 함수를 부른다.
+```python
+    try:
+        record_limit = validate_max_records(max_records)
+        descriptor = eztool_descriptor(cfg, artifact_type)
+        normalized_type = descriptor["artifact_type"]
+        if companion_member_paths and normalized_type != "registry":
+            raise ValueError("companion_member_paths is supported only for artifact_type=registry.")
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return run_archive_member_analysis_impl(
+        cfg,
+        archive_path,
+        member_path,
+        lambda member_cfg, extracted_path: parse_windows_artifact_with_eztools_impl(
+            member_cfg,
+            extracted_path,
+            normalized_type,
+            profile,
+            record_limit,
+            bool(companion_member_paths),
+        ),
+        analysis_mode="offline_zip_member_windows_artifact_parser",
+        coverage_type=normalized_type,
+        companion_member_paths=companion_member_paths,
+    )
+```
+
+[`artifact-forensic-mcp/server.py:2062-2085`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2062-L2085)
+
+[23] 항목 사본은 원래 파일 이름으로 작업 폴더에 만든다.
+```python
+            destination_names = [PurePosixPath(normalized).name for _, normalized in selected]
+            if len({name.casefold() for name in destination_names}) != len(destination_names):
+                raise ValueError("selected archive members would collide in the private work directory.")
+            copied = [
+                stream_archive_member_copy(
+                    archive,
+                    info,
+                    normalized,
+                    member_root / PurePosixPath(normalized).name,
+                    cfg,
+                )
+                for info, normalized in selected
+            ]
+```
+
+[`artifact-forensic-mcp/server.py:1882-1894`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1882-L1894)
+
+[24] `validate_archive_companion_paths`는 같은 폴더의 `.LOG1`·`.LOG2`만 받는다.
+```python
+def validate_archive_companion_paths(
+    primary_member: str,
+    companion_member_paths: list[str] | None,
+) -> list[str]:
+    """Allow only adjacent Registry transaction logs for one selected hive."""
+    companions = list(companion_member_paths or [])
+    if len(companions) > MAX_ARCHIVE_COMPANION_MEMBERS:
+        raise ValueError(
+            f"companion_member_paths accepts at most {MAX_ARCHIVE_COMPANION_MEMBERS} entries."
+        )
+    primary = PurePosixPath(primary_member)
+    allowed_names = {
+        f"{primary.name}.LOG1".casefold(),
+        f"{primary.name}.LOG2".casefold(),
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in companions:
+        candidate = normalize_archive_member(value)
+        pure = PurePosixPath(candidate)
+        if pure.parent != primary.parent or pure.name.casefold() not in allowed_names:
+            raise ValueError(
+                "Registry companions must be the selected hive's same-directory .LOG1/.LOG2 files."
+            )
+        folded = candidate.casefold()
+        if folded in seen:
+            raise ValueError(f"duplicate companion member requested: {candidate}")
+        seen.add(folded)
+        normalized.append(candidate)
+    return normalized
+```
+
+[`artifact-forensic-mcp/server.py:1782-1811`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1782-L1811)
+
+[25] capa와 YARA 도구는 파일 검사와 수 검사 뒤 바로 실행한다: [`artifact-forensic-mcp/server.py:2509-2536`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2509-L2536), [`artifact-forensic-mcp/server.py:2652-2699`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2652-L2699).
+
+```python
+    try:
+        source = validate_artifact_file(input_path, cfg)
+        capability_limit = validate_bounded_count(
+            max_capabilities,
+            name="max_capabilities",
+            maximum=MAX_CAPABILITIES_LIMIT,
+        )
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc)}
+
+    integrity = executable_integrity(
+        cfg.capa_exe_path,
+        cfg.capa_expected_sha256,
+        "capa",
+        require_pin=True,
+    )
+    if integrity["status"] == "FAILED":
+        return {"error": integrity["error"], "integrity": integrity}
+
+    source_digest_before = sha256_file(source)
+    run_dir = cfg.work_dir / ("capa_" + uuid.uuid4().hex)
+    try:
+        execution = run_static_tool(
+            cfg.capa_exe_path,
+            ["-j", "--color", "never", str(source)],
+            run_dir,
+            cfg.static_timeout,
+        )
+```
+
+[`artifact-forensic-mcp/server.py:2509-2536`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2509-L2536)
+
+[26] `resolve_investigation_intent_impl`은 `input_kind`나 요청 글의 키워드로 경로를 고르고 경로 인자는 빈 값인지만 본다.
+[`core-mcp/server.py:133-179`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L133-L179)

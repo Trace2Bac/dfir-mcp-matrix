@@ -1,0 +1,183 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 네 서버에는 앞선 작업 상태, 모델 밖 승인, 호출자 신원, 실행 자원으로 호출을 막거나 미루는 코드가 없다.
+세 증거 서버의 도구 함수는 인자와 경로 검사를 마치면 바로 분석 도구를 실행한다 [1][2].
+`ir-collect`와 `artifact-forensic`은 실행 전에 실행 파일의 해시 대조도 한다 [1][2].
+세 증거 서버의 초기화 지침은 `myirteam-core`가 워크플로를 고른 뒤에 쓰라고 안내한다 [3].
+`resolve_investigation_intent`는 고른 워크플로와 다음에 부를 도구를 응답에 적기만 하고 그 결과를 서버에 남기지 않는다 [4].
+증거 서버는 앞서 `myirteam-core`를 불렀는지 보지 않으며 네 서버는 서로 상태를 주고받지 않는다 [1][2].
+
+`collect_triage_package`는 사용자가 정한 환경변수 `IRCOLLECT_ALLOW_COLLECTION`과 호출 인자 `acknowledge_live_response`가 모두 참일 때만 실행한다 [5].
+환경변수는 서버가 시작할 때 한 번 읽는 설정이고 호출마다 받는 승인이 아니다 [5].
+`acknowledge_live_response`는 모델이 같은 호출 안에서 정하는 값이고 서버는 사용자가 낸 승인 토큰이나 승인 기록을 받거나 대조하지 않는다 [5].
+
+네 서버는 `mcp.run()`을 기본 전송 방식인 stdio로 실행하므로 원격 MCP 연결을 받지 않는다 [6][7].
+`portable_mcp.py`는 서버 ID를 받아 정해 둔 진입점 하나를 실행할 뿐 호출자를 확인하지 않는다 [8].
+
+서버는 실행 전에 메모리, CPU, 디스크 여유 공간을 확인하지 않는다.
+ZIP 크기와 항목 수 상한, `run_static_tool`이 출력 크기가 16MiB를 넘으면 도구를 멈추는 동작은 입력과 출력의 크기 상한이고 실행 자원의 상태를 보지 않는다 [9][10].
+
+동시 실행 수를 정하는 장치도 없다.
+네 서버의 도구 함수는 모두 동기 함수이고 MCP Python SDK 1.28.1의 `FastMCP`는 동기 도구 함수를 이벤트 루프에서 `await` 없이 바로 부른다 [11].
+그래서 한 호출이 분석 도구의 종료를 기다리는 동안 같은 서버의 다른 요청은 처리되지 않는다 [11].
+이는 서버가 정한 제한이 아니라 SDK가 동기 함수를 부르는 방식에서 생기는 동작이다.
+
+### 근거
+
+[1] `analyze_artifact_folder_impl`은 실행 파일 확인과 경로 검사를 마치면 바로 `IR_Collect.exe`를 실행한다.
+
+```python
+def analyze_artifact_folder_impl(cfg: Config, folder_path: str, work_on_copy: bool = True) -> dict[str, Any]:
+    integrity = ircollect_integrity_status(cfg)
+    if integrity["status"] == "FAILED":
+        return {"error": integrity["error"], "integrity": integrity}
+    try:
+        src = validate_evidence_dir(folder_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    work = _new_work_dir(cfg)
+    try:
+        target = src
+        copy_summary = None
+        if work_on_copy:
+            target = work / ("input_" + src.name)
+            try:
+                copy_summary = _safe_copy_evidence_tree(src, target)
+            except (OSError, ValueError) as exc:
+                return {"error": f"could not safely copy evidence folder: {exc}"}
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+```
+
+[`ir-collect-mcp/server.py:753-773`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L753-L773)
+
+[2] `analyze_evtx_with_hayabusa_impl`은 인자 검사와 해시 대조를 마치면 바로 Hayabusa를 실행한다: [`artifact-forensic-mcp/server.py:2402-2438`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2402-L2438).
+
+[3] 증거 서버의 초기화 지침은 `myirteam-core`가 워크플로를 고른 뒤 쓰라고 적는다.
+
+```python
+SERVER_INSTRUCTIONS = (
+    "MyIRTeam local-forensic provides bounded live-host evidence, not verdicts. "
+    "Use it only after myirteam-core resolves a workflow. Evidence Envelope v1 is "
+    "the default. Never replace a failed call with Shell, PowerShell, Python, or "
+    "a direct forensic CLI."
+)
+```
+
+[`mcp-server/autoruns_mcp.py:17-22`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L17-L22)
+
+```python
+SERVER_INSTRUCTIONS = (
+    "MyIRTeam artifact-forensic reads only allowlisted offline artifacts and safe ZIP "
+    "members; it never executes samples and returns leads rather than verdicts. Use "
+    "it after myirteam-core resolves a workflow. Evidence Envelope v1 is the default. "
+    "Never bypass MCP with Shell, PowerShell, Python, extraction scripts, or direct CLIs."
+)
+```
+
+[`artifact-forensic-mcp/server.py:40-45`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L40-L45)
+
+[`ir-collect-mcp/server.py:47-52`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L47-L52)
+
+[4] 경로 결정 결과는 응답의 `execution_contract`로만 돌아간다: [`core-mcp/server.py:195-249`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L195-L249).
+
+[5] 수집 도구는 설정값과 호출 인자만 확인한다.
+
+```python
+        allow_collection=_truthy(os.environ.get("IRCOLLECT_ALLOW_COLLECTION", "")),
+```
+
+[`ir-collect-mcp/server.py:183-183`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L183-L183)
+
+```python
+def collect_triage_package_impl(cfg: Config, evidence_id: str = "",
+                                acknowledge_live_response: bool = False) -> dict[str, Any]:
+    # Gate 1 (deployment): off unless the operator explicitly enabled collection.
+    if not cfg.allow_collection:
+        return {"error": "Live collection is disabled by deployment. Set IRCOLLECT_ALLOW_COLLECTION=1 to "
+                         "enable this high-impact, host-changing tool.", "gated": True}
+    # Gate 2 (invocation): the caller must affirmatively acknowledge the live-response action.
+    if not acknowledge_live_response:
+        return {"error": "Live-response collection changes this host and needs elevation for full coverage. "
+                         "Re-call with acknowledge_live_response=true to proceed.",
+                "requires_acknowledgement": True}
+```
+
+[`ir-collect-mcp/server.py:948-958`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L948-L958)
+
+[6] 네 서버는 인자 없이 `mcp.run()`을 부른다: [`core-mcp/server.py:376-377`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L376-L377), [`mcp-server/autoruns_mcp.py:1345-1346`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1345-L1346), [`ir-collect-mcp/server.py:1161-1162`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L1161-L1162), [`artifact-forensic-mcp/server.py:3243-3244`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L3243-L3244).
+
+[7] MCP Python SDK 1.28.1의 `FastMCP.run`은 `transport`의 기본값이 `stdio`다: [`src/mcp/server/fastmcp/server.py:279-296`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/server.py#L279-L296).
+
+[8] 실행기는 서버 ID를 정해 둔 진입점에 대응시킨다.
+
+```python
+def resolve_server_entrypoint(server_id: str, root: Path = PROJECT_ROOT) -> Path:
+    """Return one fixed server path and reject arbitrary path execution."""
+    relative = SERVER_ENTRYPOINTS.get(server_id)
+    if relative is None:
+        choices = ", ".join(sorted(SERVER_ENTRYPOINTS))
+        raise ValueError(f"Unknown server {server_id!r}. Choose one of: {choices}")
+
+    resolved_root = root.resolve()
+    entrypoint = (resolved_root / relative).resolve()
+    if not entrypoint.is_relative_to(resolved_root) or not entrypoint.is_file():
+        raise FileNotFoundError(f"MCP server entrypoint is missing or unsafe: {entrypoint}")
+    return entrypoint
+```
+
+[`portable_mcp.py:24-35`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/portable_mcp.py#L24-L35)
+
+[9] `run_static_tool`은 출력 크기와 시간 제한만 본다.
+
+```python
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            try:
+                output_size = sum(
+                    item.stat().st_size
+                    for item in run_dir.rglob("*")
+                    if item.is_file()
+                )
+            except OSError:
+                output_size = 0
+            if output_size > MAX_STATIC_OUTPUT_BYTES:
+                output_limited = True
+                process.kill()
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                process.kill()
+                break
+            time.sleep(0.05)
+```
+
+[`artifact-forensic-mcp/server.py:1188-1206`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1188-L1206)
+
+[10] ZIP 풀기 전 검사는 크기와 항목 수를 본다.
+
+```python
+    archive_size = zip_path.stat().st_size
+    if archive_size > max_zip_bytes:
+        raise ValueError(
+            f"ZIP is {archive_size} bytes, above IRCOLLECT_MAX_ZIP_BYTES={max_zip_bytes}."
+        )
+    dest = dest.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        infos = archive.infolist()
+        if len(infos) > max_members:
+            raise ValueError(f"ZIP contains {len(infos)} members; maximum is {max_members}.")
+```
+
+[`ir-collect-mcp/server.py:452-461`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L452-L461)
+
+[11] MCP Python SDK 1.28.1은 동기 도구 함수를 `await` 없이 부르고([`src/mcp/server/fastmcp/utilities/func_metadata.py:87-96`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/utilities/func_metadata.py#L87-L96)) 받은 메시지마다 같은 이벤트 루프의 작업을 만든다([`src/mcp/server/lowlevel/server.py:679-690`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L679-L690)).

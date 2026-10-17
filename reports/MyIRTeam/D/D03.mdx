@@ -1,0 +1,184 @@
+---
+cell: D03
+details:
+- id: D03.01
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 `ir-collect`의 `collect_triage_package`가 남기는 수집 ZIP에 적용된다 [1].
+ZIP이 생기면 서버는 모델의 요청 없이 ZIP 내용 전체의 SHA-256을 계산해 응답의 `sha256`에 싣고 크기를 `size_bytes`에 싣는다 [1][2].
+기준값은 ZIP 내용 전체의 SHA-256 하나다 [1].
+서버는 이 값을 응답에만 싣고 파일이나 다른 저장소에 남기지 않는다 [1].
+`IR_Collect.exe` 0.24.2도 ZIP을 묶은 뒤 그 SHA-256을 계산해 `<ID>.zip.sha256`에 16진수 문자열 하나로 쓴다 [3].
+서버는 이 파일이 있는지만 `sha256_sidecar_present`로 알리고 그 값을 읽어 서버가 계산한 값과 대조하지 않는다 [1].
+응답의 `next_step`은 해시 파일을 검증한 뒤 ZIP을 증거 폴더에 두고 `analyze_triage_zip`으로 분석하라고 안내한다 [1].
+
+수집 ZIP을 기준값과 대조하는 경로는 증거를 다루는 도구에만 있다.
+`artifact-forensic`의 `verify_sha256_manifest`는 이름 없이 해시만 적힌 `.sha256` 파일을 받으면 확장자를 뺀 같은 이름의 파일을 대상으로 SHA-256을 대조한다 [4].
+이 도구는 manifest와 대상이 모두 `ARTIFACT_EVIDENCE_ROOTS` 아래에 있어야 대조하므로 수집 ZIP과 해시 파일을 증거 폴더로 옮겨야 쓸 수 있다 [4][5].
+`analyze_triage_zip`은 분석 전후에 ZIP의 SHA-256을 계산해 둘이 다르면 경고를 싣지만 수집 때 계산한 값과는 대조하지 않는다 [6].
+
+그 밖의 파생물에는 기준값을 계산하지 않는다.
+증거 폴더를 복사하지 않고 분석할 때 분석 도구가 증거 폴더에 쓰는 CSV와 분석 도구의 로그 파일에는 서버가 해시를 계산하지 않는다.
+`artifact-forensic`은 ZIP 항목 사본을 꺼낼 때와 분석한 뒤에 그 SHA-256을 계산해 대조하지만 이 사본은 분석 입력이고 응답 전에 지운다 [7].
+Zimmerman 도구의 CSV 출력에는 이름과 크기만 응답에 싣고 해시를 계산하지 않는다 [8].
+
+**한계.** 수집 ZIP의 해시 계산은 `collect_triage_package`를 켜지 않아 실행하지 않았고 서버 코드와 `IR_Collect.exe` 소스로만 확인했다 [1][3].
+
+### 근거
+
+[1] `collect_triage_package`는 ZIP이 있으면 그 크기와 SHA-256, 해시 파일이 있는지를 응답에 싣는다.
+
+```python
+    sidecar = out_dir / (eid + ".zip.sha256")
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "evidence_id": eid,
+        "zip_path": str(zip_path),
+        "size_bytes": zip_path.stat().st_size,
+        "sha256": sha256_file(zip_path),
+        "sha256_sidecar_present": sidecar.is_file(),
+        "is_administrator": is_admin(),
+        "exit_code": rc,
+        "analyzer_sha256": integrity["sha256"],
+        "warning": ("LIVE-RESPONSE collection: this read live artifacts and wrote output ON this host "
+                    "(not zero-footprint). Full coverage ($MFT, registry hives, SRUM) requires elevation; "
+                    "without admin the collection still completes but is partial."),
+        "next_step": (
+            "To analyze: verify any SHA-256 sidecar, place the ZIP under "
+            "IRCOLLECT_EVIDENCE_ROOTS, then call analyze_triage_zip without manual extraction."
+        ),
+        "disclaimer": "Collection changes the host; this tool is opt-in and never part of default automated flows.",
+    }
+```
+
+[`ir-collect-mcp/server.py:981-1001`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L981-L1001)
+
+[2] `sha256_file`은 파일 내용 전체를 읽어 SHA-256을 계산한다.
+
+```python
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+```
+
+[`ir-collect-mcp/server.py:203-208`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L203-L208)
+
+[3] `IR_Collect.exe` 0.24.2는 ZIP을 묶은 뒤 그 SHA-256을 `<ID>.zip.sha256`에 쓴다: [`src/Collector.cs:261-279`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Collector.cs#L261-L279).
+
+[4] 해시만 적힌 `.sha256` 항목은 확장자를 뺀 파일을 대상으로 삼고 대상이 증거 폴더 밖이면 대조하지 않는다.
+
+```python
+    for entry in entries[:entry_limit]:
+        target_text = entry["target"]
+        if target_text is None:
+            if implicit_target_used or manifest.suffix.lower() != ".sha256":
+                results.append(
+                    {
+                        **entry,
+                        "status": "INVALID",
+                        "error": "A hash-only entry requires one .sha256 sidecar target.",
+                    }
+                )
+                status_counts["INVALID"] += 1
+                continue
+            implicit_target_used = True
+            candidate = manifest.with_suffix("")
+        else:
+            expanded = Path(os.path.expandvars(os.path.expanduser(str(target_text))))
+            candidate = expanded if expanded.is_absolute() else manifest.parent / expanded
+```
+
+[`artifact-forensic-mcp/server.py:669-686`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L669-L686)
+
+증거 폴더와 대조하는 곳: [`artifact-forensic-mcp/server.py:693-703`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L693-L703).
+
+[5] manifest 파일도 `ARTIFACT_EVIDENCE_ROOTS` 아래에 있어야 한다.
+
+```python
+def validate_artifact_file(path_str: str, cfg: Config) -> Path:
+    if not path_str or not path_str.strip():
+        raise ValueError("input_path is empty.")
+    path = _resolve(path_str)
+    if not cfg.evidence_roots:
+        raise ValueError("no evidence roots configured (set ARTIFACT_EVIDENCE_ROOTS).")
+    if not is_under_roots(path, cfg.evidence_roots):
+        raise ValueError(f"path is outside the configured evidence roots: {path}")
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"input path is not a regular file: {path}")
+```
+
+[`artifact-forensic-mcp/server.py:846-855`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L846-L855)
+
+[6] `analyze_triage_zip`은 분석 전후의 ZIP 해시를 대조한다.
+
+```python
+    try:
+        source_zip_size = p.stat().st_size
+        source_zip_digest_before = sha256_file(p)
+    except OSError as exc:
+        return {"error": f"could not hash source ZIP before analysis: {exc}"}
+```
+
+[`ir-collect-mcp/server.py:813-817`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L813-L817)
+
+```python
+        try:
+            source_zip_digest_after = sha256_file(p)
+        except OSError as exc:
+            return {"error": f"could not hash source ZIP after analysis: {exc}", "exit_code": rc}
+        result = shape_summary(
+            data,
+            {
+                "analyzed_copy": True,
+                "source_zip": str(p),
+                "source_zip_size_bytes": source_zip_size,
+                "source_zip_sha256_before": source_zip_digest_before,
+                "source_zip_sha256_after": source_zip_digest_after,
+                "exit_code": rc,
+                "analyzer_sha256": integrity["sha256"],
+            },
+        )
+        result["archive_extraction"] = extraction
+        if source_zip_digest_after != source_zip_digest_before:
+            result.setdefault("load_warnings", []).append(
+                "The source ZIP changed during offline analysis."
+            )
+```
+
+[`ir-collect-mcp/server.py:841-861`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L841-L861)
+
+[7] ZIP 항목 사본의 해시를 분석 전후에 대조한다: [`artifact-forensic-mcp/server.py:1814-1850`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1814-L1850), [`artifact-forensic-mcp/server.py:1940-1941`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1940-L1941), [`artifact-forensic-mcp/server.py:2018-2023`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2018-L2023).
+
+[8] CSV 출력은 이름과 크기만 남긴다.
+
+```python
+    for path in output_files:
+        try:
+            size = path.stat().st_size
+            with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fields = list(reader.fieldnames or [])[:MAX_CSV_COLUMNS]
+                for row in reader:
+                    record_count += 1
+                    if len(records) < max_records:
+                        records.append(
+                            {
+                                "source_csv": path.name,
+                                **{
+                                    str(field): _bounded_text(row.get(field))
+                                    for field in fields
+                                },
+                            }
+                        )
+            file_summaries.append({"name": path.name, "size_bytes": size})
+```
+
+[`artifact-forensic-mcp/server.py:1572-1590`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1572-L1590)

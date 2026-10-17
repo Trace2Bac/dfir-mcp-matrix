@@ -1,0 +1,715 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.02
+- id: T08.03
+- id: T08.04
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 `local-forensic`의 Sysinternals 도구와 PowerShell 실행, `artifact-forensic`의 EZ Tools·Hayabusa·capa·YARA·YARA-X 실행에 적용된다 [1][2][3][4][5][6].
+`run_sysinternals_tool`은 종료 코드가 0이 아니면 `Error: <도구> exited with code <값>.` 뒤에 도구의 출력을 붙인 글을 돌려준다 [1].
+`run_powershell_json`은 종료 코드가 0이 아니면 `PowerShell command failed.`와 표준 오류를 `error`·`details`로 돌려준다 [2].
+`evidence_v1` 응답에서 Sysinternals 도구 하나의 결과를 그대로 돌려주는 도구와 PowerShell 결과를 그대로 돌려주는 `list_running_processes`·`list_loaded_dlls`·`list_services`·`list_scheduled_tasks`의 상태는 이때 `FAILED`다 [7].
+PowerShell 결과를 `result`나 `host` 안에 담는 `get_forensic_context`·`get_file_metadata`·`collect_event_log_events`·`list_wmi_subscriptions`·`collect_defender_context`·`list_local_users_and_admins`·`collect_network_context`와 채널마다 결과를 담는 `collect_ir_event_bundle`의 상태는 `DEGRADED`다 [7][8].
+실행 확인에서 종료 코드 1을 돌려주도록 바꾼 Sysinternals 실행으로 `collect_autoruns`를 부르면 상태가 `FAILED`였다 [9].
+
+`artifact-forensic`의 EZ Tools와 Hayabusa 실행은 출력 파일이 없으면 종료 코드와 상관없이 실패로 정한다 [3][4].
+이때 `details`에는 도구의 표준 오류나 표준 출력을 싣고 둘 다 비면 종료 코드를 싣는다 [3][4].
+출력 파일이 있고 종료 코드가 0이 아니면 `<도구> returned exit code <값>.` 경고를 싣고 상태를 `DEGRADED`로 둔다 [3][4].
+capa, YARA, YARA-X는 출력을 읽을 수 있으면 종료 코드가 0이 아닐 때 같은 경고와 `DEGRADED`를 싣는다 [5][6].
+종료 코드는 `provenance.exit_code`에도 실린다 [3][4].
+실행 확인에서 CSV를 쓰고 종료 코드 3으로 끝나는 시험용 실행 파일을 PECmd 자리에 두면 상태가 `DEGRADED`였고 `PECmd returned exit code 3.` 경고가 실렸다 [9].
+
+`ir-collect`는 `IR_Collect.exe`의 종료 코드로 성공과 실패를 정하지 않는다 [10][11].
+`analyze_artifact_folder`·`analyze_triage_zip`·`correlate_hosts`·`expand_investigation_graph`는 출력 JSON이 있으면 정상 결과로 돌려주고 종료 코드는 `provenance.exit_code`에만 싣는다 [10][12].
+실행 확인에서 결과 JSON을 쓰고 종료 코드 5로 끝나는 시험용 실행 파일로 `analyze_artifact_folder`를 부르면 `evidence_v1` 응답 상태가 `SUCCESS`였고 `errors`가 비어 있었다 [9].
+`collect_triage_package`는 ZIP이 있으면 정상 결과로 돌려주고 종료 코드는 `exit_code`에만 싣는다 [11].
+`IR_Collect` 0.24.2의 `-c`는 실패한 수집 단계가 있으면 ZIP을 만든 뒤 종료 코드 2로 끝나고 수집 범위가 빠졌을 때는 종료 코드 0으로 끝난다 [13].
+`IR_Collect` 0.24.2의 `-analyze`는 폴더를 읽지 못하거나 사실 추출이 실패하면 출력 JSON을 쓰지 않고 1로 끝난다 [14].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 세 증거 서버가 실행하는 모든 외부 프로그램에 적용된다 [1][2][15][16][17].
+`local-forensic`은 Sysinternals 도구를 기본 180초, `collect_autoruns`는 300초의 시간 제한으로 실행한다 [1][18].
+PowerShell 실행의 시간 제한은 도구에 따라 120초, 180초, 300초다 [2][19].
+시간 제한을 넘으면 `subprocess.run`이 실행을 끊고 서버는 `timed out after <초> seconds` 문구의 오류를 돌려준다 [1][2].
+실행 확인에서 시간 제한 예외를 내도록 바꾼 Sysinternals 실행으로 `collect_autoruns`를 부르면 상태가 `FAILED`였고 `timed out after 300 seconds` 문구가 실렸다 [9].
+
+`artifact-forensic`의 Hayabusa 실행은 `HAYABUSA_TIMEOUT`(기본 300초, 1~3600초)으로 끊고 `Hayabusa exceeded the configured timeout` 오류를 돌려준다 [16][4].
+EZ Tools, capa, YARA·YARA-X는 `run_static_tool`이 0.05초마다 종료와 출력 크기를 보며 `STATIC_ANALYSIS_TIMEOUT`(기본 180초)을 넘으면 프로세스를 끝내고 `timed_out`을 참으로 둔다 [17].
+capa와 YARA는 `timed_out`이 참이면 오류로 끝낸다 [5][6].
+YARA와 YARA-X에는 도구 자신의 시간 제한 인자로 같은 값을 주고 프로세스 시간 제한은 그보다 10초 길게 둔다 [20].
+EZ Tools는 끊기 전에 CSV가 나왔으면 그 행을 결과로 싣고 `Analysis exceeded the <초>-second timeout.` 경고와 `DEGRADED`를 싣는다 [3].
+실행 확인에서 CSV를 쓴 뒤 6초 동안 멈추는 시험용 PECmd를 시간 제한 2초로 부르면 상태가 `DEGRADED`였고 CSV의 2행과 시간 제한 경고, 끝낸 프로세스의 종료 코드 1 경고가 함께 실렸다 [9].
+
+`ir-collect`의 `run_ircollect`는 분석을 `IRCOLLECT_ANALYZE_TIMEOUT`(기본 300초), 수집을 `IRCOLLECT_COLLECT_TIMEOUT`(기본 1800초)으로 끊고 종료 코드 -1과 `IR_Collect timed out after <초>s.` 문구를 돌려준다 [15][21].
+그 뒤 출력 파일이 없으면 그 문구를 `stderr`에 담은 오류로 끝낸다 [10].
+
+`collect_ir_event_bundle`은 채널 8개를 차례로 묻고 채널마다 180초의 시간 제한을 두며 호출 전체의 시간 제한은 없다 [22][23].
+
+**한계.** `ir-collect`는 시간 제한으로 끊긴 뒤에도 출력 JSON이나 ZIP이 있으면 정상 결과로 돌려주고 `exit_code`만 -1로 싣는다 [10][11].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 세 증거 서버의 결과 해석과 공통 응답 형식 `evidence_v1`의 상태 결정에 적용된다 [2][7][3][10].
+`local-forensic`의 PowerShell 스크립트는 오류를 처리해 `status`나 `error`가 들어 있는 JSON을 출력하고 `run_powershell_json`은 JSON으로 읽지 못한 출력을 `PowerShell returned invalid JSON.`과 원문으로 돌려준다 [2][23].
+`collect_event_log_events`의 스크립트는 일치하는 사건이 없다는 오류를 실패와 나누어 `count` 0과 `No matching events` 문구의 성공 결과로 돌려준다 [23].
+`evidence_v1`은 결과를 읽어 상태를 정한다 [7].
+
+- 결과에 `error`가 있거나 `status`가 `FAILED`·`ERROR`이면 `FAILED`다 [7].
+- 결과 글이 `Error:`나 `File not found:`로 시작하면 `FAILED`다 [7].
+- `status`가 `DEGRADED`·`PARTIAL`이거나 안쪽 결과 `result`에 오류가 있으면 `DEGRADED`다 [7].
+- 항목 목록 `results`나 질의 목록 `queries`에 실패한 항목이 있으면 `DEGRADED`다 [7].
+
+`artifact-forensic`는 EZ Tools가 CSV를 내지 않거나 Hayabusa가 JSONL을 내지 않으면 실패로 정한다 [3][4].
+CSV를 읽지 못한 파일과 JSON으로 읽지 못한 JSONL 줄은 20개까지 `parse_errors`에 싣고 경고와 `DEGRADED`를 싣는다 [24][25][3][4].
+capa는 출력이 JSON이 아니거나 객체가 아니거나 `rules`가 없으면 실패로 정하고 YARA-X는 출력이 JSON이 아니면 실패로 정한다 [5][26][6].
+출력이 16MB를 넘어 실행을 끊으면 capa와 YARA는 실패로, EZ Tools는 경고와 `DEGRADED`로 정한다 [17][5][6][3].
+
+`ir-collect`는 출력 JSON이 없거나 JSON으로 읽지 못하면 실패로 정한다 [10].
+`analyze_artifact_folder`와 `analyze_triage_zip`은 사실 수가 0이면 출처별 건수를 `EMPTY_ANALYSIS`로, 건수가 없고 사실 수도 모르면 `UNAVAILABLE`로 두어 빈 결과와 빠진 값을 나눈다 [27].
+실행 확인에서 `fact_count` 0인 결과 JSON을 쓰는 시험용 실행 파일로 부르면 `coverage_reporting`의 두 값이 `EMPTY_ANALYSIS`였다 [9].
+
+**한계.** 다음 경로는 실패를 성공과 나누지 못한다.
+
+- `run_powershell_json`은 표준 출력이 비면 빈 목록을 돌려주므로 `list_running_processes` 같은 도구는 0건의 성공 결과를 낸다 [2][28].
+- `run_sysinternals_tool`은 종료 코드가 0이면 출력이 비어도 그대로 돌려준다 [1].
+- `run_sysinternals_tool`이 실행 파일을 시작하지 못해 돌려준 `Error executing` 문구는 `Error:`로 시작하지 않아 `evidence_v1`이 실패로 읽지 않는다 [1][29].
+- YARA-X의 표준 출력이 비면 서버는 일치 0건으로 두고 YARA의 표준 출력은 형식을 보지 않고 빈 줄이 아닌 줄마다 일치 하나로 세므로 두 백엔드에서 출력이 비거나 형식이 다른 실행은 종료 코드나 표준 오류가 있을 때만 경고와 `DEGRADED`로 드러난다 [6].
+- `build_process_tree_snapshot`은 `list_running_processes`를 기본 응답 형식으로 불러 `evidence_v1` 응답을 받고 그 최상위에서 `error`와 `processes`를 찾는다 [30].
+
+`evidence_v1` 응답에는 `error`와 `processes` 키가 최상위에 없으므로 `build_process_tree_snapshot`은 PowerShell이 실패해도 실패를 알아채지 못하고 프로세스 0개를 돌려준다 [30][31].
+실행 확인에서 시험용 PowerShell 대체가 프로세스 2개를 돌려줄 때 `list_running_processes`는 2개를, `build_process_tree_snapshot`은 0개를 돌려주었다 [9].
+대체가 PowerShell 실패를 돌려줄 때 `list_running_processes`의 상태는 `FAILED`였고 `build_process_tree_snapshot`의 상태는 `SUCCESS`였다 [9].
+같은 실행 확인에서 종료 코드 0과 빈 출력을 돌려주는 Sysinternals 대체로 `collect_autoruns`를 부르면 빈 글이 `SUCCESS`로 왔고 `OSError`를 내는 대체로 부르면 `Error executing` 문구가 `SUCCESS`로 왔다 [9].
+
+### T08.04 입력별 부분 완료 집계
+
+**구현.** 이 방식은 `local-forensic`의 묶음 도구와 `artifact-forensic`의 해시 목록 검증·목록 작성 도구에 적용된다 [32][22][33].
+`check_file_signatures_batch`는 경로마다 결과를 `results`에 싣고 `evidence_v1`은 실패 글이 들어 있는 행을 세어 `PARTIAL_RESULT_FAILURE`로 알린다 [32][34].
+`collect_ir_event_bundle`은 채널 8개의 질의 결과를 `queries`에 싣고 `evidence_v1`은 실패한 질의를 세어 `PARTIAL_QUERY_FAILURE`로 알린다 [22][34].
+`list_loaded_dlls`는 프로세스마다 모듈을 읽지 못한 오류를 `module_error`에 싣고 `evidence_v1`은 그 프로세스 수를 `PARTIAL_MODULE_ENUMERATION`으로 알린다 [35][34].
+실행 확인에서 8개 채널 가운데 2개가 실패하게 바꾼 PowerShell 대체로 `collect_ir_event_bundle`을 부르면 상태가 `DEGRADED`였고 `2 bounded sub-query or channel request(s) failed.`가 실렸다 [36].
+
+`verify_sha256_manifest`는 항목마다 `MATCH`, `MISMATCH`, `MISSING`, `INVALID`, `SKIPPED` 가운데 하나를 정하고 상태별 개수를 `status_counts`에 싣는다 [33].
+`inventory_archive_members`는 경로가 안전하지 않거나 암호화되었거나 이름이 겹치거나 크기·압축 비율 상한을 넘은 항목을 종류별로 센다 [37].
+`inventory_evidence_path`는 건너뛴 링크와 증거 폴더 밖으로 이어진 항목을 센다 [38].
+
+`correlate_hosts`와 `expand_investigation_graph`는 `IR_Collect.exe`가 결과 JSON에 적은 `ready_hosts`·`skipped_hosts`나 호스트 수를 옮기기만 하고 서버가 호스트별 결과를 구분하지 않는다 [39].
+
+**한계.** `check_file_signatures_batch`에서 실행 파일을 시작하지 못한 행의 `Error executing` 문구는 실패 행으로 세지 않는다 [34][29].
+실행 확인에서 4개 경로 가운데 종료 코드 오류, 실행 실패, 없는 파일이 하나씩 있게 바꾸면 실패 행은 2개로 세어졌다 [36].
+`inventory_evidence_path`는 파일 정보를 읽지 못한 파일을 세지 않고 건너뛴다 [38].
+`evidence_v1`은 모든 행이나 질의가 실패해도 상태를 `FAILED`가 아니라 `DEGRADED`로 둔다 [34].
+실행 확인에서 8개 채널이 모두 실패하게 바꾼 PowerShell 대체로 `collect_ir_event_bundle`을 부르면 상태가 `DEGRADED`였다 [8].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 `artifact-forensic`의 서버 안 분석 코드, `ir-collect`의 결과 JSON 읽기와 ZIP 풀기, `myirteam-core`의 자료 파일 읽기에 적용된다 [40][10][41].
+`inspect_binary_file`은 파일을 읽거나 PE 구조를 해석하다 난 `OSError`, `struct.error`, `ValueError`를 처리해 `error`로 돌려준다 [40].
+PE 머리가 맞지 않는 파일은 `parse_error`를 담은 결과로 두고 경고와 `DEGRADED`를 싣는다 [40][42].
+실행 확인에서 PE 서명이 없는 MZ 파일로 부르면 상태가 `DEGRADED`였고 `missing PE signature` 경고가 실렸다 [9].
+`verify_sha256_manifest`는 항목 하나의 경로를 해석하거나 해시를 계산하다 난 `OSError`를 그 항목의 `INVALID`로 정하고 나머지 항목을 계속 검증한다 [33].
+ZIP 항목을 분석하는 도구는 항목 사본을 만들거나 분석하다 난 예외를 처리해 `could not safely analyze archive member` 오류로 돌려준다 [43].
+`ir-collect`는 결과 JSON을 읽지 못하거나 ZIP을 풀지 못하면 `error`로 돌려준다 [10][44].
+`myirteam-core`는 manifest, 워크플로, schema 파일을 읽지 못하면 오류 코드를 담은 `FAILED` 응답을 돌려준다 [41].
+
+**한계.** `ir-collect`의 결과 정리 함수는 결과 JSON의 필드가 기대한 자료형이 아니면 예외를 처리하지 않는다 [27][45].
+이 예외는 MCP Python SDK 1.28.1의 FastMCP가 `Error executing tool <도구>: ` 뒤에 붙여 `isError` 응답으로 돌려준다 [46].
+실행 확인에서 `guided_hunt`가 목록인 `summary_v3` 보고서로 `ingest_analysis_report`를 부르면 `isError`가 참인 `Error executing tool ingest_analysis_report: 'list' object has no attribute 'get'` 응답이 왔다 [47].
+`analyze_artifact_folder`·`analyze_triage_zip`·`correlate_hosts`·`expand_investigation_graph`는 `IR_Collect.exe`가 쓴 JSON이 객체가 아닐 때도 정리 함수를 그대로 부른다 [10][27][12].
+
+### 근거
+
+[1] `run_sysinternals_tool`은 시간 제한, 실행 실패, 종료 코드를 글로 돌려준다: [`mcp-server/autoruns_mcp.py:105-145`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L105-L145).
+
+[2] `run_powershell_json`은 시간 제한, 종료 코드, 빈 출력, JSON 해석 실패를 나눈다: [`mcp-server/autoruns_mcp.py:156-202`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L156-L202).
+
+[3] EZ Tools 실행은 출력이 없으면 실패로, 종료 코드·시간 제한·출력 상한·해석 오류는 경고로 정한다.
+
+```python
+        parsed = read_csv_outputs(run_dir, record_limit)
+        source_digest_after = sha256_file(source)
+        if not parsed["output_files"]:
+            detail = (execution["stderr"] or execution["stdout"]).strip()[:4000]
+            return {
+                "error": f"{descriptor['label']} did not produce CSV output.",
+                "details": detail or f"exit code: {execution['exit_code']}",
+                "integrity": integrity,
+            }
+
+        warnings: list[str] = []
+        if execution["exit_code"] != 0:
+            warnings.append(f"{descriptor['label']} returned exit code {execution['exit_code']}.")
+        if execution["timed_out"]:
+            warnings.append(f"Analysis exceeded the {cfg.static_timeout}-second timeout.")
+        if execution["output_limited"]:
+            warnings.append("Derived output reached the configured byte limit.")
+        if parsed["parse_errors"]:
+            warnings.append("One or more CSV outputs could not be fully parsed.")
+        if parsed["truncated"]:
+            warnings.append(f"Returned records were truncated at max_records={record_limit}.")
+        if source_digest_before != source_digest_after:
+            warnings.append("The source artifact changed during analysis.")
+```
+
+[`artifact-forensic-mcp/server.py:1696-1718`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1696-L1718)
+
+[4] Hayabusa 실행은 출력이 없으면 실패로, 종료 코드와 해석 오류는 경고로 정하고 시간 제한 예외를 오류로 돌려준다: [`artifact-forensic-mcp/server.py:2438-2496`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2438-L2496).
+
+[5] capa 실행은 시간 제한·출력 상한·JSON 오류를 실패로, 종료 코드를 경고로 정한다.
+
+```python
+        if execution["timed_out"]:
+            return {"error": f"capa exceeded the configured timeout of {cfg.static_timeout} seconds."}
+        if execution["output_limited"]:
+            return {
+                "error": f"capa output exceeded the {MAX_STATIC_OUTPUT_BYTES}-byte safety limit.",
+                "details": _bounded_text(execution.get("stderr")),
+            }
+        try:
+            document = json.loads(execution["stdout"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            return {
+                "error": f"capa did not return valid JSON: {exc}",
+                "details": _bounded_text(execution.get("stderr") or execution.get("stdout")),
+            }
+        if not isinstance(document, dict):
+            return {"error": "capa JSON result is not an object."}
+        try:
+            shaped = shape_capa_document(document, capability_limit)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        source_digest_after = sha256_file(source)
+        warnings: list[str] = []
+        if execution["exit_code"] != 0:
+            warnings.append(f"capa returned non-zero exit code {execution['exit_code']}.")
+```
+
+[`artifact-forensic-mcp/server.py:2537-2561`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2537-L2561)
+
+[6] YARA 실행은 시간 제한·출력 상한·YARA-X JSON 오류를 실패로, 종료 코드를 경고로 정한다: [`artifact-forensic-mcp/server.py:2699-2735`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2699-L2735).
+
+[7] `evidence_v1`은 결과의 `error`, 상태 값, 실패 글, 안쪽 결과로 상태를 정한다: [`myirteam_common/evidence.py:79-132`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L132).
+
+[8] (실행 확인) `local-forensic` 모듈을 같은 프로세스에서 불러 PowerShell 실행 함수를 `PowerShell command failed.` 오류를 돌려주는 대체로, Sysinternals 실행 함수를 종료 코드 1 오류 글을 돌려주는 대체로 바꾼 뒤 도구 함수를 불렀다.
+
+[9] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 PowerShell·Sysinternals 실행을 시험용 대체로 바꾸고 분석 도구 자리에 받은 인자를 기록하는 시험용 실행 파일을 두어 도구 함수를 불렀다.
+
+[10] `analyze_artifact_folder`와 `analyze_triage_zip`은 출력 JSON이 있는지로 성공을 정하고 종료 코드를 `provenance`에만 싣는다([`ir-collect-mcp/server.py:753-800`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L753-L800)).
+
+```python
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(extract_dir), str(out_path)])
+        if not out_path.is_file():
+            return {"error": "IR_Collect produced no summary JSON (analysis failed).",
+                    "exit_code": rc, "stdout": out_txt[:2000], "stderr": err_txt[:2000]}
+        try:
+            data = read_json_file(out_path)
+        except (ValueError, OSError) as exc:
+            return {"error": f"could not read/parse summary JSON: {exc}", "exit_code": rc}
+        try:
+            source_zip_digest_after = sha256_file(p)
+        except OSError as exc:
+            return {"error": f"could not hash source ZIP after analysis: {exc}", "exit_code": rc}
+        result = shape_summary(
+            data,
+            {
+                "analyzed_copy": True,
+                "source_zip": str(p),
+                "source_zip_size_bytes": source_zip_size,
+                "source_zip_sha256_before": source_zip_digest_before,
+                "source_zip_sha256_after": source_zip_digest_after,
+                "exit_code": rc,
+                "analyzer_sha256": integrity["sha256"],
+            },
+        )
+```
+
+[`ir-collect-mcp/server.py:832-856`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L832-L856)
+
+[11] `collect_triage_package`는 ZIP이 있는지로 성공을 정한다.
+
+```python
+    rc, out_txt, err_txt = run_ircollect(cfg, ["-c", eid], cwd=out_dir, timeout=cfg.collect_timeout)
+    zip_path = out_dir / (eid + ".zip")
+    if not zip_path.is_file():
+        return {"error": "collection produced no ZIP (it may have failed, lacked privileges, or been blocked "
+                         "by a ForensicStrict profile).", "exit_code": rc,
+                "stdout": out_txt[-2000:], "stderr": err_txt[-2000:]}
+
+    sidecar = out_dir / (eid + ".zip.sha256")
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "evidence_id": eid,
+        "zip_path": str(zip_path),
+        "size_bytes": zip_path.stat().st_size,
+        "sha256": sha256_file(zip_path),
+        "sha256_sidecar_present": sidecar.is_file(),
+        "is_administrator": is_admin(),
+        "exit_code": rc,
+        "analyzer_sha256": integrity["sha256"],
+        "warning": ("LIVE-RESPONSE collection: this read live artifacts and wrote output ON this host "
+                    "(not zero-footprint). Full coverage ($MFT, registry hives, SRUM) requires elevation; "
+                    "without admin the collection still completes but is partial."),
+        "next_step": (
+            "To analyze: verify any SHA-256 sidecar, place the ZIP under "
+            "IRCOLLECT_EVIDENCE_ROOTS, then call analyze_triage_zip without manual extraction."
+        ),
+        "disclaimer": "Collection changes the host; this tool is opt-in and never part of default automated flows.",
+    }
+```
+
+[`ir-collect-mcp/server.py:974-1001`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L974-L1001)
+
+[12] 여러 폴더 분석도 출력 JSON이 있는지로 성공을 정한다.
+
+```python
+        rc, out_txt, err_txt = run_ircollect(cfg, args)
+        if not out_path.is_file():
+            return {"error": "IR_Collect produced no output JSON.", "exit_code": rc,
+                    "stdout": out_txt[:2000], "stderr": err_txt[:2000]}
+        try:
+            data = read_json_file(out_path)
+        except (ValueError, OSError) as exc:
+            return {"error": f"could not read/parse output JSON: {exc}", "exit_code": rc}
+        prov = {"analyzed_copy": bool(work_on_copy),
+                "source_folders": [str(_resolve(f)) for f in folder_paths],
+                "exit_code": rc,
+                "analyzer_sha256": integrity["sha256"]}
+        return shaper(data, prov)
+```
+
+[`ir-collect-mcp/server.py:901-913`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L901-L913)
+
+[13] `IR_Collect` 0.24.2의 `-c`는 실패한 단계가 있으면 2로, 수집 범위가 빠지면 0으로 끝난다: [`src/Program.cs:86-123`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Program.cs#L86-L123).
+
+[14] `IR_Collect` 0.24.2의 `-analyze`는 읽기나 사실 추출이 실패하면 출력 없이 1로 끝난다: [`src/Analysis/AnalysisCli.cs:35-77`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/AnalysisCli.cs#L35-L77).
+
+[15] `run_ircollect`는 시간 제한을 넘으면 -1과 문구를 돌려준다.
+
+```python
+def run_ircollect(cfg: Config, args: list[str], cwd: Path | None = None,
+                  timeout: int | None = None) -> tuple[int, str, str]:
+    """Run IR_Collect.exe with args. Returns (exit_code, stdout_text, stderr_text).
+    stdout is unreliable for winexe — callers read the output FILE, not this."""
+    cmd = [str(cfg.exe_path), *args]
+    eff_timeout = timeout if timeout is not None else cfg.analyze_timeout
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=eff_timeout,
+            check=False,
+            creationflags=CREATE_NO_WINDOW,
+            cwd=(str(cwd) if cwd else None),
+        )
+    except subprocess.TimeoutExpired:
+        return (-1, "", f"IR_Collect timed out after {eff_timeout}s.")
+    except OSError as exc:
+        return (-1, "", f"failed to launch IR_Collect ({cfg.exe_path}): {exc}")
+    return (result.returncode, decode_output(result.stdout), decode_output(result.stderr))
+```
+
+[`ir-collect-mcp/server.py:320-339`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L320-L339)
+
+[16] Hayabusa는 `subprocess.run`의 시간 제한으로 실행한다.
+
+```python
+def run_hayabusa(
+    cfg: Config,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+) -> tuple[int, str, str]:
+    completed = subprocess.run(
+        [str(cfg.exe_path), *args],
+        cwd=str(cfg.exe_path.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout or cfg.timeout,
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    return completed.returncode, decode_output(completed.stdout), decode_output(completed.stderr)
+```
+
+[`artifact-forensic-mcp/server.py:1111-1127`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1111-L1127)
+
+[17] `run_static_tool`은 시간 제한과 출력 크기를 보며 프로세스를 끝낸다: [`artifact-forensic-mcp/server.py:1163-1218`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1163-L1218).
+
+[18] `collect_autoruns`는 시간 제한 300초로 실행한다.
+
+```python
+    result = run_sysinternals_tool(
+        "autorunsc.exe",
+        ["-a", selector, "-ct", "-nobanner"],
+        timeout_seconds=300,
+    )
+```
+
+[`mcp-server/autoruns_mcp.py:523-527`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L523-L527)
+
+[19] PowerShell 실행의 시간 제한은 도구마다 다르다: [`mcp-server/autoruns_mcp.py:372-382`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L372-L382), [`mcp-server/autoruns_mcp.py:994-1001`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L994-L1001), [`mcp-server/autoruns_mcp.py:1240-1251`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1240-L1251).
+
+[20] YARA·YARA-X에 도구의 시간 제한 인자를 주고 프로세스 시간 제한을 10초 길게 둔다: [`artifact-forensic-mcp/server.py:2668-2699`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2668-L2699).
+
+[21] 분석과 수집의 시간 제한은 환경변수로 정한다.
+
+```python
+    timeout_raw = os.environ.get("IRCOLLECT_ANALYZE_TIMEOUT", "")
+    try:
+        timeout = int(timeout_raw) if timeout_raw.strip() else DEFAULT_ANALYZE_TIMEOUT
+    except ValueError:
+        timeout = DEFAULT_ANALYZE_TIMEOUT
+    collect_dir_raw = os.environ.get("IRCOLLECT_COLLECT_DIR", "")
+    collect_dir = _resolve(collect_dir_raw) if collect_dir_raw.strip() else (work_dir / "collections")
+    collect_timeout_raw = os.environ.get("IRCOLLECT_COLLECT_TIMEOUT", "")
+    try:
+        collect_timeout = int(collect_timeout_raw) if collect_timeout_raw.strip() else DEFAULT_COLLECT_TIMEOUT
+    except ValueError:
+        collect_timeout = DEFAULT_COLLECT_TIMEOUT
+```
+
+[`ir-collect-mcp/server.py:138-149`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L138-L149)
+
+[22] `collect_ir_event_bundle`은 채널 8개를 차례로 묻는다: [`mcp-server/autoruns_mcp.py:769-825`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L769-L825).
+
+[23] 채널 질의 스크립트는 사건이 없는 경우와 실패를 나누고 시간 제한 180초로 실행한다: [`mcp-server/autoruns_mcp.py:322-394`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L322-L394).
+
+[24] CSV를 읽지 못한 파일을 `parse_errors`에 싣는다: [`artifact-forensic-mcp/server.py:1565-1601`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1565-L1601).
+
+[25] JSONL 줄을 읽지 못하면 `parse_errors`에 싣고 다음 줄을 읽는다: [`artifact-forensic-mcp/server.py:2212-2246`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2212-L2246).
+
+[26] capa 결과에 `rules` 객체가 없으면 실패로 정한다.
+
+```python
+def shape_capa_document(document: dict[str, Any], max_capabilities: int) -> dict[str, Any]:
+    rules = document.get("rules")
+    if not isinstance(rules, dict):
+        raise ValueError("capa JSON result has no rules object.")
+```
+
+[`artifact-forensic-mcp/server.py:2124-2127`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2124-L2127)
+
+[27] `shape_summary`는 사실 수와 건수로 빈 결과와 빠진 값을 나누고 결과 JSON을 `dict`로 보고 읽는다: [`ir-collect-mcp/server.py:553-625`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L553-L625).
+
+[28] `list_running_processes`는 PowerShell이 `dict`가 아닌 결과를 돌려주면 그 결과를 프로세스 목록으로 쓴다.
+
+```python
+    rows = run_powershell_json(
+        script,
+        {"FORENSIC_PROCESS_FILTERS_JSON": json.dumps(identifiers)},
+    )
+    if isinstance(rows, dict) and "error" in rows:
+        return local_response(response_format, "list_running_processes", rows)
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        rows = []
+
+    result = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "filters": identifiers,
+        "matched_processes": len(rows),
+        "processes": rows,
+        "note": "Null paths or command lines are evidence limitations, not proof of absence.",
+    }
+    target = ",".join(identifiers) if identifiers else current_host_identifier()
+    return local_response(response_format, "list_running_processes", result, "live_process", target)
+```
+
+[`mcp-server/autoruns_mcp.py:616-636`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L616-L636)
+
+[29] 실패로 읽는 글은 두 접두어로 시작하는 글이다.
+
+```python
+def _is_error_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.strip().lower()
+    return lowered.startswith("error:") or lowered.startswith("file not found:")
+```
+
+[`myirteam_common/evidence.py:60-64`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L60-L64)
+
+[30] `build_process_tree_snapshot`은 `list_running_processes`의 기본 응답에서 최상위 키를 찾는다.
+
+```python
+    process_result = list_running_processes(None)
+    if "error" in process_result:
+        return local_response(response_format, "build_process_tree_snapshot", process_result, "live_process")
+
+    try:
+        identifiers = normalize_identifiers(process_identifiers)
+    except ValueError as exc:
+        return local_response(
+            response_format,
+            "build_process_tree_snapshot",
+            {"error": str(exc)},
+            "live_process",
+        )
+
+    rows = process_result.get("processes", [])
+```
+
+[`mcp-server/autoruns_mcp.py:835-849`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L835-L849)
+
+[31] `evidence_v1` 응답의 최상위 키는 정해져 있고 결과는 `data` 안에 있다.
+
+```python
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "evidence_id": "ev_" + uuid.uuid4().hex,
+        "tool": tool,
+        "target": {
+            "type": target_type,
+            "identifier": _bounded_identifier(target_identifier),
+        },
+        "collected_at_utc": collected_at_utc or utc_now(),
+        "snapshot_id": str(snapshot_id or ("snap_" + uuid.uuid4().hex)),
+        "status": effective_status,
+        "data": data,
+        "errors": [*(errors or []), *inferred_errors],
+        "limitations": [*(limitations or []), *inferred_limitations],
+        "provenance": _provenance_from_data(tool, data),
+    }
+```
+
+[`myirteam_common/evidence.py:237-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L237-L252)
+
+[32] `check_file_signatures_batch`는 경로마다 결과를 싣는다.
+
+```python
+    results = []
+    for value in unique_paths:
+        results.append({"requested_path": value, "result": run_sigcheck(value)})
+
+    result = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "requested_count": len(unique_paths),
+        "results": results,
+    }
+    return local_response(response_format, "check_file_signatures_batch", result)
+```
+
+[`mcp-server/autoruns_mcp.py:569-579`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L569-L579)
+
+[33] `verify_sha256_manifest`는 항목마다 상태를 정하고 상태별 개수를 센다: [`artifact-forensic-mcp/server.py:665-790`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L665-L790).
+
+[34] `evidence_v1`은 실패한 행, 모듈을 읽지 못한 행, 실패한 질의를 센다: [`myirteam_common/evidence.py:134-182`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L134-L182).
+
+[35] `list_loaded_dlls`는 프로세스마다 모듈 읽기 오류를 싣는다.
+
+```python
+    $results = foreach ($process in $processes) {
+        $modules = @()
+        $moduleError = $null
+        try {
+            $modules = @($process.Modules | ForEach-Object {
+                [PSCustomObject]@{
+                    module_name = $_.ModuleName
+                    file_name = $_.FileName
+                    file_version = $_.FileVersionInfo.FileVersion
+                    company_name = $_.FileVersionInfo.CompanyName
+                    product_name = $_.FileVersionInfo.ProductName
+                }
+            })
+        } catch {
+            $moduleError = $_.Exception.Message
+        }
+
+        [PSCustomObject]@{
+            process_name = $process.ProcessName
+            process_id = $process.Id
+            path = $process.Path
+            module_error = $moduleError
+            modules = $modules
+        }
+    }
+```
+
+[`mcp-server/autoruns_mcp.py:696-720`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L696-L720)
+
+[36] (실행 확인) `local-forensic` 모듈을 같은 프로세스에서 불러 PowerShell과 Sysinternals 실행을 정해 둔 결과를 돌려주는 시험용 대체로 바꾸고 묶음 도구를 불렀다.
+
+[37] `inventory_archive_members`는 문제가 있는 항목을 종류별로 센다: [`artifact-forensic-mcp/server.py:1418-1506`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1418-L1506).
+
+[38] `inventory_evidence_path`는 링크와 폴더 밖 항목을 세고 파일 정보를 읽지 못한 파일은 세지 않고 건너뛴다: [`artifact-forensic-mcp/server.py:1239-1342`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1239-L1342).
+
+[39] 여러 호스트 분석은 `IR_Collect.exe`가 적은 호스트 수를 옮긴다.
+
+```python
+def shape_correlation(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw correlation_v1 payload (cross-host shared entities + temporal)."""
+    shared = data.get("shared_entities") if isinstance(data.get("shared_entities"), list) else []
+    temporal = data.get("temporal_correlations") if isinstance(data.get("temporal_correlations"), list) else []
+    hosts = [h for h in (data.get("hosts") or []) if isinstance(h, dict)]
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, {**provenance, "evidence_digest": data.get("evidence_digest")}),
+        "host_count": data.get("host_count"),
+        "ready_hosts": data.get("ready_hosts"),
+        "skipped_hosts": data.get("skipped_hosts"),
+        "bucket_minutes": data.get("bucket_minutes"),
+        "entity_types": data.get("entity_types"),
+        "hosts": [{k: h.get(k) for k in ("host", "case_id", "fact_count", "evidence_digest")} for h in hosts][:MAX_NOTES],
+        "shared_entity_count": len(shared),
+        "shared_entities": shared[:MAX_SHARED_ENTITIES],
+        "temporal_correlation_count": len(temporal),
+        "temporal_correlations": temporal[:MAX_TEMPORAL],
+        "truncated": len(shared) > MAX_SHARED_ENTITIES or len(temporal) > MAX_TEMPORAL,
+        "disclaimer": "Shared entities are factual cross-host pivots, not verdicts.",
+    }
+```
+
+[`ir-collect-mcp/server.py:638-659`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L638-L659)
+
+```python
+def shape_graph(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw graph_v1 payload (multi-hop investigation graph)."""
+    nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, provenance),
+        "seed_type": data.get("seed_type"),
+        "seed_value": data.get("seed_value"),
+        "max_depth": data.get("max_depth"),
+        "per_hop_fanout": data.get("per_hop_fanout"),
+        "host_count": data.get("host_count"),
+        "node_count": data.get("node_count"),
+        "edge_count": data.get("edge_count"),
+        "nodes": nodes[:MAX_NODES],
+        "edges": edges[:MAX_EDGES],
+        "truncated": len(nodes) > MAX_NODES or len(edges) > MAX_EDGES,
+        "disclaimer": "Graph nodes/edges are factual entity relationships, not verdicts.",
+    }
+```
+
+[`ir-collect-mcp/server.py:662-681`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L662-L681)
+
+[40] `inspect_binary_file`은 읽기와 해석 예외를 `error`로 돌려주고 PE 해석 실패를 경고로 싣는다: [`artifact-forensic-mcp/server.py:546-606`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L546-L606).
+
+[41] `myirteam-core`는 자료 파일을 읽지 못하면 오류 응답을 돌려준다.
+
+```python
+def project_capabilities_impl() -> dict[str, Any]:
+    try:
+        manifest = read_json_object(MANIFEST_PATH)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return error_response("MANIFEST_UNAVAILABLE", f"Unable to read agent-manifest.json: {exc}")
+```
+
+[`core-mcp/server.py:60-64`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L60-L64)
+
+```python
+    workflow_path = WORKFLOWS_DIR / f"{normalized}.json"
+    try:
+        workflow = read_json_object(workflow_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return error_response("WORKFLOW_UNAVAILABLE", f"Unable to read {workflow_path.name}: {exc}")
+```
+
+[`core-mcp/server.py:276-280`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L276-L280)
+
+[42] PE 머리가 맞지 않으면 `parse_error`를 담은 결과를 돌려준다.
+
+```python
+    with open(path, "rb") as handle:
+        dos_header = handle.read(64)
+        if len(dos_header) < 64 or not dos_header.startswith(b"MZ"):
+            return {"is_pe": False, "parse_error": "missing DOS MZ header"}
+        pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
+        if pe_offset < 64 or pe_offset + 24 > file_size:
+            return {"is_pe": False, "parse_error": "PE header offset is outside the file"}
+        handle.seek(pe_offset)
+        signature = handle.read(4)
+        if signature != b"PE\x00\x00":
+            return {"is_pe": False, "parse_error": "missing PE signature"}
+```
+
+[`artifact-forensic-mcp/server.py:414-424`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L414-L424)
+
+[43] ZIP 항목 분석은 사본 만들기와 분석의 예외를 오류로 돌려준다.
+
+```python
+    try:
+        extracted = extract_archive_member_copies(
+            cfg,
+            source,
+            member_path,
+            companion_member_paths,
+        )
+        primary = extracted["primary"]
+        member_cfg = replace(
+            cfg,
+            evidence_roots=(extracted["member_root"].resolve(),),
+            max_file_bytes=cfg.max_archive_member_bytes,
+        )
+        result = analyzer(member_cfg, str(primary["extracted_path"]))
+        member_digest_after = sha256_file(primary["extracted_path"])
+    except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+        result = {"error": f"could not safely analyze archive member: {exc}"}
+```
+
+[`artifact-forensic-mcp/server.py:1927-1943`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1927-L1943)
+
+[44] `analyze_triage_zip`은 ZIP을 풀지 못하면 오류로 돌려준다.
+
+```python
+    try:
+        extract_dir = work / "extracted"
+        try:
+            extraction = _safe_extract_zip(
+                p,
+                extract_dir,
+                max_zip_bytes=cfg.max_zip_bytes,
+                max_member_bytes=cfg.max_zip_member_bytes,
+                max_total_bytes=cfg.max_zip_total_bytes,
+            )
+        except (zipfile.BadZipFile, ValueError, OSError) as exc:
+            return {"error": f"could not extract ZIP: {exc}"}
+```
+
+[`ir-collect-mcp/server.py:820-831`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L820-L831)
+
+[45] `ingest_analysis_report`는 보고서가 객체인지와 `export_schema`만 확인하고 정리 함수를 부른다.
+
+```python
+def ingest_analysis_report_impl(cfg: Config, report_path: str) -> dict[str, Any]:
+    try:
+        p = validate_evidence_file(report_path, cfg)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    try:
+        data = read_json_file(p)
+    except (ValueError, OSError) as exc:
+        return {"error": f"could not read/parse JSON report: {exc}"}
+    if not isinstance(data, dict):
+        return {"error": "report is not a JSON object."}
+    schema = data.get("export_schema")
+    shaper = SHAPERS.get(schema)
+    if shaper is None:
+        return {"error": f"unrecognized or missing export_schema: {schema!r}. Supported: {list(SUPPORTED_SCHEMAS)}"}
+    return shaper(data, {"ingested": True, "source_report": str(p)})
+```
+
+[`ir-collect-mcp/server.py:867-882`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L867-L882)
+
+[46] MCP Python SDK 1.28.1의 FastMCP는 도구 함수의 예외를 `ToolError`로 바꾸고 저수준 서버가 `isError` 결과로 돌려준다: [`src/mcp/server/fastmcp/tools/base.py:105-117`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/tools/base.py#L105-L117), [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/lowlevel/server.py#L589-L590).
+
+[47] (실행 확인) `ir-collect`를 `portable_mcp.py`로 실행하고 MCP SDK 클라이언트로 `ingest_analysis_report`를 불렀다.

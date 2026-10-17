@@ -1,0 +1,451 @@
+---
+cell: P02
+details:
+- id: P02.01
+- id: P02.02
+- id: P02.04
+---
+
+# P02 다음 작업 결정
+
+### P02.01 고정 문서·프로필 반환
+
+**구현.** 이 방식은 `myirteam-core`의 `get_workflow`, `get_bootstrap_instructions`, `get_project_capabilities`와 네 서버의 초기화 응답 `instructions`에 적용된다 [1][2][3].
+`get_workflow`는 `agent-manifest.json`의 `workflows`에 선언된 ID만 받아 `workflows/<ID>.json` 문서를 그대로 돌려준다 [1].
+선언된 워크플로는 `infection-investigation`, `event-investigation`, `file-investigation`, `deep-analysis`, `offline-artifact-investigation`, `offline-file-investigation` 6개다 [4].
+워크플로 문서는 상태마다 부를 도구, 담당(`mcp_server`·`calling_ai_agent`·`user`), 다음 상태를 적고 끝에 `completion_criteria`와 `prohibited_actions`를 둔다 [5].
+`deep-analysis` 문서는 상태 19개를 두고 ZIP 항목을 고르는 일과 원인 분석, 보고서 작성은 `calling_ai_agent`의 상태로 적는다 [5][6].
+`get_bootstrap_instructions`는 `BOOTSTRAP.md`의 글을, `get_project_capabilities`는 `agent-manifest.json` 전체를 돌려준다 [2].
+`myirteam-core`의 `instructions`는 조사마다 `resolve_investigation_intent`를 먼저 부르고 빠진 입력이 없으면 `get_workflow`를 부르라고 적는다 [3].
+증거 서버 셋의 `instructions`는 `myirteam-core`가 워크플로를 고른 뒤에 쓰라고 적는다 [7].
+세 도구는 호출마다 파일을 다시 읽고 앞선 호출이나 증거와 관계없이 같은 내용을 돌려준다 [1][2].
+`get_workflow`는 문서의 `id`가 요청한 ID와 같은지만 확인한다 [1].
+워크플로의 도구 이름과 상태 전이를 확인하는 코드는 시험 스크립트 `tests/static_validate.py`에 있고 서버 코드에는 없다 [8].
+도구 설명과 서버 지침에는 클라이언트 문맥이 압축되거나 끊긴 뒤 다시 읽을 도구를 안내하는 글이 없다.
+
+같은 저장소의 클라이언트 지침 `AGENTS.md`·`CLAUDE.md`·`BOOTSTRAP.md`도 `resolve_investigation_intent`, `get_workflow`, 워크플로 실행의 차례를 적는다 [9].
+`.agents/workflows/`는 AGY 클라이언트에 같은 절차를 Markdown으로 준다 [10].
+
+### P02.02 규칙·조사 상태로 추천
+
+**구현.** 이 방식은 `myirteam-core`의 `resolve_investigation_intent`와 `ir-collect`의 `get_ircollect_info`·`collect_triage_package` 응답에 적용된다 [11][12][13].
+`resolve_investigation_intent`의 규칙은 `agent-manifest.json`의 `intent_routing`에 있는 경로 7개다 [14].
+경로마다 `priority`, `input_kinds`, `workflow_id`, `required_inputs`, `keywords`를 둔다 [14].
+호출자가 `input_kind`를 주면 그 값을 가진 첫 경로를 고르고 `auto`이면 `priority`가 높은 경로부터 키워드가 요청 글에 들어 있는지 대소문자를 무시하고 찾는다 [11].
+키워드는 부분 문자열로 찾고 처음 맞은 경로 하나만 고른다 [11].
+고른 경로의 `required_inputs` 가운데 `input_path`·`member_path`·`artifact_type` 인자가 비어 있는 것을 `missing_inputs`에 싣는다 [15].
+빠진 입력이 없으면 `execution_contract.next_tool`에 `myirteam-core/get_workflow`를 싣고 있으면 `null`과 `clarification_required` 참을 싣는다 [15][16].
+맞는 경로가 없으면 `fallback`의 `investigation_target_or_evidence_path`를 빠진 입력으로 싣는다 [15].
+"please parse this evtx"로 부르자 `offline-artifact-investigation`과 빠진 입력 `input_path`·`artifact_type`이 돌아왔고 "is my computer infected?"는 빠진 입력 없이 `infection-investigation`과 `get_workflow`를 돌려주었다 [17].
+`execution_contract`의 나머지 값은 `agent-manifest.json`의 `policy`에 적어 둔 고정 값이다 [16].
+이 안내는 응답 값이고 증거 서버는 `resolve_investigation_intent`를 거쳤는지 확인하지 않는다 [15].
+
+`get_ircollect_info`는 기대 해시나 증거 폴더 설정이 없으면 그 사실과 분석 도구가 모든 경로를 거부한다는 문장을 `notes`에 싣는다 [12].
+`collect_triage_package`는 꺼져 있으면 켜는 환경변수를, 확인 인자가 없으면 `acknowledge_live_response=true`로 다시 부르라는 문장을 오류에 싣는다 [13].
+수집을 마치면 ZIP을 증거 폴더에 두고 `analyze_triage_zip`을 부르라는 `next_step`을 싣는다 [18].
+`analyze_artifact_folder`·`analyze_triage_zip`과 `summary_v3` 보고서를 받은 `ingest_analysis_report`는 건수 상태와 관계없이 원시 ZIP의 범위는 `artifact-forensic`의 목록 도구로 보라는 고정 문장을 `coverage_reporting.note`에 싣는다 [19].
+
+**한계.** `resolve_investigation_intent`는 경로 인자가 비어 있는지만 보고 그 경로가 있는지는 확인하지 않는다 [15].
+없는 경로 문자열을 `input_path`로 주자 빠진 입력 없이 `next_tool`에 `get_workflow`가 실렸다 [17].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 `local-forensic`의 `collect_ir_event_bundle`에 적용된다 [20].
+`collect_ir_event_bundle`은 Security, System, PowerShell, Defender, Task Scheduler, RDP 연결, RDP 세션, WMI 채널 8개를 차례로 질의하고 결과를 `queries` 하나에 모은다 [20].
+채널마다 질의할 이벤트 ID는 코드에 정해 두고 모델은 시간 범위와 채널당 상한만 고른다 [20].
+PowerShell 실행을 대체 함수로 바꾼 실행에서 `collect_ir_event_bundle`은 8번 질의해 채널 8개의 결과를 차례로 실었다 [21].
+`build_process_tree_snapshot`은 프로세스 목록을 한 번 읽어 PID로 부모 프로세스를 찾고 부모의 이름·경로·명령 줄을 각 행에 붙이도록 짜여 있다 [22].
+이 도구는 `list_running_processes`를 기본 응답 형식으로 불러 최상위에 `processes`가 없는 `evidence_v1` 응답을 받으므로 `process_count` 0과 빈 `processes`를 돌려준다 [22][21][23][24].
+
+`ir-collect`의 분석 도구는 `IR_Collect.exe` 실행 한 번을 감싸고 그 안의 분석 단계는 `IR_Collect.exe`가 정한다 [25].
+`artifact-forensic`의 도구는 호출마다 분석 도구 하나를 실행한다 [26].
+여러 도구를 잇는 절차는 워크플로 문서에 적혀 있고 그 단계를 실행하는 것은 모델이다 [5].
+서버 안에서 모델을 불러 계획을 세우는 경로는 없다.
+
+### 근거
+
+[1] `workflow_impl`은 선언된 ID인지 확인하고 문서를 읽어 `id`만 대조한 뒤 돌려준다.
+[`core-mcp/server.py:252-293`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L252-L293)
+
+[2] 능력 목록과 시작 지침은 고정 파일을 읽어 돌려준다.
+[`core-mcp/server.py:60-96`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L60-L96)
+
+[3] `myirteam-core`의 초기화 지침이다.
+```python
+CORE_SERVER_INSTRUCTIONS = (
+    "MyIRTeam is runtime-neutral. Before every forensic investigation, call "
+    "resolve_investigation_intent with the complete user request, then call "
+    "get_workflow when no inputs are missing. If workspace instructions were not "
+    "loaded, use get_bootstrap_instructions. Never access evidence through Shell, "
+    "PowerShell, Python, or a direct forensic CLI."
+)
+mcp = FastMCP("myirteam-core", instructions=CORE_SERVER_INSTRUCTIONS)
+```
+
+[`core-mcp/server.py:20-27`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L20-L27)
+
+[4] `agent-manifest.json`이 선언한 워크플로 6개다.
+[`agent-manifest.json:380-436`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/agent-manifest.json#L380-L436)
+
+[5] 워크플로 문서는 상태, 담당, 전이, 완료 조건, 금지 행동을 적는다: [`workflows/deep-analysis.json:1-332`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/workflows/deep-analysis.json#L1-L332), [`schemas/workflow-v1.schema.json`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/schemas/workflow-v1.schema.json).
+
+[6] `deep-analysis`의 ZIP 항목 선택은 `calling_ai_agent` 상태다.
+```json
+    {
+      "id": "archive-member-decision",
+      "kind": "agent_reasoning",
+      "owner": "calling_ai_agent",
+      "description": "Select only exact, unique members whose parsing or targeted enrichment can close a material evidence gap. Assign the matching artifact_type and, for Registry only, optional same-directory hive.LOG1/hive.LOG2 companions. A filename classification is routing metadata, not proof of content.",
+      "outputs": [
+        "selected_member_path",
+        "selected_artifact_type",
+        "selected_companion_member_paths",
+        "selection_reason"
+      ],
+      "transitions": {
+        "member_selected": "parse-archive-member",
+        "executable_member_selected": "archive-static-enrichment",
+        "no_member_needed": "optional-correlation"
+      }
+    },
+```
+
+[`workflows/deep-analysis.json:127-143`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/workflows/deep-analysis.json#L127-L143)
+
+[7] 증거 서버의 초기화 지침이다: [`ir-collect-mcp/server.py:47-53`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L47-L53), [`artifact-forensic-mcp/server.py:40-46`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L40-L46), [`mcp-server/autoruns_mcp.py:17-23`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L17-L23).
+
+[8] 워크플로의 도구 이름과 전이는 시험 스크립트가 확인한다.
+[`tests/static_validate.py:428-455`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/tests/static_validate.py#L428-L455)
+
+```python
+        for state in states:
+            kind = state.get("kind")
+            if kind == "mcp_call" and not state.get("tool"):
+                fail(f"Workflow {workflow_id} state {state.get('id')} requires one tool.")
+            if kind == "mcp_call_set" and not state.get("tools"):
+                fail(f"Workflow {workflow_id} state {state.get('id')} requires a non-empty tool set.")
+            if kind == "terminal" and state.get("transitions"):
+                fail(f"Workflow {workflow_id} terminal state {state.get('id')} must not transition.")
+            if kind == "user_opt_in" and state.get("owner") != "user":
+                fail(f"Workflow {workflow_id} user opt-in state must be owned by the user.")
+            for destination in state.get("transitions", {}).values():
+                if destination not in known_states:
+                    fail(
+                        f"Workflow {workflow_id} state {state.get('id')} transitions "
+                        f"to unknown state {destination}."
+                    )
+            referenced_tools = []
+            if state.get("tool"):
+                referenced_tools.append(state["tool"])
+            referenced_tools.extend(state.get("tools", []))
+            for qualified_name in referenced_tools:
+                if not isinstance(qualified_name, str) or "/" not in qualified_name:
+                    fail(f"Workflow {workflow_id} has an invalid tool reference: {qualified_name!r}")
+                server_id, tool_name = qualified_name.split("/", 1)
+                if server_id not in workflow_servers:
+                    fail(f"Workflow {workflow_id} uses undeclared server {server_id}.")
+                if tool_name not in tool_names_by_server.get(server_id, set()):
+                    fail(f"Workflow {workflow_id} references unknown tool {qualified_name}.")
+```
+
+[`tests/static_validate.py:428-455`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/tests/static_validate.py#L428-L455)
+
+[9] 클라이언트 지침의 시작 절차: [`BOOTSTRAP.md`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/BOOTSTRAP.md), [`CLAUDE.md`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/CLAUDE.md), [`AGENTS.md`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/AGENTS.md).
+
+[10] AGY 클라이언트용 워크플로 문서: [`.agents/workflows/deep-analysis.md`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/.agents/workflows/deep-analysis.md).
+
+[11] `resolve_investigation_intent_impl`은 `input_kind`나 `priority` 차례의 키워드로 첫 경로를 고른다.
+[`core-mcp/server.py:119-154`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L119-L154)
+
+[12] `ircollect_info_impl`은 설정이 빠지면 `notes`에 그 사실을 싣는다.
+```python
+    if cfg.expected_sha256:
+        info["integrity"] = {
+            "expected_sha256": cfg.expected_sha256,
+            "match": digest == cfg.expected_sha256,
+        }
+    else:
+        info["integrity"] = {"expected_sha256": None, "match": None}
+        info["notes"].append("No IRCOLLECT_EXPECTED_SHA256 set; integrity is unverified (existence only).")
+    if not cfg.evidence_roots:
+        info["notes"].append("No IRCOLLECT_EVIDENCE_ROOTS set; analysis tools will refuse all paths until configured.")
+    return info
+```
+
+[`ir-collect-mcp/server.py:740-750`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L740-L750)
+
+[13] `collect_triage_package_impl`의 두 가지 확인은 다시 부를 방법을 오류에 싣는다.
+```python
+def collect_triage_package_impl(cfg: Config, evidence_id: str = "",
+                                acknowledge_live_response: bool = False) -> dict[str, Any]:
+    # Gate 1 (deployment): off unless the operator explicitly enabled collection.
+    if not cfg.allow_collection:
+        return {"error": "Live collection is disabled by deployment. Set IRCOLLECT_ALLOW_COLLECTION=1 to "
+                         "enable this high-impact, host-changing tool.", "gated": True}
+    # Gate 2 (invocation): the caller must affirmatively acknowledge the live-response action.
+    if not acknowledge_live_response:
+        return {"error": "Live-response collection changes this host and needs elevation for full coverage. "
+                         "Re-call with acknowledge_live_response=true to proceed.",
+                "requires_acknowledgement": True}
+```
+
+[`ir-collect-mcp/server.py:948-958`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L948-L958)
+
+[14] `agent-manifest.json`의 경로 규칙이다.
+[`agent-manifest.json:40-207`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/agent-manifest.json#L40-L207)
+
+[15] 빠진 입력은 인자가 빈 문자열인지로 정하고 맞는 경로가 없으면 `fallback`을 쓴다.
+```python
+    provided_inputs = {
+        "input_path": bool(str(input_path or "").strip()),
+        "member_path": bool(str(member_path or "").strip()),
+        "artifact_type": bool(str(artifact_type or "").strip()),
+    }
+    fallback = routing.get("fallback") if isinstance(routing, dict) else {}
+    if selected is None:
+        workflow_id = None
+        target = fallback.get("target", "unresolved") if isinstance(fallback, dict) else "unresolved"
+        required_inputs = list(fallback.get("required_inputs", [])) if isinstance(fallback, dict) else []
+        route_id = "fallback"
+        missing_inputs = required_inputs
+        clarification_required = True
+    else:
+        workflow_id = selected.get("workflow_id")
+        target = selected.get("target")
+        required_inputs = [
+            str(value) for value in selected.get("required_inputs", []) if isinstance(value, str)
+        ]
+        route_id = str(selected.get("id"))
+        missing_inputs = [
+            name for name in required_inputs if not provided_inputs.get(name, False)
+        ]
+        clarification_required = bool(missing_inputs)
+```
+
+[`core-mcp/server.py:156-179`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L156-L179)
+
+[16] `next_tool`은 빠진 입력이 없을 때만 싣고 나머지 값은 `policy`에서 옮긴다.
+```python
+        "execution_contract": {
+            "next_tool": (
+                "myirteam-core/get_workflow" if workflow_id and not clarification_required else None
+            ),
+            "preferred_response_format": policy.get("preferred_response_format"),
+            "default_live_host_triage": policy.get("default_live_host_triage"),
+            "live_collection_allowed_by_route": False,
+            "shell_fallback_allowed": policy.get("shell_fallback_allowed"),
+            "investigation_workspace_mutation_allowed": policy.get(
+                "investigation_workspace_mutation_allowed"
+            ),
+            "temporary_analysis_scripts_allowed": policy.get(
+                "temporary_analysis_scripts_allowed"
+            ),
+            "self_repair_during_investigation_allowed": policy.get(
+                "self_repair_during_investigation_allowed"
+            ),
+            "tool_repair_requires_new_investigation": policy.get(
+                "tool_repair_requires_new_investigation"
+            ),
+            "dialog_report_delivery": policy.get("dialog_report_delivery"),
+            "report_file_requires_explicit_user_request": policy.get(
+                "report_file_requires_explicit_user_request"
+            ),
+            "prohibited_fallbacks": list(routing.get("prohibited_fallbacks", [])),
+            "assessment_owner": policy.get("assessment_owner"),
+        },
+```
+
+[`core-mcp/server.py:218-244`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/core-mcp/server.py#L218-L244)
+
+[17] (실행 확인) `resolve_investigation_intent_impl`을 같은 프로세스에서 불러 요청 글 다섯 가지와 `input_kind`, 없는 경로 문자열을 주었다.
+
+[18] 수집을 마친 응답의 `next_step`이다.
+```python
+        "next_step": (
+            "To analyze: verify any SHA-256 sidecar, place the ZIP under "
+            "IRCOLLECT_EVIDENCE_ROOTS, then call analyze_triage_zip without manual extraction."
+        ),
+```
+
+[`ir-collect-mcp/server.py:996-999`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L996-L999)
+
+[19] `shape_summary`는 `coverage_reporting.note`에 원시 ZIP의 범위를 목록 도구로 보라는 고정 문장을 싣는다.
+```python
+        "coverage_reporting": {
+            "fact_source_counts": fact_source_status,
+            "entity_type_counts": entity_type_status,
+            "artifact_coverage": "NOT_PROVIDED_BY_SUMMARY_SCHEMA",
+            "note": (
+                "UNAVAILABLE means the summary omitted usable counts; it does not mean the "
+                "artifact type was absent. Use artifact-forensic inventory for raw ZIP coverage."
+            ),
+        },
+```
+
+[`ir-collect-mcp/server.py:611-619`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L611-L619)
+
+[20] `collect_ir_event_bundle`은 채널과 이벤트 ID를 코드에 정해 두고 차례로 질의한다.
+```python
+    queries = [
+        ("security", [4624, 4625, 4672, 4688, 4697, 4698, 4702, 4720, 4722, 4728, 4732, 4756, 1102]),
+        ("system", [104, 7045]),
+        ("powershell", [4103, 4104]),
+        ("defender", [1116, 1117, 5007]),
+        ("taskscheduler", [106, 129, 140, 141, 200, 201]),
+        ("rdp_connection", [1149]),
+        ("rdp_session", [21, 24, 25]),
+        ("wmi", [5857, 5858, 5859, 5860, 5861]),
+    ]
+    results = [
+        collect_event_log_internal(channel, ids, start, end, limit)
+        for channel, ids in queries
+    ]
+
+    response = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "start_time_utc": start or "DEFAULT_LAST_24_HOURS",
+        "end_time_utc": end or None,
+        "max_events_per_channel": limit,
+        "queries": results,
+        "note": "Event presence and detections require analyst correlation; missing channels are evidence limitations.",
+    }
+```
+
+[`mcp-server/autoruns_mcp.py:795-818`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L795-L818)
+
+[21] (실행 확인) `local-forensic` 모듈을 같은 프로세스에서 불러 `run_powershell_json`과 `run_sysinternals_tool`을 고정 값을 돌려주는 함수로 바꾼 뒤 `collect_ir_event_bundle`과 `build_process_tree_snapshot`을 불렀다.
+
+[22] `build_process_tree_snapshot`은 `list_running_processes(None)`의 결과에서 `error`와 `processes`를 찾는다.
+```python
+    process_result = list_running_processes(None)
+    if "error" in process_result:
+        return local_response(response_format, "build_process_tree_snapshot", process_result, "live_process")
+
+    try:
+        identifiers = normalize_identifiers(process_identifiers)
+    except ValueError as exc:
+        return local_response(
+            response_format,
+            "build_process_tree_snapshot",
+            {"error": str(exc)},
+            "live_process",
+        )
+
+    rows = process_result.get("processes", [])
+    by_pid = {
+        int(row.get("ProcessId")): row
+        for row in rows
+        if isinstance(row, dict) and row.get("ProcessId") is not None
+    }
+    selected = rows
+    if identifiers:
+        normalized = {item.lower() for item in identifiers}
+        selected = []
+        for row in rows:
+            pid = str(row.get("ProcessId", ""))
+            name = str(row.get("Name") or "").lower()
+            path = str(row.get("ExecutablePath") or "").lower()
+            if pid in normalized or name in normalized or path in normalized:
+                selected.append(row)
+```
+
+[`mcp-server/autoruns_mcp.py:835-864`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L835-L864)
+
+[23] `list_running_processes`의 기본 응답 형식은 `evidence_v1`이고 결과를 `local_response`로 감싼다.
+```python
+@mcp.tool()
+def list_running_processes(
+    process_identifiers: list[str] | None = None,
+    response_format: str = EVIDENCE_RESPONSE_FORMAT,
+) -> Any:
+    """Return processes, optionally filtered by PID, name, or executable path.
+```
+
+[`mcp-server/autoruns_mcp.py:582-587`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L582-L587)
+```python
+    result = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "filters": identifiers,
+        "matched_processes": len(rows),
+        "processes": rows,
+        "note": "Null paths or command lines are evidence limitations, not proof of absence.",
+    }
+    target = ",".join(identifiers) if identifiers else current_host_identifier()
+    return local_response(response_format, "list_running_processes", result, "live_process", target)
+```
+
+[`mcp-server/autoruns_mcp.py:627-636`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L627-L636)
+
+[24] `evidence_v1` 형식은 도구 결과를 `data` 아래에 두고 오류는 `errors`에 둔다.
+```python
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "evidence_id": "ev_" + uuid.uuid4().hex,
+        "tool": tool,
+        "target": {
+            "type": target_type,
+            "identifier": _bounded_identifier(target_identifier),
+        },
+        "collected_at_utc": collected_at_utc or utc_now(),
+        "snapshot_id": str(snapshot_id or ("snap_" + uuid.uuid4().hex)),
+        "status": effective_status,
+        "data": data,
+        "errors": [*(errors or []), *inferred_errors],
+        "limitations": [*(limitations or []), *inferred_limitations],
+        "provenance": _provenance_from_data(tool, data),
+    }
+```
+
+[`myirteam_common/evidence.py:237-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L237-L252)
+
+[25] `analyze_artifact_folder_impl`은 `IR_Collect.exe -analyze`를 한 번 실행하고 결과 JSON을 줄인다.
+```python
+        out_path = work / "summary.json"
+        rc, out_txt, err_txt = run_ircollect(cfg, ["-analyze", str(target), str(out_path)])
+        if not out_path.is_file():
+            return {
+                "error": "IR_Collect produced no summary JSON (analysis failed).",
+                "exit_code": rc,
+                "stdout": out_txt[:2000],
+                "stderr": err_txt[:2000],
+            }
+        try:
+            data = read_json_file(out_path)
+        except (ValueError, OSError) as exc:
+            return {"error": f"could not read/parse summary JSON: {exc}", "exit_code": rc}
+        provenance = {
+            "analyzed_copy": bool(work_on_copy),
+            "source_folder": str(src),
+            "exit_code": rc,
+            "analyzer_sha256": integrity["sha256"],
+        }
+        result = shape_summary(data, provenance)
+```
+
+[`ir-collect-mcp/server.py:772-791`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L772-L791)
+
+[26] `artifact-forensic`의 실행 함수는 분석 도구 하나를 하위 프로세스로 실행한다.
+
+```python
+def run_hayabusa(
+    cfg: Config,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+) -> tuple[int, str, str]:
+    completed = subprocess.run(
+        [str(cfg.exe_path), *args],
+        cwd=str(cfg.exe_path.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout or cfg.timeout,
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    return completed.returncode, decode_output(completed.stdout), decode_output(completed.stderr)
+```
+
+[`artifact-forensic-mcp/server.py:1111-1127`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1111-L1127)

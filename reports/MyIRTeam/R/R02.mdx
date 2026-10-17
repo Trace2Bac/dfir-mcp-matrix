@@ -1,0 +1,484 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.05
+- id: R02.06
+- id: R02.07
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 `local-forensic`의 PowerShell 도구 일부, `ir-collect`의 보고서 정리 함수, `artifact-forensic`의 도구 전체에 적용된다 [1][2][3].
+서버 전체에 응답 글자 수 상한은 없고 도구마다 항목 수 상한을 둔다.
+
+`local-forensic`은 다음 상한을 둔다 [4][5].
+
+- `collect_event_log_events`는 `max_events`(1~1,000, 기본값 200)개까지 읽는다 [1].
+- `collect_ir_event_bundle`은 채널 8개마다 `max_events_per_channel`(1~1,000, 기본값 200)개까지 읽는다 [4].
+- `list_scheduled_tasks`는 `max_tasks`(1~500)개, `collect_defender_context`는 탐지 `max_detections`(1~500)개, `collect_network_context`는 DNS 캐시·경로·이웃 항목을 각각 `max_entries`(1~1,000)개까지 싣는다 [5].
+- `list_services`는 서비스 500개까지 싣는다 [5].
+
+`ir-collect`의 정리 함수는 다음 상한을 둔다 [2].
+
+- Guided Hunt 일치마다 `evidence` 줄 8개, `parser_notes`·`load_warnings` 각 50개
+- `correlation_v1`의 `shared_entities` 100개, `temporal_correlations` 100개, `hosts` 50개
+- `graph_v1`의 `nodes` 300개, `edges` 600개
+
+`artifact-forensic`은 다음 상한을 둔다 [3].
+
+- EZ Tools와 Hayabusa 레코드는 `max_records`(1~1,000, 기본값 500)개
+- capa 규칙은 `max_capabilities`(1~500)개, YARA 일치는 `max_matches`(1~1,000)개
+- 문자열은 `max_strings`(1~500)개, 파일 목록은 `max_files`(1~5,000)개, ZIP 항목은 `max_members`(1~10,000)개, 해시 목록 항목은 `max_entries`(1~1,000)개
+- 해시 목록의 형식이 맞지 않는 줄과 CSV·JSONL 파싱 오류는 각 20개
+
+`artifact-forensic`은 EZ Tools, capa, YARA·YARA-X를 실행할 때 표준 출력, 표준 오류, 출력 폴더의 파생물을 합쳐 16 MiB(`MAX_STATIC_OUTPUT_BYTES`)를 넘으면 그 도구를 멈춘다 [6].
+
+응답 형식은 이 상한을 바꾸지 않는다.
+`evidence_v1` 응답은 결과를 줄이지 않고 `data`에 넣는다 [7].
+
+**한계.** `local-forensic`의 `collect_autoruns`·`check_file_signatures`·`list_network_connections`·`list_open_handles`·`list_running_processes`·`build_process_tree_snapshot`·`list_loaded_dlls`·`list_wmi_subscriptions`·`list_local_users_and_admins`·`get_file_metadata`는 출력이나 행 수에 상한을 두지 않는다 [8][9].
+`check_file_signatures_batch`는 경로를 32개(`MAX_BATCH_FILES`)까지 받지만 경로마다의 Sigcheck 출력 길이에는 상한을 두지 않는다 [9].
+`list_services`는 PowerShell에서 500개로 자르고 `service_count`에 자른 뒤의 수를 싣는다 [5].
+`collect_event_log_events`의 `count`도 상한까지 읽은 수이고 상한에 닿았는지는 응답에 없다 [1].
+`ir-collect`는 Guided Hunt 일치 수와 가설 틀 수에 상한을 두지 않는다 [2].
+Hayabusa 레코드는 값 길이를 줄이지 않으므로 JSONL 한 줄이 2 MiB까지 그대로 실린다 [10].
+그래서 Hayabusa 응답의 크기는 레코드 수 상한과 줄 길이 상한으로만 정해진다 [10].
+Hayabusa는 `run_hayabusa`로 실행하므로 표준 출력, 표준 오류, JSONL 출력 파일의 크기에 상한이 없다 [11].
+YARA 실행 파일(`yara64.exe`)에는 `-l`로 `max_matches`를 넘긴다 [12].
+YARA 4.5.5의 `-l`은 그 수만큼 규칙이 일치하면 검사를 멈추므로 서버가 센 `match_count`는 `max_matches`를 넘지 않는다 [13][12].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 `artifact-forensic`의 목록 결과와 `ir-collect`의 `correlation_v1`·`graph_v1` 결과에 적용된다 [3][2].
+`artifact-forensic`은 상한을 둔 목록마다 전체 수와 반환 수를 따로 싣고 `truncated`를 둔다 [3].
+
+- EZ Tools와 Hayabusa는 `record_count`와 `returned_record_count`
+- capa는 `capability_count`와 `returned_capability_count`, YARA는 `match_count`와 `returned_match_count`
+- `inventory_evidence_path`는 `discovered_file_count`와 `returned_file_count`, `inventory_archive_members`는 `member_count`와 `returned_member_count`
+- `verify_sha256_manifest`는 `valid_entry_count`와 `returned_entry_count`
+
+Hayabusa 도구를 뺀 도구는 목록을 자르면 `warnings`에 자른 상한을 적는 문구를 더하고 `status`를 `DEGRADED`로 둔다 [14].
+`ir-collect`는 `shared_entity_count`·`temporal_correlation_count`에 자르기 전의 수를 싣고 둘 가운데 하나라도 100개를 넘으면 `truncated`를 참으로 둔다 [2].
+`graph_v1` 결과는 IR_Collect가 적은 `node_count`·`edge_count`를 옮기고 `nodes`·`edges`를 자르면 `truncated`를 참으로 둔다 [2].
+`shared_entities` 105개 보고서는 `shared_entity_count` 105, 실린 항목 100개, `truncated` 참으로, 노드 305개 보고서는 `node_count` 305, 실린 노드 300개, `truncated` 참으로 돌아왔다 [15].
+`evidence_v1` 응답은 결과의 `note`를 `limitations`에 옮기므로 자른 상한을 적은 문구가 `limitations`에도 실린다 [7][15].
+
+**한계.** `ir-collect`는 반환 수를 따로 싣지 않으므로 반환 수는 목록 길이로만 알 수 있다 [2].
+`truncated`는 `shared_entities`와 `temporal_correlations` 가운데 어느 쪽을 잘랐는지 구별하지 않는다 [2].
+`hosts`, `parser_notes`, `load_warnings`, Guided Hunt `evidence`를 자른 사실은 응답에 없다 [2].
+IR_Collect 0.24.2는 규칙마다 정한 수(4~8개)까지만 사실을 골라 `fact_ids`와 `evidence`를 같은 수로 채우므로 이 버전의 요약에서는 `evidence`가 8줄에서 잘리지 않는다 [16][17].
+다른 곳에서 만든 보고서의 `evidence`가 8줄을 넘으면 서버는 앞 8줄만 싣고 `fact_id_count`에는 `fact_ids` 전체의 수를 싣는다 [2].
+`inventory_evidence_path`의 `returned_total_bytes`·`extension_counts`는 반환한 파일만 센 값이다 [18].
+YARA 실행 파일 경로의 `match_count`는 `-l`에서 멈춘 수라서 `truncated`가 참이 되지 않는다 [12][13].
+Hayabusa 도구는 레코드를 `max_records`에서 잘라도 `truncated`만 참으로 두고 `warnings`와 `status`는 바꾸지 않는다 [19].
+
+### R02.05 상한 초과 시 거부
+
+**구현.** 이 방식은 `artifact-forensic`의 capa 도구와 YARA 도구에 적용된다 [20][21].
+두 도구는 외부 도구 출력이 16 MiB를 넘어 실행을 멈추면 결과를 싣지 않고 `error`와 표준 오류를 담은 `details`만 돌려준다 [20][21].
+
+**한계.** 같은 상한을 쓰는 EZ Tools 도구는 거부하지 않는다 [14][6].
+EZ Tools 도구는 상한에서 멈춘 뒤 그때까지 쓴 CSV를 읽어 돌려주고 경고 문구만 더한다 [14].
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 `artifact-forensic`의 문자열 값, `local-forensic`의 사건 메시지, `artifact-forensic`·`ir-collect`의 오류 출력, `evidence_v1` 응답의 `target.identifier`에 적용된다 [22][1][23][24][7].
+`artifact-forensic`의 `_bounded_text`는 값을 2,000자(`MAX_TEXT_FIELD`)에서 자르고 `...[TRUNCATED]`를 붙인다 [22].
+EZ Tools CSV의 열 값, capa 규칙 필드, YARA-X 일치 필드, 경고 문구로 옮기는 외부 도구의 표준 오류에 이 함수가 적용된다 [22][25].
+2,515자 `Payload` 값은 앞 2,000자 뒤에 `...[TRUNCATED]`가 붙은 2,014자로 실렸다 [15].
+추출한 문자열은 500자, 해시 목록의 잘못된 줄은 500자, YARA 실행 파일의 출력 줄은 8,000자에서 같은 방식으로 자른다 [26].
+`local-forensic`의 사건 조회 스크립트는 사건 메시지를 12,000자에서 자르고 `...[TRUNCATED]`를 붙인다 [1].
+외부 도구가 결과 파일을 만들지 못하면 `artifact-forensic`은 표준 오류나 표준 출력의 앞 4,000자를, `ir-collect`는 앞 2,000자를 표시 없이 싣는다 [23][24].
+`local-forensic`은 Sysinternals 도구와 PowerShell의 오류 출력을 자르지 않고 싣는다 [27].
+`evidence_v1` 응답은 대상 식별자가 2,048자를 넘으면 자르고 끝에 원래 값의 SHA-256을 적는다 [7].
+3,000자 경로를 준 호출의 `target.identifier`는 `...[TRUNCATED sha256=…]`로 끝나는 2,048자였다 [28].
+
+**한계.** `local-forensic`의 사건 `properties` 값과 PowerShell 도구가 싣는 다른 문자열은 길이를 줄이지 않는다 [1][5].
+`evidence_v1` 응답의 `errors` 문구와 `data` 안의 같은 경로는 줄이지 않는다 [7][28].
+
+### R02.07 건수 없는 잘림 표시
+
+**구현.** 이 방식은 `artifact-forensic`의 `inspect_binary_file`과 `inspect_archive_member_binary`의 문자열 목록에 적용된다 [29].
+`extract_bounded_strings`는 `max_strings`개가 차면 읽기를 멈추고 `truncated`를 참으로 둔다 [29].
+응답에는 반환한 수 `returned_string_count`만 있고 파일 전체의 문자열 수는 없다 [29].
+`max_strings`를 2로 준 호출은 문자열 2개와 `truncated` 참, 경고 문구 `Returned strings were truncated at max_strings=2.`를 돌려줬다 [15].
+
+### 근거
+
+[1] 사건 조회는 `max_events`를 1~1,000으로 검사하고 스크립트가 메시지를 12,000자에서 자르며 `count`에 읽은 수를 싣는다.
+```python
+    $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents $maxEvents -ErrorAction Stop)
+    $rows = foreach ($event in ($events | Sort-Object TimeCreated)) {
+        $message = $null
+        try { $message = $event.FormatDescription() } catch { $message = $event.Message }
+        if ($message -and $message.Length -gt 12000) { $message = $message.Substring(0, 12000) + "...[TRUNCATED]" }
+        $properties = @($event.Properties | ForEach-Object { $_.Value })
+        [PSCustomObject]@{
+            record_id = $event.RecordId
+            time_created_utc = if ($event.TimeCreated) { $event.TimeCreated.ToUniversalTime().ToString('o') } else { $null }
+            event_id = $event.Id
+            level = $event.LevelDisplayName
+            provider = $event.ProviderName
+            machine_name = $event.MachineName
+            message = $message
+            properties = $properties
+        }
+    }
+```
+
+[`mcp-server/autoruns_mcp.py:329-345`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L329-L345)
+[`mcp-server/autoruns_mcp.py:303-309`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L303-L309)
+
+[2] `ir-collect`의 세 정리 함수와 상한 상수다: [`ir-collect-mcp/server.py:62-68`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L62-L68), [`ir-collect-mcp/server.py:553-625`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L553-L625), [`ir-collect-mcp/server.py:638-681`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L638-L681).
+
+[3] `artifact-forensic`의 상한 상수와 목록마다 전체 수·반환 수를 싣는 곳이다: [`artifact-forensic-mcp/server.py:81-99`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L81-L99), [`artifact-forensic-mcp/server.py:1594-1601`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1594-L1601), [`artifact-forensic-mcp/server.py:2151-2155`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2151-L2155), [`artifact-forensic-mcp/server.py:2194-2199`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2194-L2199), [`artifact-forensic-mcp/server.py:1350-1357`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1350-L1357), [`artifact-forensic-mcp/server.py:1535-1548`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1535-L1548), [`artifact-forensic-mcp/server.py:779-789`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L779-L789).
+
+[4] `collect_ir_event_bundle`은 채널마다 같은 상한으로 조회한다.
+```python
+    try:
+        limit = validate_limit(
+            max_events_per_channel,
+            MAX_EVENT_COUNT,
+            "max_events_per_channel",
+        )
+```
+
+[`mcp-server/autoruns_mcp.py:778-783`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L778-L783)
+```python
+    results = [
+        collect_event_log_internal(channel, ids, start, end, limit)
+        for channel, ids in queries
+    ]
+```
+
+[`mcp-server/autoruns_mcp.py:805-808`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L805-L808)
+
+[5] 서비스·작업·Defender·네트워크 도구의 상한이다: [`mcp-server/autoruns_mcp.py:906-916`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L906-L916), [`mcp-server/autoruns_mcp.py:945-966`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L945-L966), [`mcp-server/autoruns_mcp.py:1055-1066`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1055-L1066), [`mcp-server/autoruns_mcp.py:1146-1157`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1146-L1157).
+
+[6] `run_static_tool`은 실행 폴더의 파일 크기 합이 16 MiB를 넘으면 실행을 멈추고 `output_limited`를 참으로 둔다.
+```python
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            try:
+                output_size = sum(
+                    item.stat().st_size
+                    for item in run_dir.rglob("*")
+                    if item.is_file()
+                )
+            except OSError:
+                output_size = 0
+            if output_size > MAX_STATIC_OUTPUT_BYTES:
+                output_limited = True
+                process.kill()
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                process.kill()
+                break
+            time.sleep(0.05)
+```
+
+[`artifact-forensic-mcp/server.py:1188-1206`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1188-L1206)
+
+[7] `evidence_v1` 응답은 결과를 `data`에 그대로 넣고 대상 식별자만 2,048자로 줄인다.
+```python
+def _bounded_identifier(value: Any) -> str:
+    text = str(value or "unspecified").strip() or "unspecified"
+    if len(text) <= MAX_TARGET_IDENTIFIER_LENGTH:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    suffix = f"...[TRUNCATED sha256={digest}]"
+    return text[: MAX_TARGET_IDENTIFIER_LENGTH - len(suffix)] + suffix
+```
+
+[`myirteam_common/evidence.py:42-48`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L42-L48)
+[`myirteam_common/evidence.py:215-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L215-L252)
+
+[8] 상한 인자 없이 출력이나 행 전체를 싣는 도구들이다: [`mcp-server/autoruns_mcp.py:514-528`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L514-L528), [`mcp-server/autoruns_mcp.py:594-636`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L594-L636), [`mcp-server/autoruns_mcp.py:639-657`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L639-L657), [`mcp-server/autoruns_mcp.py:1017-1045`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1017-L1045), [`mcp-server/autoruns_mcp.py:1257-1273`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1257-L1273).
+
+[9] 상한 인자 없이 행 전체나 출력 전체를 싣는 다른 도구와 경로 수 상한이다: [`mcp-server/autoruns_mcp.py:35`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L35), [`mcp-server/autoruns_mcp.py:569-571`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L569-L571), [`mcp-server/autoruns_mcp.py:849-884`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L849-L884), [`mcp-server/autoruns_mcp.py:1121-1135`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1121-L1135), [`mcp-server/autoruns_mcp.py:1205-1207`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1205-L1207).
+
+[10] `read_jsonl`은 2 MiB 이하 줄을 객체 그대로 모은다.
+```python
+        for line_number, raw_line in enumerate(handle, start=1):
+            line_count += 1
+            if not raw_line.strip():
+                continue
+            if len(raw_line) > MAX_JSONL_LINE_BYTES:
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number} exceeded the {MAX_JSONL_LINE_BYTES}-byte limit")
+                continue
+            try:
+                row = json.loads(raw_line.decode("utf-8-sig"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number}: {exc}")
+                continue
+            if not isinstance(row, dict):
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number}: expected a JSON object")
+                continue
+            valid_count += 1
+            if len(records) < max_records:
+                records.append(row)
+```
+
+[`artifact-forensic-mcp/server.py:2218-2238`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2218-L2238)
+
+[11] `run_hayabusa`는 `subprocess.run`에 `PIPE`를 넘겨 Hayabusa를 실행하고 출력 크기를 보지 않는다.
+
+```python
+def run_hayabusa(
+    cfg: Config,
+    args: list[str],
+    *,
+    timeout: int | None = None,
+) -> tuple[int, str, str]:
+    completed = subprocess.run(
+        [str(cfg.exe_path), *args],
+        cwd=str(cfg.exe_path.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout or cfg.timeout,
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    return completed.returncode, decode_output(completed.stdout), decode_output(completed.stderr)
+```
+
+[`artifact-forensic-mcp/server.py:1111-1127`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1111-L1127)
+
+[12] YARA 실행 파일에는 `-l`로 `max_matches`를 넘기고 출력 줄 수를 `match_count`로 센다.
+```python
+        else:
+            args = [
+                "-N",
+                "-q",
+                "-a",
+                str(cfg.static_timeout),
+                "-l",
+                str(match_limit),
+                "-m",
+                "-g",
+                "-e",
+                *[str(path) for path in rule_files],
+                str(source),
+            ]
+```
+
+[`artifact-forensic-mcp/server.py:2685-2698`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2685-L2698)
+```python
+        else:
+            lines = [line.strip() for line in str(execution.get("stdout") or "").splitlines() if line.strip()]
+            shaped = {
+                "match_count": len(lines),
+                "returned_match_count": min(len(lines), match_limit),
+                "matches": [
+                    {"raw_match_line": _bounded_text(line, MAX_RAW_MATCH_LINE)}
+                    for line in lines[:match_limit]
+                ],
+                "truncated": len(lines) > match_limit,
+            }
+```
+
+[`artifact-forensic-mcp/server.py:2720-2730`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2720-L2730)
+
+[13] YARA 4.5.5의 `-l`(`--max-rules`)은 일치한 규칙 수가 그 값에 닿으면 검사를 멈춘다: [`cli/yara.c:238-243`](https://github.com/VirusTotal/yara/blob/f44a8958e88daa75d765a52a68876f2286d57a51/cli/yara.c#L238-L243), [`cli/yara.c:1182-1189`](https://github.com/VirusTotal/yara/blob/f44a8958e88daa75d765a52a68876f2286d57a51/cli/yara.c#L1182-L1189).
+
+[14] EZ Tools 도구는 멈춘 실행의 CSV를 읽고 경고만 더한다.
+```python
+        warnings: list[str] = []
+        if execution["exit_code"] != 0:
+            warnings.append(f"{descriptor['label']} returned exit code {execution['exit_code']}.")
+        if execution["timed_out"]:
+            warnings.append(f"Analysis exceeded the {cfg.static_timeout}-second timeout.")
+        if execution["output_limited"]:
+            warnings.append("Derived output reached the configured byte limit.")
+        if parsed["parse_errors"]:
+            warnings.append("One or more CSV outputs could not be fully parsed.")
+        if parsed["truncated"]:
+            warnings.append(f"Returned records were truncated at max_records={record_limit}.")
+        if source_digest_before != source_digest_after:
+            warnings.append("The source artifact changed during analysis.")
+        return {
+            "schema_version": "1.0",
+            "status": "DEGRADED" if warnings else "SUCCESS",
+```
+
+[`artifact-forensic-mcp/server.py:1706-1721`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1706-L1721)
+
+[15] (실행 확인) 시험 입력으로 `ir-collect`와 `artifact-forensic` 도구를 MCP로 불렀다(`runs.md` 실행 2).
+`max_records` 2로 부른 EZ Tools 도구는 `record_count` 3, `returned_record_count` 2, `truncated` 참, `status` `DEGRADED`를 돌려줬고 같은 문구가 `limitations`에 `TOOL_NOTE`로 실렸다.
+
+[16] IR_Collect 0.24.2는 일치마다 같은 사실 목록으로 `fact_ids`와 `evidence`를 함께 채운다: [`src/Analysis/GuidedHunt.cs:556-572`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L556-L572).
+
+[17] IR_Collect 0.24.2의 Guided Hunt 규칙은 `PopulateEvidence`에 4~8을 상한으로 넘긴다: [`src/Analysis/GuidedHunt.cs:162`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L162), [`src/Analysis/GuidedHunt.cs:294`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L294), [`src/Analysis/GuidedHunt.cs:446`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L446), [`src/Analysis/GuidedHunt.cs:480`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L480), [`src/Analysis/GuidedHunt.cs:531`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L531).
+
+[18] `inventory_evidence_path`는 `max_files`까지의 파일로만 크기와 확장자 수를 센다.
+```python
+    for path in candidates[:file_limit]:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        size = stat.st_size
+        total_bytes += size
+        suffix = path.suffix.lower() or "[none]"
+        extension_counts[suffix] = extension_counts.get(suffix, 0) + 1
+```
+
+[`artifact-forensic-mcp/server.py:1303-1311`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1303-L1311)
+
+[19] Hayabusa 결과의 `warnings`는 종료 코드, 파싱 오류, 원본 해시 변경만 보고 `truncated`를 보지 않는다.
+
+```python
+        warnings: list[str] = []
+        if exit_code != 0:
+            warnings.append(f"Hayabusa returned non-zero exit code {exit_code}.")
+        if parsed["parse_errors"]:
+            warnings.append("One or more JSONL rows could not be parsed.")
+        if source_kind == "file" and source_digest_after != source_digest_before:
+            warnings.append("The source EVTX changed during Hayabusa analysis.")
+        return {
+            "schema_version": "1.0",
+            "status": "DEGRADED" if warnings else "SUCCESS",
+```
+
+[`artifact-forensic-mcp/server.py:2457-2466`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2457-L2466)
+
+[20] capa 도구는 출력 상한에서 멈추면 오류를 돌려준다.
+```python
+        if execution["timed_out"]:
+            return {"error": f"capa exceeded the configured timeout of {cfg.static_timeout} seconds."}
+        if execution["output_limited"]:
+            return {
+                "error": f"capa output exceeded the {MAX_STATIC_OUTPUT_BYTES}-byte safety limit.",
+                "details": _bounded_text(execution.get("stderr")),
+            }
+```
+
+[`artifact-forensic-mcp/server.py:2537-2543`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2537-L2543)
+
+[21] YARA 도구도 출력 상한에서 멈추면 오류를 돌려준다.
+```python
+        if execution["timed_out"]:
+            return {
+                "error": f"{backend_name} exceeded the configured timeout of {cfg.static_timeout} seconds."
+            }
+        if execution["output_limited"]:
+            return {
+                "error": f"{backend_name} output exceeded the {MAX_STATIC_OUTPUT_BYTES}-byte safety limit.",
+                "details": _bounded_text(execution.get("stderr")),
+            }
+```
+
+[`artifact-forensic-mcp/server.py:2700-2708`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2700-L2708)
+
+[22] `_bounded_text`가 값을 자르고 표시를 붙이며 CSV 열 값에 적용된다.
+```python
+def _bounded_text(value: Any, limit: int = MAX_TEXT_FIELD) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "...[TRUNCATED]"
+```
+
+[`artifact-forensic-mcp/server.py:2088-2092`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2088-L2092)
+```python
+                    if len(records) < max_records:
+                        records.append(
+                            {
+                                "source_csv": path.name,
+                                **{
+                                    str(field): _bounded_text(row.get(field))
+                                    for field in fields
+                                },
+                            }
+                        )
+```
+
+[`artifact-forensic-mcp/server.py:1580-1589`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1580-L1589)
+
+[23] `artifact-forensic`은 결과 파일이 없을 때 출력 앞 4,000자를 싣는다.
+```python
+        if not parsed["output_files"]:
+            detail = (execution["stderr"] or execution["stdout"]).strip()[:4000]
+            return {
+                "error": f"{descriptor['label']} did not produce CSV output.",
+                "details": detail or f"exit code: {execution['exit_code']}",
+                "integrity": integrity,
+            }
+```
+
+[`artifact-forensic-mcp/server.py:1698-1704`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1698-L1704)
+
+[24] `ir-collect`는 결과 JSON이 없을 때 출력 앞 2,000자를 싣는다.
+```python
+        if not out_path.is_file():
+            return {
+                "error": "IR_Collect produced no summary JSON (analysis failed).",
+                "exit_code": rc,
+                "stdout": out_txt[:2000],
+                "stderr": err_txt[:2000],
+            }
+```
+
+[`ir-collect-mcp/server.py:774-780`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L774-L780)
+
+[25] capa·YARA 경고 문구로 옮기는 표준 오류에도 `_bounded_text`를 적용한다: [`artifact-forensic-mcp/server.py:2562-2564`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2562-L2564), [`artifact-forensic-mcp/server.py:2736-2738`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2736-L2738), [`artifact-forensic-mcp/server.py:2124-2146`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2124-L2146).
+
+[26] 문자열과 해시 목록 줄, YARA 출력 줄을 자르는 곳이다: [`artifact-forensic-mcp/server.py:537`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L537), [`artifact-forensic-mcp/server.py:623-626`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L623-L626), [`artifact-forensic-mcp/server.py:2726`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2726).
+
+[27] `run_sysinternals_tool`은 오류 출력을 줄이지 않고 문장 뒤에 붙이고 `run_powershell_json`은 표준 오류 전체를 `details`에 싣는다: [`mcp-server/autoruns_mcp.py:189-193`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L189-L193).
+
+```python
+    stdout = decode_output(result.stdout)
+    stderr = decode_output(result.stderr)
+    output = stdout if stdout.strip() else stderr
+
+    if result.returncode != 0:
+        details = output.strip() or "No tool output was returned."
+        return f"Error: {tool_name} exited with code {result.returncode}.\n{details}"
+```
+
+[`mcp-server/autoruns_mcp.py:135-141`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L135-L141)
+
+[28] (실행 확인) 없는 3,000자 경로로 `check_file_signatures`를 같은 프로세스에서 불렀다(`runs.md` 실행 3).
+`target.identifier`는 2,048자이고 `...[TRUNCATED sha256=…]`로 끝났으며 `errors`의 문구에는 경로 전체가 실렸다.
+
+[29] `extract_bounded_strings`는 반환 수와 `truncated`만 싣는다.
+```python
+def extract_bounded_strings(path: Path, max_strings: int) -> dict[str, Any]:
+    values: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    truncated = False
+    carry = b""
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            data = carry + chunk
+            for encoding, pattern in (("ascii", ASCII_STRING_RE), ("utf-16le", UTF16LE_STRING_RE)):
+                for match in pattern.finditer(data):
+                    raw = match.group(0)
+                    text = raw.decode(encoding, errors="replace")
+                    key = (encoding, text)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if len(values) >= max_strings:
+                        truncated = True
+                        break
+                    values.append({"encoding": encoding, "value": _bounded_text(text, 500) or ""})
+                if truncated:
+                    break
+            if truncated:
+                break
+            carry = data[-4096:]
+    return {"strings": values, "returned_string_count": len(values), "truncated": truncated}
+```
+
+[`artifact-forensic-mcp/server.py:518-543`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L518-L543)

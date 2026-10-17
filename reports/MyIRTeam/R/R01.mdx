@@ -1,0 +1,639 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `local-forensic`의 `collect_autoruns`·`check_file_signatures`·`check_file_signatures_batch`·`list_network_connections`·`list_open_handles`, `artifact-forensic`의 Hayabusa 도구와 YARA 실행 파일 경로, `ir-collect`가 IR_Collect 보고서에서 옮기는 목록 항목에 적용된다 [1][2][3][4].
+`local-forensic`의 공통 실행기 `run_sysinternals_tool`은 Sysinternals 도구의 표준 출력을 글자로 바꾼 뒤 그대로 돌려준다 [1].
+`collect_autoruns`·`check_file_signatures`·`list_network_connections`·`list_open_handles`는 이 글을 바꾸지 않고 결과로 쓴다 [5].
+`check_file_signatures_batch`는 경로마다 이 글을 `results`의 `result`에 그대로 싣는다 [5].
+`artifact-forensic`의 Hayabusa 도구 두 개는 `json-timeline` 출력의 JSONL 줄을 `json.loads`로 읽은 객체를 그대로 `records`에 싣는다 [2].
+값의 길이를 줄이지 않으므로 3,000자 값이 들어 있는 레코드가 바뀌지 않고 실렸다 [6].
+YARA 실행 파일(`yara64.exe`)을 고르면 출력 한 줄을 `raw_match_line`에 그대로 싣는다 [3].
+`ir-collect`는 Guided Hunt 일치의 `evidence` 줄, `shared_entities`·`temporal_correlations`·`nodes`·`edges`의 항목을 바꾸지 않고 싣는다 [4].
+
+응답 형식은 이 동작을 바꾸지 않는다.
+`legacy` 형식은 도구의 결과를 그대로 돌려주고 기본 형식 `evidence_v1`은 결과를 바꾸지 않고 `data`에 넣는다 [7].
+그래서 `evidence_v1`에서는 Sysinternals 출력이 JSON 문자열 값 하나로 실린다 [7][8].
+
+**한계.** `run_sysinternals_tool`은 표준 출력이 비어 있으면 표준 오류를 결과로 쓴다 [1].
+종료 코드가 0이 아니면 `Error: <도구> exited with code N.` 문구 뒤에 도구 출력을 붙여 돌려준다 [1].
+YARA 출력 줄은 8,000자에서 자르고 `...[TRUNCATED]`를 붙인다 [3][9].
+Hayabusa 출력에서 2 MiB를 넘는 줄은 싣지 않고 `parse_errors`에 줄 번호만 남긴다 [10].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 `local-forensic`의 PowerShell 도구, `ir-collect`의 보고서 정리 함수, `artifact-forensic`의 EZ Tools·capa·YARA-X 도구와 서버 안 파서에 적용된다 [11][12][13][14][15].
+`local-forensic`은 고정 PowerShell 스크립트로 정해 둔 속성만 골라 `ConvertTo-Json`으로 출력하게 하고 그 글을 `json.loads`로 읽는다 [11][16].
+예를 들어 `list_running_processes`는 `Win32_Process`에서 `ProcessId`·`ParentProcessId`·`Name`·`ExecutablePath`·`CommandLine`·`CreationDate`·`SessionId`만 고른다 [11].
+`build_process_tree_snapshot`은 프로세스마다 부모 프로세스의 이름, 경로, 명령 줄을 이어 붙이도록 짜여 있다 [17].
+
+`ir-collect`의 `shape_summary`·`shape_correlation`·`shape_graph`는 IR_Collect의 `summary_v3`·`correlation_v1`·`graph_v1` 보고서에서 필드를 골라 새 `dict`를 만든다 [12].
+`shape_summary`는 Guided Hunt 일치마다 `id`·`title`·`severity`·ATT&CK 세 필드·`summary`·`evidence`·`suggested_hypothesis_id`만 옮긴다 [12].
+가설 틀은 `id`·`title`·`question`·`why`만 옮긴다 [12].
+
+`artifact-forensic`의 `read_csv_outputs`는 EZ Tools가 만든 CSV를 `csv.DictReader`로 읽어 행마다 열 이름을 키로 한 `dict`를 만든다 [13].
+`shape_capa_document`는 capa 규칙마다 `meta`에서 이름, namespace, scope, 설명, 작성자, ATT&CK, MBC, 참고 주소, 라이브러리 여부를 고른다 [14].
+`shape_yarax_document`는 YARA-X 일치마다 규칙 이름, namespace, 파일, 태그, 메타데이터를 고른다 [15].
+`inspect_binary_file`은 서버 안에서 PE 머리와 섹션 표를 읽어 필드로 나눈다 [18].
+
+**한계.** `build_process_tree_snapshot`은 `list_running_processes`를 `response_format` 없이 부르므로 그 결과는 기본 형식인 `evidence_v1` 응답이다 [17][19].
+`evidence_v1` 응답에는 최상위 `processes` 키가 없어 이 도구는 프로세스를 하나도 읽지 못한다 [17][7].
+같은 프로세스 행 3개를 돌려주도록 PowerShell 실행을 바꾸자 `list_running_processes`는 3개를 실었고 `build_process_tree_snapshot`은 두 형식 모두 `process_count` 0을 돌려줬다 [20].
+
+`shape_summary`는 IR_Collect 요약에 있는 `fact_samples`, `collection_coverage`, Guided Hunt의 `explanation`·`fact_ids`·`notes`·`enabled`를 싣지 않는다 [12][21].
+`evidence` 목록은 항목 수 `evidence_manifest_count`로만 남는다 [12].
+capa 7.1.0의 JSON은 규칙 범위를 `scopes`에, 표본 해시를 `sample` 아래 `md5`·`sha1`·`sha256`에 둔다 [22].
+서버는 `scope`와 `sample.hashes`를 읽으므로 `scope`는 늘 `null`, `sample_hashes`는 늘 빈 `dict`로 실린다 [14][23].
+YARA-X 1.19.0의 JSON 일치 항목에는 namespace 필드가 없어 `namespace`는 늘 `null`이다 [15][24].
+서버는 `yr.exe`에 `--print-namespace`를 넘기지만 YARA-X 1.19.0은 이 옵션을 `ndjson`과 텍스트 출력에만 반영한다 [25].
+EZ Tools CSV에서 201번째부터의 열은 표시 없이 빠진다 [13].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 세 증거 서버의 건수 필드, `artifact-forensic`의 해시·엔트로피 계산과 ZIP 항목 도구의 임시 경로 치환에 적용된다 [26][27][12][28].
+`artifact-forensic`의 `inspect_binary_file`은 파일 전체의 MD5·SHA-1·SHA-256과 바이트 엔트로피, 섹션마다의 엔트로피를 계산한다 [27][18].
+`inventory_evidence_path`는 확장자별 파일 수를, `inventory_archive_members`는 후보 아티팩트 유형별 수와 안전하지 않은 항목 수를 센다 [26][29].
+`verify_sha256_manifest`는 상태별 항목 수 `status_counts`를 센다 [30].
+`shape_capa_document`는 규칙마다 capa가 돌려준 일치 위치의 수를 `match_count`로 싣는다 [14].
+`ir-collect`는 Guided Hunt 일치의 `fact_ids` 목록을 개수 `fact_id_count`로, 요약의 `evidence` 목록을 `evidence_manifest_count`로 바꾼다 [12].
+`local-forensic`은 `matched_processes`·`service_count`·`task_count`처럼 돌려준 행의 수를 싣는다 [11].
+ZIP 항목 도구는 결과의 모든 문자열 값에서 서버가 만든 임시 사본 경로를 `<ZIP 경로>::<항목 경로>`로, 작업 폴더 경로를 `[internal work directory]`로 바꾼다 [28].
+EvtxECmd 출력의 `SourceFile` 값은 이 치환으로 `triage.zip::C/Windows/System32/winevt/Logs/Security.evtx` 꼴이 되었다 [31].
+
+**한계.** `inventory_evidence_path`의 `extension_counts`와 `returned_total_bytes`는 `max_files`로 자른 뒤의 파일만 센 값이다 [26].
+`_bounded_list`와 `_bounded_metadata`는 목록과 `dict` 안의 값을 `str()`로 바꾼다 [32].
+그래서 capa의 ATT&CK·MBC 항목의 `parts` 목록은 `['Defense Evasion', ...]` 같은 Python 표기 문자열로 실린다 [23].
+YARA-X 메타데이터의 정수 75와 참 값은 문자열 `"75"`와 `"True"`로 실렸다 [23].
+임시 경로 치환은 문자열 값 전체에 적용되므로 증거 값 안에 같은 문자열이 있어도 바뀐다 [28].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 `ir-collect`와 `artifact-forensic`의 `provenance`, `evidence_v1` 응답의 `tool`·`provenance`, EZ Tools 레코드의 `source_csv`에 적용된다 [12][33][7][13].
+`artifact-forensic`의 분석 도구는 `provenance`에 분석 도구 이름, 버전, 실행 파일 SHA-256, 종료 코드, 출력 형식, 분석한 파일의 폴더를 싣는다 [33].
+ZIP 항목 도구는 여기에 원본 ZIP 경로, 항목 경로, ZIP의 SHA-256, 사본을 분석했다는 `analyzed_copy`를 더한다 [28].
+응답마다 `analysis_mode`에 분석 방식을 적는다 [33].
+`ir-collect`는 IR_Collect가 보고서에 적은 도구 이름, 버전, schema, 생성 시각에 서버가 읽은 폴더, ZIP, 보고서 경로와 실행 파일 SHA-256을 더해 `provenance`에 싣는다 [12][34].
+`read_csv_outputs`는 레코드마다 그 행을 읽은 CSV 파일 이름을 `source_csv`에 싣는다 [13].
+`evidence_v1` 응답은 `tool`에 `<서버>/<도구>` 이름을 싣고 `provenance`에 `producer`와 결과의 `provenance`에서 고른 키 9개를 옮긴다 [7].
+
+**한계.** `local-forensic`의 결과에는 `provenance`가 없다 [11].
+그래서 `legacy` 형식의 `local-forensic` 응답에는 결과를 만든 도구를 적는 필드가 없고 `evidence_v1`에서도 `producer`만 있다 [7][35].
+`evidence_v1` 응답이 옮기는 키에는 `analyzer_sha256`·`output_format`·`source_archive`·`source_member`가 없다 [7].
+이 값은 `data` 안의 `provenance`에만 있다 [31].
+Hayabusa 도구는 `tool_version`을 늘 `null`로 둔다 [2].
+capa와 YARA 도구는 실행 파일 SHA-256이 서버에 적힌 값과 같을 때만 `tool_version`을 채운다 [33][3].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `local-forensic`의 `collect_ir_event_bundle`, `ir-collect`의 건수 표, `artifact-forensic`의 Hayabusa 등급 기준과 RECmd 프로필, `inventory_evidence_path`에 적용된다 [36][37][38][39][26].
+`collect_ir_event_bundle`은 채널 8개마다 서버가 정해 둔 사건 ID 목록으로만 사건을 읽는다 [36].
+Security 채널은 4624·4625·4672·4688·4697·4698·4702·4720·4722·4728·4732·4756·1102를 읽는다 [36].
+이 목록은 인자로 바꿀 수 없다 [36].
+`ir-collect`의 `_nonzero`는 `fact_source_counts`와 `entity_type_counts`에서 값이 0인 항목을 뺀다 [37][12].
+Hayabusa 도구는 `min_level`을 `-m`으로 넘기고 기본값은 `medium`이다 [38].
+그래서 인자를 주지 않으면 `informational`·`low` 등급 규칙의 일치는 응답에 없다 [38].
+`parse_windows_artifact_with_eztools`와 `parse_archive_member_with_eztools`는 레지스트리 하이브를 서버가 SHA-256으로 고정한 RECmd 배치 파일 5개 가운데 하나로 읽고 기본값은 `dfir`이다 [39].
+배치 파일에 적힌 키만 결과에 실린다 [39][40].
+`inventory_evidence_path`는 심볼릭 링크와 증거 루트 밖으로 이어지는 항목을 빼고 뺀 수를 경고 문구에 적는다 [26].
+
+**한계.** `collect_ir_event_bundle`과 `_nonzero`가 뺀 항목의 수는 응답에 없다 [36][12].
+RECmd 배치 파일은 저장소에 없고 서버는 SHA-256만 대조하므로 어떤 키를 고르는지는 배포된 파일에 달려 있다 [39].
+RECmd 저장소 `bcd0ac3`의 `DFIRBatch.reb`와 배포된 파일이 같은지는 확인하지 못했다 [40].
+
+### 근거
+
+[1] `run_sysinternals_tool`은 표준 출력이 비면 표준 오류를 쓰고 실패하면 문구를 앞에 붙인다.
+```python
+    stdout = decode_output(result.stdout)
+    stderr = decode_output(result.stderr)
+    output = stdout if stdout.strip() else stderr
+
+    if result.returncode != 0:
+        details = output.strip() or "No tool output was returned."
+        return f"Error: {tool_name} exited with code {result.returncode}.\n{details}"
+
+    # Preserve the primary tool stream. A non-zero exit code is handled above;
+    # stderr on a successful Sysinternals run is commonly banner text.
+    return output
+```
+
+[`mcp-server/autoruns_mcp.py:135-145`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L135-L145)
+`collect_autoruns`와 `list_open_handles`는 그 글을 결과로 쓴다: [`mcp-server/autoruns_mcp.py:523-528`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L523-L528), [`mcp-server/autoruns_mcp.py:1270-1273`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1270-L1273), [`mcp-server/autoruns_mcp.py:546-551`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L546-L551).
+
+[2] Hayabusa 결과는 `read_jsonl`이 읽은 객체를 펼쳐 싣고 `tool_version`을 `None`으로 둔다: [`artifact-forensic-mcp/server.py:2212-2246`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2212-L2246), [`artifact-forensic-mcp/server.py:2455-2494`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2455-L2494).
+
+[3] YARA 실행 파일의 출력 줄은 `raw_match_line`으로 싣고 `tool_version`은 해시가 같을 때만 채운다.
+```python
+        else:
+            lines = [line.strip() for line in str(execution.get("stdout") or "").splitlines() if line.strip()]
+            shaped = {
+                "match_count": len(lines),
+                "returned_match_count": min(len(lines), match_limit),
+                "matches": [
+                    {"raw_match_line": _bounded_text(line, MAX_RAW_MATCH_LINE)}
+                    for line in lines[:match_limit]
+                ],
+                "truncated": len(lines) > match_limit,
+            }
+```
+
+[`artifact-forensic-mcp/server.py:2720-2730`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2720-L2730)
+```python
+        tool_version = None
+        if backend_name == "yara" and integrity.get("sha256", "").lower() == BUNDLED_YARA_SHA256:
+            tool_version = BUNDLED_YARA_VERSION
+        if backend_name == "yara_x" and integrity.get("sha256", "").lower() == BUNDLED_YARAX_SHA256:
+            tool_version = BUNDLED_YARAX_VERSION
+```
+
+[`artifact-forensic-mcp/server.py:2743-2747`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2743-L2747)
+
+[4] `shape_correlation`과 `shape_graph`는 목록 항목을 그대로 앞에서부터 싣는다: [`ir-collect-mcp/server.py:638-659`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L638-L659), [`ir-collect-mcp/server.py:662-681`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L662-L681).
+
+```python
+def shape_correlation(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw correlation_v1 payload (cross-host shared entities + temporal)."""
+    shared = data.get("shared_entities") if isinstance(data.get("shared_entities"), list) else []
+    temporal = data.get("temporal_correlations") if isinstance(data.get("temporal_correlations"), list) else []
+    hosts = [h for h in (data.get("hosts") or []) if isinstance(h, dict)]
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, {**provenance, "evidence_digest": data.get("evidence_digest")}),
+        "host_count": data.get("host_count"),
+        "ready_hosts": data.get("ready_hosts"),
+        "skipped_hosts": data.get("skipped_hosts"),
+        "bucket_minutes": data.get("bucket_minutes"),
+        "entity_types": data.get("entity_types"),
+        "hosts": [{k: h.get(k) for k in ("host", "case_id", "fact_count", "evidence_digest")} for h in hosts][:MAX_NOTES],
+        "shared_entity_count": len(shared),
+        "shared_entities": shared[:MAX_SHARED_ENTITIES],
+        "temporal_correlation_count": len(temporal),
+        "temporal_correlations": temporal[:MAX_TEMPORAL],
+        "truncated": len(shared) > MAX_SHARED_ENTITIES or len(temporal) > MAX_TEMPORAL,
+        "disclaimer": "Shared entities are factual cross-host pivots, not verdicts.",
+    }
+```
+
+[`ir-collect-mcp/server.py:638-659`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L638-L659)
+
+```python
+def shape_graph(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw graph_v1 payload (multi-hop investigation graph)."""
+    nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, provenance),
+        "seed_type": data.get("seed_type"),
+        "seed_value": data.get("seed_value"),
+        "max_depth": data.get("max_depth"),
+        "per_hop_fanout": data.get("per_hop_fanout"),
+        "host_count": data.get("host_count"),
+        "node_count": data.get("node_count"),
+        "edge_count": data.get("edge_count"),
+        "nodes": nodes[:MAX_NODES],
+        "edges": edges[:MAX_EDGES],
+        "truncated": len(nodes) > MAX_NODES or len(edges) > MAX_EDGES,
+        "disclaimer": "Graph nodes/edges are factual entity relationships, not verdicts.",
+    }
+```
+
+[`ir-collect-mcp/server.py:662-681`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L662-L681)
+
+[5] 네 도구는 `run_sysinternals_tool`의 글을 결과로 쓰고 `check_file_signatures_batch`는 경로마다 그 글을 `result`에 싣는다: [`mcp-server/autoruns_mcp.py:523-528`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L523-L528), [`mcp-server/autoruns_mcp.py:546-551`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L546-L551), [`mcp-server/autoruns_mcp.py:651-657`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L651-L657), [`mcp-server/autoruns_mcp.py:1270-1273`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1270-L1273).
+
+```python
+    results = []
+    for value in unique_paths:
+        results.append({"requested_path": value, "result": run_sigcheck(value)})
+
+    result = {
+        "schema_version": "1.0",
+        "collected_at_utc": utc_now(),
+        "requested_count": len(unique_paths),
+        "results": results,
+    }
+    return local_response(response_format, "check_file_signatures_batch", result)
+```
+
+[`mcp-server/autoruns_mcp.py:569-579`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L569-L579)
+
+[6] (실행 확인) 시험용 Hayabusa 대체 실행 파일이 쓴 3,000자 `Details.TgtUser` 값이 `analyze_evtx_with_hayabusa` 응답에 3,000자 그대로 실렸다(`runs.md` 실행 2).
+
+[7] `format_tool_response`는 `legacy`면 결과를 그대로, 아니면 `evidence_v1` 응답을 만들고 그 응답은 결과를 `data`에 넣는다.
+```python
+    normalized = normalize_response_format(response_format)
+    if normalized is None:
+        return {
+            "error": f"Unsupported response_format: {response_format!r}.",
+            "allowed_response_formats": list(ALLOWED_RESPONSE_FORMATS),
+        }
+    if normalized == LEGACY_RESPONSE_FORMAT:
+        return data
+    return build_evidence_envelope(
+        tool=tool,
+        target_type=target_type,
+        target_identifier=target_identifier,
+        data=data,
+        snapshot_id=snapshot_id,
+    )
+```
+
+[`myirteam_common/evidence.py:264-278`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L264-L278)
+[`myirteam_common/evidence.py:187-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L187-L252)
+
+[8] (실행 확인) `category`에 허용되지 않는 글자를 준 `collect_autoruns`는 `legacy`에서 `Error: Invalid Autoruns category…` 글만, `evidence_v1`에서 같은 글을 `data` 문자열에 담은 JSON을 돌려줬다(`runs.md` 실행 2).
+
+[9] `_bounded_text`는 정한 길이를 넘는 글을 자르고 `...[TRUNCATED]`를 붙인다.
+```python
+def _bounded_text(value: Any, limit: int = MAX_TEXT_FIELD) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "...[TRUNCATED]"
+```
+
+[`artifact-forensic-mcp/server.py:2088-2092`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2088-L2092)
+
+[10] `read_jsonl`은 2 MiB를 넘는 줄을 건너뛰고 오류 문구만 남긴다.
+```python
+        for line_number, raw_line in enumerate(handle, start=1):
+            line_count += 1
+            if not raw_line.strip():
+                continue
+            if len(raw_line) > MAX_JSONL_LINE_BYTES:
+                if len(errors) < MAX_PARSE_ERRORS:
+                    errors.append(f"line {line_number} exceeded the {MAX_JSONL_LINE_BYTES}-byte limit")
+                continue
+```
+
+[`artifact-forensic-mcp/server.py:2218-2225`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2218-L2225)
+
+[11] `list_running_processes`의 PowerShell 스크립트는 정해 둔 속성만 고르고 서버는 행 수를 싣는다: [`mcp-server/autoruns_mcp.py:594-636`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L594-L636), [`mcp-server/autoruns_mcp.py:903-934`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L903-L934), [`mcp-server/autoruns_mcp.py:1007-1014`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1007-L1014).
+
+[12] `shape_summary`는 IR_Collect 요약에서 필드를 골라 새 `dict`를 만든다: [`ir-collect-mcp/server.py:553-625`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L553-L625).
+
+[13] `read_csv_outputs`는 열을 200개까지만 읽고 행마다 `source_csv`를 붙인다.
+```python
+    for path in output_files:
+        try:
+            size = path.stat().st_size
+            with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fields = list(reader.fieldnames or [])[:MAX_CSV_COLUMNS]
+                for row in reader:
+                    record_count += 1
+                    if len(records) < max_records:
+                        records.append(
+                            {
+                                "source_csv": path.name,
+                                **{
+                                    str(field): _bounded_text(row.get(field))
+                                    for field in fields
+                                },
+                            }
+                        )
+            file_summaries.append({"name": path.name, "size_bytes": size})
+        except (OSError, csv.Error) as exc:
+            if len(errors) < MAX_PARSE_ERRORS:
+                errors.append(f"{path.name}: {exc}")
+```
+
+[`artifact-forensic-mcp/server.py:1572-1593`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1572-L1593)
+
+[14] `shape_capa_document`는 `meta`의 `scope`와 `sample`의 `hashes`를 읽는다: [`artifact-forensic-mcp/server.py:2124-2165`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2124-L2165).
+
+[15] `shape_yarax_document`는 일치 항목의 `namespace`를 읽는다.
+```python
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            metadata = rule.get("metadata")
+            if not isinstance(metadata, (dict, list)):
+                metadata = rule.get("meta") if isinstance(rule.get("meta"), (dict, list)) else None
+            normalized.append(
+                {
+                    "identifier": _bounded_text(rule.get("identifier") or rule.get("rule")),
+                    "namespace": _bounded_text(rule.get("namespace")),
+                    "file": _bounded_text(rule.get("file") or item.get("path")),
+                    "tags": _bounded_list(rule.get("tags"), 50),
+                    "metadata": _bounded_metadata(metadata),
+                }
+            )
+```
+
+[`artifact-forensic-mcp/server.py:2179-2193`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2179-L2193)
+
+[16] `run_powershell_json`은 스크립트의 표준 출력을 JSON으로 읽는다.
+```python
+    if result.returncode != 0:
+        return {
+            "error": "PowerShell command failed.",
+            "details": result.stderr.strip() or result.stdout.strip(),
+        }
+
+    raw = result.stdout.strip().lstrip("\ufeff")
+    if not raw:
+        return []
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"error": "PowerShell returned invalid JSON.", "raw_output": raw}
+```
+
+[`mcp-server/autoruns_mcp.py:189-202`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L189-L202)
+
+[17] `build_process_tree_snapshot`은 `list_running_processes(None)`의 결과에서 `processes`를 찾는다.
+```python
+    process_result = list_running_processes(None)
+    if "error" in process_result:
+        return local_response(response_format, "build_process_tree_snapshot", process_result, "live_process")
+
+    try:
+        identifiers = normalize_identifiers(process_identifiers)
+    except ValueError as exc:
+        return local_response(
+            response_format,
+            "build_process_tree_snapshot",
+            {"error": str(exc)},
+            "live_process",
+        )
+
+    rows = process_result.get("processes", [])
+```
+
+[`mcp-server/autoruns_mcp.py:835-849`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L835-L849)
+[`mcp-server/autoruns_mcp.py:866-877`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L866-L877)
+
+[18] `parse_pe_structure`는 PE 머리와 섹션 표를 읽어 필드로 나눈다: [`artifact-forensic-mcp/server.py:393-515`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L393-L515).
+
+[19] 도구 함수의 `response_format` 기본값은 `evidence_v1`이고 `FastMCP`의 `tool()` 장식자는 함수를 그대로 돌려준다.
+```python
+@mcp.tool()
+def list_running_processes(
+    process_identifiers: list[str] | None = None,
+    response_format: str = EVIDENCE_RESPONSE_FORMAT,
+) -> Any:
+    """Return processes, optionally filtered by PID, name, or executable path.
+    Set response_format='evidence_v1' for the common Evidence Envelope."""
+```
+
+[`mcp-server/autoruns_mcp.py:582-588`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L582-L588)
+MCP Python SDK 1.28.1의 장식자는 등록한 함수를 그대로 돌려준다: [`src/mcp/server/fastmcp/server.py:493-504`](https://github.com/modelcontextprotocol/python-sdk/blob/777b8d06710c140e3606b0d4598e2aa48546c266/src/mcp/server/fastmcp/server.py#L493-L504).
+
+[20] (실행 확인) `run_powershell_json`을 프로세스 행 3개를 돌려주는 함수로 바꾸고 같은 프로세스에서 불렀다(`runs.md` 실행 3).
+`list_running_processes(None, response_format="legacy")`는 `matched_processes` 3을, `build_process_tree_snapshot`은 `evidence_v1`과 `legacy`에서 모두 `process_count` 0과 빈 `processes`를 돌려줬다.
+
+[21] IR_Collect 0.24.2의 `summary_v3`에는 `collection_coverage`와 `fact_samples`가 있고 `-analyze`는 요약을 가림 없이 쓴다: [`src/Analysis/SummaryExport.cs:12-74`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/SummaryExport.cs#L12-L74), [`src/Analysis/AnalysisCli.cs:84-133`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/AnalysisCli.cs#L84-L133), [`src/Analysis/GuidedHunt.cs:9-68`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GuidedHunt.cs#L9-L68).
+
+[22] capa 7.1.0의 `Sample`은 `md5`·`sha1`·`sha256`·`path`를, `RuleMetadata`는 `scopes`를 두고 JSON은 `model_dump_json(exclude_none=True)`로 쓴다: [`capa/render/result_document.py:36-40`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/render/result_document.py#L36-L40), [`capa/render/result_document.py:572-584`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/render/result_document.py#L572-L584), [`capa/render/json.py:13-14`](https://github.com/mandiant/capa/blob/482686ab8138bd30088f2f09fb1e97e0897d94d5/capa/render/json.py#L13-L14).
+
+[23] (실행 확인) capa 7.1.0 JSON 모양으로 출력하는 시험용 capa와 메타데이터에 정수·참 값을 둔 시험용 YARA-X로 불렀다(`runs.md` 실행 2).
+`capabilities[].scope`는 `null`, `capa_result_meta.sample_hashes`는 `{}`, MBC의 `parts`는 `"['Defense Evasion', 'Obfuscated Files or Information', 'Encoding-Standard Algorithm']"`였다.
+YARA-X 일치의 `namespace`는 `null`, `metadata.score`는 `"75"`, `metadata.active`는 `"True"`였다.
+
+[24] YARA-X 1.19.0의 JSON 일치 항목은 `rule`·`file`·`meta`·`tags`·`strings`만 둔다: [`cli/src/commands/scan.rs:978-994`](https://github.com/VirusTotal/yara-x/blob/fe40349ea12c5ccb89aae9f304b979c4fb410f66/cli/src/commands/scan.rs#L978-L994).
+
+[25] 서버는 YARA-X에 `--output-format json`과 `--print-namespace`를 넘기고 YARA-X 1.19.0의 `json` 출력 항목 `MatchJson`에는 namespace가 없으며 namespace는 `ndjson` 출력의 `RuleJson`에만 실린다: [`cli/src/commands/scan.rs:291-296`](https://github.com/VirusTotal/yara-x/blob/fe40349ea12c5ccb89aae9f304b979c4fb410f66/cli/src/commands/scan.rs#L291-L296), [`cli/src/commands/scan.rs:978-988`](https://github.com/VirusTotal/yara-x/blob/fe40349ea12c5ccb89aae9f304b979c4fb410f66/cli/src/commands/scan.rs#L978-L988), [`cli/src/commands/scan.rs:638-642`](https://github.com/VirusTotal/yara-x/blob/fe40349ea12c5ccb89aae9f304b979c4fb410f66/cli/src/commands/scan.rs#L638-L642).
+
+```python
+            args = [
+                "scan",
+                "--output-format",
+                "json",
+                "--print-meta",
+                "--print-tags",
+                "--print-namespace",
+                "--disable-console-logs",
+                "--no-mmap",
+                "--threads",
+                "1",
+                "--timeout",
+                str(cfg.static_timeout),
+                *[str(path) for path in rule_files],
+                str(source),
+            ]
+```
+
+[`artifact-forensic-mcp/server.py:2669-2684`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2669-L2684)
+
+[26] `inventory_evidence_path`는 `max_files`까지의 파일로 크기와 확장자 수를 세고 건너뛴 링크와 루트 밖 항목 수를 경고에 적는다: [`artifact-forensic-mcp/server.py:1239-1366`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1239-L1366).
+
+[27] `file_hashes_and_entropy`는 해시 세 개와 엔트로피를 계산한다: [`artifact-forensic-mcp/server.py:308-339`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L308-L339).
+
+[28] ZIP 항목 분석 뒤 임시 경로를 바꾸고 `provenance`에 ZIP 정보를 더한다.
+```python
+    replacements: dict[str, str] = {}
+    if extracted is not None:
+        work = extracted["work"]
+        primary = extracted["primary"]
+        for record in [primary, *extracted["companions"]]:
+            replacements[str(record["extracted_path"])] = f"{source}::{record['member_path']}"
+        replacements[str(work)] = "[internal work directory]"
+        shutil.rmtree(work, ignore_errors=True)
+    result = _replace_text_paths(result, replacements)
+```
+
+[`artifact-forensic-mcp/server.py:1951-1959`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1951-L1959)
+```python
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    provenance.pop("source_folder", None)
+    provenance.update(
+        {
+            "evidence_digest": (
+                primary_metadata["member_sha256"] if primary_metadata is not None else None
+            ),
+            "source_archive": str(source),
+            "source_member": normalized_member,
+            "source_companion_members": [
+                record["member_path"] for record in companion_metadata
+            ],
+            "archive_digest": archive_digest_before,
+            "analyzed_copy": True,
+        }
+    )
+    result["provenance"] = provenance
+```
+
+[`artifact-forensic-mcp/server.py:1997-2013`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1997-L2013)
+
+[29] `inventory_archive_members`는 항목 속성별 수와 유형별 후보 수를 센다: [`artifact-forensic-mcp/server.py:1408-1562`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1408-L1562).
+
+[30] `verify_sha256_manifest`는 상태별 수를 센다.
+```python
+        total_hashed_bytes += size
+        row_status = "MATCH" if actual == entry["expected_sha256"] else "MISMATCH"
+        status_counts[row_status] += 1
+        results.append(
+            {
+                **entry,
+                "resolved_path": str(target),
+                "size_bytes": size,
+                "actual_sha256": actual,
+                "status": row_status,
+            }
+        )
+```
+
+[`artifact-forensic-mcp/server.py:753-764`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L753-L764)
+
+[31] (실행 확인) 시험용 EvtxECmd 대체 실행 파일로 `parse_archive_member_with_eztools`를 부르자 `SourceFile`에 ZIP 경로와 항목 경로가 `::`로 이어진 값이 실렸다(`runs.md` 실행 2).
+같은 응답의 최상위 `provenance`에는 `source_archive`·`source_member`가 없고 `data.provenance`에는 있었다.
+
+[32] `_bounded_list`와 `_bounded_metadata`는 값마다 `_bounded_text`를 부른다.
+```python
+def _bounded_list(value: Any, limit: int = 50) -> list[Any]:
+    if value is None:
+        return []
+    rows = value if isinstance(value, list) else [value]
+    bounded: list[Any] = []
+    for row in rows[:limit]:
+        if isinstance(row, (str, int, float, bool)) or row is None:
+            bounded.append(_bounded_text(row))
+        elif isinstance(row, dict):
+            bounded.append({str(k): _bounded_text(v) for k, v in list(row.items())[:20]})
+        else:
+            bounded.append(_bounded_text(row))
+    return bounded
+
+
+def _bounded_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _bounded_text(item) for key, item in list(value.items())[:50]}
+    if isinstance(value, list):
+        return _bounded_list(value, 50)
+    return _bounded_text(value)
+```
+
+[`artifact-forensic-mcp/server.py:2095-2115`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2095-L2115)
+
+[33] EZ Tools 결과의 `analysis_mode`와 `provenance`다.
+```python
+            "provenance": {
+                "tool_name": descriptor["label"],
+                "tool_version": BUNDLED_EZTOOLS_VERSION,
+                "evidence_digest": source_digest_before,
+                "source_folder": str(source.parent),
+                "analyzed_copy": False,
+                "exit_code": execution["exit_code"],
+                "analyzer_sha256": integrity["sha256"],
+                "output_format": "csv",
+                "profile": normalized_profile,
+                "profile_sha256": actual_batch_sha256,
+                "registry_transaction_logs_requested": (
+                    bool(use_registry_transaction_logs) if normalized == "registry" else None
+                ),
+            },
+```
+
+[`artifact-forensic-mcp/server.py:1742-1756`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1742-L1756)
+capa는 해시가 같을 때만 버전을 채운다: [`artifact-forensic-mcp/server.py:2569-2573`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2569-L2573).
+
+[34] 폴더 분석은 서버가 읽은 폴더와 실행 파일 SHA-256을 `provenance`에 더한다.
+```python
+        provenance = {
+            "analyzed_copy": bool(work_on_copy),
+            "source_folder": str(src),
+            "exit_code": rc,
+            "analyzer_sha256": integrity["sha256"],
+        }
+        result = shape_summary(data, provenance)
+```
+
+[`ir-collect-mcp/server.py:785-791`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L785-L791)
+
+[35] `local_response`는 결과에 도구 이름을 더하지 않고 `format_tool_response`에 넘긴다.
+```python
+def local_response(
+    response_format: str,
+    tool_name: str,
+    data: Any,
+    target_type: str = "live_host",
+    target_identifier: str = "",
+) -> Any:
+    return format_tool_response(
+        response_format,
+        tool=f"local-forensic/{tool_name}",
+        target_type=target_type,
+        target_identifier=target_identifier or current_host_identifier(),
+        data=data,
+    )
+```
+
+[`mcp-server/autoruns_mcp.py:47-60`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L47-L60)
+
+[36] `collect_ir_event_bundle`의 채널별 사건 ID 목록이다.
+```python
+    queries = [
+        ("security", [4624, 4625, 4672, 4688, 4697, 4698, 4702, 4720, 4722, 4728, 4732, 4756, 1102]),
+        ("system", [104, 7045]),
+        ("powershell", [4103, 4104]),
+        ("defender", [1116, 1117, 5007]),
+        ("taskscheduler", [106, 129, 140, 141, 200, 201]),
+        ("rdp_connection", [1149]),
+        ("rdp_session", [21, 24, 25]),
+        ("wmi", [5857, 5858, 5859, 5860, 5861]),
+    ]
+    results = [
+        collect_event_log_internal(channel, ids, start, end, limit)
+        for channel, ids in queries
+    ]
+```
+
+[`mcp-server/autoruns_mcp.py:795-808`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L795-L808)
+
+[37] `_nonzero`는 값이 0인 항목을 뺀다.
+```python
+def _nonzero(counts: Any) -> dict[str, Any]:
+    if not isinstance(counts, dict):
+        return {}
+    return {k: v for k, v in counts.items() if v}
+```
+
+[`ir-collect-mcp/server.py:547-550`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L547-L550)
+
+[38] Hayabusa 인자는 `-m`에 `min_level`을 넣고 `-p standard`를 고정한다: [`artifact-forensic-mcp/server.py:2396-2437`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2396-L2437).
+
+[39] RECmd 프로필은 SHA-256을 대조한 배치 파일 이름으로 정한다.
+```python
+RECMD_PROFILES = {
+    "dfir": ("DFIRBatch.reb", BUNDLED_RECMD_DFIR_PROFILE_SHA256),
+    "registry_aseps": ("RegistryASEPs.reb", BUNDLED_RECMD_REGISTRY_ASEPS_PROFILE_SHA256),
+    "system_aseps": ("SystemASEPs.reb", BUNDLED_RECMD_SYSTEM_ASEPS_PROFILE_SHA256),
+    "software_aseps": ("SoftwareASEPs.reb", BUNDLED_RECMD_SOFTWARE_ASEPS_PROFILE_SHA256),
+    "user_activity": ("UserActivity.reb", BUNDLED_RECMD_USER_ACTIVITY_PROFILE_SHA256),
+}
+```
+
+[`artifact-forensic-mcp/server.py:103-109`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L103-L109)
+```python
+    if normalized == "registry":
+        normalized_profile = str(profile or "dfir").strip().lower()
+        batch_spec = RECMD_PROFILES.get(normalized_profile)
+        if batch_spec is None:
+            return {"error": f"profile must be one of: {', '.join(sorted(RECMD_PROFILES))}"}
+        batch_name, expected_batch_sha256 = batch_spec
+        batch_path = (DEFAULT_RECMD_BATCH_DIR / batch_name).resolve()
+        if not batch_path.is_relative_to(DEFAULT_RECMD_BATCH_DIR.resolve()) or not batch_path.is_file():
+            return {"error": f"bundled RECmd profile is missing or unsafe: {batch_path}"}
+        actual_batch_sha256 = sha256_file(batch_path)
+        if actual_batch_sha256.lower() != expected_batch_sha256.lower():
+            return {"error": f"bundled RECmd profile SHA-256 mismatch: {batch_path.name}"}
+```
+
+[`artifact-forensic-mcp/server.py:1662-1673`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1662-L1673)
+
+[40] RECmd 저장소의 배치 파일은 읽을 키 경로를 항목마다 적는다: [`BatchExamples/DFIRBatch.reb`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/BatchExamples/DFIRBatch.reb).

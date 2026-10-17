@@ -1,0 +1,489 @@
+---
+cell: E02
+details:
+- id: E02.01
+- id: E02.02
+- id: E02.03
+- id: E02.04
+- id: E02.05
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 `artifact-forensic`의 파일 분석 도구와 ZIP 항목 도구, `ir-collect`의 `analyze_triage_zip`에 적용된다 [1][2][3][4].
+EZ Tools·capa·YARA 도구와 파일을 받은 Hayabusa 도구, `inspect_binary_file`은 분석 도구를 실행하기 전에 모델의 요청 없이 입력 파일 전체의 SHA-256을 계산한다 [1].
+이 값은 응답의 `input.sha256_before`(`inspect_binary_file`은 `input.hashes`)와 `provenance.evidence_digest`에 실린다 [1].
+`inspect_binary_file`은 같은 읽기에서 MD5와 SHA-1도 계산해 싣는다 [5].
+ZIP 항목 도구는 ZIP 파일 전체의 SHA-256을 계산한 뒤 항목을 꺼내면서 꺼낸 바이트의 SHA-256을 계산한다 [2][6].
+두 값은 `archive_sha256_before`와 `member_sha256_before`, `provenance`의 `archive_digest`와 `evidence_digest`에 실린다 [2].
+`analyze_triage_zip`은 ZIP을 풀기 전에 ZIP 파일의 크기와 SHA-256을 `provenance`의 `source_zip_size_bytes`와 `source_zip_sha256_before`에 싣는다 [3][4].
+기준값은 모두 내용의 SHA-256이고 서버는 이 값을 응답에만 싣고 따로 보관하지 않는다 [1][2][3].
+
+`analyze_artifact_folder`, `correlate_hosts`, `expand_investigation_graph`는 받은 폴더의 해시를 계산하지 않는다 [7].
+`analyze_artifact_folder`의 `provenance.evidence_digest`는 `IR_Collect.exe` 0.24.2가 받은 폴더의 파일 해시로 만든 묶음 해시를 옮긴 것이다 [8][9].
+`correlate_hosts`는 같은 묶음 해시를 `hosts`의 호스트마다 `evidence_digest`로 옮긴다 [10].
+`correlate_hosts`의 `provenance.evidence_digest`는 `IR_Collect.exe` 0.24.2의 결과에 최상위 값이 없어 `null`이다 [10].
+`expand_investigation_graph`의 응답에는 묶음 해시가 실리지 않는다 [11].
+기본값으로 `IR_Collect.exe`가 받는 폴더는 원본이 아니라 작업 폴더의 사본이다 [7].
+`analyze_evtx_with_hayabusa`에 폴더를 주면 해시를 계산하지 않고 `sha256_before`가 `null`이다 [12].
+
+**한계.** 기준값은 도구를 부를 때마다 그 시점의 파일에서 새로 계산한다 [1][2][3].
+그래서 서버가 읽기 전에 바뀐 증거는 바뀐 상태가 기준값이 된다.
+
+### E02.02 도구를 요청해 기준값 계산
+
+**구현.** 이 방식은 `artifact-forensic`의 `inventory_evidence_path`와 `inventory_archive_members`에 적용된다 [13][14].
+`inventory_evidence_path`는 `include_sha256`이 참(기본값)이면 받은 파일이나 폴더의 파일마다 SHA-256을 계산해 응답의 `files`에 싣는다 [13].
+이미 해시한 바이트에 그 파일의 크기를 더한 값이 512MiB를 넘는 파일은 `sha256`을 `null`로 두고 경고를 싣는다 [13].
+받은 경로가 파일이면 그 해시를 `provenance.evidence_digest`에도 싣는다 [13].
+`inventory_archive_members`는 `include_sha256`이 참이면 ZIP 파일의 SHA-256을 계산해 `input.sha256_before`에 싣는다 [14].
+두 값은 응답에만 실린다 [13][14].
+
+`local-forensic`의 `get_file_metadata`는 `include_hashes`가 참이면 PowerShell의 `Get-FileHash`로 SHA-256·SHA-1·MD5를, `check_file_signatures`는 Sigcheck의 `-h`로 해시를 계산한다 [15][16].
+두 도구의 대상은 서버를 실행한 호스트의 파일이고 서버는 그 값을 보관하거나 다시 대조하지 않는다 [15][16].
+
+### E02.03 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 실행 전 기준값을 자동으로 계산하는 위의 도구들과 `inventory_archive_members`에 적용된다 [1][2][3][14].
+파일 분석 도구는 분석 도구가 끝난 뒤 입력 파일의 SHA-256을 다시 계산해 실행 전 값과 대조하고 `input.sha256_after`에 싣는다 [1].
+ZIP 항목 도구는 분석이 끝난 뒤 ZIP 파일과 꺼낸 항목 사본의 SHA-256을 다시 계산해 각각 실행 전 값과 대조한다 [2].
+`analyze_triage_zip`은 `IR_Collect.exe`가 끝난 뒤 ZIP 파일을 다시 해시해 `source_zip_sha256_after`에 싣고 풀기 전 값과 대조한다 [3][4].
+`inventory_archive_members`는 `include_sha256`이 참(기본값)이면 항목 목록을 읽기 전후의 ZIP 해시를 대조한다 [14][17].
+대조는 내용의 해시로 하고 기준값은 같은 호출 안에서 계산한 값이다 [1][2][3].
+
+**한계.** 대조는 한 호출 안의 실행 전후만 비교하고 앞선 호출의 값과 대조하지 않는다 [1][2][3].
+파일 분석 도구는 결과 파일이 없거나 시간 제한·출력 한도에 닿거나 출력이 JSON이 아니면 실행 뒤 해시를 대조하지 않고 오류만 돌려준다 [18].
+폴더를 받는 `analyze_artifact_folder`, `correlate_hosts`, `expand_investigation_graph`와 폴더를 받은 Hayabusa 도구는 대조하지 않는다 [7][12].
+
+### E02.04 도구를 요청해 검증
+
+**구현.** 이 방식은 `artifact-forensic`의 `verify_sha256_manifest`에 적용된다 [19].
+모델이 증거 폴더 아래의 해시 목록 파일을 주면 서버는 `<SHA-256> <대상>` 꼴의 줄마다 대상 파일의 SHA-256을 계산해 목록의 값과 대조한다 [19][20].
+대상이 없는 줄은 목록 파일이 `.sha256`이면 그 확장자를 뗀 파일 하나를 대상으로 삼는다 [19].
+상대 경로는 목록 파일의 폴더를 기준으로 하고 대상의 실제 경로가 증거 폴더 밖이면 `INVALID`, 파일이 없으면 `MISSING`으로 적는다 [19].
+대조 결과는 줄마다 `MATCH`·`MISMATCH`·`MISSING`·`INVALID`·`SKIPPED`로 싣고 상태별 수를 `status_counts`에 싣는다 [19].
+기준값은 모델이 고른 목록 파일에서 가져오고 응답의 `disclaimer`는 일치가 목록을 누가 만들었는지를 증명하지 않는다고 적는다 [21].
+`deep-analysis` 워크플로 문서는 ZIP 옆에 `.sha256` 파일이 있으면 분석 전에 이 도구를 부르라고 적는다 [22].
+맞는 해시, 다른 해시, 없는 파일, 형식이 틀린 줄을 담은 목록으로 부르자 `status_counts`는 `MATCH` 1, `MISMATCH` 1, `MISSING` 1이었다 [23].
+
+**한계.** 이미 해시한 바이트에 대상 크기를 더한 값이 2GiB를 넘는 항목은 대조하지 않고 `SKIPPED`로 적는다 [19].
+`max_entries`(최대 1,000)를 넘는 줄은 대조하지 않고 잘랐다는 경고만 싣는다 [19][24].
+
+### E02.05 불일치 시 중단·경고
+
+**구현.** 이 방식은 위의 두 대조가 어긋날 때 적용된다.
+파일 분석 도구와 ZIP 항목 도구는 해시가 다르면 "The source artifact changed during analysis." 같은 경고를 `warnings`와 `note`에 더하고 응답 `status`를 `DEGRADED`로 둔다 [1][2].
+ZIP 항목 도구는 꺼낸 사본의 해시가 달라져도 "The internal member copy changed during analysis."를 더한다 [2].
+`inventory_archive_members`도 전후 해시가 다르면 경고를 더하고 `status`를 `DEGRADED`로 둔다 [14][25].
+`verify_sha256_manifest`는 `MISMATCH`·`MISSING`·`INVALID`·`SKIPPED`가 하나라도 있으면 상태별 수를 경고로 싣고 `status`를 `DEGRADED`로 둔다 [19].
+공통 모듈은 이 `note`를 `evidence_v1` 응답의 `limitations`에 `TOOL_NOTE`로 옮기고 `status` `DEGRADED`를 그대로 쓴다 [26].
+불일치가 있는 목록으로 부른 응답을 `evidence_v1`로 감싸자 `status`는 `DEGRADED`였고 `limitations`에 `TOOL_NOTE` 1개가 실렸다 [23].
+서버는 분석 결과를 그대로 돌려주고 이후의 호출을 막지 않는다.
+불일치를 기억하는 상태도 없다.
+
+**한계.** `analyze_triage_zip`은 ZIP 해시가 달라지면 `load_warnings`에 문장을 더하기만 한다 [4].
+공통 모듈은 `load_warnings`를 보지 않으므로 `evidence_v1` 응답의 `status`는 `SUCCESS`로 남는다 [4][26].
+분석 중에 원본 ZIP 끝에 1바이트를 덧붙이는 시험용 `IR_Collect.exe`로 부르자 `load_warnings`에 문장이 실리고 해시 전후가 달랐지만 `status`는 `SUCCESS`, `errors`와 `limitations`는 빈 목록이었다 [27].
+
+### 근거
+
+[1] EZ Tools 도구는 실행 전후에 입력을 해시해 대조하고 다르면 경고를 더한다.
+```python
+        source_digest_after = sha256_file(source)
+        if not parsed["output_files"]:
+            detail = (execution["stderr"] or execution["stdout"]).strip()[:4000]
+            return {
+                "error": f"{descriptor['label']} did not produce CSV output.",
+                "details": detail or f"exit code: {execution['exit_code']}",
+                "integrity": integrity,
+            }
+
+        warnings: list[str] = []
+        if execution["exit_code"] != 0:
+            warnings.append(f"{descriptor['label']} returned exit code {execution['exit_code']}.")
+        if execution["timed_out"]:
+            warnings.append(f"Analysis exceeded the {cfg.static_timeout}-second timeout.")
+        if execution["output_limited"]:
+            warnings.append("Derived output reached the configured byte limit.")
+        if parsed["parse_errors"]:
+            warnings.append("One or more CSV outputs could not be fully parsed.")
+        if parsed["truncated"]:
+            warnings.append(f"Returned records were truncated at max_records={record_limit}.")
+        if source_digest_before != source_digest_after:
+            warnings.append("The source artifact changed during analysis.")
+        return {
+            "schema_version": "1.0",
+            "status": "DEGRADED" if warnings else "SUCCESS",
+```
+
+[`artifact-forensic-mcp/server.py:1697-1721`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1697-L1721)
+[`artifact-forensic-mcp/server.py:1679`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1679), [`artifact-forensic-mcp/server.py:2409`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2409), [`artifact-forensic-mcp/server.py:2456-2463`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2456-L2463), [`artifact-forensic-mcp/server.py:2528`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2528), [`artifact-forensic-mcp/server.py:2558-2566`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2558-L2566), [`artifact-forensic-mcp/server.py:2664`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2664), [`artifact-forensic-mcp/server.py:2732-2740`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2732-L2740), [`artifact-forensic-mcp/server.py:559-582`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L559-L582)
+
+[2] ZIP 항목 분석은 ZIP과 항목 사본을 전후로 해시해 대조한다.
+```python
+    warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    if archive_digest_after != archive_digest_before:
+        warnings.append("The source archive changed during member analysis.")
+    if (
+        primary_metadata is not None
+        and member_digest_after is not None
+        and member_digest_after != primary_metadata["member_sha256"]
+    ):
+        warnings.append("The internal member copy changed during analysis.")
+    if warnings:
+        result["warnings"] = warnings
+        result["note"] = "; ".join(warnings)
+        if "error" not in result:
+            result["status"] = "DEGRADED"
+```
+
+[`artifact-forensic-mcp/server.py:2015-2028`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2015-L2028)
+[`artifact-forensic-mcp/server.py:1918-1949`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1918-L1949), [`artifact-forensic-mcp/server.py:1970-2012`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1970-L2012)
+
+[3] `analyze_triage_zip_impl`은 풀기 전에 ZIP을 해시한다.
+```python
+    try:
+        source_zip_size = p.stat().st_size
+        source_zip_digest_before = sha256_file(p)
+    except OSError as exc:
+        return {"error": f"could not hash source ZIP before analysis: {exc}"}
+```
+
+[`ir-collect-mcp/server.py:813-817`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L813-L817)
+
+[4] 분석 뒤 ZIP을 다시 해시해 다르면 `load_warnings`에 문장을 더한다.
+```python
+        try:
+            source_zip_digest_after = sha256_file(p)
+        except OSError as exc:
+            return {"error": f"could not hash source ZIP after analysis: {exc}", "exit_code": rc}
+        result = shape_summary(
+            data,
+            {
+                "analyzed_copy": True,
+                "source_zip": str(p),
+                "source_zip_size_bytes": source_zip_size,
+                "source_zip_sha256_before": source_zip_digest_before,
+                "source_zip_sha256_after": source_zip_digest_after,
+                "exit_code": rc,
+                "analyzer_sha256": integrity["sha256"],
+            },
+        )
+        result["archive_extraction"] = extraction
+        if source_zip_digest_after != source_zip_digest_before:
+            result.setdefault("load_warnings", []).append(
+                "The source ZIP changed during offline analysis."
+            )
+```
+
+[`ir-collect-mcp/server.py:841-861`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L841-L861)
+
+[5] `file_hashes_and_entropy`는 한 번 읽으며 MD5·SHA-1·SHA-256을 계산한다.
+```python
+    hashes = {
+        "md5": md5_digest,
+        "sha1": sha1_digest,
+        "sha256": hashlib.sha256(),
+    }
+    counts = [0] * 256
+    total = 0
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            total += len(chunk)
+            for digest in hashes.values():
+                digest.update(chunk)
+            for value in chunk:
+                counts[value] += 1
+    entropy = 0.0
+    if total:
+        for count in counts:
+            if count:
+                probability = count / total
+                entropy -= probability * math.log2(probability)
+    return {
+        "size_bytes": total,
+        "hashes": {name: digest.hexdigest() for name, digest in hashes.items()},
+        "entropy": round(entropy, 4),
+    }
+```
+
+[`artifact-forensic-mcp/server.py:315-339`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L315-L339)
+
+[6] 항목을 꺼내며 꺼낸 바이트의 SHA-256을 계산한다.
+```python
+    written = 0
+    digest = hashlib.sha256()
+    with archive.open(info, "r") as input_handle, open(destination, "xb") as output_handle:
+        while True:
+            chunk = input_handle.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > cfg.max_archive_member_bytes or written > info.file_size:
+                raise ValueError(
+                    "archive member expanded beyond its declared or configured size: "
+                    f"{normalized_member}"
+                )
+            digest.update(chunk)
+            output_handle.write(chunk)
+    if written != info.file_size:
+        raise ValueError(
+            f"archive member size mismatch: expected {info.file_size}, extracted {written}: "
+            f"{normalized_member}"
+        )
+    return {
+        "member_path": normalized_member,
+        "member_size_bytes": info.file_size,
+        "member_compressed_size_bytes": info.compress_size,
+        "member_crc32": f"{info.CRC:08x}",
+        "candidate_artifact_types": archive_member_candidate_types(normalized_member),
+        "member_sha256": digest.hexdigest(),
+        "extracted_path": destination,
+    }
+```
+
+[`artifact-forensic-mcp/server.py:1822-1850`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1822-L1850)
+
+[7] `analyze_artifact_folder_impl`은 폴더를 해시하지 않고 사본을 만들어 넘긴다.
+[`ir-collect-mcp/server.py:753-800`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L753-L800), [`ir-collect-mcp/server.py:885-915`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L885-L915)
+
+[8] `shape_summary`는 `IR_Collect.exe`가 낸 `evidence_digest`를 옮긴다.
+```python
+        "provenance": {
+            "tool_name": data.get("tool_name"),
+            "tool_version": data.get("tool_version"),
+            "export_schema": data.get("export_schema"),
+            "generated_at": data.get("generated_at"),
+            "evidence_digest": data.get("evidence_digest"),
+            **provenance,
+        },
+```
+
+[`ir-collect-mcp/server.py:598-605`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L598-L605)
+
+[9] `IR_Collect.exe` 0.24.2는 받은 폴더의 파일을 해시해 묶음 해시를 만든다: [`src/Analysis/CaseManager.cs:462-470`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CaseManager.cs#L462-L470), [`src/Analysis/EvidenceManifest.cs:31-118`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/EvidenceManifest.cs#L31-L118).
+
+[10] `shape_correlation`은 `provenance.evidence_digest`에 결과의 최상위 값을 넣고 호스트마다 `evidence_digest`를 옮기며 `IR_Collect.exe` 0.24.2의 `CorrelationReport`에는 최상위 `evidence_digest`가 없다: [`src/Analysis/CorrelationExport.cs:15-21`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CorrelationExport.cs#L15-L21), [`src/Analysis/CorrelationExport.cs:50-63`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/CorrelationExport.cs#L50-L63).
+```python
+    hosts = [h for h in (data.get("hosts") or []) if isinstance(h, dict)]
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, {**provenance, "evidence_digest": data.get("evidence_digest")}),
+        "host_count": data.get("host_count"),
+        "ready_hosts": data.get("ready_hosts"),
+        "skipped_hosts": data.get("skipped_hosts"),
+        "bucket_minutes": data.get("bucket_minutes"),
+        "entity_types": data.get("entity_types"),
+        "hosts": [{k: h.get(k) for k in ("host", "case_id", "fact_count", "evidence_digest")} for h in hosts][:MAX_NOTES],
+```
+
+[`ir-collect-mcp/server.py:642-652`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L642-L652)
+
+[11] `shape_graph`는 `evidence_digest`와 `hosts`를 옮기지 않는다: [`src/Analysis/GraphCli.cs:42-57`](https://github.com/9-Security/IR_Collect/blob/b32c3d7ff00d757adeea2feef409afe7963e99cd/src/Analysis/GraphCli.cs#L42-L57).
+```python
+def shape_graph(data: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    """Trim a raw graph_v1 payload (multi-hop investigation graph)."""
+    nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    return {
+        "schema_version": SERVER_SCHEMA_VERSION,
+        "collected_at_utc": utc_now(),
+        "provenance": _base_provenance(data, provenance),
+        "seed_type": data.get("seed_type"),
+        "seed_value": data.get("seed_value"),
+        "max_depth": data.get("max_depth"),
+        "per_hop_fanout": data.get("per_hop_fanout"),
+        "host_count": data.get("host_count"),
+        "node_count": data.get("node_count"),
+        "edge_count": data.get("edge_count"),
+        "nodes": nodes[:MAX_NODES],
+        "edges": edges[:MAX_EDGES],
+        "truncated": len(nodes) > MAX_NODES or len(edges) > MAX_EDGES,
+        "disclaimer": "Graph nodes/edges are factual entity relationships, not verdicts.",
+```
+
+[`ir-collect-mcp/server.py:662-680`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/ir-collect-mcp/server.py#L662-L680)
+
+[12] Hayabusa 도구는 입력이 파일일 때만 해시한다.
+```python
+    source_digest_before = sha256_file(source) if source_kind == "file" else None
+```
+
+[`artifact-forensic-mcp/server.py:2409-2409`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2409-L2409)
+
+[13] `inventory_evidence_path_impl`은 요청에 따라 파일마다 해시하고 한도를 넘으면 멈춘다.
+```python
+    for path in candidates[:file_limit]:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        size = stat.st_size
+        total_bytes += size
+        suffix = path.suffix.lower() or "[none]"
+        extension_counts[suffix] = extension_counts.get(suffix, 0) + 1
+        digest = None
+        if include_sha256 and hashed_bytes + size <= MAX_INVENTORY_HASH_BYTES:
+            try:
+                digest = sha256_file(path)
+                hashed_bytes += size
+            except OSError:
+                digest = None
+        elif include_sha256:
+            hash_budget_exhausted = True
+```
+
+[`artifact-forensic-mcp/server.py:1303-1320`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1303-L1320)
+[`artifact-forensic-mcp/server.py:1359-1365`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1359-L1365)
+
+[14] `inventory_archive_members_impl`은 요청에 따라 목록을 읽기 전후로 ZIP을 해시한다.
+```python
+    try:
+        archive_digest_after = sha256_file(source) if include_sha256 else None
+    except OSError as exc:
+        return {"error": f"could not re-hash ZIP after inventory: {exc}"}
+```
+
+[`artifact-forensic-mcp/server.py:1480-1483`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1480-L1483)
+```python
+    if include_sha256 and archive_digest_before != archive_digest_after:
+        warnings.append("The source archive changed during inventory.")
+```
+
+[`artifact-forensic-mcp/server.py:1507-1508`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1507-L1508)
+
+[15] `get_file_metadata`의 PowerShell 글은 `Get-FileHash`로 해시한다.
+```python
+    $hashes = $null
+    if ($includeHashes) {
+        $hashes = [PSCustomObject]@{
+            sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            sha1 = (Get-FileHash -LiteralPath $path -Algorithm SHA1).Hash
+            md5 = (Get-FileHash -LiteralPath $path -Algorithm MD5).Hash
+        }
+    }
+```
+
+[`mcp-server/autoruns_mcp.py:1208-1215`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L1208-L1215)
+
+[16] `check_file_signatures`는 Sigcheck에 `-h`를 넘긴다.
+```python
+def run_sigcheck(file_path: str) -> str:
+    try:
+        normalized_path = normalize_file_path(file_path)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if not normalized_path.is_file():
+        return f"File not found: {normalized_path}"
+
+    return run_sysinternals_tool(
+        "sigcheck.exe",
+        ["-a", "-h", "-i", "-ct", "-nobanner", str(normalized_path)],
+    )
+```
+
+[`mcp-server/autoruns_mcp.py:531-543`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L531-L543)
+
+[17] `inventory_archive_members`의 `include_sha256` 기본값은 참이고 이 값이 참일 때만 목록을 읽기 전에 ZIP을 해시한다.
+```python
+        archive_digest_before = sha256_file(source) if include_sha256 else None
+```
+
+[`artifact-forensic-mcp/server.py:1383-1383`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1383-L1383)
+```python
+@mcp.tool()
+def inventory_archive_members(
+    archive_path: str,
+    max_members: int = 1000,
+    include_sha256: bool = True,
+    response_format: str = EVIDENCE_RESPONSE_FORMAT,
+) -> Any:
+```
+
+[`artifact-forensic-mcp/server.py:2940-2946`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2940-L2946)
+
+[18] 파일 분석 도구는 결과가 없거나 시간 제한·출력 한도·JSON 오류이면 실행 뒤 해시를 대조하기 전에 오류를 돌려준다: [`artifact-forensic-mcp/server.py:1697-1704`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1697-L1704), [`artifact-forensic-mcp/server.py:2439-2453`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2439-L2453), [`artifact-forensic-mcp/server.py:2537-2556`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2537-L2556), [`artifact-forensic-mcp/server.py:2700-2718`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L2700-L2718).
+
+[19] `verify_sha256_manifest_impl`은 줄마다 대상을 정하고 해시를 대조해 상태를 적는다.
+[`artifact-forensic-mcp/server.py:641-803`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L641-L803)
+
+[20] 해시 목록의 줄 형식이다.
+```python
+SHA256_MANIFEST_RE = re.compile(r"^([0-9a-fA-F]{64})(?:\s+\*?(.+?))?\s*$")
+```
+
+[`artifact-forensic-mcp/server.py:114-114`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L114-L114)
+
+[21] 응답의 `disclaimer`다.
+```python
+        "disclaimer": (
+            "A SHA-256 match confirms byte identity with the supplied manifest entry; it does not "
+            "establish who created the manifest or whether the source was trustworthy before hashing."
+        ),
+```
+
+[`artifact-forensic-mcp/server.py:792-795`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L792-L795)
+
+[22] `deep-analysis` 문서의 부속 해시 확인 단계다.
+```json
+    {
+      "id": "integrity-decision",
+      "kind": "agent_reasoning",
+      "owner": "calling_ai_agent",
+      "description": "If the supplied ZIP has a .sha256 sidecar inside the configured evidence roots, verify it before analysis; otherwise record that no external sidecar was supplied.",
+      "outputs": ["sidecar_status"],
+      "transitions": {
+        "sidecar_available": "verify-sidecar",
+        "not_available": "offline-analysis"
+      }
+    },
+    {
+      "id": "verify-sidecar",
+      "kind": "mcp_call",
+      "owner": "mcp_server",
+      "description": "Verify the supplied SHA-256 sidecar without modifying the ZIP or manifest.",
+      "tool": "artifact-forensic/verify_sha256_manifest",
+      "arguments": {},
+      "outputs": ["hash_verification", "integrity_limitations"],
+      "transitions": {
+        "success": "offline-analysis",
+        "degraded": "offline-analysis",
+        "failed": "offline-analysis"
+      }
+    },
+```
+
+[`workflows/deep-analysis.json:39-63`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/workflows/deep-analysis.json#L39-L63)
+
+[23] (실행 확인) 맞는 줄, 다른 해시, 없는 파일, 형식이 틀린 줄을 담은 `hashes.sha256`으로 `verify_sha256_manifest_impl`을 부르고 그 결과를 `evidence_v1`로 감쌌다.
+
+[24] `max_entries`는 1부터 1,000까지 받는다.
+```python
+    try:
+        manifest = validate_artifact_file(manifest_path, cfg)
+        entry_limit = validate_bounded_count(
+            max_entries,
+            name="max_entries",
+            maximum=MAX_HASH_MANIFEST_ENTRIES,
+        )
+```
+
+[`artifact-forensic-mcp/server.py:646-652`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L646-L652)
+
+[25] `inventory_archive_members_impl`은 경고가 있으면 `status`를 `DEGRADED`로 둔다.
+```python
+    return {
+        "schema_version": "1.0",
+        "status": "DEGRADED" if warnings else "SUCCESS",
+```
+
+[`artifact-forensic-mcp/server.py:1524-1526`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1524-L1526)
+
+[26] 공통 모듈은 `note`를 `TOOL_NOTE`로 옮기고 `status`·`error`·하위 결과만 본다.
+[`myirteam_common/evidence.py:51-57`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L51-L57), [`myirteam_common/evidence.py:79-106`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L79-L106), [`myirteam_common/evidence.py:227-252`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/myirteam_common/evidence.py#L227-L252)
+
+[27] (실행 확인) 분석 중에 원본 ZIP 끝에 1바이트를 덧붙이는 시험용 `IR_Collect.exe`를 두고 `analyze_triage_zip_impl`의 결과를 `evidence_v1`로 감쌌다.
