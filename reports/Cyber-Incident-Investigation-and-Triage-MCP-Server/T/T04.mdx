@@ -1,0 +1,505 @@
+---
+cell: T04
+details:
+- id: T04.01
+- id: T04.02
+- id: T04.03
+- id: T04.04
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 plist, Unified Logs, FSEvents, SQLite, XML, CSV, Mozilla LZ4 도구와 `identify_file_type`·`browse_files_and_folders`에 적용된다 [1][2][3][4].
+`analyze_macos_plist`는 이진 형식 plist를 Python `plistlib` 모듈로 읽고 XML plist는 글로 읽는다 [1].
+`analyze_macos_unified_logs`는 저장소 밖 `Tools\macos_forensics\UnifiedLogReader`를 `sys.path`에 더해 `UnifiedLogReader`를 불러오고 `run_in_executor`로 서버 프로세스의 다른 스레드에서 파싱한다 [2].
+`analyze_macos_fsevents`는 mac_apt에서 옮겨 온 `utils/fsevents_parser.py`로 FSEvents 파일을 파싱한다 [3].
+`analyze_sqlite_database`는 Python `sqlite3`로, `parse_xml_evidence`는 `xml.etree.ElementTree`로, `decompress_mozilla_lz4`는 `lz4.block`으로 서버 프로세스 안에서 처리한다 [4].
+`identify_file_type`은 파일 앞 32바이트를 읽어 서버 코드의 표로 형식을 고른다 [5].
+SleuthKit·WSL 이미지의 파일은 외부 도구로 꺼낸 뒤 이 코드들이 읽는다 [6].
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 이 방식은 KAPE, MFTECmd·AmcacheParser·AppCompatCacheParser·EvtxECmd, SleuthKit 도구, Volatility 3, chainbreaker, hashcat, Arsenal Image Mounter의 실행에 적용된다 [7][8][9][10][11][12][13].
+처리기는 실행 파일과 인자를 `list`로 `asyncio.create_subprocess_exec`, `subprocess.run`, `subprocess.Popen`에 넘긴다 [7][8][9][10].
+`analyze_memory`와 `get_memory_plugin_help`는 설정 값이 `python`이면 서버 해석기 `sys.executable`로, `list_memory_plugins`는 이름 `python.exe`로 `vol.py`를 실행한다 [10][14].
+chainbreaker는 모듈을 불러올 수 있으면 `sys.executable -m chainbreaker`로 실행한다 [11].
+Arsenal의 `aim_cli.exe`는 `--background`로 실행한 뒤 마운트가 유지되는 동안 프로세스를 남겨 둔다 [13].
+도구는 모두 서버와 같은 계정과 권한으로 실행되고 서버는 계정이나 권한을 낮추지 않는다 [7][8][9][10][11][12][13].
+KAPE와 Arsenal은 관리자 권한을 요구하고 서버는 그 권한을 따로 얻지 않으므로 사용자가 서버를 관리자 권한으로 실행해야 한다 [15].
+시험용 AmcacheParser는 서버의 작업 위치에서, 시험용 `vol.py`는 서버 해석기로 Volatility 폴더에서, 시험용 hashcat은 hashcat 폴더에서 실행되었다 [16].
+
+작업 위치는 도구마다 다르고 호출마다 새로 만들지 않는다.
+KAPE는 실행 파일 폴더를, Volatility 3는 `vol.py` 폴더를 `cwd`로 받는다 [7][10].
+레지스트리 처리기와 EZ 도구 직접 실행은 `cwd`를 정하지 않아 서버의 작업 위치를 쓴다 [8][9].
+`crack_hash`는 다른 스레드에서 `os.chdir(HASHCAT_DIR)`로 서버 프로세스 전체의 작업 위치를 바꾼 뒤 hashcat을 실행하고 끝나면 되돌린다 [12].
+SleuthKit 추출 처리기는 `temp_directory` 아래에 `<도구>_extract_<inode>` 폴더를 만들어 꺼낸 파일을 두지만 그 폴더를 작업 위치로 쓰지 않는다 [17].
+
+### T04.03 셸 명령 문자열 실행
+
+**구현.** 이 방식은 WSL 안에서 실행하는 이미지 마운트·목록·추출 명령에 적용된다 [18][19][20][21].
+`WSLLVMMounter._run_wsl`은 `wsl -d <배포판> -u root bash -c '<명령>'` 문자열을 `shell=True`로 실행한다 [18].
+`WSLAPFSMounter._run_wsl`은 `wsl`에 인자 `list`를 넘기지만 마지막 인자를 `bash -c`가 해석하는 명령 문자열로 둔다 [19].
+`browse_files_and_folders`의 WSL 경로 나열은 `find`·`stat` 명령을 문자열로 만들어 `wsl bash -c`로 감싼 뒤 `shell=True`로 실행한다 [20].
+이 함수는 처리 중 예외가 난 뒤 등록 항목에 `wsl_access_point`가 있을 때만 호출되고 서버 코드는 이 값을 등록 항목에 쓰지 않는다 [20][22].
+`prepare_disk_image`는 LVM 마운트가 살아 있는지 `wsl ... mount | findstr` 문자열을 `shell=True`로 실행한다 [21].
+명령 문자열에는 마운트 위치와 함께 모델이 준 경로에서 만든 이미지 안 경로가 큰따옴표나 작은따옴표로 감싸여 들어간다 [18][19][20][23].
+WSL 명령은 Windows 드라이브의 이미지를 `/mnt/<드라이브>/` 아래 경로로 읽고 APFS 추출은 꺼낸 파일을 같은 꼴의 경로로 서버의 사건 폴더에 써서 서버와 같은 파일에 닿는다 [24].
+`analyze_macos_fsevents`도 APFS 이미지의 FSEvents 파일을 `find "<경로>"` 문자열로 찾는다 [23].
+이 경로는 WSL과 이미지 마운트가 필요해 실행하지 않고 코드로만 확인했다.
+
+### T04.04 권한을 나눈 실행
+
+**구현.** 이 방식은 WSL LVM 마운터의 명령과 `prepare_disk_image`의 LVM 마운트 확인에 적용된다 [18][21].
+두 경로는 `wsl`에 `-u root`를 붙여 WSL 배포판의 기본 사용자가 아닌 root로 명령을 실행한다 [18][21].
+이 root 권한이 WSL에서 연결한 Windows 드라이브의 파일에 미치는 범위는 확인하지 못했다.
+`losetup`, `vgchange`, `mount`, `find`, `cat`이 이렇게 실행된다 [25].
+권한을 높이는 방향만 있고 권한을 낮추거나 다른 일반 계정으로 바꾸는 코드는 없다.
+WSL APFS 마운터는 `-u`를 붙이지 않아 배포판의 기본 사용자로 실행한다 [19].
+이 경로는 실행하지 않고 코드로만 확인했다.
+
+### 근거
+
+[1] plist를 서버 코드로 읽는다.
+
+```python
+        with open(readable_path, 'rb') as f:
+            header = f.read(6)
+            is_xml = header.startswith(b'<?xml')
+        
+        if is_xml:
+            logger.info(f"Reading XML plist as text: {readable_path}")
+            with open(readable_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            result_text = "=" * 70 + "\n"
+            result_text += "macOS PROPERTY LIST (XML FORMAT)\n"
+            result_text += "=" * 70 + "\n\n"
+            result_text += f"File: {plist_path}\n"
+            if prepared_info:
+                result_text += f"Source: {Path(prepared_info.get('image_path', 'unknown')).name}\n"
+            result_text += f"\n{content}\n"
+            
+            log_operation_success(operation_id, f"Read XML plist: {plist_path}")
+            return [TextContent(type="text", text=result_text)]
+        
+        logger.info(f"Parsing binary plist: {readable_path}")
+        with open(readable_path, 'rb') as f:
+            plist_data = plistlib.load(f)
+```
+
+[`handlers/macos_handlers.py:54-76`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L54-L76)
+
+[2] UnifiedLogReader를 불러와 다른 스레드에서 파싱한다: [`handlers/macos_handlers.py:355-370`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L355-L370), [`handlers/macos_handlers.py:428-433`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L428-L433).
+
+```python
+        def parse_logs_sync():
+            import sys
+            # Repo-relative (portable) path to the bundled UnifiedLogReader.
+            unified_reader_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "Tools", "macos_forensics", "UnifiedLogReader")
+            if unified_reader_path not in sys.path:
+                sys.path.insert(0, unified_reader_path)
+            
+            from scripts.UnifiedLogReader import UnifiedLogReader, SQLiteDatabaseOutputWriter, FileOutputWriter
+            import tempfile
+            
+            temp_dir = tempfile.mkdtemp(prefix="unified_logs_")
+            
+            try:
+                unified_log_reader = UnifiedLogReader()
+```
+
+[`handlers/macos_handlers.py:355-370`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L355-L370)
+
+```python
+        loop = asyncio.get_event_loop()
+        try:
+            output_file, error_msg, total_processed = await asyncio.wait_for(
+                loop.run_in_executor(None, parse_logs_sync),
+                timeout=300
+            )
+```
+
+[`handlers/macos_handlers.py:428-433`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L428-L433)
+
+[3] FSEvents는 서버의 파서로 읽는다.
+
+```python
+            from utils.fsevents_parser import parse_fsevents_directory
+            
+            try:
+                fsevents_dir = Path(fsevents_path)
+                if fsevents_dir.exists() and fsevents_dir.is_dir():
+                    result_text += "Parsing FSEvents timeline...\n\n"
+                    events = parse_fsevents_directory(fsevents_dir, max_events=10000)
+```
+
+[`handlers/macos_handlers.py:1046-1052`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L1046-L1052)
+
+[4] SQLite·XML·LZ4를 라이브러리로 처리한다: [`handlers/database_handlers.py:107-109`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L107-L109), [`handlers/file_handlers.py:1123-1125`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1123-L1125), [`handlers/file_handlers.py:1375-1394`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1375-L1394).
+
+[5] 파일 앞부분을 읽어 형식을 고른다.
+
+```python
+        try:
+            with open(target_file, 'rb') as f:
+                magic_bytes = f.read(32)
+                hex_signature = ' '.join(f'{b:02X}' for b in magic_bytes[:16])
+        except Exception as e:
+            hex_signature = f"Cannot read: {e}"
+        
+        result_text = f"FILE ANALYSIS: {target_file.name}\n\n"
+        result_text += f"Size: {size:,} bytes\n"
+        result_text += f"Extension: {suffix if suffix else 'None'}\n"
+        result_text += f"Filename: {name}\n"
+        result_text += f"Magic Bytes (Hex): {hex_signature}\n"
+        
+        suggestions = analyze_file_signature_and_suggest_tools(
+            file_path=file_path,
+            magic_bytes=magic_bytes,
+            file_name=target_file.name,
+            file_size=size
+        )
+```
+
+[`handlers/file_handlers.py:854-872`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L854-L872)
+
+[6] SleuthKit 이미지 파일은 꺼낸 뒤 그 경로를 돌려준다.
+
+```python
+        # For files that don't exist in WSL or need extraction, extract them
+        logger.info(f"SleuthKit mount - extracting file: {file_path}")
+        success, windows_path, error = extract_sleuthkit_file(linux_path, metadata)
+        
+        if not success:
+            raise FileNotFoundError(
+                f"Failed to extract file from forensic image\n"
+                f"Linux path: {linux_path}\n"
+                f"Error: {error}"
+            )
+        
+        logger.info(f"File extracted successfully: {windows_path}")
+        return windows_path
+```
+
+[`utils/forensic_file_access.py:415-427`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L415-L427)
+
+[7] KAPE를 인자 배열로 실행하고 작업 위치를 실행 파일 폴더로 둔다.
+
+```python
+        process = await asyncio.create_subprocess_exec(
+            cmd[0], *cmd[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(kape_exe.parent)
+        )
+```
+
+[`handlers/kape_handlers.py:83-88`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L83-L88)
+
+[8] 레지스트리 처리기는 작업 위치 없이 KAPE를 실행한다.
+
+```python
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+```
+
+[`handlers/registry_forensics_handler.py:369-373`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L369-L373)
+
+[9] EZ 도구는 `subprocess.run`에 인자 배열로 실행한다.
+
+```python
+    cmd = [
+        str(binary_path.absolute()),
+        "-f", str(amcache_path),
+        "--csv", str(output_dir.absolute()),
+        "-i",
+        "--mp",
+    ]
+    command = " ".join(cmd)
+    logger.info(f"Executing: {command}")
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+```
+
+[`handlers/amcache_forensics_handler.py:259-270`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L259-L270)
+
+[10] Volatility 3는 서버 해석기로 실행한다: [`handlers/memory_forensics_handler.py:19-21`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L19-L21), [`handlers/memory_forensics_handler.py:66-74`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L66-L74).
+
+```python
+VOL_SCRIPT = Path(CONFIG['volatility3']['script_path'])
+_cfg_python = CONFIG['volatility3'].get('python_executable', 'python')
+PYTHON_EXE = sys.executable if _cfg_python in ('python', 'python.exe', 'python3', '') else _cfg_python
+```
+
+[`handlers/memory_forensics_handler.py:19-21`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L19-L21)
+
+```python
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            cwd=str(VOL_SCRIPT.parent),
+            stdin=subprocess.DEVNULL  # Don't wait for stdin
+        )
+```
+
+[`handlers/memory_forensics_handler.py:66-74`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L66-L74)
+
+[11] chainbreaker는 모듈로 실행한다: [`handlers/macos_handlers.py:559-576`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L559-L576), [`handlers/macos_handlers.py:623-634`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L623-L634).
+
+```python
+        try:
+            import chainbreaker
+            cmd = [sys.executable, '-m', 'chainbreaker']
+            logger.info(f"✓ Using chainbreaker module: python -m chainbreaker")
+        except ImportError:
+            chainbreaker_path = shutil.which('chainbreaker')
+            if not chainbreaker_path:
+                for path in [Path(sys.executable).parent / 'Scripts' / 'chainbreaker.exe',
+                           Path(sys.executable).parent / 'Scripts' / 'chainbreaker']:
+                    if path.exists():
+                        chainbreaker_path = str(path)
+                        break
+            
+            if not chainbreaker_path:
+                return [TextContent(type="text", text="ERROR: chainbreaker not found. Install: pip install chainbreaker")]
+            
+            cmd = [chainbreaker_path]
+            logger.warning(f"⚠️  Using chainbreaker .EXE: {chainbreaker_path} (may cause timeouts)")
+```
+
+[`handlers/macos_handlers.py:559-576`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L559-L576)
+
+```python
+            result = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,  # Don't inherit stdin from MCP server
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=300,
+                check=False,
+                creationflags=creationflags,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+```
+
+[`handlers/macos_handlers.py:623-634`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L623-L634)
+
+[12] hashcat 실행 전에 프로세스 작업 위치를 바꾼다.
+
+```python
+        def run_hashcat():
+            """Run hashcat synchronously in thread"""
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(HASHCAT_DIR)
+                
+                result = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout if not show_only else 30,
+                    check=False,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+                
+                return result
+            finally:
+                os.chdir(original_cwd)
+```
+
+[`handlers/hash_cracking_handler.py:231-251`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/hash_cracking_handler.py#L231-L251)
+
+[13] Arsenal CLI를 백그라운드로 실행한다.
+
+```python
+            cmd = [
+                str(self.aim_cli),
+                '--mount'
+            ]
+            
+            if readonly:
+                cmd.append('--readonly')
+            
+            cmd.append('--background')
+            
+            cmd.append(f'--filename={image_path}')
+            
+            self.logger.info(f"Mounting image with Arsenal: {' '.join(cmd)}")
+            
+            # Start Arsenal in background (DO NOT WAIT - process must stay alive)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+```
+
+[`mounters/arsenal_mounter.py:91-111`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/arsenal_mounter.py#L91-L111)
+
+[14] `list_memory_plugins`는 이름 `python.exe`로, `get_memory_plugin_help`는 서버 해석기로 `vol.py`를 실행한다.
+
+```python
+        cmd = ["python.exe", "vol.py", "--help"]
+```
+
+[`handlers/memory_forensics_handler.py:227-227`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L227-L227)
+
+```python
+        cmd = [PYTHON_EXE, str(VOL_SCRIPT), plugin, "--help"]
+```
+
+[`handlers/memory_forensics_handler.py:283-283`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L283-L283)
+
+[15] KAPE 처리기의 관리자 권한 안내다.
+
+```python
+        if "Administrator privileges not found" in output_text or "Administrator privileges not found" in error_text:
+            return [TextContent(type="text", text=
+                "ERROR: KAPE requires administrator privileges to execute parsing.\n\n"
+                "SOLUTION:\n"
+                "1. Close VS Code / PowerShell\n"
+                "2. Right-click VS Code icon → 'Run as administrator'\n"
+                "3. Reopen your workspace\n"
+                "4. Try kape_parse_artifact() again\n\n"
+                "NOTE: get_kape_modules_catalog() works without admin privileges."
+            )]
+```
+
+[`handlers/kape_handlers.py:96-105`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L96-L105)
+
+[16] (실행 확인) 작업 사본의 처리기를 같은 프로세스에서 불러 시험용 AmcacheParser·`vol.py`·hashcat이 기록한 작업 위치와 해석기를 확인했다.
+
+[17] 추출용 임시 폴더를 만든다.
+
+```python
+            temp_dir = Path(CONFIG['forensics']['temp_directory']) / f"prefetch_extract_{target_inode}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`handlers/prefetch_forensics_handler.py:219-220`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L219-L220)
+
+[18] LVM 마운터는 root로 셸 문자열을 실행한다.
+
+```python
+    def _run_wsl(self, command: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        """Run command in WSL as root"""
+        # We always use root to simplify and avoid password prompts
+        wsl_command = f"wsl -d {self.wsl_distribution} -u root bash -c '{command}'"
+        
+        try:
+            result = subprocess.run(
+                wsl_command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=True
+```
+
+[`mounters/wsl_lvm_mounter.py:33-44`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L33-L44)
+
+[19] APFS 마운터는 `bash -c`에 명령 문자열을 넘긴다.
+
+```python
+    def _run_wsl(self, command: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        """Run command in WSL"""
+        return subprocess.run(
+            ["wsl", "-d", self.wsl_distribution, "bash", "-c", command],
+            capture_output=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=timeout
+        )
+```
+
+[`mounters/wsl_apfs_mounter.py:26-34`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L26-L34)
+
+[20] WSL 경로 나열은 셸 문자열로 실행한다: [`handlers/file_handlers.py:549-559`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L549-L559), [`handlers/file_handlers.py:584-592`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L584-L592).
+
+```python
+        cmd = f"find '{wsl_path}' -maxdepth {depth} -type f -o -type d 2>/dev/null | head -n 500"
+        wsl_cmd = f'wsl bash -c "{cmd}"'
+        
+        result = subprocess.run(
+            wsl_cmd,
+            shell=True,
+            capture_output=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=30
+        )
+```
+
+[`handlers/file_handlers.py:549-559`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L549-L559)
+
+```python
+            is_dir_cmd = f'wsl bash -c "[ -d \\"{line}\\" ] && echo dir || echo file"'
+            is_dir_result = subprocess.run(is_dir_cmd, shell=True, capture_output=True, encoding='utf-8', errors='replace', timeout=5)
+            is_dir = 'dir' in is_dir_result.stdout
+            
+            if is_dir:
+                result_text += f"{indent}📁 {name}/\\n"
+            else:
+                size_cmd = f'wsl bash -c "stat -c %s \\"{line}\\" 2>/dev/null"'
+                size_result = subprocess.run(size_cmd, shell=True, capture_output=True, encoding='utf-8', errors='replace', timeout=5)
+```
+
+[`handlers/file_handlers.py:584-592`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L584-L592)
+
+[21] LVM 마운트 확인 명령이다.
+
+```python
+            elif mount_type == 'wsl_lvm':
+                mount_point = existing.get('mount_point')
+                try:
+                    check_cmd = f'wsl -d Ubuntu -u root mount | findstr "{mount_point}"'
+                    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+                    is_active = result.returncode == 0
+```
+
+[`handlers/image_handlers.py:113-118`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L113-L118)
+
+[22] `browse_wsl_path`는 등록 항목에 `wsl_access_point`가 있을 때만 호출된다.
+
+```python
+        for image_path, image_info in PREPARED_IMAGES.items():
+            if image_info.get('is_linux') and image_info.get('wsl_access_point'):
+                if path.startswith(image_info['wsl_access_point']) or path.startswith(image_info['access_point']):
+                    is_wsl_path = True
+                    wsl_mount_point = image_info['wsl_access_point']
+                    break
+        
+        if forensics_output_allowed:
+            logger.info(f"Access granted to forensics output directory: {path}")
+        elif sleuthkit_mount_allowed:
+            logger.info(f"Access granted to SleuthKit mount directory: {path}")
+        elif is_wsl_path:
+            logger.info(f"Access granted to WSL mount: {path}")
+            return await browse_wsl_path(wsl_mount_point, path, depth)
+```
+
+[`handlers/file_handlers.py:429-442`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L429-L442)
+
+[23] 경로를 넣은 WSL 명령 문자열이다: [`mounters/wsl_lvm_mounter.py:270-289`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L270-L289), [`mounters/wsl_apfs_mounter.py:187-226`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L187-L226), [`handlers/macos_handlers.py:807-812`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L807-L812).
+
+[24] WSL 마운터는 Windows 경로를 `/mnt/<드라이브>/` 아래 경로로 바꿔 이미지를 읽고 APFS 추출은 그 꼴의 경로로 사건 폴더에 쓴다: [`mounters/wsl_lvm_mounter.py:64-74`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L64-L74), [`mounters/wsl_lvm_mounter.py:94-94`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L94-L94), [`mounters/wsl_apfs_mounter.py:37-48`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L37-L48), [`mounters/wsl_apfs_mounter.py:59-59`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L59-L59), [`mounters/wsl_apfs_mounter.py:197-225`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L197-L225).
+
+[25] LVM 마운터가 root로 실행하는 명령이다.
+
+[`mounters/wsl_lvm_mounter.py:95-235`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L95-L235)

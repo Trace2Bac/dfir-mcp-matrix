@@ -1,0 +1,389 @@
+---
+cell: E03
+details:
+- id: E03.01
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.01 실행 환경의 읽기 전용 강제
+
+**구현.** 이 방식은 `prepare_disk_image`가 이미지를 마운트하는 세 경로(Arsenal Image Mounter, WSL LVM, WSL apfs-fuse)에 적용된다 [1][2][3].
+OS를 `windows`로 판별한 이미지는 `aim_cli --mount --readonly --background --filename=<이미지>`로 Windows 드라이브에 마운트한다 [1].
+분석 도구는 그 드라이브 아래 파일을 그대로 읽는다 [4].
+LVM2 이미지는 WSL에서 loop 장치로 붙이고 논리 볼륨을 `mount -o ro`로 `/mnt/ubuntu_forensics`에 마운트한다 [2].
+파일은 그 마운트에서 `cat`으로 읽는다 [5].
+APFS 컨테이너 이미지는 WSL에서 `apfs-fuse <이미지> <마운트 위치>`로 마운트한다 [3].
+서버 명령에는 읽기 전용 옵션이 없지만 apfs-fuse는 마운트 옵션에 늘 `ro`를 넣고 쓰기로 여는 요청을 거부하며 이미지를 `O_RDONLY`로 연다 [6].
+이 마운트 경로들은 실행 확인에서 실행하지 않았고 코드와 apfs-fuse 소스로만 확인했다.
+
+**한계.** Arsenal Image Mounter는 소스가 공개되어 있지 않아 `--readonly`가 이미지 파일에 쓰기를 막는지는 확인하지 못했다 [1].
+WSL LVM 경로는 `losetup -fP --show`에 읽기 전용 옵션을 주지 않아 loop 장치는 쓰기가 되는 상태로 붙고 `vgchange -ay`로 볼륨 그룹을 활성화한다 [2].
+이 상태에서 `mount -o ro`가 파일시스템 저널 처리 같은 일로 이미지에 쓰는지는 확인하지 못했다 [2].
+Arsenal 마운트가 실패하면 SleuthKit으로 파일을 꺼내는 방식으로 바꾸고 이 장치 없이 진행한다 [7].
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 이미지와 증거 파일을 직접 여는 해시 계산, 서명 확인, 파일 읽기 도구에 적용된다 [8][9][10].
+`calculate_image_hash`와 파티션 표가 없는 이미지의 서명 확인, LVM 서명 확인은 이미지를 `rb`로 연다 [8][9].
+`identify_file_type`·`decompress_mozilla_lz4`·`analyze_macos_plist`는 받은 파일을 `rb`로, `read_text_file`·`read_csv_data`는 `r`로 연다 [10].
+`analyze_sqlite_database`는 이미지 안 DB를 사건 폴더의 `extracted_files`로 복사한 뒤 그 사본을 `mode=ro` URI로 연다 [11][12].
+서버가 만드는 파일은 설정의 출력 폴더와 임시 폴더 아래에 둔다 [13].
+설정 파일의 `read_only_mode: true`를 읽는 코드는 없다 [14].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 SleuthKit, Volatility 3, KAPE와 EZ Tools, chainbreaker, UnifiedLogReader에 이미지와 증거 파일을 넘기는 경로에 적용된다 [15][16].
+이 경로에는 서버 코드의 쓰기 차단 장치가 없고 원본 보호는 외부 도구의 동작에 달려 있다.
+SleuthKit의 `mmls`·`fsstat`·`fls`·`icat`에는 이미지 경로를 그대로 넘긴다 [15].
+SleuthKit 4.14.0은 raw 이미지를 Windows에서 `FILE_READ_DATA`로, 그 밖에서는 `O_RDONLY`로 열고 EWF 이미지는 libewf를 `LIBEWF_OPEN_READ`로 연다 [17].
+`analyze_memory`는 메모리 파일 경로를 Volatility 3의 `-f`로 넘긴다 [16].
+Volatility 3 2.28.0의 `FileLayer`는 파일을 `rb`로 연다 [18].
+Arsenal 드라이브와 로컬 경로의 Windows 아티팩트는 KAPE의 `--msource`나 EvtxECmd·MFTECmd·AmcacheParser·AppCompatCacheParser의 입력으로 원래 위치를 넘긴다 [19][20].
+EvtxECmd와 RECmd는 입력 파일을 `FileAccess.Read`의 `FileStream`으로 열어 파싱한다 [21].
+chainbreaker는 키체인을 `rb`로 읽고 UnifiedLogReader의 파일 객체는 기본으로 `rb`로 연다 [22].
+
+원본을 지키는 서버 쪽 장치가 없는 다른 경로도 있다.
+`analyze_memory`는 경로 대조 없이 받은 경로를 넘긴다 [16].
+`analyze_registry`·`analyze_prefetch`·`analyze_mft`·`analyze_shimcache`·`analyze_jump_lists`·`analyze_lnk_files`·`analyze_amcache`는 준비한 이미지 밖의 로컬 경로를 받으면 그 원래 위치를 외부 도구에 넘긴다 [20][23].
+
+**한계.** KAPE는 소스가 공개되어 있지 않아 `--msource` 폴더에 쓰는지는 확인하지 못했다 [19].
+SBECmd는 공개 소스를 찾지 못했다.
+LECmd·JLECmd·PECmd·MFTECmd는 바로 가기 파일, 점프 목록, Prefetch, `$MFT`를, AmcacheParser·AppCompatCacheParser는 하이브를 별도 라이브러리로 연다 [24][25].
+이 라이브러리들은 버전 기준에 포함되지 않아 여는 모드를 확인하지 못했다.
+그래서 KAPE와 이 도구들은 실제 보호 미확인이다.
+SleuthKit·Volatility 3·apfs-fuse·EvtxECmd·RECmd·chainbreaker·UnifiedLogReader는 버전 기준의 소스에서 읽기 모드로 여는 것을 확인했다 [17][18][6][21][22].
+
+### 근거
+
+[1] Arsenal 마운트 명령에 `--readonly`를 넣는다.
+
+```python
+            cmd = [
+                str(self.aim_cli),
+                '--mount'
+            ]
+            
+            if readonly:
+                cmd.append('--readonly')
+            
+            cmd.append('--background')
+            
+            cmd.append(f'--filename={image_path}')
+```
+
+[`mounters/arsenal_mounter.py:91-101`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/arsenal_mounter.py#L91-L101)
+
+[`handlers/image_handlers.py:279-289`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L279-L289)
+
+[2] WSL LVM 경로의 loop 장치 연결, 볼륨 활성화, 읽기 전용 마운트.
+
+```python
+            setup_cmd = f'losetup -fP --show "{wsl_image}"'
+            self.logger.info(f"[LINUX] Attaching image: {setup_cmd}")
+            setup_result = self._run_wsl(setup_cmd)
+            
+            if setup_result.returncode != 0 or not setup_result.stdout.strip():
+                return {'success': False, 'error': f"Failed to attach image: {setup_result.stderr}"}
+            
+            loop_device = setup_result.stdout.strip().split('\n')[-1]
+            self.logger.info(f"[LINUX] Attached to loop device: {loop_device}")
+            self.loop_devices[image_path] = loop_device
+
+            self._run_wsl(f"ls {loop_device}*")
+
+            self.logger.info("[LINUX] Detecting LVM...")
+            self._run_wsl("pvscan")
+
+            self.logger.info("[LINUX] Activating LVM...")
+            self._run_wsl("vgchange -ay")
+            
+            self.logger.info("[LINUX] Confirming Logical Volumes...")
+            lv_result = self._run_wsl("lvscan")
+```
+
+[`mounters/wsl_lvm_mounter.py:101-121`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L101-L121)
+
+```python
+            self.logger.info(f"[LINUX] Mounting {lv_device} at {mount_point}")
+            self._run_wsl(f'mkdir -p "{mount_point}"')
+            
+            mount_cmd = f'mount -o ro "{lv_device}" "{mount_point}"'
+            mount_result = self._run_wsl(mount_cmd)
+            
+            if mount_result.returncode != 0:
+                return {'success': False, 'error': f"Mount failed: {mount_result.stderr}"}
+```
+
+[`mounters/wsl_lvm_mounter.py:185-192`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L185-L192)
+
+[3] WSL APFS 마운트 명령.
+
+```python
+            mount_point = f"/tmp/apfs_mount_{int(time.time())}"
+            wsl_image = self._win_to_wsl_path(image_path)
+            
+            cmd = f'mkdir -p "{mount_point}" && apfs-fuse "{wsl_image}" "{mount_point}" && sleep 1 && test -d "{mount_point}/root"'
+            result = self._run_wsl(cmd)
+```
+
+[`mounters/wsl_apfs_mounter.py:58-62`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L58-L62)
+
+[4] Arsenal 항목은 받은 경로를 그대로 읽는다.
+
+```python
+    if 'arsenal' in access_type or 'direct' in access_type:
+        logger.debug(f"Arsenal mount - direct access: {file_path}")
+        return file_path
+```
+
+[`utils/forensic_file_access.py:260-262`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L260-L262)
+
+[5] WSL LVM 마운트에서 파일을 `cat`으로 읽는다.
+
+```python
+    def extract_file(self, image_path: str, file_path: str) -> Dict:
+        """Extract file from mounted image"""
+        ensure = self.ensure_mounted(image_path)
+        if not ensure['success']: return ensure
+        
+        mount_point = ensure['mount_point']
+        target = os.path.join(mount_point, file_path.lstrip('/')).replace('\\', '/')
+        result = self._run_wsl(f'cat "{target}"', timeout=60)
+        return {'success': True, 'content': result.stdout} if result.returncode == 0 else {'success': False, 'error': result.stderr}
+```
+
+[`mounters/wsl_lvm_mounter.py:281-289`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L281-L289)
+
+[6] apfs-fuse는 마운트 옵션에 `ro`를 넣고 쓰기 열기를 거부하며 이미지를 `O_RDONLY`로 연다(apfs-fuse `66b86bd`).
+[`apfsfuse/ApfsFuse.cpp:804`](https://github.com/sgan81/apfs-fuse/blob/66b86bd525e8cb90f9012543be89b1f092b75cf3/apfsfuse/ApfsFuse.cpp#L804), [`apfsfuse/ApfsFuse.cpp:401-402`](https://github.com/sgan81/apfs-fuse/blob/66b86bd525e8cb90f9012543be89b1f092b75cf3/apfsfuse/ApfsFuse.cpp#L401-L402), [`ApfsLib/DeviceLinux.cpp:48`](https://github.com/sgan81/apfs-fuse/blob/66b86bd525e8cb90f9012543be89b1f092b75cf3/ApfsLib/DeviceLinux.cpp#L48)
+
+[7] Arsenal 마운트가 실패하면 SleuthKit 방식으로 바꾼다.
+
+```python
+            except Exception as e:
+                logger.warning(f"Arsenal mounting failed ({e}); falling back to SleuthKit extraction")
+
+        if not arsenal_mounted:
+            logger.info("🔧 Using SleuthKit (extraction-based)")
+```
+
+[`handlers/image_handlers.py:318-322`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L318-L322)
+
+[8] 이미지 해시는 이미지를 `rb`로 연다.
+
+```python
+            hash_obj = hashlib.sha256()
+            sample_size = min(sample_size_mb * 1024 * 1024, file_size)
+            
+            with open(image_path, 'rb') as f:
+                chunk = f.read(sample_size)
+                if not chunk:
+                    logger.warning(f"Could not read from image file: {image_path}")
+                    return hashlib.md5(image_path.encode()).hexdigest()
+                hash_obj.update(chunk)
+```
+
+[`utils/extraction_manager.py:88-96`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L88-L96)
+
+[9] 파티션 표가 없는 이미지와 LVM 서명 확인은 이미지를 `rb`로 연다.
+
+```python
+        try:
+            with open(self.image_path, 'rb') as f:
+                header = f.read(512)
+                if b'NXSB' in header[:64]:
+```
+
+[`mounters/sleuthkit_mounter.py:170-173`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L170-L173)
+
+```python
+        try:
+            with open(self.image_path, 'rb') as f:
+                f.seek(offset * 512)
+                header = f.read(1024)
+                if b'LVM2 001' in header or b'LABELONE' in header:
+                    return {'fs_type': 'lvm2', 'raw_output': 'LVM2 signature found'}
+```
+
+[`mounters/sleuthkit_mounter.py:286-291`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L286-L291)
+
+[10] 파일 읽기 도구가 여는 모드.
+[`handlers/file_handlers.py:854-857`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L854-L857), [`handlers/file_handlers.py:950`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L950), [`handlers/file_handlers.py:1242-1243`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1242-L1243), [`handlers/file_handlers.py:1366-1367`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1366-L1367), [`handlers/macos_handlers.py:54-61`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L54-L61)
+
+[11] SQLite DB를 사건 폴더로 복사한다.
+
+```python
+        case_dir = Path(BASE_OUTPUT_DIR) / "cases" / image_id / "extracted_files"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        
+        original_name = source_path.name
+        dest_path = case_dir / original_name
+        
+        if dest_path.exists():
+            if dest_path.stat().st_size == source_path.stat().st_size:
+                logger.info(f"[EXTRACT] File already extracted, reusing: {dest_path}")
+                return str(dest_path.resolve())
+            else:
+                counter = 1
+                stem = source_path.stem
+                suffix = source_path.suffix
+                while dest_path.exists():
+                    dest_path = case_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+        
+        logger.info(f"[EXTRACT] Copying to: {dest_path}")
+        shutil.copy2(readable_path, dest_path)
+```
+
+[`utils/forensic_file_access.py:528-547`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L528-L547)
+
+[12] 복사본을 `mode=ro`로 연다.
+
+```python
+        try:
+            conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+```
+
+[`handlers/database_handlers.py:107-108`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L107-L108)
+
+[13] 출력 폴더와 임시 폴더 설정.
+
+```yaml
+forensics:
+  max_memory_usage: "4GB"
+  temp_directory: "D:\\forensics_mcp_server\\temp"
+  output_directory: "D:\\forensics_mcp_server\\forensic_output"
+```
+
+[`config/config.yaml:4-7`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L4-L7)
+
+[`app_config.py:111-115`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/app_config.py#L111-L115)
+
+[14] 설정 파일의 `read_only_mode`.
+
+```yaml
+disk_images:
+  supported_formats: ["E01", "Ex01", "DD", "VMDK", "VHD", "VHDX", "AFF", "AFF4"]
+  preparation_timeout: 300  # 5 minutes
+  read_only_mode: true
+```
+
+[`config/config.yaml:20-23`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L20-L23)
+
+[15] SleuthKit 도구에 이미지 경로를 넘긴다.
+[`mounters/sleuthkit_mounter.py:84-92`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L84-L92), [`mounters/sleuthkit_mounter.py:612-634`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L612-L634), [`mounters/sleuthkit_mounter.py:798-815`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L798-L815)
+
+[16] `analyze_memory`는 경로가 있는지만 보고 Volatility 3에 넘긴다.
+
+```python
+        if not Path(memory_file).exists():
+            return [TextContent(
+                type="text",
+                text=f"ERROR: Memory file not found: {memory_file}"
+            )]
+        
+        logger.info(f"Analyzing: {memory_file} with plugin: {plugin}")
+        
+        result = _execute_volatility_command(
+            memory_file=memory_file,
+            plugin=plugin,
+            output_format=output_format,
+            extra_args=plugin_args or [],
+            timeout=DEFAULT_TIMEOUT
+        )
+```
+
+[`handlers/memory_forensics_handler.py:152-166`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L152-L166)
+
+[`handlers/memory_forensics_handler.py:54-62`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L54-L62)
+
+[17] SleuthKit 4.14.0이 이미지를 여는 모드.
+[`tsk/img/raw.c:91-93`](https://github.com/sleuthkit/sleuthkit/blob/c6efd66293546b9c95637be703c7c7823e950629/tsk/img/raw.c#L91-L93), [`tsk/img/raw.c:105-106`](https://github.com/sleuthkit/sleuthkit/blob/c6efd66293546b9c95637be703c7c7823e950629/tsk/img/raw.c#L105-L106), [`tsk/img/ewf.cpp:347-353`](https://github.com/sleuthkit/sleuthkit/blob/c6efd66293546b9c95637be703c7c7823e950629/tsk/img/ewf.cpp#L347-L353)
+
+[18] Volatility 3 2.28.0의 `FileLayer`는 `rb`로 연다.
+[`volatility3/framework/layers/physical.py:122-124`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/physical.py#L122-L124)
+
+[19] Arsenal 항목과 로컬 경로는 원래 위치를 KAPE의 `--msource`로 넘긴다.
+
+```python
+    kape_exe = Path(CONFIG['kape']['binary_path'])
+    
+    if isinstance(artifact_source, Path) and artifact_source.is_dir():
+        kape_source = str(artifact_source)
+    else:
+        kape_source = str(artifact_source.parent) if hasattr(artifact_source, 'parent') else str(artifact_source)
+    
+    # This RECmd build doesn't create the <mdest>\Registry subfolder itself and
+    # fails while saving the batch CSV, so pre-create it.
+    try:
+        (output_dir / "Registry").mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not pre-create Registry output subfolder: {e}")
+
+    cmd = [
+        str(kape_exe),
+        "--msource", kape_source,
+        "--mdest", str(output_dir),
+        "--module", kape_module_name,
+        "--mef", output_format
+    ]
+```
+
+[`handlers/registry_forensics_handler.py:342-362`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L342-L362)
+
+[20] EZ Tools를 직접 실행하는 도구와 로컬 경로를 받는 도구.
+[`handlers/event_logs_forensics_handler.py:69-110`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L69-L110), [`handlers/event_logs_forensics_handler.py:279-299`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L279-L299), [`handlers/amcache_forensics_handler.py:101-134`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L101-L134), [`handlers/amcache_forensics_handler.py:259-265`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L259-L265)
+
+[21] EvtxECmd와 RECmd는 파싱할 입력을, MFTECmd는 형식을 고를 머리 50바이트를, PECmd는 `dedupe`의 SHA-1을 구할 입력을 `FileAccess.Read`의 `FileStream`으로 연다.
+[EvtxECmd `EvtxECmd/Program.cs:1052`](https://github.com/EricZimmerman/evtx/blob/03a7a1fba32760f20841bea3c12099169f9ecf2d/EvtxECmd/Program.cs#L1052), [MFTECmd `MFTECmd/Program.cs:2755`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L2755), [RECmd `RECmd/Program.cs:883`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L883), [PECmd `PECmd/Program.cs:596`](https://github.com/EricZimmerman/PECmd/blob/acdf082f1c2e946b0c358cdf6ef71607e00cfea0/PECmd/Program.cs#L596)
+
+[22] chainbreaker와 UnifiedLogReader가 파일을 여는 모드.
+[chainbreaker `chainbreaker/__init__.py:195-198`](https://github.com/n0fate/chainbreaker/blob/2eb467d9355e61f1dfecee1cec41b06033186326/chainbreaker/__init__.py#L195-L198), [UnifiedLogReader `UnifiedLog/virtual_file.py:25-30`](https://github.com/ydkhatri/UnifiedLogReader/blob/39f774e41be45a780f84e1486ce49b2ed31cab9f/UnifiedLog/virtual_file.py#L25-L30)
+
+[23] Windows 아티팩트 도구는 대조에 실패한 로컬 경로를 받는다.
+
+```python
+        for path_str in paths:
+            path = Path(path_str)
+            
+            try:
+                prepared_info = validate_file_access(path_str, PREPARED_IMAGES)
+                validated_paths.append({
+                    'path': path,
+                    'type': 'prepared_image',
+                    'prepared_info': prepared_info
+                })
+            except SecurityError:
+                if path.exists():
+                    if path.is_file():
+                        validated_paths.append({
+                            'path': path,
+                            'type': 'file',
+                            'prepared_info': None
+                        })
+                    elif path.is_dir():
+                        validated_paths.append({
+                            'path': path,
+                            'type': 'folder',
+                            'prepared_info': None
+                        })
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=f"❌ ERROR: Path not found: {path_str}\n\n"
+                             f"Please provide valid registry hive files or folders."
+                    )]
+```
+
+[`handlers/registry_forensics_handler.py:87-116`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L87-L116)
+
+[`handlers/jump_lists_forensics_handler.py:166-187`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L166-L187)
+
+[24] LECmd·JLECmd·AmcacheParser·AppCompatCacheParser는 라이브러리 함수와 객체로 입력을 연다.
+[LECmd `LECmd/Program.cs:946`](https://github.com/EricZimmerman/LECmd/blob/8107efc4f9f9b4f80fd7b50ed659ffb736e29dd1/LECmd/Program.cs#L946), [JLECmd `JLECmd/Program.cs:1743`](https://github.com/EricZimmerman/JLECmd/blob/4cba3cc0c85552b24c1cbd7e70a5b5e29ae32589/JLECmd/Program.cs#L1743), [AmcacheParser `Amcache/AmcacheNew.cs:27-29`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/Amcache/AmcacheNew.cs#L27-L29), [AppCompatCacheParser `AppCompatCache/AppCompatCache.cs:150`](https://github.com/EricZimmerman/AppCompatCacheParser/blob/0cf059f40c2f7b31acdccb142461945402217398/AppCompatCache/AppCompatCache.cs#L150)
+
+[25] PECmd는 `PrefetchFile.Open`으로, MFTECmd는 `MftFile.Load`로 입력을 파싱한다.
+[PECmd `PECmd/Program.cs:1303`](https://github.com/EricZimmerman/PECmd/blob/acdf082f1c2e946b0c358cdf6ef71607e00cfea0/PECmd/Program.cs#L1303), [MFTECmd `MFTECmd/Program.cs:1545`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L1545)

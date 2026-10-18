@@ -1,0 +1,418 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `analyze_memory`와 `read_csv_data`에 적용된다 [1][2].
+`analyze_memory_handler`는 Volatility를 하위 프로세스로 실행하고 그 표준 출력 `stdout`을 바꾸지 않고 응답 본문에 싣는다 [1].
+`read_csv_data_handler`는 모델이 준 행 범위의 CSV 줄을 값 그대로 응답에 싣는다 [2].
+두 함수는 값을 다시 계산하거나 필드로 나누지 않는다 [1][2].
+`analyze_lnk_files`는 `lnk_removable` 모듈에서 LECmd가 만든 CSV를 다시 읽어 `DriveType` 열에 removable이나 USB가 들어 있거나 값이 `2`인 줄만 `_Removable.csv`에 따로 쓴다 [3].
+이 파일과 원래 CSV는 응답 본문에 실리지 않고 `browse_files_and_folders`·`read_csv_data`로 다시 읽어야 모델에게 전달된다 [4].
+
+**한계.** `analyze_memory`는 `stdout`이 5,000자를 넘으면 앞 5,000자만 싣는다 [1].
+`read_csv_data`는 CSV 줄을 ```` ```csv ```` 표시로 감싸 응답에 싣고 요청한 행 범위 밖은 싣지 않는다 [2].
+`read_csv_data`는 줄마다 앞뒤 공백을 지우고 줄 사이를 줄바꿈 문자 대신 `\`와 `n` 두 글자로 이어 응답에 싣는다 [5][2].
+앞뒤에 공백을 둔 시험용 CSV 줄은 공백 없이 실렸고 줄 사이는 `\n` 두 글자로 이어졌다 [6].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 `analyze_sqlite_database`, `analyze_macos_plist`, `analyze_macos_fsevents`, `identify_file_type`에 적용된다 [7][8][9][10].
+`analyze_sqlite_database_handler`는 SQLite 데이터베이스를 읽어 `list_tables`에서 객체 이름과 종류를, 질의 결과에서 열 이름과 행 값을 골라 응답에 싣는다 [7].
+`analyze_macos_plist_handler`는 이진 형식 plist를 `plistlib`로 읽고 `plist_type`이 `login_items`·`recent_items`·`dock`·`launch_agent`이면 정해 둔 키만 골라 싣는다 [8].
+`analyze_macos_fsevents_handler`는 FSEvents 파일을 `parse_fsevents_directory`로 읽어 레코드마다 `event_id`·`path`·`type`·`actions`를 뽑아 싣는다 [9][11].
+`identify_file_type_handler`는 파일 앞부분의 매직 바이트를 읽어 `file_type`·`category`·`primary_tool` 같은 필드로 나눠 싣는다 [10].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 `analyze_mft`, `analyze_amcache`, `analyze_shimcache`, `analyze_event_logs`, `analyze_sqlite_database`, `analyze_macos_fsevents`에 적용된다 [12][13][14][15][7][9].
+`analyze_mft_handler`는 `mft_timeline` 모듈에서 결과 폴더의 `MFT_Timeline.csv`를 다시 읽어 머리 줄을 뺀 행 수를 `Records Processed`로 싣는다 [12].
+같은 파일 전체를 대문자로 바꾼 뒤 `DELETED`가 나온 횟수와 `:`가 나온 횟수를 세어 `Deleted Files Found`와 `ADS Found`로 싣는다 [12].
+`analyze_amcache_handler`는 결과 폴더에 있는 CSV 파일마다 머리 줄을 뺀 줄 수를 더해 `Programs Found`에 싣는다 [13].
+`analyze_shimcache_handler`는 CSV를 `csv.DictReader`로 읽어 캐시 항목 수, `Executed`가 참인 수, 의심 경로 수를 집계한다 [14].
+`analyze_event_logs`는 EvtxECmd가 만든 CSV의 행 수를 더해 `Total events processed`에 싣고 파일 이름에 `Security`가 들어간 CSV의 행 수를 `Security events`에 싣는다 [15][16].
+`analyze_sqlite_database`의 `list_tables`는 표마다 행 수를 세어 싣는다 [7].
+`analyze_macos_fsevents_handler`는 FSEvents의 이진 레코드를 `dict` 목록으로 바꾸고 동작별 개수를 집계해 싣는다 [9].
+
+**한계.** `analyze_shimcache`가 세는 실행 수, USB 경로 수, 의심 경로 수는 응답 본문에 실리지 않고 캐시 항목 수만 실린다 [17].
+MFTECmd `6aadd87`은 `--csvf`가 없으면 결과 파일 이름을 `<시각>_MFTECmd_$MFT_Output.csv`로 짓고 서버는 `--csvf`를 넘기지 않으므로 `analyze_mft`의 세 값은 `File not found`로 실린다 [12][18][19].
+`MFT_Timeline.csv`가 있을 때도 `ADS Found`는 대체 데이터 스트림 수가 아니라 MFTECmd 기본 시각 형식 `yyyy-MM-dd HH:mm:ss.fffffff`의 `:`까지 센 수다 [12][18].
+AmcacheParser `2904455`는 프로그램, 파일, 바로 가기, 드라이버, 장치 항목을 서로 다른 CSV에 쓰므로 `Programs Found`는 프로그램 수가 아니라 이 CSV들의 행 수 합이다 [13][20].
+`analyze_amcache`의 결과 폴더는 같은 증거에서 늘 같은 경로이고 AmcacheParser는 파일 이름 앞에 실행 시각을 붙이므로 앞선 실행의 CSV가 남아 있으면 그 행도 더한다 [21][20].
+`analyze_amcache` 응답의 `SHA1 Hashes`는 값을 채우는 코드가 없어 늘 `N/A`로 실린다 [22].
+EvtxECmd `03a7a1f`는 `--csvf`가 없으면 모든 로그를 `<시각>_EvtxECmd_Output.csv` 파일 하나에 쓰고 서버는 `--csvf`를 넘기지 않으므로 `Security events`는 늘 0이다 [15][23].
+`analyze_event_logs` 응답의 `System events`와 `Application events`는 값을 채우는 코드가 없어 늘 `N/A`로 실린다 [16].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 `analyze_memory`, `analyze_sqlite_database`, `analyze_mft`, `analyze_amcache`의 응답에 적용된다 [1][7][22].
+`analyze_memory_handler`는 응답 머리에 `Memory File`과 `Plugin`을 적어 결과가 어느 파일에 어느 Volatility 플러그인을 실행한 것인지 밝힌다 [1].
+`analyze_sqlite_database`의 질의 응답은 `QUERY RESULTS`와 실행한 `Query`를 적는다 [7].
+`Query`에는 실행한 질의의 앞 100자까지만 싣는다 [7].
+`analyze_mft`·`analyze_amcache`의 응답은 실행한 명령 `Command`와 결과를 만든 모듈 이름을 적는다 [22].
+
+### 근거
+
+[1] `analyze_memory_handler`가 Volatility 출력을 바꾸지 않고 싣고 5,000자에서 자르는 부분이다.
+
+```python
+        response = []
+        response.append(f"Memory Analysis Complete\n")
+        response.append(f"{'='*60}\n")
+        response.append(f"Memory File: {Path(memory_file).name}\n")
+        response.append(f"Plugin: {plugin}\n")
+        response.append(f"Format: {output_format}\n")
+        
+        if output_file:
+            response.append(f"Saved: {output_file}\n")
+        
+        response.append(f"\n{'='*60}\n")
+        response.append("RESULTS:\n")
+        response.append(f"{'='*60}\n\n")
+        
+        stdout = result["stdout"]
+        if len(stdout) > 5000:
+            response.append(stdout[:5000])
+            response.append(f"\n\n... (output truncated, full results saved to file)")
+        else:
+            response.append(stdout)
+        
+        if result["stderr"]:
+            response.append(f"\n\nInfo/Warnings:\n{result['stderr'][:500]}")
+        
+        return [TextContent(type="text", text=''.join(response))]
+```
+
+[`handlers/memory_forensics_handler.py:180-204`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L180-L204)
+
+[2] `read_csv_data_handler`가 CSV 줄을 값 그대로 코드 블록에 싣는 부분이다.
+
+```python
+            if csv_content:
+                result_text += f"📊 **CSV Data**:\\n```csv\\n"
+                result_text += '\\n'.join(csv_content)
+                result_text += f"\\n```\\n\\n"
+                
+                actual_data_rows = len(csv_content) - (1 if include_header else 0)
+                result_text += f"✅ **Retrieved**: {actual_data_rows:,} data rows\\n"
+                
+                remaining_rows = total_data_rows - end_row
+                if remaining_rows > 0:
+                    result_text += f"📍 **Remaining**: {remaining_rows:,} rows\\n"
+                    result_text += f"💡 **Next Chunk**: `start_row: {end_row + 1}, end_row: {min(end_row + 50, total_data_rows)}`\\n"
+```
+
+[`handlers/file_handlers.py:1290-1301`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1290-L1301)
+
+[3] `_filter_removable_drives_in_output`이 조건으로 CSV 줄을 고르는 부분이다.
+
+```python
+                filtered_rows.append(headers)
+                
+                for row in reader:
+                    total_rows += 1
+                    if len(row) > drive_type_idx:
+                        drive_type = row[drive_type_idx]
+                        if ('removable' in drive_type.lower() or 
+                            'usb' in drive_type.lower() or
+                            drive_type == '2'):
+                            filtered_rows.append(row)
+                            removable_rows += 1
+            
+            out_file = csv_file[:-4] + "_Removable.csv" if csv_file.lower().endswith(".csv") else csv_file + "_Removable.csv"
+            with open(out_file, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(filtered_rows)
+```
+
+[`handlers/lnk_forensics_handler.py:696-711`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L696-L711)
+
+[4] `analyze_lnk_files`는 `lnk_removable`이면 선별 함수를 부르고 응답에는 모듈마다 출력 파일 수와 결과 폴더만 싣는다.
+
+```python
+        if module_id == "lnk_removable":
+            logger.info("Filtering results for removable drives only...")
+            _filter_removable_drives_in_output(str(output_dir))
+```
+
+[`handlers/lnk_forensics_handler.py:473-475`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L473-L475)
+
+```python
+            output_text += f"\n✅ Module: {module_name}\n"
+            output_text += f"   Source: {source_path}\n"
+            output_text += f"   Status: SUCCESS\n"
+            output_text += f"   Execution Time: {execution_time:.2f}s\n"
+            output_text += f"   Output Files: {file_count}\n"
+            output_text += f"   📁 Output Directory: {output_dir}\n"
+```
+
+[`handlers/lnk_forensics_handler.py:243-248`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L243-L248)
+
+[5] `read_csv_data_handler`는 고른 줄마다 `strip()`을 부른다.
+
+```python
+            if data_end_idx <= len(lines):
+                csv_content.extend(line.strip() for line in lines[data_start_idx:data_end_idx])
+            else:
+                csv_content.extend(line.strip() for line in lines[data_start_idx:])
+```
+
+[`handlers/file_handlers.py:1285-1288`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1285-L1288)
+
+[6] (실행 확인) 작업 사본에서 앞뒤에 공백을 둔 줄이 있는 시험용 CSV를 `read_csv_data`로 읽었다.
+
+[7] `analyze_sqlite_database_handler`의 `list_tables`와 질의 처리다: [`handlers/database_handlers.py:114-200`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L114-L200).
+
+[8] `analyze_macos_plist_handler`가 plist를 읽고 유형별로 키를 고르는 부분이다: [`handlers/macos_handlers.py:48-99`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L48-L99).
+
+[9] `analyze_macos_fsevents_handler`가 FSEvents를 파싱하고 동작별로 집계하는 부분이다: [`handlers/macos_handlers.py:969-1019`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L969-L1019).
+
+[10] `identify_file_type_handler`가 매직 바이트를 필드로 나누는 부분이다: [`handlers/file_handlers.py:832-896`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L832-L896).
+
+[11] `parse_fsevents_directory`가 레코드마다 필드를 뽑는 부분이다: [`utils/fsevents_parser.py:156-170`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/fsevents_parser.py#L156-L170).
+
+```python
+                    item_type, actions = parse_flags(flags)
+                    
+                    event_data = {
+                        'event_id': event_id,
+                        'path': display_path,
+                        'type': item_type,
+                        'actions': ', '.join(actions),
+                        'flags_hex': f"0x{flags:08X}"
+                    }
+                    
+                    # Add encoding note if path contains hex
+                    if "[hex:" in display_path:
+                        event_data['encoding_note'] = 'Path contains non-UTF8 data shown as hex'
+                    
+                    events.append(event_data)
+```
+
+[`utils/fsevents_parser.py:156-170`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/fsevents_parser.py#L156-L170)
+
+[12] `analyze_mft`가 CSV를 다시 읽어 레코드 수를 세는 부분이다: [`handlers/mft_forensics_handler.py:365-390`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L365-L390).
+
+```python
+        if module_id == "mft_timeline":
+            timeline_csv = output_dir / "MFT_Timeline.csv" 
+            if timeline_csv.exists():
+                try:
+                    import csv
+                    with open(timeline_csv, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        next(reader)
+                        record_count = sum(1 for row in reader)
+                    success_result['records_processed'] = record_count
+                    
+                    with open(timeline_csv, 'r', encoding='utf-8') as f:
+                        content = f.read().upper()
+                        deleted_count = content.count('DELETED')
+                        ads_count = content.count(':')
+                    success_result['deleted_files_found'] = deleted_count
+                    success_result['ads_found'] = ads_count
+                except Exception as e:
+                    logger.warning(f"Could not analyze CSV statistics: {e}")
+                    success_result['records_processed'] = "Unknown"
+                    success_result['deleted_files_found'] = "Unknown"
+                    success_result['ads_found'] = "Unknown"
+            else:
+                success_result['records_processed'] = "File not found"
+                success_result['deleted_files_found'] = "File not found"
+                success_result['ads_found'] = "File not found"
+```
+
+[`handlers/mft_forensics_handler.py:365-390`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L365-L390)
+
+[13] `analyze_amcache`가 CSV 줄을 세는 부분이다.
+
+```python
+    entries = 0
+    for f in output_files:
+        try:
+            with open(f, 'r', encoding='utf-8', errors='replace') as fh:
+                entries += max(0, sum(1 for _ in fh) - 1)
+        except Exception:
+            pass
+
+    return {
+        'status': 'success',
+        'command': command,
+        'output_directory': str(output_dir),
+        'timestamp': datetime.now().isoformat(),
+        'programs_found': entries,
+        'entries_processed': entries,
+        'output_files': output_files,
+```
+
+[`handlers/amcache_forensics_handler.py:285-300`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L285-L300)
+
+[14] `_analyze_shimcache_output`이 CSV를 읽어 집계하는 부분이다: [`handlers/shimcache_forensics_handler.py:354-392`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shimcache_forensics_handler.py#L354-L392).
+
+[15] `_analyze_event_log_output`이 이벤트 ID별로 줄을 세는 부분이다: [`handlers/event_logs_forensics_handler.py:397-434`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L397-L434).
+
+[16] `analyze_event_logs`의 응답은 통계 네 값과 출력 파일 수를 싣고 통계 `dict`에는 `system_events`와 `application_events` 키가 없다.
+
+```python
+            text = f"✅ **Event Logs Analysis Complete**\n\n"
+            text += f"📊 **Processing Summary**:\n"
+            
+            if result.get("statistics"):
+                stats = result["statistics"]
+                text += f"  - Total events processed: {stats.get('total_events', 'N/A')}\n"
+                text += f"  - Security events: {stats.get('security_events', 'N/A')}\n"
+                text += f"  - System events: {stats.get('system_events', 'N/A')}\n"
+                text += f"  - Application events: {stats.get('application_events', 'N/A')}\n"
+            
+            text += f"  - Output files generated: {len(result.get('output_files', []))}\n\n"
+```
+
+[`handlers/event_logs_forensics_handler.py:151-161`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L151-L161)
+
+```python
+    stats = {
+        "total_files": len(output_files),
+        "total_events": 0,
+        "logs_processed": [],
+        "event_id_summary": {},
+        "security_events": 0,
+        "logon_events": 0,
+        "failed_logon_events": 0,
+        "process_creation_events": 0,
+        "service_events": 0,
+        "powershell_events": 0,
+        "errors": []
+    }
+```
+
+[`handlers/event_logs_forensics_handler.py:379-391`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L379-L391)
+
+[17] `analyze_shimcache`의 응답이 캐시 항목 수만 싣고 실행 수 등은 싣지 않는 부분이다: [`handlers/shimcache_forensics_handler.py:235-245`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shimcache_forensics_handler.py#L235-L245).
+
+```python
+    if results.get('success'):
+        text = f"✅ **Shimcache Analysis Complete**\n\n"
+        text += f"📁 **Processing Summary**:\n"
+        text += f"  - Registry hives processed: {results['summary']['total_hives_processed']}\n"
+        text += f"  - Cache entries found: {results['summary']['total_cache_entries']}\n"
+        text += f"  - Output files generated: {len(results['output_files'])}\n\n"
+        
+        if results['output_files']:
+            text += f"📄 **Generated Files**:\n"
+            for file_path in results['output_files']:
+                text += f"  - {file_path}\n"
+```
+
+[`handlers/shimcache_forensics_handler.py:235-245`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shimcache_forensics_handler.py#L235-L245)
+
+[18] MFTECmd 6aadd87은 `--csvf`가 없으면 결과 파일 이름을 실행 시각으로 시작하게 짓고 기본 시각 형식에 `:`를 쓴다: [`MFTECmd/Program.cs:1761-1788`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L1761-L1788), [`MFTECmd/Program.cs:175`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/Program.cs#L175).
+
+[19] `analyze_mft`는 MFTECmd에 `--csv`와 결과 폴더를 넘기고 `--csvf`는 넘기지 않는다.
+
+```python
+    cmd_parts = [
+        "MFTECmd.exe",
+        "-f", mft_path,
+        "--csv", str(output_dir),
+    ]
+    
+    if output_format == "json":
+        cmd_parts.append("--json")
+        cmd_parts.append(str(output_dir))
+    elif output_format == "body":
+        cmd_parts.append("--body")
+        cmd_parts.append(str(output_dir))
+        cmd_parts.append("--bdl")
+        cmd_parts.append("C")
+    
+    if module_id == "mft_resident_files":
+        resident_dir = output_dir / "ResidentFiles"
+        resident_dir.mkdir(parents=True, exist_ok=True)
+        cmd_parts.append("--dr")
+        # Note: --dr saves to 'Resident' subdirectory automatically
+    
+    cmd_parts.append("--vss")
+    
+    command = " ".join(cmd_parts)
+```
+
+[`handlers/mft_forensics_handler.py:274-297`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L274-L297)
+
+[20] AmcacheParser 2904455는 항목 종류마다 실행 시각을 앞에 붙인 다른 CSV 파일을 쓴다: [`AmcacheParser/Program.cs:341`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L341), [`AmcacheParser/Program.cs:407`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L407), [`AmcacheParser/Program.cs:478`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L478), [`AmcacheParser/Program.cs:551`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L551), [`AmcacheParser/Program.cs:592`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L592), [`AmcacheParser/Program.cs:655`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L655), [`AmcacheParser/Program.cs:712`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L712), [`AmcacheParser/Program.cs:766`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/AmcacheParser/Program.cs#L766).
+
+[21] `analyze_amcache`의 결과 폴더는 증거와 모듈 이름으로 정해지고 서버는 그 폴더의 CSV 파일을 모두 센다.
+
+```python
+    output_dir = get_case_output_directory(
+        prepared_info=prepared_info,
+        artifact_name='amcache',
+        kape_module_name='AmcacheParser',
+        module_id='amcache',
+        cases_dir=CASES_DIR
+    )
+```
+
+[`handlers/amcache_forensics_handler.py:237-243`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L237-L243)
+
+```python
+    output_files = [str(f) for f in sorted(output_dir.glob("*.csv"))]
+```
+
+[`handlers/amcache_forensics_handler.py:275-275`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L275-L275)
+
+[22] `analyze_mft`·`analyze_amcache`의 응답 머리는 모듈 이름, 입력 경로, 실행 명령을 적고 `SHA1 Hashes`는 결과에 없는 키 `sha1_hashes`를 읽는다.
+기준 커밋에서 `sha1_hashes`를 찾으면 이 응답 줄만 나온다.
+
+```python
+                text = f"✅ **MFT Analysis: {result.get('module_name', result.get('module_id'))}**\n"
+                text += f"📁 **Path**: {result.get('path')}\n"
+                text += f"⏱️ **Processing Time**: {result.get('timestamp', 'N/A')}\n"
+                text += f"📊 **Records Processed**: {format_number(result.get('records_processed', 'N/A'))}\n"
+                
+                if result.get('module_id') == 'mft_timeline':
+                    text += f"🗑️ **Deleted Files Found**: {format_number(result.get('deleted_files_found', 0))}\n"
+                    text += f"📋 **ADS Found**: {format_number(result.get('ads_found', 0))}\n"
+                elif result.get('module_id') == 'mft_resident_files':
+                    text += f"📁 **Resident Files Found**: {format_number(result.get('resident_files_found', 0))}\n"
+                    text += f"💾 **Files Extracted**: {format_number(result.get('resident_files_extracted', 0))}\n"
+                
+                text += f"📂 **Output Directory**: {result.get('output_directory')}\n"
+                text += f"🔧 **Command**: {result.get('command')}\n"
+```
+
+[`handlers/mft_forensics_handler.py:199-212`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L199-L212)
+
+```python
+                text = f"✅ **Amcache Analysis: {result.get('module_name', result.get('module_id'))}**\n"
+                text += f"📁 **Path**: {result.get('path')}\n"
+                text += f"⏱️ **Processing Time**: {result.get('timestamp', 'N/A')}\n"
+                text += f"📊 **Programs Found**: {result.get('programs_found', 'N/A')}\n"
+                text += f"🔍 **SHA1 Hashes**: {result.get('sha1_hashes', 'N/A')}\n"
+                text += f"📂 **Output Directory**: {result.get('output_directory')}\n"
+                text += f"🔧 **Command**: {result.get('command')}\n"
+```
+
+[`handlers/amcache_forensics_handler.py:182-188`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L182-L188)
+
+[23] 서버는 EvtxECmd에 `--csv`와 결과 폴더만 넘기고 EvtxECmd 03a7a1f는 `--csvf`가 없으면 결과 파일 이름을 `<시각>_EvtxECmd_Output.csv`로 짓는다: [`EvtxECmd/Program.cs:550-557`](https://github.com/EricZimmerman/evtx/blob/03a7a1fba32760f20841bea3c12099169f9ecf2d/EvtxECmd/Program.cs#L550-L557).
+
+```python
+    if output_format.lower() == "csv":
+        cmd.extend(["--csv", output_dir])
+    elif output_format.lower() == "json":
+        cmd.extend(["--json", output_dir])
+    elif output_format.lower() == "xml":
+        cmd.extend(["--xml", output_dir])
+    else:
+        cmd.extend(["--csv", output_dir])
+```
+
+[`handlers/event_logs_forensics_handler.py:291-298`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L291-L298)

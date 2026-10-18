@@ -1,0 +1,256 @@
+---
+cell: E02
+details:
+- id: E02.01
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 디스크 이미지를 준비하는 `prepare_disk_image`에 적용된다 [1].
+`prepare_disk_image`는 모델의 요청 없이 `ExtractionManager.calculate_image_hash`로 이미지의 해시를 계산한다 [1].
+해시는 이미지 파일의 앞 10 MiB(파일이 더 작으면 파일 전체)를 한 번에 읽은 SHA-256이다 [2].
+EWF 이미지는 첫 조각 파일 자체의 바이트를 읽으므로 이 값은 담긴 매체 데이터의 해시가 아니다 [2].
+설정 파일의 `hash_algorithm`을 읽는 코드는 없고 해시 종류는 `calculate_image_hash`에 정해져 있다 [2][3].
+값은 등록부 항목의 `hash`에 들어가 `prepared_images_registry.json`에 저장되고 응답에 `Hash:`로 실린다 [4][5].
+값의 앞 12글자는 이미지 ID `unique_image_id`의 끝에 들어간다 [4].
+`list_prepared_images`는 이 값을 `SHA256 Hash:`로, `kape_parse_artifact`는 `Image Hash:`로 응답에 싣는다 [6][7].
+
+등록한 해시를 다시 계산해 현재 이미지와 대조하는 코드는 없다.
+같은 이미지를 다시 준비하면 해시를 새로 계산하지만 앞 항목의 값과 대조하지 않는다 [8].
+앞 항목은 그 키가 실제 경로와 같은 표기이면 지우고 다르면 지우지 않는다 [8][9][10].
+파일의 SHA-256 전체를 계산하는 `calculate_file_hash`는 `image_handlers.py`가 불러오기만 하고 부르지 않는다 [11].
+해시를 계산하는 MCP 도구는 없고 `analyze_memory`가 받는 메모리 파일과 로컬 경로로 받은 증거 파일은 해시하지 않는다 [12].
+
+**한계.** 앞 10 MiB 뒤의 내용은 해시에 들어가지 않는다 [2].
+11 MiB 시험 이미지의 10 MiB 뒤 바이트 하나를 바꾼 사본은 원래 이미지와 같은 해시를 냈고 앞부분의 바이트 하나를 바꾼 사본은 다른 해시를 냈다 [13].
+응답과 `list_prepared_images`는 이 값을 범위 없이 `Hash`·`SHA256 Hash`로 적어 이미지 전체의 해시인지 구별되지 않는다 [5][6].
+파일을 읽다 예외가 나거나 읽은 바이트가 없으면 이미지 경로 문자열의 MD5를 해시 자리에 넣고 응답에는 그 사실을 적지 않는다 [2].
+없는 파일 경로로 이 함수를 부르자 32글자 MD5 값을 돌려주었다 [13].
+크기가 0인 파일도 경로 문자열의 MD5를 돌려준다 [2].
+Arsenal 드라이브나 WSL LVM 마운트가 살아 있는 이미지를 다시 준비하면 해시를 계산하지 않고 등록부의 값을 응답에 싣는다 [8].
+
+### 근거
+
+[1] `prepare_disk_image`가 등록 전에 해시를 계산한다.
+
+```python
+        logger.info("Calculating SHA256 hash for unique image identification...")
+        try:
+            extraction_manager = get_extraction_manager(
+                sleuthkit_bin_dir=str(CONFIG.get('sleuthkit', {}).get('bin_directory', '')),
+                extraction_base_dir=str(BASE_OUTPUT_DIR / 'extract')
+            )
+            image_hash_full = extraction_manager.calculate_image_hash(str(image_file))
+            image_name = image_file.stem
+            
+            logger.info(f"Image name: {image_name}")
+            logger.info(f"Full hash: {image_hash_full}")
+        except Exception as e:
+            logger.error(f"Hash calculation failed: {e}")
+            return [TextContent(type="text", text=f"ERROR: Failed to calculate hash: {e}")]
+```
+
+[`handlers/image_handlers.py:142-155`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L142-L155)
+
+[2] `calculate_image_hash`는 앞 10 MiB를 SHA-256으로 해시하고 실패하면 경로 문자열의 MD5를 돌려준다.
+
+```python
+        try:
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image path does not exist: {image_path}")
+
+            file_size = os.path.getsize(image_path)
+            if file_size == 0:
+                logger.warning(f"Image file is empty: {image_path}")
+                return hashlib.md5(image_path.encode()).hexdigest()
+
+            hash_obj = hashlib.sha256()
+            sample_size = min(sample_size_mb * 1024 * 1024, file_size)
+            
+            with open(image_path, 'rb') as f:
+                chunk = f.read(sample_size)
+                if not chunk:
+                    logger.warning(f"Could not read from image file: {image_path}")
+                    return hashlib.md5(image_path.encode()).hexdigest()
+                hash_obj.update(chunk)
+            
+            full_hash = hash_obj.hexdigest()
+            
+            logger.info(f"Image hash calculated: {full_hash} (Sample size: {len(chunk)} bytes)")
+            return full_hash
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate image hash: {e}")
+            fallback_hash = hashlib.md5(image_path.encode()).hexdigest()
+            logger.info(f"Using fallback hash: {fallback_hash}")
+            return fallback_hash
+```
+
+[`utils/extraction_manager.py:79-107`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L79-L107)
+
+[3] 설정 파일의 `hash_algorithm`.
+
+```yaml
+  hash_algorithm: "SHA256"
+```
+
+[`config/config.yaml:9-9`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L9-L9)
+
+[4] 해시를 이미지 ID와 등록부 항목에 넣는다.
+
+```python
+        unique_image_id = f"{image_name}_{os_family}_{image_hash_full[:12]}"  # short hash: keep case paths under Windows MAX_PATH (260)
+        logger.info(f"Unique image ID (with OS): {unique_image_id}")
+```
+
+[`handlers/image_handlers.py:271-272`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L271-L272)
+
+[`handlers/image_handlers.py:496-518`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L496-L518)
+
+[5] 응답에 해시를 싣는다.
+
+```python
+        result_text = "✅ DISK IMAGE PREPARED SUCCESSFULLY\n\n"
+        result_text += "=" * 70 + "\n"
+        result_text += "IMAGE INFORMATION\n"
+        result_text += "=" * 70 + "\n"
+        result_text += f"Image: {image_name}\n"
+        result_text += f"Path: {image_path}\n"
+        result_text += f"Size: {file_size:,} bytes ({file_size / (1024**3):.2f} GB)\n"
+        result_text += f"Hash: {image_hash_full}\n"
+        result_text += f"Filesystem: {fs_type.upper()}\n"
+        result_text += f"OS Type: {os_family.upper()}\n"
+```
+
+[`handlers/image_handlers.py:524-533`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L524-L533)
+
+[6] `list_prepared_images`의 `SHA256 Hash`.
+
+```python
+        image_hash = info.get('hash', 'HASH_NOT_AVAILABLE')
+        image_name = info.get('name', Path(image_path).stem)
+        case_dir = info.get('case_dir', 'N/A')
+        
+        result += f"{'='*70}\\n"
+        result += f"[{idx}] {image_name}\\n"
+        result += f"{'='*70}\\n"
+        result += f"SHA256 Hash: {image_hash}\\n"
+        result += f"Filesystem: {fs_type.upper()}\\n"
+        result += f"OS Family: {os_family}\\n"
+        result += f"Access Point: {access_point}\\n"
+```
+
+[`handlers/image_handlers.py:717-727`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L717-L727)
+
+[7] `kape_parse_artifact` 응답의 `Image Hash`.
+
+```python
+        result_text = "ARTIFACT PARSING COMPLETED\\n\\n"
+        result_text += f"Operation Hash: {operation_hash}\\n"
+        result_text += f"Image: {mounted_image['name']}\\n"
+        result_text += f"Image Hash: {mounted_image['hash']}\\n"
+        result_text += f"Module: {kape_module}\\n"
+```
+
+[`handlers/kape_handlers.py:135-139`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L135-L139)
+
+[8] 같은 이미지를 다시 준비할 때 Arsenal 마운트가 살아 있으면 등록부의 해시를 싣고 아니면 앞 항목을 지운다.
+
+```python
+        if image_path_normalized in PREPARED_IMAGES:
+            existing = PREPARED_IMAGES[image_path_normalized]
+            
+            is_active = False
+            mount_type = existing.get('mount_type')
+            
+            if mount_type == 'arsenal':
+                drive = existing.get('access_point', '').rstrip('\\')
+                is_active = os.path.exists(drive)
+            elif mount_type == 'wsl_lvm':
+                mount_point = existing.get('mount_point')
+                try:
+                    check_cmd = f'wsl -d Ubuntu -u root mount | findstr "{mount_point}"'
+                    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+                    is_active = result.returncode == 0
+                except:
+                    is_active = False
+            
+```
+
+[`handlers/image_handlers.py:104-121`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L104-L121)
+
+```python
+            if is_active:
+                logger.info(f"✅ Image already mounted and active - Reusing!")
+                
+                execution_time = time.time() - start_time
+                log_operation_success("prepare_disk_image", f"Reused active mount", execution_time)
+                
+                result_text = f"✅ IMAGE ALREADY MOUNTED AND ACTIVE\n\n"
+                result_text += f"Image: {existing.get('name')}\n"
+                result_text += f"Access Point: {existing.get('access_point')}\n"
+                result_text += f"Hash: {existing.get('hash')}\n"
+                result_text += f"Filesystem: {existing.get('fs_type', 'unknown').upper()}\n"
+                result_text += f"Case Directory: {existing.get('case_dir')}\n"
+                result_text += f"\n⚡ Reusing existing active mount!\n"
+                
+                return [TextContent(type="text", text=result_text)]
+            
+            logger.warning(f"⚠️ Previously prepared mount for {image_path_normalized} is inactive - will remount")
+            del PREPARED_IMAGES[image_path_normalized]
+            save_prepared_images(PREPARED_IMAGES, BASE_OUTPUT_DIR)
+```
+
+[`handlers/image_handlers.py:122-140`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L122-L140)
+
+[9] 다시 준비할 때는 실제 경로로 바꾼 값으로 앞 항목을 찾고 등록부 키는 받은 경로 문자열로 쓴다.
+
+```python
+        image_path_normalized = str(image_file.resolve())
+```
+
+[`handlers/image_handlers.py:102-102`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L102-L102)
+
+```python
+        PREPARED_IMAGES[str(image_file)] = prep_info_with_mounter
+```
+
+[`handlers/image_handlers.py:516-516`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L516-L516)
+
+[10] (실행 확인) 같은 시험 이미지를 실제 표기, 소문자 표기, 상대 경로로 차례로 `prepare_disk_image`에 주자 상대 경로로 준비한 뒤 같은 `unique_image_id`의 항목 두 개가 남았다.
+
+[11] `calculate_file_hash`는 불러오기만 하고 부르는 곳이 없다.
+
+```python
+from core.forensic_tools import calculate_file_hash
+```
+
+[`handlers/image_handlers.py:17-17`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L17-L17)
+
+[`core/forensic_tools.py:9-15`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/forensic_tools.py#L9-L15)
+
+[12] `analyze_memory`는 받은 경로가 있는지만 보고 Volatility 3를 실행한다.
+
+```python
+        if not Path(memory_file).exists():
+            return [TextContent(
+                type="text",
+                text=f"ERROR: Memory file not found: {memory_file}"
+            )]
+        
+        logger.info(f"Analyzing: {memory_file} with plugin: {plugin}")
+        
+        result = _execute_volatility_command(
+            memory_file=memory_file,
+            plugin=plugin,
+            output_format=output_format,
+            extra_args=plugin_args or [],
+            timeout=DEFAULT_TIMEOUT
+        )
+```
+
+[`handlers/memory_forensics_handler.py:152-166`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L152-L166)
+
+[13] (실행 확인) 작업 사본의 `calculate_image_hash`로 11 MiB 시험 이미지, 10 MiB 뒤 바이트 하나를 바꾼 사본, 앞부분 바이트 하나를 바꾼 사본, 없는 파일 경로의 값을 계산해 대조했다.

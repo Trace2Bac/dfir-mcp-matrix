@@ -1,0 +1,546 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 이 방식은 준비한 이미지의 준비 객체와 마운트 객체, 파일 추출에 쓰는 관리 객체에 적용된다 [1][2][3].
+등록부 `PREPARED_IMAGES`는 모듈 전역 `dict`이고 항목마다 SleuthKit·WSL 준비 객체를 `mounter`에, Arsenal 마운트 객체를 `arsenal`에 둔다 [1][4].
+Arsenal 마운트 객체는 실행한 `aim_cli` 프로세스 객체와 드라이브 문자를 `mounted_images`에 둔다 [2].
+WSL APFS·LVM 마운트 객체도 이미지마다 마운트 위치를 `mounted_images`에 둔다 [2].
+레지스트리 폴더 추출을 맡는 `ExtractionManager`는 프로세스에 하나를 만들어 다시 쓰고 경로 대응표 `PathMapper`는 이미지 경로의 MD5마다 하나를 모듈 전역 `_MAPPERS`에 두어 다시 쓴다 [3][5].
+등록부 파일에 쓸 때 `mounter` 키는 빼므로 SleuthKit·WSL 준비 객체는 프로세스가 끝나면 사라진다 [6].
+
+**한계.** 프로세스가 끝나도 Arsenal이 마운트한 드라이브와 WSL 마운트가 남는지는 확인하지 못했다 [2].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 이 방식은 등록부, 레지스트리 폴더 추출 기록, SleuthKit 파일 추출의 경로 대응표, 분석 도구의 출력 폴더에 적용된다 [6][7][8][9].
+`prepare_disk_image`와 `cleanup_prepared_image`는 등록부를 바꿀 때마다 `forensic_output/prepared_images_registry.json`에 전체를 다시 쓴다 [6].
+항목에는 이미지 경로, 이미지 ID, 해시, 사건 폴더, 접근 위치, 파일시스템, OS, 파티션 위치, 준비 시각이 들어간다 [10].
+`ExtractionManager`는 이미지 ID와 내부 경로마다 추출 위치, 시각, 파일 수를 `extract/extraction_registry.json`에 쓰고 같은 경로를 다시 요청하면 앞서 꺼낸 폴더를 돌려준다 [7].
+`PathMapper`는 이미지 안 경로마다 꺼낸 파일 경로, inode, 크기를 사건 폴더의 `path_mapping.json`에 쓰고 같은 경로를 다시 읽으면 꺼낸 파일을 돌려준다 [8].
+레지스트리·KAPE 도구는 출력 폴더에 파일이 있으면 KAPE를 다시 실행하지 않고 `CACHED`로 그 폴더를 돌려준다 [9].
+같은 레지스트리 요청을 두 번 부르자 두 번째 응답은 `CACHED (already analyzed)`였다 [11].
+
+**한계.** `analyze_registry`는 KAPE를 실행하기 전에 출력 폴더 안에 `Registry` 폴더를 만든다 [9].
+그래서 KAPE가 실패해도 출력 폴더가 비어 있지 않아 같은 요청을 다시 부르면 `CACHED`를 돌려준다 [9].
+시험용 KAPE가 실패하게 한 뒤 같은 요청을 다시 부르자 응답은 `CACHED (already analyzed)`였고 출력 폴더에는 빈 `Registry` 폴더만 있었다 [12].
+캐시 판정은 출력 폴더 이름만 보므로 같은 이름의 폴더를 쓰는 다른 입력의 결과도 돌려준다 [9][13].
+`kape_parse_artifact`의 출력 폴더 이름은 이미지 안 경로를 `_`로 이은 것이고 레지스트리 도구는 파일 이름 줄기나 폴더 이름으로 짓는다 [9][13].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** 이 방식은 stdio 진입점 `main.py`의 시작 처리에 적용된다 [14].
+`main.py`는 서버를 만들기 전에 `load_prepared_images`로 등록부 파일을 읽어 `PREPARED_IMAGES`를 채운다 [14][15].
+`load_prepared_images`에는 읽은 Arsenal 항목의 드라이브를 확인해 없으면 지우는 단계가 있지만 서버가 Arsenal 항목을 넣어 쓴 등록부는 읽히지 않는다 [15][4][6].
+SleuthKit 항목은 준비 객체 없이 복구되고 `browse_files_and_folders`는 준비 객체가 없으면 등록부의 이미지 경로와 파티션 번호로 다시 만든다 [16].
+`analyze_registry`는 준비 객체가 없으면 부를 때마다 등록부의 이미지 경로로 준비 객체를 다시 만들고 파티션은 다시 판별해 고른 것을 쓴다 [17][18].
+SleuthKit 파일 읽기 경로는 준비 객체를 쓰지 않고 등록부의 이미지 경로와 파티션 위치로 SleuthKit을 다시 실행한다 [19].
+WSL 항목은 파일을 읽거나 둘러볼 때 등록부의 마운트 위치로 마운트 객체를 다시 만든다 [19][16].
+LVM 마운트 객체는 파일을 읽거나 둘러볼 때 `mountpoint -q`로 마운트를 확인하고 없으면 같은 위치에 다시 마운트한다 [20].
+시험 이미지를 준비한 프로세스를 끝내고 새 프로세스에서 시작 처리를 부르자 그 이미지의 항목이 준비 객체 없이 복구되었고 `browse_files_and_folders`가 준비 객체를 다시 만들었다 [21].
+
+**한계.** SSE 진입점 `remote_server.py`는 `load_prepared_images`를 부르지 않는다 [22].
+그래서 SSE로 시작한 서버는 앞서 준비한 이미지를 모른다 [22].
+그 상태에서 이미지를 준비하면 등록부 파일을 그 프로세스의 항목만으로 다시 쓰므로 앞 항목이 파일에서 사라진다 [6][22].
+`kape_parse_artifact`·`analyze_prefetch`·`analyze_lnk_files`·`analyze_shellbags`·`analyze_jump_lists`는 준비 객체를 다시 만들지 않는다 [23].
+재시작 뒤 다른 도구가 준비 객체를 만들기 전에 `kape_parse_artifact`와 `analyze_prefetch`를 부르자 둘 다 `No mounter available` 오류를 돌려주었다 [21].
+Arsenal로 준비하면 항목에 Arsenal 마운트 객체를 `arsenal` 키로 넣는데 등록부 저장은 `mounter` 키만 빼고 JSON으로 쓴다 [4][6].
+Arsenal 꼴의 항목을 넣고 저장하자 등록부 파일은 그 객체에서 끊긴 121바이트로 남았고 다음 `load_prepared_images`는 빈 등록부를 돌려주었다 [24].
+이때 같은 파일의 다른 항목도 함께 복구되지 않는다 [24].
+APFS 항목은 마운트가 살아 있는지 확인하지 않고 복구한다 [15].
+LVM 마운트가 실패해 다른 파티션을 등록한 이미지에서는 재시작 뒤 `analyze_registry`가 등록한 것과 다른 파티션을 읽을 수 있다 [17][18][25].
+이 경로는 코드로만 확인했다.
+
+### 근거
+
+[1] 등록부는 모듈 전역 `dict`다.
+
+```python
+PREPARED_IMAGES = {}
+```
+
+[`models/prepared_images.py:12-12`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L12-L12)
+
+[2] Arsenal·WSL 마운트 객체가 메모리에 마운트 정보를 둔다.
+
+```python
+            self.mounted_images[image_path] = {
+                'drive': mounted_drive,
+                'all_drives': sorted(new_drives) if new_drives else [mounted_drive],
+                'accessible_drives': accessible_drives if 'accessible_drives' in locals() else [mounted_drive],
+                'process': process,
+                'readonly': readonly
+            }
+```
+
+[`mounters/arsenal_mounter.py:186-192`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/arsenal_mounter.py#L186-L192)
+
+[`mounters/wsl_apfs_mounter.py:67-72`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L67-L72), [`mounters/wsl_lvm_mounter.py:194-202`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L194-L202)
+
+[3] `ExtractionManager`는 프로세스에 하나를 만들고 `PathMapper`는 받은 키마다 하나를 모듈 전역 `_MAPPERS`에 둔다.
+
+```python
+_extraction_manager = None
+
+
+def get_extraction_manager(sleuthkit_bin_dir: str = None,
+                          extraction_base_dir: str = None) -> ExtractionManager:
+    """
+    Get or create singleton ExtractionManager instance
+    
+    Args:
+        sleuthkit_bin_dir: Path to SleuthKit binaries (required for first call)
+        extraction_base_dir: Base directory for extractions (required for first call)
+    
+    Returns:
+        ExtractionManager instance
+    """
+    global _extraction_manager
+    
+    if _extraction_manager is None:
+        if not sleuthkit_bin_dir or not extraction_base_dir:
+            raise ValueError("sleuthkit_bin_dir and extraction_base_dir required for first call")
+        
+        _extraction_manager = ExtractionManager(sleuthkit_bin_dir, extraction_base_dir)
+    
+    return _extraction_manager
+```
+
+[`utils/extraction_manager.py:397-420`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L397-L420)
+
+```python
+_MAPPERS: Dict[str, PathMapper] = {}
+
+
+def get_mapper(image_hash: str, extraction_base_dir: str = None) -> PathMapper:
+    """
+    Get or create PathMapper for a specific image
+    
+    Args:
+        image_hash: Unique hash identifying the disk image
+        extraction_base_dir: Optional base directory for extractions
+        
+    Returns:
+        PathMapper instance for this image
+    """
+    if image_hash not in _MAPPERS:
+        _MAPPERS[image_hash] = PathMapper(image_hash, extraction_base_dir)
+    return _MAPPERS[image_hash]
+```
+
+[`utils/path_mapper.py:255-271`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/path_mapper.py#L255-L271)
+
+[4] Arsenal 준비는 마운트 객체를 `arsenal` 키로 항목에 넣는다.
+
+```python
+                mounter_info = {
+                    'type': 'arsenal',
+                    'arsenal': arsenal,
+                    'drive_letter': drive_letter,
+                    'all_drives': all_drives,
+                    'accessible_drives': accessible_drives,
+                    'process_id': mount_result.get('process_id')
+                }
+                arsenal_mounted = True
+```
+
+[`handlers/image_handlers.py:308-316`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L308-L316)
+
+[`handlers/image_handlers.py:513-518`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L513-L518)
+
+[5] SleuthKit 파일 읽기 경로는 항목에 `image_hash`가 없으면 이미지 경로의 MD5를 경로 대응표의 키로 쓴다.
+
+```python
+    image_hash = metadata.get('image_hash')
+    partition_offset = metadata.get('partition_offset', 0)
+    unique_image_id = metadata.get('unique_image_id', '')
+    
+    if not image_path:
+        return False, "", "Missing image_path in metadata"
+    
+    if not image_hash:
+        image_hash = hashlib.md5(str(image_path).encode()).hexdigest()
+        logger.info(f"Generated image hash from path: {image_hash}")
+    
+    extraction_dir = None
+    if unique_image_id:
+        extraction_dir = Path(BASE_OUTPUT_DIR) / "cases" / unique_image_id / "extracted_files"
+        extraction_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using case-specific extraction directory: {extraction_dir}")
+    
+    mapper = get_mapper(image_hash, str(extraction_dir) if extraction_dir else None)
+```
+
+[`utils/forensic_file_access.py:143-160`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L143-L160)
+
+[6] 등록부 저장은 `mounter` 키만 빼고 전체를 다시 쓴다.
+
+```python
+def save_prepared_images(prepared_images, base_output_dir):
+    """Save prepared images registry to disk (excluding non-serializable objects)"""
+    registry_file = Path(base_output_dir) / "prepared_images_registry.json"
+    
+    try:
+        serializable_images = {}
+        for path, info in prepared_images.items():
+            serializable_info = {k: v for k, v in info.items() if k != 'mounter'}
+            serializable_images[path] = serializable_info
+        
+        with open(registry_file, 'w') as f:
+            json.dump(serializable_images, f, indent=2)
+        logger.info(f"Saved prepared images registry: {len(serializable_images)} images")
+    except Exception as e:
+        logger.error(f"Failed to save prepared images registry: {e}")
+```
+
+[`models/prepared_images.py:50-64`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L50-L64)
+
+[7] 레지스트리 폴더 추출 기록과 재사용.
+[`utils/extraction_manager.py:49-66`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L49-L66), [`utils/extraction_manager.py:277-330`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L277-L330)
+
+```python
+    def _load_registry(self) -> Dict:
+        """Load extraction registry from JSON file"""
+        if self.registry_file.exists():
+            try:
+                with open(self.registry_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load extraction registry: {e}")
+                return {}
+        return {}
+    
+    def _save_registry(self):
+        """Save extraction registry to JSON file"""
+        try:
+            with open(self.registry_file, 'w', encoding='utf-8') as f:
+                json.dump(self.registry, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save extraction registry: {e}")
+```
+
+[`utils/extraction_manager.py:49-66`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L49-L66)
+
+[8] 경로 대응표의 저장과 재사용.
+[`utils/path_mapper.py:52-76`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/path_mapper.py#L52-L76), [`utils/forensic_file_access.py:160-165`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L160-L165), [`utils/path_mapper.py:119-147`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/path_mapper.py#L119-L147)
+
+[9] `analyze_registry`는 출력 폴더가 비어 있지 않으면 `CACHED`를 돌려주고 KAPE 실행 전에 `Registry` 폴더를 만든다.
+
+```python
+    output_dir = get_case_output_directory(
+        prepared_info=prepared_info,
+        artifact_name='registry',
+        kape_module_name=kape_module_name,
+        module_id=identifier,
+        cases_dir=CASES_DIR
+    )
+    
+    if output_dir.exists() and any(output_dir.iterdir()):
+        logger.info(f"Using cached results: {output_dir}")
+        result = f"✅ Module: {module_config.get('name')}\n"
+        result += f"   Source: {path.name}\n"
+        result += f"   Status: CACHED (already analyzed)\n"
+        result += f"   Output: {output_dir}\n"
+        return result
+    
+    kape_exe = Path(CONFIG['kape']['binary_path'])
+    
+    if isinstance(artifact_source, Path) and artifact_source.is_dir():
+        kape_source = str(artifact_source)
+    else:
+        kape_source = str(artifact_source.parent) if hasattr(artifact_source, 'parent') else str(artifact_source)
+    
+    # This RECmd build doesn't create the <mdest>\Registry subfolder itself and
+    # fails while saving the batch CSV, so pre-create it.
+    try:
+        (output_dir / "Registry").mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not pre-create Registry output subfolder: {e}")
+```
+
+[`handlers/registry_forensics_handler.py:326-354`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L326-L354)
+
+[10] 등록부 항목의 필드.
+
+```python
+        prep_info = {
+            'prep_time': datetime.now().isoformat(),
+            'access_point': access_point,
+            'unique_image_id': unique_image_id,
+            'status': 'prepared',
+            'hash': image_hash_full,
+            'name': image_name,
+            'case_dir': str(case_dir),
+            'fs_type': fs_type,
+            'os_family': os_family,
+            'partition_offset': partition_offset if 'partition_offset' in locals() else 0,
+            'partition_number': partition_number if 'partition_number' in locals() else 0,
+            'all_partitions': detection_result.get('all_partitions', []) if 'detection_result' in locals() else [],
+            'image_path': str(image_file),
+            'mount_type': mounter_info['type'],
+        }
+```
+
+[`handlers/image_handlers.py:496-511`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L496-L511)
+
+[11] (실행 확인) SleuthKit으로 준비한 시험 이미지에 같은 `analyze_registry` 요청을 두 번 불러 두 번째 응답을 확인했다.
+
+[12] (실행 확인) 입력 경로에 따라 실패하는 시험용 KAPE로 `analyze_registry`를 두 번 불러 두 응답과 출력 폴더를 확인했다.
+
+[13] `kape_parse_artifact`의 출력 폴더 이름과 캐시 판정.
+
+```python
+        access_point = prepared_info.get('access_point', '') if prepared_info else ''
+        
+        if access_point and str(file_path).startswith(str(access_point)):
+            rel_path = str(file_path)[len(str(access_point)):].strip('\\\\/')
+            clean_path = rel_path.replace('\\', '_').replace('/', '_').replace(':', '').replace(' ', '_')
+        else:
+            clean_path = Path(file_path).stem
+        
+        output_dir = get_case_output_directory(
+            prepared_info=prepared_info,
+            artifact_name='kape_generic',
+            kape_module_name=kape_module,
+            module_id=clean_path,
+            cases_dir=CASES_DIR,
+            fallback_case_name=f"local_kape_{kape_module}"
+        )
+        
+        case_dir = output_dir.parent.parent
+        module_dir = output_dir
+        
+        logger.info(f"KAPE Parse Structure:")
+        logger.info(f"  Image: {mounted_image['name']}")
+        logger.info(f"  Case Dir: {case_dir}")
+        logger.info(f"  Module Dir: {module_dir}")
+        logger.info(f"  Clean path: {clean_path}")
+        
+        if module_dir.exists() and any(module_dir.iterdir()):
+            return await get_cached_results(mounted_image, module_dir, kape_module, file_path)
+```
+
+[`handlers/kape_handlers.py:237-264`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L237-L264)
+
+[14] `main.py`는 서버를 만들기 전에 등록부를 읽는다.
+
+```python
+async def main():
+    """Main entry point for the MCP server"""
+    logger = setup_logging(LOGS_DIR)
+    
+    logger.info("Forensic MCP Server initializing...")
+    
+    setup_forensics_directories()
+    load_prepared_images(BASE_OUTPUT_DIR)
+    
+    server = create_server()
+```
+
+[`main.py:34-43`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/main.py#L34-L43)
+
+[15] `load_prepared_images`는 등록부를 읽고 Arsenal 항목만 드라이브를 확인한다.
+[`models/prepared_images.py:14-48`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L14-L48), [`models/prepared_images.py:66-92`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L66-L92)
+
+```python
+def load_prepared_images(base_output_dir):
+    """Load prepared images registry from disk and validate mounts"""
+    global PREPARED_IMAGES
+    
+    registry_file = Path(base_output_dir) / "prepared_images_registry.json"
+    
+    if not registry_file.exists():
+        logger.info("No existing prepared images registry found")
+        return {}
+    
+    try:
+        with open(registry_file, 'r') as f:
+            data = json.load(f)
+            PREPARED_IMAGES.clear()
+            PREPARED_IMAGES.update(data)
+        logger.info(f"Loaded prepared images registry: {len(PREPARED_IMAGES)} images")
+        
+        stale_count = validate_arsenal_mounts()
+        
+        if stale_count > 0:
+            save_prepared_images(PREPARED_IMAGES, base_output_dir)
+            logger.info(f"Updated registry after removing {stale_count} stale mount(s)")
+        
+        return PREPARED_IMAGES
+    except Exception as e:
+        logger.error(f"Failed to load prepared images registry: {e}")
+        return {}
+```
+
+[`models/prepared_images.py:66-92`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L66-L92)
+
+[16] `browse_files_and_folders`는 WSL·SleuthKit 준비 객체가 없으면 등록부 값으로 다시 만든다.
+[`handlers/file_handlers.py:194-222`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L194-L222), [`handlers/file_handlers.py:289-325`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L289-L325)
+
+```python
+        mount_type = target_image_info.get('mount_type', 'sleuthkit')
+        if mount_type in ['wsl_apfs_fuse', 'wsl_lvm']:
+            logger.info(f"WSL {mount_type} mount detected - using optimized file listing")
+            
+            from mounters.wsl_apfs_mounter import WSLAPFSMounter
+            from mounters.wsl_lvm_mounter import WSLLVMMounter
+            
+            mounter = target_image_info.get('mounter')
+            if not mounter:
+                try:
+                    if mount_type == 'wsl_apfs_fuse':
+                        mounter = WSLAPFSMounter()
+                        mounter.mounted_images[str(Path(target_image_info['image_path']).resolve())] = {
+                            'mount_point': target_image_info['mount_point'],
+                            'mount_point_windows': f"\\\\wsl$\\Ubuntu{target_image_info['mount_point']}",
+                            'image_path': target_image_info['image_path']
+                        }
+                    else:
+                        mounter = WSLLVMMounter()
+                        mounter.mounted_images[str(Path(target_image_info['image_path']).resolve())] = {
+                            'mount_point': target_image_info['mount_point'],
+                            'lv_device': target_image_info.get('lv_device'),
+                            'loop_device': target_image_info.get('loop_device'),
+                            'image_path': target_image_info['image_path'],
+                            'filesystem': 'ext4'
+                        }
+                    target_image_info['mounter'] = mounter
+                except Exception as e:
+                    return [TextContent(type="text", text=f"ERROR: Could not recreate WSL mounter: {e}")]
+```
+
+[`handlers/file_handlers.py:194-222`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L194-L222)
+
+[17] `analyze_registry`는 준비 객체가 없으면 다시 만든다.
+
+```python
+        if not mounter:
+            logger.info("Mounter not in memory, recreating from prepared_info...")
+            from mounters.sleuthkit_mounter import SleuthKitForensicAccess as SleuthKitMounter
+            
+            try:
+                image_path = prepared_info.get('image_path')
+                partition_offset = prepared_info.get('partition_offset', 0)
+                
+                if not image_path:
+                    logger.error(f"No image_path in prepared_info for: {path}")
+                    return None
+                
+                logger.info(f"Creating mounter for image: {image_path}, offset: {partition_offset}")
+                
+                mounter = SleuthKitMounter(
+                    image_path=image_path,
+                    access_dir=str(BASE_OUTPUT_DIR / 'forensic_access')
+                )
+                
+                mounter.detect_filesystem_type()
+                mounter.partition_offset = partition_offset
+                prepare_result = mounter.prepare()
+                
+                if not prepare_result.get('success'):
+                    logger.error(f"Failed to prepare mounter: {prepare_result.get('error')}")
+                    return None
+                
+                logger.info("✅ Mounter recreated and prepared successfully")
+```
+
+[`handlers/registry_forensics_handler.py:241-268`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L241-L268)
+
+[18] 준비 객체는 파티션을 이미 고르지 않았으면 파티션 판별 때 다시 고르고 등록부의 `partition_offset`은 읽지 않는다.
+
+```python
+            self.partitions = partitions
+            
+            if self.primary_partition is None:
+                self.primary_partition = self._select_primary_partition(partitions)
+            else:
+                self.logger.info(f"[i] Preserving previously selected partition: {self.primary_partition['slot']}")
+```
+
+[`mounters/sleuthkit_mounter.py:115-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L115-L120)
+
+[19] 파일 읽기 경로는 등록부 값으로 SleuthKit을 다시 실행하거나 WSL 마운트 객체를 다시 만든다.
+[`utils/forensic_file_access.py:128-202`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L128-L202), [`utils/forensic_file_access.py:264-397`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L264-L397)
+
+[20] LVM 마운트 객체는 `mountpoint -q`로 마운트를 확인하고 없으면 다시 마운트한다.
+
+```python
+    def verify_mount(self, image_path: str) -> bool:
+        """Check if mount is still active using mountpoint command"""
+        image_path = str(Path(image_path).resolve())
+        if image_path not in self.mounted_images: return False
+        mount_point = self.mounted_images[image_path]['mount_point']
+        
+        # mountpoint -q returns 0 if it is a mount point, non-zero otherwise
+        check_cmd = f"mountpoint -q {mount_point}"
+        result = self._run_wsl(check_cmd)
+        
+        if result.returncode == 0:
+            return True
+        else:
+            self.logger.warning(f"[LINUX] Mount verification failed for {mount_point}. Exit code: {result.returncode}")
+            return False
+
+    def ensure_mounted(self, image_path: str) -> Dict:
+        """Restore if lost, otherwise return current"""
+        image_path = str(Path(image_path).resolve())
+        if self.verify_mount(image_path):
+            return {'success': True, **self.mounted_images[image_path]}
+        
+        existing_mount_point = "/mnt/ubuntu_forensics"
+        if image_path in self.mounted_images:
+            existing_mount_point = self.mounted_images[image_path]['mount_point']
+            
+        return self.mount_lvm_image(image_path, mount_point=existing_mount_point)
+```
+
+[`mounters/wsl_lvm_mounter.py:242-268`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L242-L268)
+
+[21] (실행 확인) 시험 이미지를 준비한 뒤 새 프로세스에서 `main.py`의 시작 처리를 불러 복구된 항목과 도구별 동작을 확인했다.
+
+[22] `remote_server.py`는 서버를 만들고 등록부를 읽지 않는다.
+
+```python
+from server import create_server
+
+mcp_server = create_server()
+```
+
+[`remote_server.py:26-28`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L26-L28)
+
+```python
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8000"))
+
+    if os.environ.get("USE_NGROK", "true").lower() == "true":
+        start_ngrok(port)
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+[`remote_server.py:114-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L114-L120)
+
+[23] SleuthKit 경로의 이 도구들은 준비 객체가 없으면 오류를 돌려준다.
+[`handlers/kape_handlers.py:195-197`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L195-L197), [`handlers/prefetch_forensics_handler.py:201-205`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L201-L205), [`handlers/lnk_forensics_handler.py:315-323`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L315-L323), [`handlers/shellbags_forensics_handler.py:287-294`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L287-L294), [`handlers/jump_lists_forensics_handler.py:334-338`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L334-L338)
+
+[24] (실행 확인) 별도 폴더에 Arsenal 꼴의 항목과 SleuthKit 꼴의 항목을 넣고 `save_prepared_images`와 `load_prepared_images`를 차례로 불러 파일 내용과 읽은 결과를 확인했다.
+
+[25] LVM 마운트가 실패하면 읽을 수 있는 다른 파티션의 위치와 번호를 등록한다.
+
+```python
+                            if readable_partition:
+                                logger.warning(f"⚠️  Switching to readable partition: {readable_partition.get('fs_type')}")
+                                fs_type = readable_partition.get('fs_type', 'unknown').lower()
+                                partition_offset = readable_partition.get('offset', 0)
+                                partition_number = readable_partition.get('slot', 0)
+```
+
+[`handlers/image_handlers.py:443-447`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L443-L447)

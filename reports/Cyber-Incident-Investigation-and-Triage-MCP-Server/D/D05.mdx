@@ -1,0 +1,260 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 서버가 파생물을 쓰는 경로, 곧 `analyze_memory`의 출력 저장, `analyze_sqlite_database`의 CSV 쓰기, 모든 처리기의 출력 폴더 만들기에 적용된다 [1][2][3].
+
+`analyze_memory`는 `_save_output_to_file`에서 출력 폴더를 만들고 결과를 파일에 쓴다 [1].
+이때 난 예외를 따로 처리하지 않아 처리기의 바깥 `except`까지 올라가 `ERROR: <예외>` 글로 끝난다 [1][4].
+`analyze_sqlite_database`는 조회·내보내기 CSV를 쓰다 난 예외를 따로 처리하지 않아 바깥 `except`가 `ERROR: <예외>`로 돌려준다 [2][5].
+`get_case_output_directory`는 출력 폴더를 `mkdir`로 만든다 [3].
+여기서 난 예외도 각 처리기의 `except`까지 올라가 오류 글로 끝난다 [3].
+
+KAPE와 EZ Tools로 파생물을 만드는 처리기는 실행 파일의 종료 코드와 출력 파일 유무로 성공과 실패를 가른다 [6][7].
+레지스트리 처리기는 종료 코드가 0이 아니면 `FAILED`와 종료 코드, 표준 오류 앞부분을 결과에 싣는다 [8].
+셸백 처리기는 출력 파일이 하나도 없으면 그 모듈을 실패로 적는다 [9].
+성공한 모듈이 없으면 응답 전체를 실패로 돌려준다 [9].
+
+**한계.** `analyze_amcache`와 `analyze_shellbags`는 출력 폴더에 파일이 있는지로 성공을 판정하고 그 파일을 이번 실행이 썼는지 가리지 않는다 [7][10].
+`analyze_amcache`는 출력 폴더를 비우지 않으므로 AmcacheParser가 실패해도 앞 실행의 CSV가 남아 있으면 성공으로 돌려준다 [10].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `kape_parse_artifact`가 KAPE 콘솔 로그를 출력 폴더로 옮기는 경로, `analyze_registry`가 KAPE 출력의 하위 폴더를 미리 만드는 경로, `ExtractionManager`가 이미지의 폴더를 푸는 경로, `analyze_lnk_files`의 `lnk_removable` 모듈이 걸러 낸 CSV를 쓰는 경로에 적용된다 [11][12][13][14].
+`kape_parse_artifact`는 KAPE 실행 파일 폴더의 `*_ConsoleLog.txt`를 출력 폴더로 옮긴다 [11].
+옮기기와 복사가 모두 `OSError`나 `PermissionError`로 실패하면 경고만 로그에 남기고 다음 단계를 실행해 성공 응답을 돌려준다 [11].
+레지스트리 처리기는 KAPE 출력의 하위 폴더를 미리 만들다 난 예외를 경고로 남기고 이어서 KAPE를 실행한다 [12].
+
+`ExtractionManager`는 SleuthKit 이미지의 폴더를 풀 때 파일마다 SleuthKit `icat`을 실행하고 그 결과를 보지 않는다 [13].
+`icat`이 실패해도 미리 연 출력 파일이 남고 그 파일도 푼 수 `file_count`에 세며 `extraction_registry.json`에 푼 것으로 적는다 [13][15].
+이때 경고 로그도 남기지 않는다 [13].
+실행 확인에서 한 inode의 `icat`을 실패시키자 0바이트 파일이 남았고 등록부의 `file_count`에 들어가고 `failed_count`는 0이었다 [16].
+
+`analyze_lnk_files`의 `lnk_removable` 모듈은 걸러 낸 CSV를 쓰다 예외가 나면 오류 로그만 남기고 이어서 응답을 만든다 [14].
+
+### 근거
+
+[1] 메모리 출력 저장에서 난 예외를 처리기가 따로 처리하지 않는다.
+
+```python
+        output_file = None
+        if save_output and result["stdout"]:
+            output_dir = _get_memory_output_directory(memory_file, plugin)
+            format_ext = "json" if output_format == "json" else "csv" if output_format == "csv" else "txt"
+            output_file = _save_output_to_file(output_dir, plugin, result["stdout"], format_ext)
+```
+
+[`handlers/memory_forensics_handler.py:174-178`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L174-L178)
+
+[2] SQLite CSV 쓰기에서 난 예외를 따로 처리하지 않는다.
+
+```python
+                    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(columns)
+                        writer.writerows(results)
+```
+
+[`handlers/database_handlers.py:181-184`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L181-L184)
+
+[3] 출력 폴더를 `mkdir`로 만든다.
+
+```python
+    output_dir = case_dir / artifact_name / f"{kape_module_name}_{module_id}"
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`core/forensic_helpers.py:117-119`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/forensic_helpers.py#L117-L119)
+
+[4] 메모리 처리기의 바깥 `except`가 오류 글을 돌려준다.
+
+```python
+    except Exception as e:
+        logger.error(f"Memory analysis error: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"ERROR: {e}")]
+```
+
+[`handlers/memory_forensics_handler.py:206-208`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L206-L208)
+
+[5] SQLite 처리기의 바깥 `except`가 오류 글을 돌려준다.
+
+```python
+    except Exception as e:
+        logger.exception(f"SQLite analysis error: {e}")
+        return [TextContent(type="text", text=f"ERROR: {str(e)}")]
+```
+
+[`handlers/database_handlers.py:238-240`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L238-L240)
+
+[6] (실행 확인) 시험용 KAPE 자리 실행 파일이 0이 아닌 종료 코드를 내게 하자 레지스트리 처리기가 `FAILED`와 종료 코드를 응답에 실었다.
+
+[7] 출력 파일 유무로 성공을 판정한다.
+
+```python
+        success = len(output_files) > 0 and any(f['size'] > 0 for f in output_files)
+```
+
+[`handlers/shellbags_forensics_handler.py:471-471`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L471-L471)
+
+[8] 종료 코드가 0이 아니면 실패를 응답에 싣는다.
+
+```python
+        else:
+            result = f"❌ Module: {module_config.get('name')}\n"
+            result += f"   File: {path.name}\n"
+            result += f"   Status: FAILED (Return code: {process.returncode})\n"
+            result += f"   Error: {error_text[:200] if error_text else 'Unknown error'}\n"
+            
+            return result
+```
+
+[`handlers/registry_forensics_handler.py:408-414`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L408-L414)
+
+[9] 성공한 모듈이 없으면 응답을 실패로 돌려준다.
+
+```python
+        if not successful_results:
+            error_text = "❌ SHELLBAGS ANALYSIS FAILED\n\n"
+            error_text += f"Attempted to analyze {len(validated_paths)} path(s) with {len(modules)} module(s)\n\n"
+            error_text += "Errors encountered:\n"
+            for err in errors:
+                error_text += f"  - Module '{err['module']}': {err['error']}\n"
+            return [TextContent(type="text", text=error_text)]
+```
+
+[`handlers/shellbags_forensics_handler.py:184-190`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L184-L190)
+
+[10] `analyze_amcache`는 출력 폴더를 비우지 않고 AmcacheParser를 실행한 뒤 폴더에 CSV가 있으면 성공으로 본다.
+
+```python
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        str(binary_path.absolute()),
+        "-f", str(amcache_path),
+        "--csv", str(output_dir.absolute()),
+        "-i",
+        "--mp",
+    ]
+    command = " ".join(cmd)
+    logger.info(f"Executing: {command}")
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {'status': 'failed', 'error': "AmcacheParser timed out after 600s",
+                'command': command, 'output_files': []}
+
+    output_files = [str(f) for f in sorted(output_dir.glob("*.csv"))]
+    if not output_files:
+        detail = (proc.stderr or proc.stdout or "").strip()[:250]
+        return {
+            'status': 'failed',
+            'error': f"AmcacheParser produced no CSV (return code {proc.returncode}). {detail}",
+            'command': command,
+            'output_files': [],
+        }
+```
+
+[`handlers/amcache_forensics_handler.py:257-283`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L257-L283)
+
+[11] 콘솔 로그 옮기기가 실패하면 경고만 남기고 다음 단계를 실행한다.
+
+```python
+            try:
+                shutil.move(str(latest_log), str(dest_log))
+            except Exception:
+                try:
+                    shutil.copy2(str(latest_log), str(dest_log))
+                    latest_log.unlink()
+                except (OSError, PermissionError):
+                    logger.warning(f"Could not move or copy KAPE log file: {latest_log}")
+```
+
+[`handlers/kape_handlers.py:116-123`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L116-L123)
+
+[12] 하위 폴더 만들기 실패를 경고로 남기고 이어 실행한다.
+
+```python
+    try:
+        (output_dir / "Registry").mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not pre-create Registry output subfolder: {e}")
+```
+
+[`handlers/registry_forensics_handler.py:351-354`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L351-L354)
+
+[13] `ExtractionManager`는 `extract_file`의 반환값을 보지 않고 푼 수를 더하며 `extract_file`은 출력 파일을 연 뒤 `icat` 실패를 반환값으로만 알린다.
+
+```python
+                file_inode = file_info.get('inode')
+                if file_inode:
+                    mounter.extract_file(file_inode, str(dest_file))
+                    extracted_count += 1
+```
+
+[`utils/extraction_manager.py:262-265`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L262-L265)
+
+```python
+            with open(output_path, 'wb') as out_file:
+                result = subprocess.run(
+                    cmd,
+                    stdout=out_file,
+                    stderr=subprocess.PIPE,
+                    timeout=60
+                )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+                return {'success': False, 'error': error_msg}
+```
+
+[`mounters/sleuthkit_mounter.py:809-819`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L809-L819)
+
+[14] 걸러 낸 CSV를 쓰다 난 예외는 오류 로그로만 남고 처리기는 이어서 출력 파일 목록을 만든다.
+
+```python
+    except Exception as e:
+        logger.error(f"Error filtering removable drives: {e}", exc_info=True)
+```
+
+[`handlers/lnk_forensics_handler.py:715-716`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L715-L716)
+
+```python
+        if module_id == "lnk_removable":
+            logger.info("Filtering results for removable drives only...")
+            _filter_removable_drives_in_output(str(output_dir))
+        
+        output_files = []
+        sample_data = []
+        
+        if os.path.exists(str(output_dir)):
+```
+
+[`handlers/lnk_forensics_handler.py:473-480`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L473-L480)
+
+[15] 푼 수와 실패 수를 등록부에 적는다.
+
+```python
+        extraction_info = {
+            'extracted': True,
+            'extract_location': str(extraction_path),
+            'extracted_at': datetime.now().isoformat(),
+            'file_count': extracted_count,
+            'failed_count': failed_count,
+            'internal_path': internal_path,
+            'partition_offset': partition_offset
+        }
+```
+
+[`utils/extraction_manager.py:277-285`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L277-L285)
+
+[16] (실행 확인) 시험용 `icat` 자리 실행 파일이 한 inode에서 실패하게 하고 `analyze_registry`로 SleuthKit 이미지의 폴더를 풀게 한 뒤 푼 파일과 `extraction_registry.json`을 대조했다.

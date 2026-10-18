@@ -1,0 +1,193 @@
+---
+cell: F06
+details:
+- id: not_implemented
+---
+
+# F06 보고 산출물 구성
+
+### 미구현
+
+**판단.** 서버는 준비한 이미지마다 사건 폴더를 두고 분석 출력과 실행 기록을 남기지만 보고 산출물을 만들거나 내보내는 도구가 없다.
+`prepare_disk_image`는 이미지 이름, 운영체제 종류, 해시 앞부분으로 `unique_image_id`를 만들고 `cases` 아래에 그 이름의 사건 폴더를 만든다 [1].
+준비 정보에는 이 폴더가 `case_dir`로 남는다 [1].
+분석 도구는 `get_case_output_directory`로 그 사건 폴더 아래 아티팩트와 모듈 이름의 폴더에 출력을 쓴다 [2].
+서버는 도구 호출을 서버 로그에, macOS 도구와 `crack_hash`, 이미지 준비의 시작과 끝을 `operations_logs`에, KAPE 명령을 `kape_operations.log`에 적는다 [3][4].
+
+도구 31개 가운데 이 자료를 모아 증거 목록, 수행 범위, 발견사항, 한계를 담은 파일을 만드는 도구는 없다 [5].
+
+- `audit_kape_operations`는 `kape_operations.log`의 항목을 읽어 항목마다 ID, 시각, 종류, 명령 앞부분을 응답 글로 돌려주고 파일을 쓰지 않는다 [6].
+- `list_prepared_images`는 준비한 이미지의 해시 `hash`, 파일 시스템, 운영체제 종류, 사건 폴더를 응답 글로 돌려주고 파일을 쓰지 않는다 [7].
+- 파일을 쓰는 도구는 `analyze_sqlite_database`의 질의 결과 CSV와 `analyze_memory`의 플러그인 출력처럼 증거에서 고른 자료나 분석 도구의 출력을 쓴다 [8].
+
+README는 보고서 초안을 대화로 쓴다고 적는다 [9].
+이 보고서는 클라이언트 모델이 직접 쓰는 글이다.
+같은 저장소에는 서버 기록이나 서버 응답을 정해진 코드로 가공해 보고 산출물을 만드는 사용자 CLI나 클라이언트 코드가 없다.
+저장소의 두 진입점 `main.py`와 `remote_server.py`는 모두 `create_server`로 서버를 열 뿐이다 [10].
+
+### 근거
+
+[1] 이미지를 준비할 때 사건 폴더를 만들고 준비 정보에 남긴다.
+
+```python
+        unique_image_id = f"{image_name}_{os_family}_{image_hash_full[:12]}"  # short hash: keep case paths under Windows MAX_PATH (260)
+        logger.info(f"Unique image ID (with OS): {unique_image_id}")
+        
+        case_dir = CASES_DIR / unique_image_id
+        case_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Case directory created: {case_dir}")
+```
+
+[`handlers/image_handlers.py:271-276`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L271-L276)
+
+```python
+        prep_info = {
+            'prep_time': datetime.now().isoformat(),
+            'access_point': access_point,
+            'unique_image_id': unique_image_id,
+            'status': 'prepared',
+            'hash': image_hash_full,
+            'name': image_name,
+            'case_dir': str(case_dir),
+            'fs_type': fs_type,
+```
+
+[`handlers/image_handlers.py:496-504`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L496-L504)
+
+[2] 분석 도구의 출력 폴더는 사건 폴더 아래에 만든다.
+
+```python
+    if prepared_info and prepared_info.get('case_dir'):
+        case_dir = Path(prepared_info['case_dir'])
+        logger.debug(f"Using existing case_dir from prepared_info: {case_dir}")
+        
+    elif prepared_info:
+        unique_image_id = prepared_info.get('unique_image_id')
+        if unique_image_id:
+            case_dir = cases_dir / unique_image_id
+            logger.debug(f"Constructed case_dir from unique_image_id: {case_dir}")
+        else:
+            image_name = Path(prepared_info.get('image_path', 'unknown')).stem
+            image_hash = prepared_info.get('hash', 'UNKNOWN')
+            case_dir = cases_dir / f"{image_name}_{image_hash[:16]}"
+            logger.debug(f"Constructed case_dir from image_path and hash: {case_dir}")
+            
+    else:
+        if fallback_case_name:
+            case_dir = cases_dir / fallback_case_name
+            logger.debug(f"Using fallback_case_name: {case_dir}")
+        else:
+            case_dir = cases_dir / "local_analysis"
+            logger.debug(f"Using generic local_analysis case_dir: {case_dir}")
+    
+    output_dir = case_dir / artifact_name / f"{kape_module_name}_{module_id}"
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`core/forensic_helpers.py:94-119`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/forensic_helpers.py#L94-L119)
+
+[3] 도구 호출, 작업 시작과 끝, KAPE 명령을 각각의 기록 파일에 적는다.
+
+```python
+            logger.info(f"Tool called: {name} with arguments: {arguments}")
+```
+
+[`server.py:516-516`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L516-L516)
+
+[`core/operation_logging.py:12-19`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/operation_logging.py#L12-L19), [`core/logging_setup.py:31-59`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/logging_setup.py#L31-L59)
+
+[4] `crack_hash`도 시작을 `operations_logs`에 적는다.
+
+```python
+    operation_id = log_operation_start("crack_hash", {
+```
+
+[`handlers/hash_cracking_handler.py:134-134`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/hash_cracking_handler.py#L134-L134)
+
+[5] 도구 정의와 YAML 도구의 처리기 대응: [`server.py:26-505`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L26-L505), [`core/tool_generator.py:168-178`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/tool_generator.py#L168-L178), [`server.py:512-640`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L512-L640).
+
+[6] KAPE 실행 기록의 항목을 응답 글로 만든다.
+
+```python
+        result_text = f"KAPE OPERATION LOGS\\n"
+        result_text += f"Log file: {log_file.name}\\n"
+        result_text += f"Total entries found: {len(log_entries)}\\n\\n"
+        
+        for i, entry in enumerate(log_entries, 1):
+            hash_id = entry.get('hash', 'Unknown')
+            timestamp = entry.get('timestamp', 'Unknown')
+            op_type = entry.get('operation_type', 'Unknown')
+            return_code = entry.get('return_code', 'Unknown')
+            
+            result_text += f"{i}. [{hash_id}]\\n"
+            result_text += f"   Time: {timestamp}\\n"
+            result_text += f"   Operation: {op_type}\\n"
+            result_text += f"   Result: RC: {return_code}\\n"
+            
+            if 'command' in entry:
+                command_preview = entry['command'][:100].replace('\\n', ' ').strip()
+                result_text += f"   Command: {command_preview}{'...' if len(entry['command']) > 100 else ''}\\n"
+            
+            result_text += "\\n"
+        
+        result_text += f"TIP: Each operation has a unique ID for identification\\n"
+        result_text += f"Available types: MODULE_LIST, ARTIFACT_PARSING\\n"
+        
+        return [TextContent(type="text", text=result_text)]
+```
+
+[`handlers/kape_handlers.py:374-398`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L374-L398)
+
+[7] 준비한 이미지 목록을 응답 글로 만든다.
+
+```python
+    for idx, (image_path, info) in enumerate(PREPARED_IMAGES.items(), 1):
+        access_point = info.get('access_point', 'Unknown')
+        wsl_access = info.get('wsl_access_point')
+        prep_time = info.get('prep_time', 'Unknown')
+        fs_type = info.get('fs_type', 'Unknown')
+        os_family = info.get('os_family', 'Unknown')
+        
+        image_hash = info.get('hash', 'HASH_NOT_AVAILABLE')
+        image_name = info.get('name', Path(image_path).stem)
+        case_dir = info.get('case_dir', 'N/A')
+        
+        result += f"{'='*70}\\n"
+        result += f"[{idx}] {image_name}\\n"
+        result += f"{'='*70}\\n"
+        result += f"SHA256 Hash: {image_hash}\\n"
+        result += f"Filesystem: {fs_type.upper()}\\n"
+        result += f"OS Family: {os_family}\\n"
+        result += f"Access Point: {access_point}\\n"
+        
+        if wsl_access:
+            result += f"WSL Access: {wsl_access}\\n"
+        
+        result += f"Prepared: {prep_time}\\n"
+        result += f"Case Directory: {case_dir}\\n"
+        result += f"Original Path: {image_path}\\n"
+        result += "\\n"
+```
+
+[`handlers/image_handlers.py:710-735`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L710-L735)
+
+[8] 파일을 쓰는 도구는 질의 결과와 플러그인 출력을 쓴다: [`handlers/database_handlers.py:177-184`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L177-L184), [`handlers/memory_forensics_handler.py:174-178`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L174-L178), [`handlers/macos_handlers.py:471-477`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L471-L477).
+
+[9] README의 소개 문장: [`README.md:23-24`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/README.md#L23-L24).
+
+[10] 두 진입점은 같은 함수로 서버를 만든다.
+
+```python
+    server = create_server()
+```
+
+[`main.py:43-43`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/main.py#L43-L43)
+
+```python
+from server import create_server
+
+mcp_server = create_server()
+```
+
+[`remote_server.py:26-28`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L26-L28)

@@ -1,0 +1,139 @@
+---
+cell: I01
+details:
+- id: I01.03
+- id: I01.06
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.03 기본 활성화
+
+**구현.** 이 방식은 SSE 진입점 `remote_server.py`의 ngrok 연결에 적용된다 [1].
+`remote_server.py`를 직접 실행하면 환경변수 `USE_NGROK`의 기본값 `true`에 따라 `start_ngrok`이 실행되고 그 뒤에 uvicorn이 `0.0.0.0`에서 요청을 받는다 [1].
+`start_ngrok`은 `pyngrok`의 `ngrok.connect`에 로컬 포트만 넘겨 ngrok 서비스로 가는 터널을 연다 [2].
+`USE_NGROK`를 `true`가 아닌 값으로 두면 연결하지 않는다 [1].
+`pyngrok`은 `requirements.txt`에 없고 `install.ps1`도 설치하지 않는다 [3].
+`pyngrok`을 불러오지 못하면 `start_ngrok`은 `pyngrok not installed` 오류 줄만 쓰고 `None`을 돌려주며 서버는 터널 없이 요청을 받는다 [2][1].
+`pyngrok`이 없는 환경에서 `remote_server` 모듈의 `start_ngrok`을 부르자 이 오류 줄이 `remote_server.log`에 남고 `None`이 돌아왔다 [4].
+터널 연결이 다른 이유로 실패해도 `ngrok failed` 줄만 쓰고 서버는 계속 요청을 받는다 [2].
+stdio 진입점 `main.py`에는 ngrok 연결이 없다 [5].
+서버 코드가 스스로 여는 외부 연결은 이 연결뿐이다 [6].
+`requirements.txt`에 있는 `requests`를 불러오는 서버 코드는 없다 [6].
+
+### I01.06 설정으로 목적지 지정
+
+**구현.** 이 방식은 같은 ngrok 연결에 적용된다 [2].
+서버 코드는 `ngrok.connect`에 로컬 포트만 넘기고 접속할 ngrok 서버 주소를 넘기지 않는다 [2].
+로컬 포트는 환경변수 `PORT`가 정하고 기본값은 8000이다 [1].
+`pyngrok` 8.1.2는 설정 객체를 받지 않으면 기본 설정으로 ngrok 에이전트를 시작하고 그 에이전트의 로컬 API에 터널을 만들라고 요청한다 [7].
+ngrok 문서는 에이전트가 접속할 ngrok 서버 주소를 설정 파일의 `connect_url`로 정한다고 적고 사용자 지정 주소를 쓸 때 이 값을 정하라고 적는다 [8].
+도구 인자로는 목적지를 바꾸지 못한다 [2].
+
+**한계.** ngrok 에이전트는 소스가 공개되어 있지 않아 접속 주소를 정하는 방식을 ngrok 문서로만 확인했다 [8].
+
+### 근거
+
+[1] `remote_server.py`를 직접 실행할 때의 차례다.
+
+```python
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8000"))
+
+    if os.environ.get("USE_NGROK", "true").lower() == "true":
+        start_ngrok(port)
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+[`remote_server.py:114-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L114-L120)
+
+[2] `start_ngrok`은 환경변수의 토큰과 로컬 포트만 `pyngrok`에 넘기고 실패하면 오류 줄만 쓴다.
+
+```python
+def start_ngrok(port: int) -> str | None:
+    try:
+        from pyngrok import ngrok
+
+        token = os.environ.get("NGROK_AUTHTOKEN")
+        if token:
+            ngrok.set_auth_token(token)
+
+        tunnel = ngrok.connect(port)
+        public_url = tunnel.public_url
+
+        logger.info("=" * 60)
+        logger.info("NGROK PUBLIC URL : %s", public_url)
+        logger.info("SSE  ENDPOINT    : %s/sse", public_url)
+        logger.info("=" * 60)
+        print(f"\n  Remote MCP Server is LIVE!")
+        print(f"  Public URL : {public_url}/sse")
+        print(f"  Press Ctrl+C to stop.\n")
+        return public_url
+    except ImportError:
+        logger.error("pyngrok not installed – run:  pip install pyngrok")
+    except Exception as exc:
+        logger.error("ngrok failed: %s", exc)
+    return None
+```
+
+[`remote_server.py:88-111`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L88-L111)
+
+[3] 의존성 파일과 설치 스크립트의 Python 패키지 설치 단계다: [`requirements.txt:1-29`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/requirements.txt#L1-L29), [`install.ps1:107-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/install.ps1#L107-L120).
+기준 커밋에서 `pyngrok`을 찾으면 `remote_server.py` 밖에서는 나오지 않는다.
+
+```powershell
+Info "Installing core requirements (requirements.txt)..."
+& $VenvPy -m pip install -r (Join-Path $RepoRoot 'requirements.txt')
+if ($LASTEXITCODE -ne 0) { Die "Core requirements install failed." }
+Ok "Core requirements installed."
+
+Info "Installing Volatility3 dependencies (bundled Tools\volatility3)..."
+& $VenvPy -m pip install -e (Join-Path $RepoRoot 'Tools\volatility3') --quiet
+if ($LASTEXITCODE -ne 0) { Warn "Editable Volatility3 install failed; falling back to core deps."; & $VenvPy -m pip install pefile --quiet }
+Ok "Volatility3 dependencies installed."
+
+Info "Installing chainbreaker (macOS keychain parser, from git)..."
+& $VenvPy -m pip install "git+https://github.com/n0fate/chainbreaker.git" --quiet
+if ($LASTEXITCODE -ne 0) { Warn "chainbreaker install failed (git required). macOS keychain parsing will be unavailable until installed." }
+else { Ok "chainbreaker installed." }
+```
+
+[`install.ps1:107-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/install.ps1#L107-L120)
+
+[4] (실행 확인) `USE_NGROK`를 `false`로 두고 작업 사본의 `remote_server` 모듈을 같은 프로세스에서 불러 앱을 `127.0.0.1`에만 연 뒤 닫고 `start_ngrok`을 한 번 불렀다.
+실행 환경에는 `pyngrok`이 설치되어 있지 않았고 `remote_server.log`에 `pyngrok not installed – run:  pip install pyngrok` 줄이 남았으며 반환값은 `None`이었다.
+
+[5] `main.py`는 stdio 전송만 연다.
+
+```python
+        async with stdio_server() as (read_stream, write_stream):
+            logger.info("MCP stdio connection established")
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options()
+            )
+```
+
+[`main.py:47-53`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/main.py#L47-L53)
+
+[6] 기준 커밋의 Python 코드에서 `requests`, `urllib`, `socket`, `http`, `httpx`, `aiohttp`, `pyngrok`을 불러오는 줄을 찾으면 [`remote_server.py:90`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L90)만 나온다.
+`requests.get`은 Amcache 처리기 파일 안의 주석 처리된 예시 코드 문자열에만 있다([`handlers/amcache_forensics_handler.py:459-466`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L459-L466)).
+
+```python
+        "# import requests",
+        "# with open('hashes.txt') as f:",
+        "#     for hash in f:",
+        "#         url = f'https://www.virustotal.com/api/v3/files/{hash.strip()}'",
+        "#         headers = {'x-apikey': 'YOUR_API_KEY'}",
+        "#         response = requests.get(url, headers=headers)",
+        "#         print(f'{hash}: {response.json()}')",
+        "",
+```
+
+[`handlers/amcache_forensics_handler.py:459-466`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L459-L466)
+
+[7] `pyngrok` 8.1.2의 `connect`와 에이전트 시작이다: [`pyngrok/ngrok.py:326-404`](https://github.com/alexdlaird/pyngrok/blob/eb90e21b73cf23748d2d6bf50795f7eaa9e6e97a/pyngrok/ngrok.py#L326-L404), [`pyngrok/process.py:383-410`](https://github.com/alexdlaird/pyngrok/blob/eb90e21b73cf23748d2d6bf50795f7eaa9e6e97a/pyngrok/process.py#L383-L410).
+
+[8] ngrok 에이전트 설정 파일 v3 문서의 `connect_url` 항목: [ngrok Agent Configuration File v3](https://ngrok.com/docs/agent/config/v3/).

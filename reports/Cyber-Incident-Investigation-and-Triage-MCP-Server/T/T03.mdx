@@ -1,0 +1,189 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 서버에는 앞선 작업 상태, 모델 밖 승인, 원격 호출자 신원, 실행 자원으로 호출을 막거나 미루는 코드가 없다.
+`call_tool`은 도구 이름으로 처리기를 골라 바로 부르고 그 사이에 조건을 보지 않는다 [1].
+여러 도구가 준비된 이미지 안의 경로만 받는 것은 경로 인자를 등록부 `PREPARED_IMAGES`와 대조하는 검사이고 앞선 호출의 결과를 따로 확인하지 않는다 [2].
+KAPE가 관리자 권한이 없다는 문구를 내면 처리기는 그 문구를 찾아 안내 글을 돌려주지만 실행 전에 권한을 확인하지는 않는다 [3].
+
+원격 진입점 `remote_server.py`는 Starlette 앱에 `/sse`와 `/messages/` 경로를 두고 호출자를 확인하는 코드를 두지 않는다 [4].
+`SseServerTransport`는 `security_settings` 없이 만들어 MCP Python SDK 1.29.1의 Host·Origin 헤더 검사가 꺼진 상태로 동작한다 [4][5].
+앱에는 모든 출처·메서드·헤더를 허용하는 CORS 미들웨어가 붙는다 [4].
+직접 실행하면 `0.0.0.0`에 열리고 `USE_NGROK`의 기본값 `true`에서는 ngrok 공개 터널도 연다 [6].
+SSE 연결마다 생기는 세션 ID는 메시지를 그 연결로 보내는 데 쓰이고 서버는 그 ID를 받은 쪽이 누구인지 확인하지 않는다 [5].
+모듈의 Starlette 앱을 `127.0.0.1`에만 열고 인증 헤더 없이 연결하자 초기화, 도구 31개 목록, `list_prepared_images` 호출이 모두 처리되었다 [7].
+다른 호스트 이름을 적은 `Host`·`Origin` 헤더로 요청한 SSE 연결도 받아들였고 메시지 요청은 세션 ID가 없거나 없는 ID일 때만 거부되었다 [7].
+`0.0.0.0`에 여는 실행과 ngrok 터널은 확인하지 않았다 [6].
+stdio 진입점 `main.py`는 원격 연결을 받지 않는다 [8].
+
+설정 파일에는 `max_memory_usage`와 `max_concurrent_operations`가 있지만 서버 코드는 두 값을 읽지 않는다 [9].
+메모리, CPU, 디스크 여유 공간을 확인하는 코드는 없다.
+동시 실행 수를 정하는 장치도 없다.
+KAPE 처리기는 `asyncio.create_subprocess_exec`로 실행하고 hashcat·chainbreaker·Unified Logs 파싱은 `run_in_executor`로 다른 스레드에서 실행한다 [3][10].
+MFT·Amcache·ShimCache·이벤트 로그·Volatility 3 처리기는 비동기 처리기 안에서 `subprocess.run`을 부르므로 그 실행이 끝날 때까지 서버는 다른 요청을 처리하지 않는다 [11].
+`decompress_mozilla_lz4`는 시간 제한이 지난 뒤 풀기 스레드가 끝날 때까지 기다리므로 그동안 서버는 다른 요청을 처리하지 않는다 [12][13].
+이는 서버가 정한 제한이 아니라 처리기가 동기 호출을 쓰는 방식에서 생기는 동작이다.
+
+### 근거
+
+[1] `call_tool`은 도구 이름으로 처리기를 골라 부른다.
+
+[`server.py:512-640`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L512-L640)
+
+[2] 경로 검사는 경로를 등록부의 이미지와 대조한다.
+
+[`core/security.py:14-106`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/security.py#L14-L106)
+
+[3] KAPE 실행 뒤 관리자 권한 문구를 찾는다.
+
+```python
+        process = await asyncio.create_subprocess_exec(
+            cmd[0], *cmd[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(kape_exe.parent)
+        )
+        
+        stdout, stderr = await process.communicate()
+        execution_time = time.time() - start_time
+        
+        output_text = stdout.decode('utf-8', errors='ignore') if stdout else ""
+        error_text = stderr.decode('utf-8', errors='ignore') if stderr else ""
+        
+        if "Administrator privileges not found" in output_text or "Administrator privileges not found" in error_text:
+            return [TextContent(type="text", text=
+                "ERROR: KAPE requires administrator privileges to execute parsing.\n\n"
+                "SOLUTION:\n"
+                "1. Close VS Code / PowerShell\n"
+                "2. Right-click VS Code icon → 'Run as administrator'\n"
+                "3. Reopen your workspace\n"
+                "4. Try kape_parse_artifact() again\n\n"
+                "NOTE: get_kape_modules_catalog() works without admin privileges."
+            )]
+```
+
+[`handlers/kape_handlers.py:83-105`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L83-L105)
+
+[4] 원격 앱은 인증 없이 경로와 CORS 미들웨어를 둔다: [`remote_server.py:30-46`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L30-L46), [`remote_server.py:70-85`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L70-L85).
+
+```python
+# POST endpoint clients use to send messages back; must match the route below.
+sse = SseServerTransport("/messages/")
+
+
+async def handle_sse(request: Request) -> None:
+    """
+    GET /sse  – opens a long-lived SSE stream.
+    The MCP SDK needs raw ASGI (scope, receive, send).
+    Starlette stores them on the Request object.
+    """
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+```
+
+[`remote_server.py:30-46`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L30-L46)
+
+```python
+
+app = Starlette(
+    debug=False,
+    routes=[
+        Route("/", homepage),
+        Route("/sse", handle_sse),
+        Mount("/messages", app=sse.handle_post_message),
+    ],
+    middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+    ],
+```
+
+[`remote_server.py:70-85`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L70-L85)
+
+[5] MCP Python SDK 1.29.1은 보안 설정이 없으면 Host·Origin 검사를 끈다: [`src/mcp/server/transport_security.py:44-50`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/transport_security.py#L44-L50), [`src/mcp/server/transport_security.py:109-122`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/transport_security.py#L109-L122), [`src/mcp/server/sse.py:86-136`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/sse.py#L86-L136).
+
+[6] 직접 실행하면 ngrok을 열고 모든 주소에 바인드한다.
+
+```python
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8000"))
+
+    if os.environ.get("USE_NGROK", "true").lower() == "true":
+        start_ngrok(port)
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+[`remote_server.py:114-120`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L114-L120)
+
+[7] (실행 확인) 작업 사본의 `remote_server` 모듈을 같은 프로세스에서 불러 `app`을 uvicorn으로 `127.0.0.1`에만 열고 MCP SDK SSE 클라이언트와 HTTP 요청으로 접속했다.
+
+[8] `main.py`는 stdio로만 연결한다.
+
+```python
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            logger.info("MCP stdio connection established")
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options()
+            )
+```
+
+[`main.py:46-53`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/main.py#L46-L53)
+
+[9] 설정의 자원·동시 실행 값이다: [`config/config.yaml:5-5`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L5-L5), [`config/config.yaml:165-168`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L165-L168).
+
+```yaml
+  max_memory_usage: "4GB"
+```
+
+[`config/config.yaml:5-5`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L5-L5)
+
+```yaml
+mcp:
+  transport: "stdio"
+  log_level: "INFO"
+  max_concurrent_operations: 5
+```
+
+[`config/config.yaml:165-168`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/config/config.yaml#L165-L168)
+
+[10] 다른 스레드에서 실행하는 처리기다: [`handlers/hash_cracking_handler.py:253-255`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/hash_cracking_handler.py#L253-L255), [`handlers/macos_handlers.py:641-647`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L641-L647), [`handlers/macos_handlers.py:428-433`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L428-L433).
+
+[11] 비동기 처리기 안에서 `subprocess.run`을 부른다: [`handlers/mft_forensics_handler.py:333-338`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L333-L338), [`handlers/amcache_forensics_handler.py:269-270`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L269-L270), [`handlers/event_logs_forensics_handler.py:303-309`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L303-L309), [`handlers/memory_forensics_handler.py:66-74`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L66-L74).
+
+[12] `decompress_mozilla_lz4`는 `ThreadPoolExecutor` 블록 안에서 `asyncio.wait_for`로 기다린다.
+
+```python
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                loop = asyncio.get_event_loop()
+                try:
+                    decompressed = await asyncio.wait_for(
+                        loop.run_in_executor(executor, decompress_sync),
+                        timeout=30
+                    )
+                except asyncio.TimeoutExpired:
+                    return [TextContent(type="text", text="ERROR: LZ4 decompression timed out after 30 seconds.")]
+```
+
+[`handlers/file_handlers.py:1388-1396`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1388-L1396)
+
+[13] (실행 확인) 작업 사본의 `decompress_mozilla_lz4` 처리기를 같은 프로세스에서 불러 시간 제한을 2초로, 풀기를 6초 걸리게 바꾸자 응답은 6초 뒤에 왔고 그동안 같은 이벤트 루프의 다른 작업은 실행되지 않았다.

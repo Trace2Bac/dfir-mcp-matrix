@@ -1,0 +1,146 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `read_csv_data`, `analyze_sqlite_database`, `analyze_memory`, `analyze_macos_unified_logs`에 적용된다 [1][2][3][4].
+`read_csv_data`는 CSV 줄의 시각 열을 값 그대로 싣는다 [1].
+`analyze_sqlite_database`의 질의는 표의 정수 시각 값을 바꾸지 않고 싣는다 [2].
+`analyze_memory`는 Volatility 출력을 바꾸지 않고 싣는다 [3].
+`analyze_macos_unified_logs`는 UnifiedLogReader가 쓴 줄을 바꾸지 않고 싣는다 [4].
+서버 코드에는 네 도구의 시각을 찾거나 바꾸는 코드가 없다 [1][2][3][4].
+시험용 CSV의 `2024-01-01 00:00:00` 꼴 열과 SQLite 표의 `1700000000` 꼴 정수가 응답에 그대로 실렸다 [1][2].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 `analyze_memory`에 적용된다 [3].
+Volatility 3 2.28.0의 JSON 렌더러는 `datetime` 값을 `isoformat()` 문자열로 출력한다 [5].
+같은 버전의 `quick`·`pretty`·`csv` 렌더러는 `datetime`을 `%Y-%m-%d %H:%M:%S.%f %Z` 형식으로 적어 시간대 이름을 붙인다 [6].
+`wintime_to_datetime`은 Windows FILETIME을 UTC 시간대가 붙은 `datetime`으로 바꾸므로 이 문자열 끝에는 `+00:00`이 붙는다 [7].
+`analyze_memory`는 이 문자열을 바꾸지 않으므로 응답의 시각 값에 시간대가 값으로 실린다 [3].
+FILETIME이 0이면 Volatility는 값 대신 해당 없음 표시를 내고 JSON 렌더러는 이를 `null`로 출력한다 [5][7].
+
+**한계.** `read_csv_data`로 전달되는 EZ Tools CSV의 시각과 SQLite 정수 시각, plist의 시각에는 시간대나 단위 표기가 없고 서버는 이를 보태지 않는다 [1][2][8].
+PECmd acdf082는 기본 시각 형식을 `yyyy-MM-dd HH:mm:ss`로 정해 시간대를 붙이지 않는다 [9].
+`analyze_macos_plist`는 이진 형식 plist의 `datetime`을 `str`로 적어 `2024-01-02 03:04:05` 꼴로 싣고 시간대와 원래 바이트를 밝히지 않는다 [8].
+UnifiedLogReader `39f774e`는 시각을 시간대 없는 `datetime` 문자열로 쓴다 [10].
+
+### 근거
+
+[1] `read_csv_data`가 CSV 줄을 값 그대로 싣는 부분이다.
+(실행 확인) 시험용 CSV의 시각 열이 그대로 실렸다.
+
+```python
+            if csv_content:
+                result_text += f"📊 **CSV Data**:\\n```csv\\n"
+                result_text += '\\n'.join(csv_content)
+                result_text += f"\\n```\\n\\n"
+```
+
+[`handlers/file_handlers.py:1290-1293`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1290-L1293)
+
+[2] `analyze_sqlite_database`의 질의가 표 값을 바꾸지 않고 싣는 부분이다.
+(실행 확인) 시험용 SQLite 표의 정수 시각이 그대로 실렸다.
+
+```python
+                cursor.execute(sql_query)
+                results = cursor.fetchmany(max_rows + 1)
+                columns = [description[0] for description in cursor.description]
+                
+                truncated = len(results) > max_rows
+                if truncated:
+                    results = results[:max_rows]
+                
+                result = f"QUERY RESULTS\nQuery: {sql_query[:100]}{'...' if len(sql_query) > 100 else ''}\nRows: {len(results)}\n"
+                
+                if results:
+                    csv_filename = f"query_{hash(sql_query) & 0x7FFFFFFF}.csv"
+                    csv_path = sqlite_dir / csv_filename
+                    
+                    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(columns)
+                        writer.writerows(results)
+                    
+                    result += f"CSV Export: {csv_path}\n\n"
+                    
+                    result += " | ".join(columns) + "\n"
+                    for row in results[:20]:
+                        result += " | ".join(str(val) for val in row) + "\n"
+```
+
+[`handlers/database_handlers.py:167-190`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L167-L190)
+
+[3] `analyze_memory`가 Volatility 출력을 바꾸지 않고 싣는 부분이다.
+
+```python
+        stdout = result["stdout"]
+        if len(stdout) > 5000:
+            response.append(stdout[:5000])
+            response.append(f"\n\n... (output truncated, full results saved to file)")
+        else:
+            response.append(stdout)
+        
+```
+
+[`handlers/memory_forensics_handler.py:194-200`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L194-L200)
+
+[4] `analyze_macos_unified_logs`는 UnifiedLogReader 출력 파일의 줄을 바꾸지 않고 응답에 붙인다.
+
+```python
+                        result_text += f"{'=' * 70}\n"
+                        result_text += f"LOG ENTRIES (lines {start_line} to {end_line} of {total_lines} total):\n"
+                        result_text += f"{'=' * 70}\n\n"
+                        
+                        for line in lines[start_line:end_line]:
+                            result_text += line
+                        
+                        result_text += f"\n{'=' * 70}\n"
+                        result_text += f"📊 Displayed entries {start_line}-{end_line} of {total_lines} total\n"
+```
+
+[`handlers/macos_handlers.py:461-469`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L461-L469)
+
+[5] Volatility 3 2.28.0 JSON 렌더러의 `datetime` 변환이다: [`volatility3/cli/text_renderer.py:549-553`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L549-L553).
+
+[6] Volatility 3 2.28.0의 CLI 렌더러 공통 형식과 이를 쓰는 렌더러다: [`volatility3/cli/text_renderer.py:237-249`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L237-L249), [`volatility3/cli/text_renderer.py:280-281`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L280-L281), [`volatility3/cli/text_renderer.py:349-350`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L349-L350), [`volatility3/cli/text_renderer.py:404-405`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/cli/text_renderer.py#L404-L405).
+
+[7] Volatility 3 2.28.0이 FILETIME을 UTC `datetime`으로 바꾸는 함수다: [`volatility3/framework/renderers/conversion.py:14-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L14-L28).
+
+[8] `analyze_macos_plist`가 `datetime`을 `str`로 적는 부분이다.
+(실행 확인) 시험용 이진 형식 plist의 시각이 시간대 없이 실렸다: [`handlers/macos_handlers.py:242-261`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L242-L261).
+
+```python
+            else:
+                if value == "" or value is None:
+                    display_value = "(empty)" if value == "" else "(none)"
+                    result += f"{prefix}{key}: {display_value}\n"
+                else:
+                    result += f"{prefix}{key}: {value}\n"
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            current_items[0] += 1
+            if current_items[0] > max_items:
+                result += f"{prefix}... (max items reached)\n"
+                break
+                
+            if isinstance(item, (dict, list)):
+                result += f"{prefix}[{i}]:\n"
+                result += _format_plist_generic(item, indent + 1, max_depth, current_depth + 1, max_items, current_items)
+            else:
+                result += f"{prefix}• {item}\n"
+    else:
+        result += f"{prefix}{data}\n"
+```
+
+[`handlers/macos_handlers.py:242-261`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L242-L261)
+
+[9] PECmd acdf082의 기본 시각 형식에 시간대가 없는 부분이다: [`PECmd/Program.cs:151-154`](https://github.com/EricZimmerman/PECmd/blob/acdf082f1c2e946b0c358cdf6ef71607e00cfea0/PECmd/Program.cs#L151-L154).
+
+[10] UnifiedLogReader 39f774e의 `ReadAPFSTime`은 시간대 없는 `datetime`을 만들고 `WriteLogEntry`는 그 값을 그대로 줄에 쓴다: [`UnifiedLog/Lib.py:54-63`](https://github.com/ydkhatri/UnifiedLogReader/blob/39f774e41be45a780f84e1486ce49b2ed31cab9f/UnifiedLog/Lib.py#L54-L63), [`scripts/UnifiedLogReader.py:260-297`](https://github.com/ydkhatri/UnifiedLogReader/blob/39f774e41be45a780f84e1486ce49b2ed31cab9f/scripts/UnifiedLogReader.py#L260-L297).

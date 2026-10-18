@@ -1,0 +1,314 @@
+---
+cell: D02
+details:
+- id: D02.01
+---
+
+# D02 파생물 추적
+
+### D02.01 ID·경로 참조
+
+**구현.** 이 방식은 `ExtractionManager`가 남기는 `extraction_registry.json`과 파일 도구가 남기는 `path_mapping.json`, 준비된 이미지의 파생물을 두는 `cases/<이미지 ID>/` 경로, `kape_parse_artifact`가 남기는 `kape_operations.log`에 적용된다 [1][2][3][4].
+
+`ExtractionManager`는 이미지에서 푼 폴더마다 그것을 푼 이미지의 경로 `image_path`, 이미지 ID `image_id`, 이미지 안의 내부 경로 `internal_path`, 푼 위치 `extract_location`을 `extraction_registry.json`에 적는다 [1].
+그래서 이 기록에서 꺼낸 파일이 어느 이미지의 어느 내부 경로에서 나왔는지 이어진다 [1].
+파일 도구가 SleuthKit 이미지에서 꺼낸 파일은 `path_mapping.json`이 이미지 안 경로, inode, 크기, 꺼낸 시각에 잇는다 [2].
+
+파생물이 담기는 경로 자체가 그것을 만든 이미지를 가리킨다.
+`prepare_disk_image`는 이미지 이름과 그 이미지 앞부분의 SHA-256을 이어 붙인 `<이미지 이름>_<os>_<해시 앞 12자>`를 이미지 ID로 짓고 `prepared_images_registry.json`에 이미지 경로와 함께 적는다 [5][6].
+준비된 이미지를 분석하는 처리기는 `get_case_output_directory`로 이 이미지 ID의 `cases/<이미지 ID>/` 아래에 파생물을 둔다 [3].
+`analyze_sqlite_database`는 `cases/<이미지 이름>_<해시>/` 아래에 둔다 [7].
+그래서 두 경로에서 파생물을 만든 이미지의 이름과 해시가 드러난다 [5][7].
+
+`kape_parse_artifact`는 KAPE를 실행할 때마다 `kape_operations.log`에 항목을 남긴다 [4].
+항목에는 시각과 명령으로 만든 16진수 ID `operation_hash`, 실행한 명령줄, KAPE의 표준 출력과 표준 오류가 담긴다 [4][8].
+처리기는 KAPE 실행 전과 후에 항목을 하나씩 남긴다 [8][9].
+명령줄에는 입력 폴더 `--msource`와 출력 폴더 `--mdest`가 들어 있어, 이 기록에서 출력 폴더가 어느 입력에서 나왔는지 이어진다 [8].
+`audit_kape_operations`는 이 기록을 읽어 ID, 시각, 종류, 명령 요약으로 돌려준다 [10].
+
+**한계.** YAML에서 만든 도구 9개는 `kape_operations.log`에 명령을 남기지 않는다 [11][12].
+이 가운데 5개는 KAPE를 직접 실행하고 4개는 EZ Tools 실행 파일을 직접 실행한다 [11][12].
+그래서 이 도구의 파생물은 출력 폴더 경로로만 입력과 이어진다 [11].
+`analyze_memory`의 출력 폴더와 준비된 이미지가 아닌 입력의 출력 폴더는 메모리 파일 이름, 입력 파일·폴더 이름, 시각, `local_analysis` 같은 대체 이름으로 지어 이미지를 가리키지 않는다 [3][13].
+`kape_parse_artifact` 응답의 `Operation Hash`는 모듈 이름, 파일 경로, 시각으로 따로 구한 값이라 `kape_operations.log`의 `OPERATION ID`와 같지 않다 [4][14].
+그래서 응답에서 기록 항목으로는 ID가 아니라 명령줄의 출력 폴더로만 이어진다 [8][14].
+실행 확인에서 응답의 `Operation Hash`와 기록의 `OPERATION ID`가 서로 달랐다 [15].
+KAPE와 EZ Tools의 출력 파일 안이나 곁에 그것을 만든 호출이나 입력을 가리키는 값을 서버가 더 적지는 않는다.
+앞 도구의 파생물을 뒤 도구가 입력으로 쓸 때 그 부모 관계를 기록하는 코드는 없다.
+`extraction_registry.json`의 기록은 이미지에서 꺼낸 파일에만 있다 [1].
+그 파일을 분석해 만든 CSV를 다시 그 꺼낸 파일과 잇지는 않는다 [1].
+
+### 근거
+
+[1] 푼 폴더마다 이미지 경로·ID·내부 경로·푼 위치를 기록한다.
+
+```python
+        extraction_info = {
+            'extracted': True,
+            'extract_location': str(extraction_path),
+            'extracted_at': datetime.now().isoformat(),
+            'file_count': extracted_count,
+            'failed_count': failed_count,
+            'internal_path': internal_path,
+            'partition_offset': partition_offset
+        }
+        
+        if image_id not in self.registry:
+            self.registry[image_id] = {
+                'image_path': image_path,
+                'image_id': image_id,
+                'extracted_paths': {}
+            }
+        
+        normalized_path = internal_path.replace('\\', '/').strip('/')
+        self.registry[image_id]['extracted_paths'][normalized_path] = extraction_info
+        self._save_registry()
+```
+
+[`utils/extraction_manager.py:277-296`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L277-L296)
+
+[2] `path_mapping.json`에 이미지 안 경로, 꺼낸 파일 경로, inode, 시각, 크기를 적는다.
+
+```python
+    def add_mapping(self, linux_path: str, windows_path: str, inode: int, 
+                   size: Optional[int] = None) -> bool:
+        """
+        Add or update path mapping
+        
+        Args:
+            linux_path: Original Linux path in image
+            windows_path: Extracted Windows file location
+            inode: Inode number
+            size: File size in bytes (optional)
+            
+        Returns:
+            True if mapping added successfully
+        """
+        linux_path = self.normalize_linux_path(linux_path)
+        windows_path = str(windows_path)
+        
+        self.path_mapping[linux_path] = {
+            'windows_path': windows_path,
+            'inode': inode,
+            'timestamp': datetime.now().isoformat(),
+            'size': size
+        }
+        
+        self.reverse_mapping[windows_path] = linux_path
+        
+        self._save_mappings()
+        
+        return True
+```
+
+[`utils/path_mapper.py:119-147`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/path_mapper.py#L119-L147)
+
+[3] 이미지 ID로 만든 `cases/<이미지 ID>` 아래에 파생물을 둔다.
+
+```python
+    elif prepared_info:
+        unique_image_id = prepared_info.get('unique_image_id')
+        if unique_image_id:
+            case_dir = cases_dir / unique_image_id
+            logger.debug(f"Constructed case_dir from unique_image_id: {case_dir}")
+        else:
+            image_name = Path(prepared_info.get('image_path', 'unknown')).stem
+            image_hash = prepared_info.get('hash', 'UNKNOWN')
+            case_dir = cases_dir / f"{image_name}_{image_hash[:16]}"
+            logger.debug(f"Constructed case_dir from image_path and hash: {case_dir}")
+            
+    else:
+        if fallback_case_name:
+            case_dir = cases_dir / fallback_case_name
+            logger.debug(f"Using fallback_case_name: {case_dir}")
+        else:
+            case_dir = cases_dir / "local_analysis"
+            logger.debug(f"Using generic local_analysis case_dir: {case_dir}")
+    
+    output_dir = case_dir / artifact_name / f"{kape_module_name}_{module_id}"
+```
+
+[`core/forensic_helpers.py:98-117`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/forensic_helpers.py#L98-L117)
+
+[4] `kape_parse_artifact`가 실행마다 남기는 기록 항목.
+
+```python
+    log_entry = f"""
+{'='*80}
+OPERATION ID: {operation_hash}
+TIMESTAMP: {timestamp}
+TYPE: {operation_type}
+COMMAND: {command}
+RETURN CODE: {return_code}
+{'='*80}
+OUTPUT:
+{output}
+{'='*80}
+ERRORS:
+{error}
+{'='*80}
+"""
+```
+
+[`core/logging_setup.py:42-56`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/logging_setup.py#L42-L56)
+
+[5] 이미지 이름과 해시 앞 12자로 이미지 ID를 짓는다.
+
+```python
+        unique_image_id = f"{image_name}_{os_family}_{image_hash_full[:12]}"  # short hash: keep case paths under Windows MAX_PATH (260)
+        logger.info(f"Unique image ID (with OS): {unique_image_id}")
+```
+
+[`handlers/image_handlers.py:271-272`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L271-L272)
+
+[6] 이미지 경로와 ID를 `prepared_images_registry.json`에 적는다.
+
+```python
+def save_prepared_images(prepared_images, base_output_dir):
+    """Save prepared images registry to disk (excluding non-serializable objects)"""
+    registry_file = Path(base_output_dir) / "prepared_images_registry.json"
+    
+    try:
+        serializable_images = {}
+        for path, info in prepared_images.items():
+            serializable_info = {k: v for k, v in info.items() if k != 'mounter'}
+            serializable_images[path] = serializable_info
+        
+        with open(registry_file, 'w') as f:
+            json.dump(serializable_images, f, indent=2)
+        logger.info(f"Saved prepared images registry: {len(serializable_images)} images")
+```
+
+[`models/prepared_images.py:50-62`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/models/prepared_images.py#L50-L62)
+
+[7] `analyze_sqlite_database`는 이미지 이름과 해시로 사건 폴더를 짓는다.
+
+```python
+        source_image = {
+            "name": Path(prepared_info.get("image_path", "unknown")).stem,
+            "hash": prepared_info.get("hash", "UNKNOWN"),
+            "drive": prepared_info.get("access_point", "")
+        }
+        
+        case_dir = CASES_DIR / f"{source_image['name']}_{source_image['hash']}"
+        sqlite_dir = case_dir / "sqlite_analysis" / db_file.stem
+        sqlite_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`handlers/database_handlers.py:58-66`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L58-L66)
+
+[8] 명령줄에 입력 폴더와 출력 폴더가 들어간다.
+
+```python
+        cmd = [
+            str(kape_exe),
+            '--msource', str(artifact_file.parent),
+            '--mdest', str(module_dir),
+            '--module', kape_module
+        ]
+        
+        logger.info(f"Executing KAPE command: {' '.join(cmd)}")
+        
+        log_kape_operation("ARTIFACT_PARSING", cmd, "", "", 0, KAPE_LOGS_DIR)
+```
+
+[`handlers/kape_handlers.py:71-80`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L71-L80)
+
+[9] KAPE 실행 뒤에 항목을 한 번 더 남긴다.
+
+```python
+        success = process.returncode == 0
+        log_kape_operation("ARTIFACT_PARSING", cmd, output_text, error_text, process.returncode, KAPE_LOGS_DIR)
+```
+
+[`handlers/kape_handlers.py:107-108`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L107-L108)
+
+[10] `audit_kape_operations`가 기록을 읽어 돌려준다.
+
+[`handlers/kape_handlers.py:312-398`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L312-L398)
+
+[11] `analyze_shimcache`는 AppCompatCacheParser를 직접 부르고 `kape_operations.log`에 남기지 않는다.
+
+```python
+        csv_name = f"{hive_file.stem}_AppCompatCache.csv"
+        cmd = [
+            str(binary_path.absolute()),
+            '-f', str(hive_file.absolute()),
+            '--csv', str(output_dir.absolute()),
+            '--csvf', csv_name
+        ]
+        
+        logger.info(f"Executing: {' '.join(cmd)}")
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+```
+
+[`handlers/shimcache_forensics_handler.py:288-303`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shimcache_forensics_handler.py#L288-L303)
+
+[12] `log_kape_operation`은 `kape_handlers.py`에서만 부르고 레지스트리 처리기는 KAPE를 직접 실행한다.
+
+```python
+    cmd = [
+        str(kape_exe),
+        "--msource", kape_source,
+        "--mdest", str(output_dir),
+        "--module", kape_module_name,
+        "--mef", output_format
+    ]
+    
+    logger.info(f"Executing KAPE: {' '.join(cmd)}")
+    
+    start_time = datetime.now()
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+```
+
+[`handlers/registry_forensics_handler.py:356-374`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L356-L374)
+
+[13] 메모리 출력 폴더와 준비된 이미지가 아닌 입력의 대체 이름.
+
+```python
+def _get_memory_output_directory(memory_file_path: str, plugin_name: str) -> Path:
+    """
+    Get output directory for memory analysis results
+    
+    Creates structure: forensic_output/cases/{memory_filename}/memory/{plugin_name}/
+    """
+    memory_file = Path(memory_file_path)
+    memory_filename = memory_file.stem
+    
+    output_dir = CASES_DIR / memory_filename / "memory" / plugin_name
+    return output_dir
+```
+
+[`handlers/memory_forensics_handler.py:121-131`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L121-L131)
+
+```python
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fallback_case_name = f"standalone_event_logs_{timestamp}" if not first_prepared_info else None
+```
+
+[`handlers/event_logs_forensics_handler.py:123-125`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L123-L125)
+
+[14] 응답의 `Operation Hash`는 모듈 이름, 파일 경로, 시각으로 구한다.
+
+```python
+        operation_data = f"{kape_module}|{artifact_file}|{datetime.now().isoformat()}"
+        operation_hash = hashlib.sha256(operation_data.encode()).hexdigest()[:16]
+```
+
+[`handlers/kape_handlers.py:64-65`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L64-L65)
+
+[15] (실행 확인) 시험용 KAPE 자리 실행 파일로 `kape_parse_artifact`를 부르고 응답과 `kape_operations.log`의 ID를 대조했다.

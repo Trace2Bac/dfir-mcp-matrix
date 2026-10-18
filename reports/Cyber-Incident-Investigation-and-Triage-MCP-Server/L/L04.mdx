@@ -1,0 +1,113 @@
+---
+cell: L04
+details:
+- id: not_implemented
+---
+
+# L04 기록 위변조 방지
+
+### 미구현
+
+**판단.** 서버의 기록은 모두 덧붙여 쓰는 글 파일이고 수정, 삭제, 순서 변경을 막거나 알아차리는 장치가 없다 [1][2][3].
+
+- 루트 로거의 `forensic_output/logs/mcp_server_<시작 시각>.log`와 `remote_server.log`, 운영 기록 `forensic_output/operations_logs/operations_<날짜>.log`는 표준 라이브러리 `FileHandler`가 쓴다 [1].
+- KAPE 기록 `forensic_output/kape_logs/kape_operations.log`는 `log_kape_operation`이 덧붙이기 모드로 열어 쓴다 [2].
+- `main.py`는 표준 오류를 저장소 폴더의 `stderr.log`에 덧붙여 쓴다 [3].
+
+항목에는 앞 항목의 해시나 일련번호가 없다 [1][2].
+KAPE 기록 항목의 `OPERATION ID`는 초 단위 시각과 명령 글의 SHA-256 앞 16자리로 항목마다 따로 계산한다 [2].
+그래서 같은 초에 같은 명령으로 쓴 항목은 같은 값을 갖는다 [2].
+`kape_parse_artifact`를 부르자 같은 실행의 실행 전 항목과 실행 뒤 항목이 같은 `OPERATION ID`로 남았다 [4].
+`audit_kape_operations`는 KAPE 기록을 읽어 항목의 ID, 시각, 종류, 반환 코드, 명령을 보여 줄 뿐 해시를 다시 계산해 대조하지 않는다 [5].
+이 도구는 기록을 줄로 나눌 때 줄바꿈 문자 대신 역슬래시와 `n` 두 글자를 기준으로 쓴다 [5].
+그래서 파일 전체가 한 줄로 읽혀 항목이 몇 개든 `Total entries found: 1`로 보고하고 첫 `OPERATION ID:` 뒤의 내용 전체를 ID 자리에 싣는다 [5][4].
+저장소에는 기록 폴더를 읽기 전용으로 두고 분석 도구를 실행하는 구성이 없다.
+KAPE와 그 모듈, EZ Tools, Volatility 3는 서버와 같은 계정으로 같은 호스트에서 실행된다 [6].
+
+### 근거
+
+[1] 루트 로거, `remote_server.log`, 운영 기록의 처리기다: [`core/logging_setup.py:14-23`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/logging_setup.py#L14-L23), [`remote_server.py:16-23`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L16-L23), [`core/operation_logging.py:12-27`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/operation_logging.py#L12-L27).
+
+[2] `log_kape_operation`의 항목 ID 계산과 덧붙여 쓰기다.
+
+```python
+def log_kape_operation(operation_type, command, return_code, output, error, kape_logs_dir):
+    """Log KAPE operations to audit log for forensic defensibility"""
+    from datetime import datetime
+    import hashlib
+    
+    log_file = Path(kape_logs_dir) / "kape_operations.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    operation_hash = hashlib.sha256(f"{timestamp}{command}".encode()).hexdigest()[:16]
+    
+    log_entry = f"""
+{'='*80}
+OPERATION ID: {operation_hash}
+TIMESTAMP: {timestamp}
+TYPE: {operation_type}
+COMMAND: {command}
+RETURN CODE: {return_code}
+{'='*80}
+OUTPUT:
+{output}
+{'='*80}
+ERRORS:
+{error}
+{'='*80}
+"""
+    
+    with open(log_file, 'a', encoding='utf-8') as f:
+        f.write(log_entry)
+```
+
+[`core/logging_setup.py:31-59`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/logging_setup.py#L31-L59)
+
+[3] `main.py`는 `stderr.log`를 덧붙이기 모드로 연다.
+
+```python
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STDERR_PATH = os.path.join(BASE_DIR, "stderr.log")
+
+stderr_log = open(STDERR_PATH, "a", encoding="utf-8", buffering=1)
+sys.stderr = stderr_log
+```
+
+[`main.py:12-16`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/main.py#L12-L16)
+
+[4] (실행 확인) stdio 서버에 `kape_parse_artifact` 두 번, `get_kape_modules_catalog` 한 번을 부른 뒤 `audit_kape_operations`를 불렀다.
+`kape_operations.log`에는 항목 5개가 남았고 같은 실행의 두 항목은 `OPERATION ID`가 같았다.
+`audit_kape_operations`의 응답은 `Total entries found: 1`이었고 ID 자리에 첫 항목 뒤의 파일 내용이 이어졌다.
+
+[5] `audit_kape_operations`는 `'\\n'`으로 나누고 각 줄의 머리글만 읽는다.
+
+```python
+        log_entries = []
+        current_entry = {}
+        
+        lines = log_content.split('\\n')
+        in_entry = False
+        current_section = None
+        
+        for line in lines:
+            line = line.strip()
+            
+            if 'OPERATION ID:' in line:
+                if current_entry:
+                    log_entries.append(current_entry)
+                current_entry = {'hash': line.split(':', 1)[1].strip()}
+                in_entry = True
+                
+            elif line.startswith('TIMESTAMP:'):
+                current_entry['timestamp'] = line.split(':', 1)[1].strip()
+                
+            elif line.startswith('TYPE:'):
+                current_entry['operation_type'] = line.split(':', 1)[1].strip()
+                
+```
+
+[`handlers/kape_handlers.py:326-347`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L326-L347)
+
+[6] 분석 도구는 서버 프로세스의 하위 프로세스로 실행되고 처리기는 계정이나 환경을 바꾸는 인자를 넘기지 않는다: [`handlers/kape_handlers.py:83-88`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L83-L88), [`handlers/event_logs_forensics_handler.py:304-309`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L304-L309), [`handlers/memory_forensics_handler.py:66-74`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L66-L74).
+기준 커밋의 Python 코드에서 `env=`를 찾으면 나오지 않는다.

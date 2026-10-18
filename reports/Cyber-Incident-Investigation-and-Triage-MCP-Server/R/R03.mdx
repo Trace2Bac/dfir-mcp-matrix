@@ -1,0 +1,236 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.03
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 MCP Python SDK가 인자 schema를 어기는 호출을 처리하는 경로에만 적용된다 [1].
+SDK 1.29.1의 저수준 `call_tool`은 처리기를 부르기 전에 도구의 `inputSchema`로 인자를 검사하고 어기면 `isError`가 참인 결과를 돌려준다 [1].
+서버의 `create_server`가 등록한 `call_tool`은 처리기에서 난 예외를 모두 처리해 `ERROR: Tool execution failed:`로 시작하는 글을 `isError`가 거짓인 결과로 돌려준다 [2].
+필수 인자를 뺀 호출에는 `isError`가 참인 `Input validation error`가 왔다 [3].
+
+**한계.** 서버가 스스로 낸 실패는 모두 `isError`가 거짓인 글로 나가고 성공과 글의 문구로만 갈린다 [2].
+응답에 성공과 실패를 나누는 필드나 상태 값은 없다 [2].
+알 수 없는 도구 이름에는 `ERROR: Unknown tool:`을, 준비한 증거가 아닌 경로에는 `ACCESS DENIED`를 `isError`가 거짓인 글로 돌려준다 [2][4].
+인자 이름이 schema에 없어 처리기가 받지 못하는 호출도 schema 검사를 지나 처리기 예외가 되어 `isError`가 거짓인 글로 돌아왔다 [2][3].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 경로와 모듈 여러 개를 처리하는 `analyze_mft`, `analyze_amcache`, `analyze_registry`에 적용된다 [5][6][7].
+`analyze_mft`와 `analyze_amcache`는 경로와 모듈마다 성공과 실패를 나눠 싣고 성공이면 경로와 집계 값을, 실패면 경로와 오류 `error`를 싣는다 [5][6].
+두 도구는 응답 머리에 성공 수와 실패 수를 센다 [5][6].
+`analyze_registry`는 실행한 모듈마다 `Status`를 `SUCCESS`, `CACHED (already analyzed)`, `FAILED - Administrator privileges required`, `FAILED (Return code: N)`, `EXCEPTION` 가운데 하나로 싣고 원본 파일 이름을 함께 적는다 [7][8].
+
+**한계.** `analyze_shellbags`·`analyze_jump_lists`는 성공한 항목만 목록으로 싣고 실패한 항목은 머리의 실패 수로만 센다 [9][10].
+`analyze_lnk_files`는 일부가 실패하면 성공한 항목과 그 수만 싣고 실패 수는 적지 않는다 [11].
+`analyze_registry`는 이미지에서 파일을 꺼내지 못한 항목, 파일에 맞지 않아 건너뛴 모듈, 설정에 없는 모듈을 응답에 싣지 않는다 [12].
+`analyze_registry`는 모든 모듈이 실패해도 응답 끝에 `Analysis completed successfully.`를 적는다 [13].
+
+### 근거
+
+[1] SDK 1.29.1이 인자 schema 위반을 `isError` 결과로 돌려주는 부분이다: [`src/mcp/server/lowlevel/server.py:472-478`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L472-L478), [`src/mcp/server/lowlevel/server.py:532-538`](https://github.com/modelcontextprotocol/python-sdk/blob/b22271305c59dfc7910f1493faea78cb1d396e48/src/mcp/server/lowlevel/server.py#L532-L538).
+
+[2] 서버의 `call_tool`이 예외와 알 수 없는 도구 이름을 `isError`가 거짓인 글로 돌려주는 부분이다.
+
+```python
+            else:
+                return [TextContent(type="text", text=f"ERROR: Unknown tool: {name}")]
+        
+        except Exception as e:
+            logger.error(f"Tool execution error for {name}: {e}", exc_info=True)
+            return [TextContent(type="text", text=f"ERROR: Tool execution failed: {e}")]
+```
+
+[`server.py:635-640`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L635-L640)
+
+[3] (실행 확인) stdio 서버에 필수 인자를 뺀 호출과 schema에 없는 인자를 준 호출을 보내 `isError` 값을 확인했다.
+
+[4] 준비한 증거가 아닌 경로를 거부하는 부분이다: [`core/security.py:99-106`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/security.py#L99-L106).
+
+```python
+    raise SecurityError(
+        f"Access denied: File not part of any prepared forensic image\n"
+        f"Requested: {file_path}\n\n"
+        f"Only files from prepared disk images can be accessed.\n"
+        f"Available prepared images:\n" + 
+        "\n".join([f"  - {meta.get('access_point', 'N/A')}" for meta in prepared_images.values()]) +
+        "\n\nUse 'prepare_disk_image' tool first to prepare a forensic image."
+    )
+```
+
+[`core/security.py:99-106`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/security.py#L99-L106)
+
+[5] `analyze_mft`가 경로·모듈마다 성공과 실패를 나눠 싣는 부분이다: [`handlers/mft_forensics_handler.py:187-231`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L187-L231).
+
+[6] `analyze_amcache`가 경로·모듈마다 성공과 실패를 나눠 싣는 부분이다: [`handlers/amcache_forensics_handler.py:179-207`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L179-L207).
+
+```python
+        formatted_results = []
+        for result in results:
+            if result.get('status') == 'success':
+                text = f"✅ **Amcache Analysis: {result.get('module_name', result.get('module_id'))}**\n"
+                text += f"📁 **Path**: {result.get('path')}\n"
+                text += f"⏱️ **Processing Time**: {result.get('timestamp', 'N/A')}\n"
+                text += f"📊 **Programs Found**: {result.get('programs_found', 'N/A')}\n"
+                text += f"🔍 **SHA1 Hashes**: {result.get('sha1_hashes', 'N/A')}\n"
+                text += f"📂 **Output Directory**: {result.get('output_directory')}\n"
+                text += f"🔧 **Command**: {result.get('command')}\n"
+                
+                if result.get('output_files'):
+                    text += f"📄 **Output Files**:\n"
+                    for file_path in result.get('output_files', []):
+                        text += f"  - {file_path}\n"
+                
+                formatted_results.append(text)
+            else:
+                text = f"❌ **Amcache Analysis Failed: {result.get('module_id', 'Unknown')}**\n"
+                text += f"📁 **Path**: {result.get('path')}\n"
+                text += f"🚨 **Error**: {result.get('error')}\n"
+                formatted_results.append(text)
+        
+        summary_text = f"🔍 **Amcache Analysis Summary**\n"
+        summary_text += f"✅ Successful: {success_count}\n"
+        summary_text += f"❌ Failed: {len(results) - success_count}\n"
+        summary_text += f"📊 Total Modules: {len(results)}\n\n"
+        
+        final_text = summary_text + "\n" + "\n---\n\n".join(formatted_results)
+```
+
+[`handlers/amcache_forensics_handler.py:179-207`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L179-L207)
+
+[7] `analyze_registry`가 모듈마다 상태와 파일 이름을 싣는 부분이다: [`handlers/registry_forensics_handler.py:383-414`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L383-L414).
+
+[8] `analyze_registry`는 저장해 둔 결과가 있으면 `CACHED (already analyzed)`를, 예외가 나면 `EXCEPTION`을 상태로 싣는다.
+
+```python
+    if output_dir.exists() and any(output_dir.iterdir()):
+        logger.info(f"Using cached results: {output_dir}")
+        result = f"✅ Module: {module_config.get('name')}\n"
+        result += f"   Source: {path.name}\n"
+        result += f"   Status: CACHED (already analyzed)\n"
+        result += f"   Output: {output_dir}\n"
+        return result
+```
+
+[`handlers/registry_forensics_handler.py:334-340`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L334-L340)
+
+```python
+    except Exception as e:
+        logger.exception(f"KAPE execution failed: {e}")
+        result = f"❌ Module: {module_config.get('name')}\n"
+        result += f"   File: {path.name}\n"
+        result += f"   Status: EXCEPTION\n"
+        result += f"   Error: {str(e)}\n"
+        return result
+```
+
+[`handlers/registry_forensics_handler.py:416-422`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L416-L422)
+
+[9] `analyze_shellbags`가 성공한 항목만 싣고 실패는 수로만 세는 부분이다: [`handlers/shellbags_forensics_handler.py:192-219`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L192-L219).
+
+```python
+        output_text = "✅ SHELLBAGS ANALYSIS COMPLETE\n\n"
+        output_text += "=" * 70 + "\n"
+        output_text += "ANALYSIS SUMMARY\n"
+        output_text += "=" * 70 + "\n"
+        output_text += f"Paths Analyzed: {len(validated_paths)}\n"
+        output_text += f"Modules Executed: {len(modules)}\n"
+        output_text += f"Successful: {len(successful_results)}\n"
+        output_text += f"Failed: {len(failed_results)}\n"
+        output_text += f"Output Format: {output_format.upper()}\n"
+        output_text += "\n"
+        
+        output_text += "=" * 70 + "\n"
+        output_text += "PARSED DATA LOCATIONS\n"
+        output_text += "=" * 70 + "\n"
+        
+        for result in successful_results:
+            output_text += f"\n📁 Module: {result.get('module_name', 'Unknown')}\n"
+            output_text += f"   Path: {result.get('input_path', 'Unknown')}\n"
+            output_text += f"   Output: {result.get('output_directory', 'Unknown')}\n"
+            
+            csv_files = result.get('csv_files', [])
+            if csv_files:
+                output_text += f"   CSV Files: {len(csv_files)} file(s)\n"
+                for csv_file in csv_files[:3]:
+                    output_text += f"     - {Path(csv_file).name}\n"
+                if len(csv_files) > 3:
+                    output_text += f"     ... and {len(csv_files) - 3} more\n"
+        
+```
+
+[`handlers/shellbags_forensics_handler.py:192-219`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L192-L219)
+
+[10] `analyze_jump_lists`가 성공한 모듈만 싣는 부분이다: [`handlers/jump_lists_forensics_handler.py:244-261`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L244-L261).
+
+
+```python
+        if successful > 0:
+            text = f"✅ **Jump Lists Analysis Complete**\n\n"
+            text += f"📊 **Processing Summary**:\n"
+            text += f"  - Total operations: {total}\n"
+            text += f"  - Successful: {successful}\n"
+            text += f"  - Failed: {total - successful}\n"
+            text += f"  - Modules executed: {', '.join(modules)}\n\n"
+            
+            for result in all_results:
+                if result.get("success"):
+                    text += f"📄 **Module**: {result.get('module_name', result.get('module_id'))}\n"
+                    output_files = result.get("output_files", [])
+                    if output_files:
+                        text += f"  - Files generated: {len(output_files)}\n"
+                        text += f"  - Output directory: {result.get('output_directory', 'N/A')}\n"
+                    text += "\n"
+            
+            return [TextContent(type="text", text=text)]
+```
+
+[`handlers/jump_lists_forensics_handler.py:244-261`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L244-L261)
+
+[11] `analyze_lnk_files`는 성공한 결과만 골라 머리에 그 수를 적고 실패 수나 실패 항목은 모두 실패했을 때만 싣는다.
+
+```python
+        successful_results = [r for r in results if r['success']]
+        
+        if not successful_results:
+            return [TextContent(
+                type="text",
+                text="❌ LNK FILES ANALYSIS FAILED\n\n"
+                     "No results were generated. This may happen if:\n"
+                     "- No LNK files found in the specified paths\n"
+                     "- Path validation failed\n"
+                     "- KAPE execution failed\n\n"
+                     f"Errors: {errors if errors else 'None'}"
+            )]
+        
+        output_text = "=" * 80 + "\n"
+        output_text += "LNK FILES FORENSICS ANALYSIS COMPLETE\n"
+        output_text += "=" * 80 + "\n\n"
+        output_text += f"Tool: LNK Files Analysis (LECmd)\n"
+        output_text += f"Modules Executed: {len(modules)}\n"
+        output_text += f"Paths Processed: {len(validated_paths)}\n"
+        output_text += f"Results Generated: {len(successful_results)}\n\n"
+        
+```
+
+[`handlers/lnk_forensics_handler.py:211-231`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L211-L231)
+
+[12] `analyze_registry`는 설정에 없는 모듈과 파일에 맞지 않는 모듈을 로거에만 남기고 `execute_registry_module`이 `None`을 돌려준 항목을 결과 목록에 넣지 않는다: [`handlers/registry_forensics_handler.py:131-133`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L131-L133), [`handlers/registry_forensics_handler.py:145-161`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L145-L161), [`handlers/registry_forensics_handler.py:230-315`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L230-L315).
+
+[13] `analyze_registry`는 결과 목록을 실은 뒤 결과와 관계없이 완료 문구를 붙인다.
+
+```python
+        for result in results:
+            output_text += f"\n{result}\n"
+        
+        output_text += "\n" + "=" * 80 + "\n"
+        output_text += "Analysis completed successfully.\n"
+        output_text += "CSV files are ready for AI analysis or Timeline Explorer import.\n"
+```
+
+[`handlers/registry_forensics_handler.py:184-189`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L184-L189)

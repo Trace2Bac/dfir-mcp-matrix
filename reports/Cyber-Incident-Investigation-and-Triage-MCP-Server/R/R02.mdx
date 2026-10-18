@@ -1,0 +1,518 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.03
+- id: R02.04
+- id: R02.06
+- id: R02.07
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 `read_text_file`, `parse_xml_evidence`, `analyze_sqlite_database`, `analyze_macos_unified_logs`, `analyze_memory`, `decompress_mozilla_lz4`, `browse_files_and_folders`에 적용된다 [1][2][3][4][5][6][7].
+`read_text_file`은 읽을 줄 수를 `max_lines`로 제한하고 기본값은 100이다 [1].
+`parse_xml_evidence`는 돌려줄 요소 수를 `max_elements`로 제한하고 기본값은 50이다 [2].
+`parse_xml_evidence`는 `max_elements`와 관계없이 요소 10개를 싣고 멈춘다 [8].
+`analyze_sqlite_database`는 질의와 표 내보내기에서 CSV로 남길 행 수를 `max_rows`로 제한하고 기본값은 1,000이다 [3].
+질의 응답 본문에는 그 가운데 앞 20행만 싣는다 [9].
+`analyze_macos_unified_logs`는 `start_line`과 `end_line`으로 돌려줄 줄 범위를 정하고 기본값은 0과 100이다 [4].
+`analyze_memory`는 Volatility 표준 출력을 5,000자, 표준 오류를 500자에서 자른다 [5].
+`decompress_mozilla_lz4`는 JSON을 10,000자, JSON이 아닌 글을 5,000자, 열린 탭을 20개, 최상위 키를 10개까지 싣는다 [6].
+`browse_files_and_folders`는 WSL로 마운트한 APFS·LVM 이미지의 경로 목록을 500개까지 싣는다 [7].
+`read_text_file`과 `parse_xml_evidence`는 50 MB, `read_csv_data`는 100 MB, `decompress_mozilla_lz4`는 10 MB를 넘는 입력 파일을 읽지 않고 오류를 돌려준다 [10][11][12][13].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 `read_csv_data`, `analyze_sqlite_database`, `parse_xml_evidence`, `analyze_macos_fsevents`에 적용된다 [14][9][2][15].
+`read_csv_data`는 응답에 전체 행 수 `Total Data Rows`, 이번에 돌려준 행 수 `Retrieved`, 남은 행 수 `Remaining`을 구별해 싣는다 [14].
+`analyze_sqlite_database`의 질의는 CSV로 내보낸 행 수를 `Rows`로 적고 응답 본문에 실은 20행 밖의 수를 `... and N more rows`로 적는다 [9].
+질의 결과가 `max_rows`를 넘으면 `Results limited to {max_rows} rows`를 싣는다 [9].
+`parse_xml_evidence`는 찾은 요소 수와 보여 주는 요소 수를 구별해 싣는다 [2].
+`analyze_macos_fsevents`는 파싱한 사건 가운데 어느 범위를 보여 주는지 `Displayed … of N total`로 싣는다 [15].
+
+**한계.** `analyze_sqlite_database`의 질의는 결과가 `max_rows`를 넘으면 전체 행 수를 세지 않는다 [9].
+이때 `Full results in CSV`라고 적지만 내보낸 CSV에도 `max_rows`행만 들어 있다 [9].
+30행 표를 `max_rows` 25로 질의하자 `Rows: 25`, 본문 20행, `... and 5 more rows`가 실렸다 [16].
+`parse_xml_evidence`는 `Showing`과 `(showing N of M)`에 `max_elements`로 자른 수를 적지만 응답에는 요소 10개만 싣는다 [8].
+XPath 없이 부르면 `M`도 `max_elements`로 자른 수다 [2].
+자식 60개인 시험용 XML에서 `Showing: 50`과 `(showing 50 of 50)`이 적혔고 요소는 10개가 실렸다 [17].
+`analyze_macos_fsevents`는 파싱한 사건이 1만 건에 이르면 남은 파일을 읽지 않고 사건 번호가 큰 1만 건만 남긴다 [18].
+SleuthKit 경로는 FSEvents 파일을 앞 10개만 꺼낸다 [18].
+그래서 `of N total`의 `N`은 증거 전체의 사건 수보다 작을 수 있다 [15][18].
+
+### R02.03 페이지·커서 조회
+
+**구현.** 이 방식은 `read_csv_data`, `analyze_macos_unified_logs`, `analyze_macos_fsevents`에 적용된다 [14][4][15].
+`read_csv_data`는 `start_row`와 `end_row`로 행 범위를 받고 응답에 다음 범위를 `Next Chunk`로 안내한다 [14].
+`analyze_macos_unified_logs`는 `start_line`과 `end_line`으로, `analyze_macos_fsevents`는 `start_index`와 `end_index`로 다음 범위를 이어 읽게 한다 [4][15].
+두 도구 가운데 `analyze_macos_fsevents`만 응답에 다음 범위를 `To see next batch`로 안내한다 [15].
+
+**한계.** macOS 두 도구는 부를 때마다 증거를 처음부터 다시 파싱하고 `analyze_macos_unified_logs`는 `end_line`까지 파싱한다 [19][18].
+그래서 `analyze_macos_unified_logs` 응답의 `of N total`에서 `N`은 로그 전체 항목 수가 아니다 [4][19].
+
+### R02.04 파일·리소스로 전체 결과 조회
+
+**구현.** 이 방식은 `analyze_memory`, KAPE를 부르는 분석 도구, `analyze_event_logs`에 적용된다 [20][21][22].
+`analyze_memory`는 `save_output`이 참이면 Volatility 출력 전체를 사건 폴더의 파일에 저장하고 응답에 그 경로를 `Saved`로 적는다 [20].
+`output_format`이 `csv`이면 저장한 파일을 `read_csv_data`로 다시 읽을 수 있다 [20][23].
+레지스트리, Prefetch 같은 KAPE 분석 도구와 `analyze_event_logs`는 CSV를 사건 폴더에 저장하고 응답에 그 폴더나 파일 경로를 적는다 [21][22].
+모델은 `browse_files_and_folders`와 `read_csv_data`로 그 CSV를 다시 읽는다 [21].
+
+**한계.** `analyze_memory`가 저장한 파일은 준비한 이미지의 파일이 아니므로 `read_text_file`은 이 파일을 거부하고 `read_csv_data`는 확장자가 `.csv`가 아닌 파일을 읽지 않는다 [24].
+그래서 기본값 `json`이나 `pretty`로 저장한 전체 결과는 MCP 도구로 다시 읽을 수 없다 [24].
+`read_csv_data`는 100 MB를 넘는 CSV를 거부하므로 그보다 큰 결과는 끝까지 다시 읽을 수 없다 [12].
+`json`으로 저장한 시험용 출력에 `read_text_file`은 `ACCESS DENIED`를, `read_csv_data`는 확장자 경고를 돌려주었다 [23].
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 `parse_xml_evidence`에 적용된다 [25].
+`parse_xml_evidence`는 요소 하나의 글자 값을 200자에서 자르고 `...`를 붙인다 [25].
+
+### R02.07 건수 없는 잘림 표시
+
+**구현.** 이 방식은 `analyze_memory`와 `read_text_file`에 적용된다 [20][26].
+`analyze_memory`는 Volatility 출력이 5,000자를 넘으면 `... (output truncated, full results saved to file)`를 붙이고 전체 건수와 반환 건수는 적지 않는다 [20].
+`read_text_file`은 읽을 줄이 더 남으면 `WARNING: File continues...`를 붙이고 전체 줄 수와 반환 줄 수는 적지 않는다 [26].
+
+**한계.** `analyze_memory`는 `save_output`이 거짓이면 파일을 쓰지 않는데도 같은 문구를 붙인다 [20].
+`save_output`을 거짓으로 부르자 `Saved:` 줄 없이 이 문구가 실렸다 [23].
+
+### 근거
+
+[1] `read_text_file_handler`의 `max_lines` 기본값이다: [`handlers/file_handlers.py:902-902`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L902-L902).
+
+```python
+async def read_text_file_handler(file_path: str, max_lines: int = 100, encoding: str = "utf-8"):
+```
+
+[`handlers/file_handlers.py:902-902`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L902-L902)
+
+[2] `parse_xml_evidence_handler`의 `max_elements` 기본값과 전체·반환 수 표시다: [`handlers/file_handlers.py:1090-1090`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1090-L1090), [`handlers/file_handlers.py:1136-1147`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1136-L1147).
+
+```python
+async def parse_xml_evidence_handler(file_path: str, xpath_query: str = None, max_elements: int = 50, include_attributes: bool = True, encoding: str = "utf-8"):
+```
+
+[`handlers/file_handlers.py:1090-1090`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1090-L1090)
+
+```python
+            if xpath_query:
+                try:
+                    elements_to_process = root.findall(xpath_query)
+                    result_text += f"🎯 **XPath Query**: `{xpath_query}`\\n"
+                    result_text += f"📊 **Found Elements**: {len(elements_to_process)}\\n\\n"
+                except Exception as e:
+                    return [TextContent(type="text", text=f"ERROR: XPath error: `{xpath_query}` is invalid\\nError: {e}")]
+            else:
+                elements_to_process = list(root)[:max_elements]
+                result_text += f"📊 **Direct Children**: {len(list(root))} elements\\n"
+                result_text += f"📋 **Showing**: {len(elements_to_process)} elements\\n\\n"
+            
+```
+
+[`handlers/file_handlers.py:1136-1147`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1136-L1147)
+
+[3] `analyze_sqlite_database_handler`의 `max_rows` 기본값이다: [`handlers/database_handlers.py:20-20`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L20-L20).
+
+```python
+async def analyze_sqlite_database_handler(db_path: str, operation: str, table_name: str = None, sql_query: str = None, max_rows: int = 1000):
+```
+
+[`handlers/database_handlers.py:20-20`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L20-L20)
+
+[4] `analyze_macos_unified_logs_handler`의 줄 범위 인자와 전체·범위 표시다: [`handlers/macos_handlers.py:273-273`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L273-L273), [`handlers/macos_handlers.py:453-469`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L453-L469).
+
+```python
+    end_line: int = 100,
+```
+
+[`handlers/macos_handlers.py:273-273`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L273-L273)
+
+```python
+                    if start_line < 0:
+                        start_line = 0
+                    if end_line > total_lines:
+                        end_line = total_lines
+                    
+                    if start_line >= total_lines:
+                        result_text += f"\n⚠️  Start line {start_line} exceeds total lines ({total_lines})\n"
+                    else:
+                        result_text += f"{'=' * 70}\n"
+                        result_text += f"LOG ENTRIES (lines {start_line} to {end_line} of {total_lines} total):\n"
+                        result_text += f"{'=' * 70}\n\n"
+                        
+                        for line in lines[start_line:end_line]:
+                            result_text += line
+                        
+                        result_text += f"\n{'=' * 70}\n"
+                        result_text += f"📊 Displayed entries {start_line}-{end_line} of {total_lines} total\n"
+```
+
+[`handlers/macos_handlers.py:453-469`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L453-L469)
+
+[5] `analyze_memory_handler`는 Volatility 표준 출력을 5,000자, 표준 오류를 500자에서 자른다.
+
+```python
+        stdout = result["stdout"]
+        if len(stdout) > 5000:
+            response.append(stdout[:5000])
+            response.append(f"\n\n... (output truncated, full results saved to file)")
+        else:
+            response.append(stdout)
+        
+        if result["stderr"]:
+            response.append(f"\n\nInfo/Warnings:\n{result['stderr'][:500]}")
+```
+
+[`handlers/memory_forensics_handler.py:194-202`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L194-L202)
+
+[6] `decompress_mozilla_lz4`가 최상위 키, 탭, JSON 글, JSON이 아닌 글을 정한 수까지만 싣는 부분이다: [`handlers/file_handlers.py:1417-1487`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1417-L1487).
+
+[7] `browse_files_and_folders`는 WSL로 마운트한 이미지의 경로 목록을 500개까지 싣는다.
+
+```python
+                max_entries = 500
+                display_entries = sorted(found_entries, key=lambda x: (not x['is_dir'], x['path']))
+                for entry in display_entries[:max_entries]:
+                    type_marker = "[DIR]" if entry['is_dir'] else "[FILE]"
+                    size_val = entry['size']
+                    size_str = f" ({int(size_val)/1024:.1f} KB)" if not entry['is_dir'] and size_val.isdigit() else ""
+                    result_text += f"{entry['path']} {type_marker}{size_str}\n"
+                
+                if len(display_entries) > max_entries:
+                    result_text += f"\n... Truncated ({len(display_entries) - max_entries} more entries).\n"
+```
+
+[`handlers/file_handlers.py:272-281`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L272-L281)
+
+[8] `parse_xml_evidence`는 `max_elements`로 자른 목록을 다시 `max_elements`로 자르고 10번째 요소를 실은 뒤 멈춘다.
+
+```python
+            display_elements = elements_to_process[:max_elements]
+            
+            result_text += f"📋 **XML Elements** (showing {len(display_elements)} of {len(elements_to_process)}):\\n\\n"
+            
+            for i, elem in enumerate(display_elements):
+```
+
+[`handlers/file_handlers.py:1152-1156`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1152-L1156)
+
+```python
+                if i >= 9:
+                    if len(display_elements) > 10:
+                        result_text += f"... and {len(display_elements) - 10} more elements\\n\\n"
+                    break
+```
+
+[`handlers/file_handlers.py:1175-1178`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1175-L1178)
+
+[9] `analyze_sqlite_database`의 질의가 돌려준 행 수와 상한 표시다.
+
+```python
+                results = cursor.fetchmany(max_rows + 1)
+                columns = [description[0] for description in cursor.description]
+                
+                truncated = len(results) > max_rows
+                if truncated:
+                    results = results[:max_rows]
+                
+                result = f"QUERY RESULTS\nQuery: {sql_query[:100]}{'...' if len(sql_query) > 100 else ''}\nRows: {len(results)}\n"
+                
+                if results:
+                    csv_filename = f"query_{hash(sql_query) & 0x7FFFFFFF}.csv"
+                    csv_path = sqlite_dir / csv_filename
+                    
+                    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(columns)
+                        writer.writerows(results)
+                    
+                    result += f"CSV Export: {csv_path}\n\n"
+                    
+                    result += " | ".join(columns) + "\n"
+                    for row in results[:20]:
+                        result += " | ".join(str(val) for val in row) + "\n"
+                    
+                    if len(results) > 20:
+                        result += f"\n... and {len(results) - 20} more rows\n"
+                    
+                    if truncated:
+                        result += f"\nResults limited to {max_rows} rows. Full results in CSV.\n"
+```
+
+[`handlers/database_handlers.py:168-196`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L168-L196)
+
+[10] `read_text_file`이 50 MB를 넘으면 거부하는 부분이다.
+
+```python
+        if size > 50 * 1024 * 1024:
+            return [TextContent(type="text", text=f"ERROR: File too large ({size:,} bytes). Max size: 50MB")]
+```
+
+[`handlers/file_handlers.py:946-947`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L946-L947)
+
+[11] `parse_xml_evidence`가 50 MB를 넘으면 거부하는 부분이다.
+
+```python
+        if size > 50 * 1024 * 1024:
+            return [TextContent(type="text", text=f"ERROR: XML file too large ({size:,} bytes). Max size: 50MB")]
+```
+
+[`handlers/file_handlers.py:1120-1121`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1120-L1121)
+
+[12] `read_csv_data`가 100 MB를 넘으면 거부하는 부분이다.
+
+```python
+        if size > 100 * 1024 * 1024:
+            return [TextContent(type="text", text=f"ERROR: CSV file too large ({size:,} bytes). Max size: 100MB")]
+```
+
+[`handlers/file_handlers.py:1238-1239`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1238-L1239)
+
+[13] `decompress_mozilla_lz4`가 10 MB를 넘으면 거부하는 부분이다.
+
+```python
+        if len(file_data) > 10 * 1024 * 1024:
+            return [TextContent(type="text", text=f"ERROR: File too large for LZ4 decompression ({len(file_data):,} bytes). Limit is 10MB.")]
+```
+
+[`handlers/file_handlers.py:1372-1373`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1372-L1373)
+
+[14] `read_csv_data_handler`의 전체·반환·남은 수 표시와 다음 범위 안내다: [`handlers/file_handlers.py:1251-1301`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1251-L1301).
+
+[15] `analyze_macos_fsevents_handler`의 전체·범위 표시와 다음 범위 안내다: [`handlers/macos_handlers.py:880-894`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L880-L894), [`handlers/macos_handlers.py:1025-1036`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L1025-L1036).
+
+```python
+                                        
+                                        result_text += f"{'=' * 70}\n"
+                                        result_text += f"📊 Displayed events {start_index}-{end_index} of {total_filtered} total\n"
+                                        
+                                        if end_index < total_filtered:
+                                            remaining = total_filtered - end_index
+                                            result_text += f"💡 {remaining} additional events available\n"
+                                            result_text += f"💡 To see next batch: start_index={end_index}, end_index={min(end_index + 100, total_filtered)}\n"
+                                        else:
+                                            result_text += f"✅ Reached end of events\n"
+                                        
+                                        if start_index > 0:
+                                            result_text += f"💡 To see previous batch: start_index={max(0, start_index - 100)}, end_index={start_index}\n"
+                                else:
+                                    result_text += "⚠️  No FSEvents parsed\n"
+```
+
+[`handlers/macos_handlers.py:880-894`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L880-L894)
+
+```python
+                                result_text += f"{'=' * 70}\n"
+                                result_text += f"📊 Displayed events {start_index}-{end_index} of {total_filtered} total\n"
+                                
+                                if end_index < total_filtered:
+                                    remaining = total_filtered - end_index
+                                    result_text += f"💡 {remaining} additional events available\n"
+                                    result_text += f"💡 To see next batch: start_index={end_index}, end_index={min(end_index + 100, total_filtered)}\n"
+                                else:
+                                    result_text += f"✅ Reached end of events\n"
+                                
+                                if start_index > 0:
+                                    result_text += f"💡 To see previous batch: start_index={max(0, start_index - 100)}, end_index={start_index}\n"
+```
+
+[`handlers/macos_handlers.py:1025-1036`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L1025-L1036)
+
+[16] (실행 확인) 작업 사본에서 30행 SQLite 표에 `max_rows` 25로 표 전체를 고르는 질의를 보냈다.
+
+[17] (실행 확인) 작업 사본에서 자식 요소 60개인 시험용 XML로 `parse_xml_evidence`를 기본 인자로 불렀다.
+
+[18] `parse_fsevents_directory`는 1만 건에 이르면 파일 읽기를 멈추고 사건 번호가 큰 1만 건만 남기며 `analyze_macos_fsevents`는 부를 때마다 이 함수를 부르고 SleuthKit 경로에서는 파일을 앞 10개만 꺼낸다: [`handlers/macos_handlers.py:840`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L840), [`handlers/macos_handlers.py:943`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L943), [`handlers/macos_handlers.py:971`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L971), [`handlers/macos_handlers.py:1052`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L1052).
+
+```python
+        for fsevent_file in sorted(fsevent_files):
+            logger.info(f"Parsing FSEvents file: {fsevent_file.name}")
+            events = parse_fsevent_file(fsevent_file)
+            all_events.extend(events)
+            
+            if len(all_events) >= max_events:
+                break
+        
+        all_events.sort(key=lambda x: x['event_id'])
+        
+        if len(all_events) > max_events:
+            all_events = all_events[-max_events:]
+```
+
+[`utils/fsevents_parser.py:207-218`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/fsevents_parser.py#L207-L218)
+
+[19] `analyze_macos_unified_logs`는 부를 때마다 tracev3 파일을 처음부터 읽고 `end_line`개 항목을 쓰면 파싱을 멈춘다.
+
+```python
+                effective_limit = max_logs or 0
+                if end_line and end_line > 0:
+                    effective_limit = end_line if effective_limit == 0 else min(effective_limit, end_line)
+
+                class _StopParsing(Exception):
+                    pass
+
+                class _LimitedWriter:
+                    """Forwards to the real writer, then stops after `limit` entries."""
+                    def __init__(self, inner, limit):
+                        self._inner = inner
+                        self._limit = limit
+                        self.count = 0
+                    def WriteLogEntry(self, log):
+                        self._inner.WriteLogEntry(log)
+                        self.count += 1
+                        if self._limit and self.count >= self._limit:
+                            raise _StopParsing()
+                    def WriteLogEntries(self, logs):
+                        for log in logs:
+                            self.WriteLogEntry(log)
+
+                writer_for_parse = _LimitedWriter(output_writer, effective_limit) if effective_limit else output_writer
+                try:
+                    unified_log_reader.ReadTraceV3Files(readable_tracev3, writer_for_parse)
+                except _StopParsing:
+                    logger.info(f"Reached parse limit ({effective_limit} entries); stopping early (fast/paged mode)")
+```
+
+[`handlers/macos_handlers.py:393-419`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L393-L419)
+
+[20] `analyze_memory_handler`가 전체를 파일로 저장하고 응답을 5,000자에서 자르며 잘림 표시를 붙이는 부분이다.
+
+```python
+        output_file = None
+        if save_output and result["stdout"]:
+            output_dir = _get_memory_output_directory(memory_file, plugin)
+            format_ext = "json" if output_format == "json" else "csv" if output_format == "csv" else "txt"
+            output_file = _save_output_to_file(output_dir, plugin, result["stdout"], format_ext)
+        
+        response = []
+        response.append(f"Memory Analysis Complete\n")
+        response.append(f"{'='*60}\n")
+        response.append(f"Memory File: {Path(memory_file).name}\n")
+        response.append(f"Plugin: {plugin}\n")
+        response.append(f"Format: {output_format}\n")
+        
+        if output_file:
+            response.append(f"Saved: {output_file}\n")
+        
+        response.append(f"\n{'='*60}\n")
+        response.append("RESULTS:\n")
+        response.append(f"{'='*60}\n\n")
+        
+        stdout = result["stdout"]
+        if len(stdout) > 5000:
+            response.append(stdout[:5000])
+            response.append(f"\n\n... (output truncated, full results saved to file)")
+```
+
+[`handlers/memory_forensics_handler.py:174-197`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L174-L197)
+
+[21] KAPE 분석 도구가 CSV를 사건 폴더에 저장하고 다시 읽을 길을 안내하는 부분이다: [`handlers/registry_forensics_handler.py:392-406`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L392-L406).
+
+```python
+            output_files = list(output_dir.rglob("*"))
+            file_count = len([f for f in output_files if f.is_file()])
+            
+            result = f"✅ Module: {module_config.get('name')}\n"
+            result += f"   File: {path.name}\n"
+            result += f"   Status: SUCCESS\n"
+            result += f"   Execution Time: {execution_time:.2f}s\n"
+            result += f"   Output Files: {file_count}\n"
+            result += f"   📁 Output Directory: {output_dir}\n"
+            result += f"   \n"
+            result += f"   💡 Next Steps:\n"
+            result += f"      1. Use 'browse_files_and_folders' tool with the Output Directory path above\n"
+            result += f"      2. Navigate into subdirectories to find CSV files\n"
+            result += f"      3. Use 'read_csv_data' tool to read specific CSV files\n"
+            
+```
+
+[`handlers/registry_forensics_handler.py:392-406`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L392-L406)
+
+[22] `analyze_event_logs`의 응답은 만든 CSV 파일의 경로를 싣는다.
+
+```python
+            text += f"  - Output files generated: {len(result.get('output_files', []))}\n\n"
+            
+            if result.get("output_files"):
+                text += f"📄 **Generated Files**:\n"
+                for file_path in result["output_files"]:
+                    text += f"  - {file_path}\n"
+```
+
+[`handlers/event_logs_forensics_handler.py:161-166`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L161-L166)
+
+[23] (실행 확인) 작업 사본에서 400행을 출력하는 시험용 `vol.py`로 `analyze_memory`를 `json`·`csv` 형식과 `save_output` 거짓으로 부르고 저장한 파일을 `read_text_file`·`read_csv_data`로 다시 읽었다.
+`csv`로 저장한 파일은 `read_csv_data`로 읽혔고 `read_text_file`은 두 형식의 파일을 모두 `ACCESS DENIED`로 거부했다.
+
+[24] `read_text_file`은 준비한 이미지의 파일만 읽고 `read_csv_data`는 확장자가 `.csv`가 아닌 파일을 읽지 않으며 `analyze_memory`의 `output_format` 기본값은 `json`이다.
+
+```python
+        try:
+            prepared_info = validate_file_access(file_path, PREPARED_IMAGES)
+        except SecurityError as e:
+            logger.warning(f"File access denied: {file_path}")
+            return [TextContent(
+                type="text", 
+                text=f"🔒 ACCESS DENIED\n\n{str(e)}"
+            )]
+```
+
+[`handlers/file_handlers.py:906-913`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L906-L913)
+
+```python
+        if target_file.suffix.lower() != '.csv':
+            return [TextContent(type="text", text=f"WARNING: File doesn't have .csv extension: {target_file.name}")]
+```
+
+[`handlers/file_handlers.py:1228-1229`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1228-L1229)
+
+```python
+                        "output_format": {
+                            "type": "string",
+                            "description": "Output format: json, csv, or pretty",
+                            "default": "json"
+                        },
+```
+
+[`server.py:286-290`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L286-L290)
+
+[25] `parse_xml_evidence`가 요소 글자 값을 200자에서 자르는 부분이다.
+
+```python
+                if elem.text and elem.text.strip():
+                    text_content = elem.text.strip()[:200]
+                    if len(elem.text.strip()) > 200:
+                        text_content += "..."
+                    result_text += f"  📝 **Text**: {text_content}\\n"
+```
+
+[`handlers/file_handlers.py:1162-1166`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L1162-L1166)
+
+[26] `read_text_file`이 남은 줄을 건수 없이 알리는 부분이다.
+
+```python
+                more_lines = False
+                try:
+                    next(f)
+                    more_lines = True
+                except StopIteration:
+                    more_lines = False
+                
+                if content_lines:
+                    result_text += f"FILE CONTENTS (first {lines_read} lines):\\n"
+                    result_text += f"```\\n"
+                    result_text += '\\n'.join(content_lines)
+                    result_text += f"\\n```\\n"
+                    
+                    if more_lines:
+                        result_text += f"\\nWARNING: File continues... Use higher max_lines to read more\\n"
+                    else:
+                        result_text += f"\\nSUCCESS: Complete file read ({lines_read} lines total)\\n"
+```
+
+[`handlers/file_handlers.py:960-976`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L960-L976)

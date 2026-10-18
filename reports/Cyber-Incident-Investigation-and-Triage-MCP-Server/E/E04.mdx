@@ -1,0 +1,730 @@
+---
+cell: E04
+details:
+- id: E04.02
+- id: E04.03
+- id: E04.04
+---
+
+# E04 분석 입력 준비
+
+### E04.02 선택 추출
+
+**구현.** 이 방식은 SleuthKit과 WSL로 준비한 이미지의 파일을 읽는 공통 경로, 레지스트리 폴더 추출, Windows 아티팩트 도구와 FSEvents 도구의 파일 고르기에 적용된다 [1][2][3][4].
+공통 경로 `get_readable_file_path`는 `/<이미지 ID>/…` 경로를 받으면 SleuthKit `fls`로 경로를 한 조각씩 따라가 inode를 찾고 `icat`으로 그 파일 하나를 꺼낸다 [1][5].
+꺼낸 파일은 사건 폴더의 `extracted_files/<경로 MD5 앞 8글자>/inode_<번호>_<이름>`에 두고 같은 경로를 다시 읽으면 그 파일을 돌려준다 [1][6].
+파일 읽기 도구, `identify_file_type`, `analyze_sqlite_database`, macOS 도구가 이 경로로 받은 파일을 읽는다 [1][7].
+`analyze_sqlite_database`는 꺼낸 파일을 사건 폴더의 `extracted_files`에 한 번 더 복사해 그 사본을 연다 [7].
+WSL로 마운트한 이미지는 마운트 아래 파일을 `cp`나 `cat`으로 사건 폴더의 `extracted`에 꺼낸다 [8].
+`analyze_registry`는 요청 경로의 폴더를 `fls -r`로 훑어 파일을 모두 `extract/<이미지 ID>/<내부 경로>`에 꺼내고 그 폴더를 KAPE에 넘긴다 [2].
+`kape_parse_artifact`는 요청한 파일 하나를 `kape_extract_<inode>` 폴더에 꺼내 그 폴더를 KAPE에 넘긴다 [9].
+`analyze_prefetch`·`analyze_lnk_files`·`analyze_shellbags`·`analyze_jump_lists`는 폴더에서 이름과 확장자가 맞는 파일만 임시 폴더에 꺼내 KAPE에 넘긴다 [3].
+`analyze_macos_fsevents`는 이름이 16글자인 FSEvents 파일을 골라 앞의 10개를 임시 폴더에 꺼내 파싱한다 [4].
+시험 이미지에서 `read_text_file`은 `inode_103_notes.txt`를 꺼내 읽었고 `analyze_registry`는 `Windows/System32/config` 폴더를 꺼내 KAPE에 넘겼다 [10][11].
+
+꺼내는 경로는 부속 자료를 찾아 함께 옮기지 않는다.
+SQLite DB는 본 파일 하나만 꺼내므로 `-wal`에만 있는 행은 조회에 나오지 않는다 [1][7].
+`-wal`에 두 번째 행이 있는 시험 DB를 조회하자 `moz_places`는 1행으로 나왔다 [10].
+`analyze_shellbags`는 `NTUSER.DAT`·`USRCLASS.DAT`만 꺼내고 같은 폴더의 트랜잭션 로그는 꺼내지 않는다 [3].
+`analyze_registry`의 폴더 추출은 경로 아래 파일을 모두 꺼내므로 `SYSTEM.LOG1` 같은 로그도 함께 꺼낸다 [2][11].
+AmcacheParser와 AppCompatCacheParser는 하이브와 같은 폴더의 `.LOG?` 파일을 스스로 찾아 적용한다 [12].
+SleuthKit 4.14.0은 EWF 이미지의 첫 조각을 받으면 libewf의 glob으로 나머지 조각을 스스로 찾는다 [13].
+이미지 전체를 작업 위치로 복사하거나 파일시스템 전체를 꺼내는 경로는 없다.
+
+**한계.** `analyze_registry`는 `/<이미지 ID>/…` 꼴의 경로를 받으면 접근 폴더 경로의 길이로 앞부분을 잘라 내부 경로를 만들고 결과가 비면 `Windows\System32\config`를 쓴다 [2].
+그래서 이 꼴의 경로가 접근 폴더 경로보다 짧으면 무엇을 주어도 `Windows/System32/config` 폴더를 꺼낸다 [2].
+`/<이미지 ID>/Users/alice`를 주자 `extract` 아래에는 `Windows/System32/config`가 꺼내졌다 [11].
+더 길면 경로 끝의 남은 글자가 내부 경로가 된다 [2].
+접근 폴더 경로보다 두 글자 긴 경로를 주자 내부 경로가 `/x`가 되어 추출이 실패했고 응답은 결과가 없다는 문장만 적었다 [14].
+`fls -r`은 하위 폴더 항목 앞에 `+`를 붙여 적는데 추출 함수는 그 줄에서 inode를 읽지 못해 하위 폴더 안의 파일을 꺼내지 않는다 [2][15].
+`RegBack/SAM`이 있는 시험 이미지에서 `RegBack` 폴더는 비어 있었고 추출 기록은 `file_count` 2, `failed_count` 0이었다 [11].
+`analyze_prefetch`는 접근 폴더 아래 경로로 폴더를 받으면 그 폴더 대신 파티션 루트의 목록에서 `.pf`를 찾아 0개를 꺼낸다 [16][11].
+`analyze_event_logs`는 SleuthKit으로 준비한 이미지의 경로를 꺼내지 않고 디스크에 없는 경로로 보고 뺀다 [17][11].
+WSL 경로는 꺼낸 파일을 파일 이름만으로 `extracted/<이름>`에 두고 그 이름의 파일이 이미 있으면 다른 폴더의 같은 이름 파일이어도 그 파일을 돌려준다 [8].
+이 경로는 코드로만 확인했다.
+Arsenal로 마운트한 이미지의 DB는 원래 이름으로 사건 폴더에 복사하고 같은 이름과 크기의 사본이 이미 있으면 다른 폴더의 파일이어도 그 사본을 연다 [7][18].
+이 경로도 코드로만 확인했다.
+`kape_parse_artifact`도 받은 경로에서 접근 폴더 경로의 글자 수만큼 앞부분을 잘라 내부 경로를 만든다 [19].
+그래서 접근 폴더 경로보다 짧은 `/<이미지 ID>/…` 꼴의 경로는 루트 폴더로 풀려 `icat`이 inode 없이 실행되고 파일을 꺼내지 못한다 [19][9].
+시험 이미지의 `SYSTEM`을 이 꼴로 주자 `kape_parse_artifact`는 `Failed to extract file from forensic image`를 돌려주었다 [20].
+
+### E04.03 전체·부분 마운트
+
+**구현.** 이 방식은 `prepare_disk_image`의 네 준비 방식에 적용된다 [21].
+Arsenal Image Mounter는 이미지 전체를 Windows 드라이브로 마운트하고 새로 생긴 드라이브 가운데 읽을 수 있는 첫 드라이브를 접근 위치로 정한다 [22].
+WSL LVM 경로는 이미지를 loop 장치로 붙이고 논리 볼륨과 파티션 가운데 LVM을 앞세워 크기가 가장 큰 것 하나를 마운트한다 [23].
+WSL APFS 경로는 apfs-fuse로 이미지의 컨테이너를 마운트한다 [24].
+SleuthKit 경로는 서버가 고른 파티션의 시작 위치를 `fls`·`icat`의 `-o`로 넘겨 그 파티션만 읽는다 [25][26].
+파티션은 설명에 NTFS·FAT·Linux가 있거나 파일시스템을 알아본 것 가운데 가장 큰 것을 고른다 [26].
+시험 이미지에서 SleuthKit 도구는 모두 `-o 2048`로 실행되었다 [10].
+이 마운트 경로들은 실행 확인에서 실행하지 않았다.
+
+**한계.** SleuthKit 경로는 파티션 하나만 등록하고 다른 파티션을 고르는 인자를 받지 않는다 [21][25].
+파티션 표 파서는 `DOS`가 들어 있는 줄과 20000섹터보다 작은 파티션을 후보에서 뺀다 [27].
+Arsenal 경로는 드라이브가 여럿 생겨도 첫 드라이브만 접근 위치로 등록하고 경로 대조는 그 접근 위치 아래만 이미지로 본다 [22][28].
+WSL LVM 경로는 후보 하나만 마운트하고 나머지 논리 볼륨과 파티션은 마운트하지 않는다 [23].
+LVM 마운트가 실패하면 SleuthKit이 읽을 수 있는 첫 파티션으로 바꾸고 이 전환은 서버 로그에만 남는다 [29].
+
+### E04.04 추출·생략 범위 기록
+
+**구현.** 이 방식은 Prefetch·점프 목록·FSEvents 도구의 응답, 이미지 준비 응답, 레지스트리 폴더 추출 기록, 경로 대응표에 적용된다 [30][4][31][6][32].
+`analyze_prefetch`와 `analyze_jump_lists`는 폴더에서 꺼낸 파일 수를 응답에 싣는다 [30].
+`analyze_macos_fsevents`는 찾은 파일 수와 꺼낸 파일 수를 따로 싣는다 [4].
+`prepare_disk_image`는 찾은 파티션 수와 쓰는 파티션 번호를 싣고 Arsenal 경로에서는 마운트한 드라이브와 읽지 못한 드라이브를 싣는다 [31].
+`ExtractionManager`는 꺼낸 폴더마다 위치, 시각, 꺼낸 파일 수 `file_count`, 실패한 수 `failed_count`, 파티션 위치를 `extraction_registry.json`에 남긴다 [6].
+`PathMapper`는 꺼낸 파일마다 이미지 안 경로, 꺼낸 경로, inode, 크기를 `path_mapping.json`에 남긴다 [32].
+
+**한계.** 하위 폴더 안이라 꺼내지 않은 파일은 `file_count`에도 `failed_count`에도 들어가지 않는다 [2][11].
+`file_count`는 `icat`이 실패한 파일도 세고 `failed_count`는 예외가 난 파일만 센다 [6][33].
+`icat`이 실패하는 항목을 둔 시험 폴더에서 기록은 `file_count` 3, `failed_count` 0이었고 그 파일은 0바이트로 남았다 [34].
+`analyze_registry`의 응답에는 꺼낸 파일 수와 위치가 없다 [35].
+`analyze_macos_fsevents`의 응답은 10개만 꺼낸다는 상한을 적지 않는다 [4].
+`analyze_lnk_files`와 `analyze_shellbags`는 꺼낸 파일 수를 서버 로그에만 남긴다 [3].
+`analyze_prefetch`는 꺼내지 못한 파일을 서버 로그에만 남기고 응답에는 꺼낸 수만 싣는다 [30].
+
+### 근거
+
+[1] `get_readable_file_path`와 `extract_sleuthkit_file`이 이미지 안 경로의 파일 하나를 꺼낸다.
+[`utils/forensic_file_access.py:128-202`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L128-L202), [`utils/forensic_file_access.py:399-427`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L399-L427)
+
+```python
+    if 'sleuthkit' in access_type or 'ondemand' in access_type:
+        linux_path = normalize_path_for_image(file_path, metadata)
+        logger.debug(f"Normalized path: {file_path} -> {linux_path}")
+        
+        access_point = metadata.get('access_point')
+        if access_point:
+            wsl_path = Path(access_point) / linux_path.lstrip('/')
+            logger.debug(f"Built WSL path: {wsl_path}")
+            
+            if wsl_path.exists():
+                if wsl_path.is_dir():
+                    logger.info(f"Directory access via WSL: {wsl_path}")
+                    return str(wsl_path)
+                logger.info(f"File exists in WSL mount, using direct access: {wsl_path}")
+                return str(wsl_path)
+        
+        # For files that don't exist in WSL or need extraction, extract them
+        logger.info(f"SleuthKit mount - extracting file: {file_path}")
+        success, windows_path, error = extract_sleuthkit_file(linux_path, metadata)
+        
+        if not success:
+            raise FileNotFoundError(
+                f"Failed to extract file from forensic image\n"
+                f"Linux path: {linux_path}\n"
+                f"Error: {error}"
+            )
+        
+        logger.info(f"File extracted successfully: {windows_path}")
+        return windows_path
+```
+
+[`utils/forensic_file_access.py:399-427`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L399-L427)
+
+[2] `analyze_registry`가 내부 경로를 만들고 `ExtractionManager.extract_folder`가 `fls -r` 목록의 파일을 꺼낸다.
+[`handlers/registry_forensics_handler.py:283-307`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L283-L307), [`utils/extraction_manager.py:177-298`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L177-L298), [`mounters/sleuthkit_mounter.py:640-668`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L640-L668)
+
+[3] Windows 아티팩트 도구가 이름과 확장자로 고른 파일을 임시 폴더에 꺼낸다.
+[`handlers/prefetch_forensics_handler.py:219-263`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L219-L263), [`handlers/lnk_forensics_handler.py:343-409`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L343-L409), [`handlers/shellbags_forensics_handler.py:314-380`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shellbags_forensics_handler.py#L314-L380), [`handlers/jump_lists_forensics_handler.py:352-395`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L352-L395)
+
+[4] `analyze_macos_fsevents`가 16글자 이름의 파일 앞 10개를 꺼내고 수를 적는다.
+[`handlers/macos_handlers.py:807-835`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L807-L835), [`handlers/macos_handlers.py:925-967`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L925-L967)
+
+```python
+                find_cmd = f'find "{linux_path}" -type f -regextype posix-extended -regex ".*/[0-9a-fA-F]{{16}}"'
+                logger.info(f"Finding FSEvents files in WSL: {find_cmd}")
+                
+                list_result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: mounter._run_wsl(find_cmd)
+                )
+                
+                if list_result.returncode == 0:
+                    found_paths = list_result.stdout.strip().split('\n')
+                    fsevent_files = [os.path.basename(p) for p in found_paths if p.strip()]
+                    
+                    result_text += f"Found {len(fsevent_files)} FSEvents files\n\n"
+                    
+                    if fsevent_files:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            temp_path = Path(temp_dir)
+                            def extract_batch():
+                                count = 0
+                                for file_name in fsevent_files[:10]:
+                                    file_path = f"{rel_path}/{file_name}".replace('//', '/')
+                                    output_file = temp_path / file_name
+                                    extract_result = mounter.extract_file(image_path, file_path, str(output_file))
+                                    if extract_result.get('success'):
+                                        count += 1
+                                return count
+
+                            extracted_count = await asyncio.get_event_loop().run_in_executor(None, extract_batch)
+                            
+                            result_text += f"Extracted {extracted_count} FSEvents files for parsing\n\n"
+```
+
+[`handlers/macos_handlers.py:807-835`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L807-L835)
+
+[5] `resolve_path_to_inode`는 경로 조각마다 `fls`로 폴더를 읽어 이름을 찾는다.
+[`mounters/sleuthkit_mounter.py:736-781`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L736-L781)
+
+[6] 꺼낸 폴더의 기록.
+
+```python
+        extraction_info = {
+            'extracted': True,
+            'extract_location': str(extraction_path),
+            'extracted_at': datetime.now().isoformat(),
+            'file_count': extracted_count,
+            'failed_count': failed_count,
+            'internal_path': internal_path,
+            'partition_offset': partition_offset
+        }
+        
+        if image_id not in self.registry:
+            self.registry[image_id] = {
+                'image_path': image_path,
+                'image_id': image_id,
+                'extracted_paths': {}
+            }
+        
+        normalized_path = internal_path.replace('\\', '/').strip('/')
+        self.registry[image_id]['extracted_paths'][normalized_path] = extraction_info
+        self._save_registry()
+```
+
+[`utils/extraction_manager.py:277-296`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L277-L296)
+
+[7] `analyze_sqlite_database`는 꺼낸 파일을 사건 폴더로 복사해 그 사본을 연다.
+
+```python
+        case_dir = Path(BASE_OUTPUT_DIR) / "cases" / image_id / "extracted_files"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        
+        original_name = source_path.name
+        dest_path = case_dir / original_name
+        
+        if dest_path.exists():
+            if dest_path.stat().st_size == source_path.stat().st_size:
+                logger.info(f"[EXTRACT] File already extracted, reusing: {dest_path}")
+                return str(dest_path.resolve())
+            else:
+                counter = 1
+                stem = source_path.stem
+                suffix = source_path.suffix
+                while dest_path.exists():
+                    dest_path = case_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+        
+        logger.info(f"[EXTRACT] Copying to: {dest_path}")
+        shutil.copy2(readable_path, dest_path)
+```
+
+[`utils/forensic_file_access.py:528-547`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L528-L547)
+
+[`handlers/database_handlers.py:36-49`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L36-L49)
+
+[8] WSL 경로는 파일 이름으로 `extracted/<이름>`을 정하고 있으면 그 파일을 돌려준다.
+
+```python
+    if 'wsl_apfs' in access_type:
+        logger.debug(f"WSL APFS mount detected - extracting file: {file_path}")
+        linux_path = normalize_path_for_image(file_path, metadata)
+        
+        image_path = metadata.get('image_path')
+        unique_id = metadata.get('unique_image_id', '')
+        case_dir = metadata.get('case_dir') or str(BASE_OUTPUT_DIR / "cases" / unique_id)
+        
+        extract_dir = Path(case_dir) / "extracted"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        
+        file_name = Path(linux_path).name
+        output_path = extract_dir / file_name
+        
+        if output_path.exists():
+            logger.info(f"File already extracted (cached): {output_path}")
+            return str(output_path)
+```
+
+[`utils/forensic_file_access.py:264-280`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L264-L280)
+
+[`utils/forensic_file_access.py:333-349`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L333-L349), [`mounters/wsl_apfs_mounter.py:174-252`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L174-L252)
+
+[9] `kape_parse_artifact`가 파일 하나를 꺼내 그 폴더를 KAPE에 넘긴다.
+
+```python
+                resolve_result = mounter.resolve_path_to_inode(sleuthkit_path)
+                if not resolve_result.get('success'):
+                    return [TextContent(type="text", text=f"ERROR: Could not locate file in forensic image: {sleuthkit_path}")]
+                
+                file_inode = resolve_result.get('inode')
+                
+                temp_dir = Path(CONFIG['forensics']['temp_directory']) / f"kape_extract_{file_inode}"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                
+                extracted_file = temp_dir / artifact_file.name
+                extract_result = mounter.extract_file(file_inode, str(extracted_file))
+                
+                if not extract_result.get('success'):
+                    return [TextContent(type="text", text=f"ERROR: Failed to extract file from forensic image: {extract_result.get('error')}")]
+                
+                artifact_file = extracted_file
+                logger.info(f"Extracted forensic file to: {artifact_file}")
+```
+
+[`handlers/kape_handlers.py:206-222`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L206-L222)
+
+[10] (실행 확인) 시험용 SleuthKit 실행 파일로 준비한 이미지에서 `read_text_file`과 `analyze_sqlite_database`를 불러 꺼낸 파일, 조회 결과, 시험용 실행 파일이 받은 인자를 확인했다.
+
+[11] (실행 확인) 재시작을 흉내 낸 프로세스에서 `analyze_registry`, `analyze_prefetch`, `analyze_event_logs`에 이미지 경로를 주어 꺼낸 폴더, 추출 기록, 응답을 확인했다.
+
+[12] AmcacheParser와 AppCompatCacheParser가 하이브 옆의 로그 파일을 찾는다.
+[AmcacheParser `Amcache/AmcacheNew.cs:70-106`](https://github.com/EricZimmerman/AmcacheParser/blob/2904455115443035934fbfdeb900162c6afba269/Amcache/AmcacheNew.cs#L70-L106), [AppCompatCacheParser `AppCompatCache/AppCompatCache.cs:171`](https://github.com/EricZimmerman/AppCompatCacheParser/blob/0cf059f40c2f7b31acdccb142461945402217398/AppCompatCache/AppCompatCache.cs#L171), [AppCompatCacheParser `AppCompatCache/AppCompatCache.cs:277-281`](https://github.com/EricZimmerman/AppCompatCacheParser/blob/0cf059f40c2f7b31acdccb142461945402217398/AppCompatCache/AppCompatCache.cs#L277-L281)
+
+[13] SleuthKit 4.14.0의 EWF 열기는 libewf glob으로 조각을 찾는다.
+[`tsk/img/ewf.cpp:231-265`](https://github.com/sleuthkit/sleuthkit/blob/c6efd66293546b9c95637be703c7c7823e950629/tsk/img/ewf.cpp#L231-L265)
+
+[14] (실행 확인) 접근 폴더 경로보다 두 글자 긴 `/<이미지 ID>/…` 경로를 `analyze_registry`에 주어 추출 기록과 응답을 확인했다.
+
+[15] SleuthKit 4.14.0의 `fls`는 하위 항목 앞에 깊이만큼 `+`를 적는다.
+[`tsk/fs/fls_lib.c:55-67`](https://github.com/sleuthkit/sleuthkit/blob/c6efd66293546b9c95637be703c7c7823e950629/tsk/fs/fls_lib.c#L55-L67)
+
+[16] `analyze_prefetch`는 폴더 inode를 `list_files`에 넘기지 않는다.
+
+```python
+            resolve_result = mounter.resolve_path_to_inode(sleuthkit_path)
+            if not resolve_result.get('success'):
+                return f"\n   ❌ ERROR: Could not locate in image: {sleuthkit_path}"
+            
+            target_inode = resolve_result.get('inode')
+            
+            temp_dir = Path(CONFIG['forensics']['temp_directory']) / f"prefetch_extract_{target_inode}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            if path.is_dir() or '/' in sleuthkit_path.rstrip('/'):
+                result.append(f"   📦 Extracting .pf files from folder: {path.name}")
+                
+                files_result = mounter.list_files(sleuthkit_path, recursive=False)
+                if not files_result.get('success'):
+                    return f"\n   ❌ ERROR: Could not list files in folder"
+                
+                files_list = files_result.get('files', [])
+                extracted_count = 0
+                
+                for file_entry in files_list:
+                    file_name = file_entry.get('name', '')
+                    file_inode = file_entry.get('inode')
+                    
+                    if file_entry.get('type') == 'd' or not file_name.lower().endswith('.pf'):
+```
+
+[`handlers/prefetch_forensics_handler.py:213-236`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L213-L236)
+
+[17] `analyze_event_logs`는 디스크에 없는 경로를 뺀다.
+
+```python
+            try:
+                prepared_info = validate_file_access(path_str, PREPARED_IMAGES)
+                logger.info("✓ Path is in forensic image (Arsenal mounted)")
+                
+                if not first_prepared_info:
+                    first_prepared_info = prepared_info
+                
+                if os.path.exists(path_str):
+                    processed_paths.append(path_str)
+                    logger.info(f"✓ Added Arsenal path: {path_str}")
+                else:
+                    logger.warning(f"⚠️ Arsenal path not accessible: {path_str}")
+                continue
+            except SecurityError:
+                forensic_dirs = [
+                    str(Path(CONFIG['forensics']['output_directory'])),
+                    str(Path(CONFIG['forensics']['temp_directory']))
+                ]
+                
+                in_forensic_dirs = any(path_str.startswith(forensic_dir) for forensic_dir in forensic_dirs)
+                
+                if in_forensic_dirs:
+                    if os.path.exists(path_str):
+                        logger.info("✓ Path exists in forensic output directory")
+                        processed_paths.append(path_str)
+                    else:
+                        logger.warning(f"⚠️ Path not found: {path_str}")
+                else:
+                    logger.warning(f"⚠️ Path not in prepared images or forensic output: {path_str}")
+                continue
+```
+
+[`handlers/event_logs_forensics_handler.py:74-103`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L74-L103)
+
+[18] Arsenal 항목의 경로는 꺼내지 않고 받은 경로를 그대로 돌려준다.
+
+```python
+    access_type = metadata.get('access_type', '').lower()
+    
+    if 'arsenal' in access_type or 'direct' in access_type:
+        logger.debug(f"Arsenal mount - direct access: {file_path}")
+        return file_path
+```
+
+[`utils/forensic_file_access.py:258-262`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L258-L262)
+
+[19] `kape_parse_artifact`는 받은 경로에서 접근 폴더 경로의 글자 수만큼 앞부분을 잘라 내부 경로를 만든다.
+
+```python
+                access_point = prepared_info.get('access_point')
+                normalized_path = str(artifact_file).replace('/', '\\\\')
+                normalized_access = access_point.replace('/', '\\\\')
+                
+                rel_path = normalized_path[len(normalized_access):].strip("\\\\")
+                sleuthkit_path = "/" + rel_path.replace("\\\\", "/")
+```
+
+[`handlers/kape_handlers.py:199-204`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L199-L204)
+
+[20] (실행 확인) SleuthKit으로 준비한 시험 이미지의 `SYSTEM`을 `/<이미지 ID>/…` 꼴로 `kape_parse_artifact`에 주어 응답과 시험용 `icat`이 받은 인자를 확인했다.
+
+[21] `prepare_disk_image`의 준비 방식 분기.
+[`handlers/image_handlers.py:157-518`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L157-L518)
+
+[22] Arsenal 마운트는 새 드라이브 가운데 읽을 수 있는 첫 드라이브를 고른다.
+[`mounters/arsenal_mounter.py:88-205`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/arsenal_mounter.py#L88-L205), [`handlers/image_handlers.py:294-316`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L294-L316)
+
+```python
+                drive_letter = mount_result['drive_letter']
+                all_drives = mount_result.get('all_drives', [drive_letter])
+                accessible_drives = mount_result.get('accessible_drives', [drive_letter])
+                
+                logger.info(f"✅ Primary drive: {drive_letter}")
+                logger.info(f"ℹ️  All mounted drives: {all_drives}")
+                logger.info(f"ℹ️  Accessible drives: {accessible_drives}")
+                
+                access_point = drive_letter + "\\"
+                fs_type = "ntfs"
+                os_family = "windows"
+                partition_offset = 0
+                partition_number = 0
+                
+                mounter_info = {
+                    'type': 'arsenal',
+                    'arsenal': arsenal,
+                    'drive_letter': drive_letter,
+                    'all_drives': all_drives,
+                    'accessible_drives': accessible_drives,
+                    'process_id': mount_result.get('process_id')
+                }
+                arsenal_mounted = True
+```
+
+[`handlers/image_handlers.py:294-316`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L294-L316)
+
+[23] WSL LVM 경로의 후보 고르기와 마운트.
+[`mounters/wsl_lvm_mounter.py:124-192`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L124-L192)
+
+[24] WSL APFS 마운트 명령.
+
+```python
+            mount_point = f"/tmp/apfs_mount_{int(time.time())}"
+            wsl_image = self._win_to_wsl_path(image_path)
+            
+            cmd = f'mkdir -p "{mount_point}" && apfs-fuse "{wsl_image}" "{mount_point}" && sleep 1 && test -d "{mount_point}/root"'
+            result = self._run_wsl(cmd)
+```
+
+[`mounters/wsl_apfs_mounter.py:58-62`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_apfs_mounter.py#L58-L62)
+
+[25] SleuthKit 도구에 파티션 시작 위치를 넘긴다.
+
+```python
+            cmd = [fls_cmd]
+            
+            if recursive:
+                cmd.append('-r')
+            
+            cmd.extend(['-o', str(self.primary_partition['offset'])])
+            
+            cmd.append(str(self.image_path))
+```
+
+[`mounters/sleuthkit_mounter.py:612-619`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L612-L619)
+
+```python
+            cmd = [
+                icat_cmd,
+                '-o', str(self.primary_partition['offset']),
+                str(self.image_path),
+                str(inode)
+            ]
+```
+
+[`mounters/sleuthkit_mounter.py:800-805`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L800-L805)
+
+[26] 가장 큰 데이터 파티션을 고른다.
+
+```python
+    def _select_primary_partition(self, partitions: List[Dict]) -> Optional[Dict]:
+        """Select the primary partition to mount (usually the largest data partition)"""
+        if not partitions:
+            return None
+        
+        data_partitions = [p for p in partitions 
+                          if 'NTFS' in p['description'] or 
+                             'FAT' in p['description'] or
+                             'Linux' in p['description'] or
+                             'Primary' in p['description'] or
+                             p.get('fs_type', 'unknown') != 'unknown']
+        
+        if not data_partitions:
+            data_partitions = partitions
+        
+        return max(data_partitions, key=lambda p: p['length'])
+```
+
+[`mounters/sleuthkit_mounter.py:346-361`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L346-L361)
+
+[27] 파티션 표 파서가 `DOS`가 든 줄과 작은 파티션을 뺀다.
+
+```python
+        for line in lines:
+            line = line.strip()
+            if not line or 'Units are in' in line or 'Slot' in line or 'DOS' in line:
+                continue
+            
+            if ':' in line:
+                parts = line.split()
+                if len(parts) >= 5:
+                    try:
+                        slot_str = parts[0].replace(':', '')
+                        partition_num = parts[1]
+                        start_sector = int(parts[2])
+                        end_sector = int(parts[3])
+                        size_sectors = int(parts[4])
+                        
+                        if 'Meta' in line or 'Unallocated' in line or '-------' in line:
+                            self.logger.debug(f"[-] Skipping partition: {line}")
+                            continue
+                        
+                        if size_sectors < 20000:
+                            self.logger.debug(f"[-] Skipping small partition ({size_sectors} sectors): {line}")
+                            continue
+```
+
+[`mounters/sleuthkit_mounter.py:304-325`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L304-L325)
+
+[28] 경로 대조는 등록부 항목의 `access_point` 아래만 그 이미지로 본다.
+
+```python
+    file_path_obj = Path(file_path).resolve()
+    
+    for image_path, metadata in prepared_images.items():
+        access_point = Path(metadata.get('access_point', '')).resolve()
+        case_dir = Path(metadata.get('case_dir', '')).resolve() if metadata.get('case_dir') else None
+        
+        try:
+            file_path_obj.relative_to(access_point)
+            return metadata
+        except ValueError:
+            pass
+        
+        if case_dir:
+            try:
+                file_path_obj.relative_to(case_dir)
+                return metadata
+            except ValueError:
+                pass
+```
+
+[`core/security.py:55-72`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/security.py#L55-L72)
+
+[29] LVM 마운트가 실패하면 SleuthKit이 읽을 수 있는 첫 파티션으로 바꾼다.
+
+```python
+                        else:
+                            logger.error(f"WSL LVM mount failed: {lvm_mount_result.get('error')}")
+                            logger.warning("Falling back to SleuthKit for LVM handling...")
+                            
+                            all_partitions = detection_result.get('all_partitions', [])
+                            logger.info(f"Available partitions: {all_partitions}")
+                            
+                            readable_partition = None
+                            for partition in all_partitions:
+                                p_fs_type = partition.get('fs_type', 'unknown').lower()
+                                if p_fs_type not in ['lvm2', 'unknown', 'fat']:
+                                    readable_partition = partition
+                                    logger.info(f"✅ Found readable partition: {p_fs_type} at offset {partition.get('offset')}")
+                                    break
+                            
+                            if readable_partition:
+                                logger.warning(f"⚠️  Switching to readable partition: {readable_partition.get('fs_type')}")
+                                fs_type = readable_partition.get('fs_type', 'unknown').lower()
+                                partition_offset = readable_partition.get('offset', 0)
+                                partition_number = readable_partition.get('slot', 0)
+                                logger.info(f"Updated: fs_type={fs_type}, offset={partition_offset}, partition={partition_number}")
+```
+
+[`handlers/image_handlers.py:428-448`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L428-L448)
+
+[30] Prefetch·점프 목록 도구가 꺼낸 수를 싣고 실패는 로그에만 남긴다.
+
+```python
+                for file_entry in files_list:
+                    file_name = file_entry.get('name', '')
+                    file_inode = file_entry.get('inode')
+                    
+                    if file_entry.get('type') == 'd' or not file_name.lower().endswith('.pf'):
+                        continue
+                    
+                    extract_path = temp_dir / file_name
+                    extract_result = mounter.extract_file(file_inode, str(extract_path))
+                    
+                    if extract_result.get('success'):
+                        extracted_count += 1
+                    else:
+                        logger.warning(f"Failed to extract: {file_name}")
+                
+                result.append(f"   ✅ Extracted {extracted_count} .pf files")
+                
+                if extracted_count == 0:
+                    return "\n".join(result) + f"\n   ⚠️  No .pf files found in folder"
+```
+
+[`handlers/prefetch_forensics_handler.py:232-250`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L232-L250)
+
+```python
+                    extract_path = temp_dir / file_name
+                    extract_result = mounter.extract_file(file_inode, str(extract_path))
+                    
+                    if extract_result.get('success'):
+                        extracted_count += 1
+                    else:
+                        logger.warning(f"Failed to extract: {file_name}")
+            
+            else:
+                logger.warning(f"Unknown mount type: {mount_type} - attempting direct access")
+                source_path = path
+                needs_cleanup = False
+            
+            result.append(f"   ✅ Extracted {extracted_count} Jump Lists files")
+            
+            if extracted_count == 0:
+                return "\n".join(result) + f"\n   ⚠️  No Jump Lists files found"
+```
+
+[`handlers/jump_lists_forensics_handler.py:376-392`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L376-L392)
+
+[31] 이미지 준비 응답의 파티션·드라이브 안내.
+
+```python
+        all_partitions = detection_result.get('all_partitions', [])
+        if len(all_partitions) > 1:
+            result_text += f"\nPartitions: {len(all_partitions)} detected, using partition {partition_number}\n"
+        
+        result_text += f"\n{'='*70}\n"
+        result_text += "ACCESS INFORMATION\n"
+        result_text += "=" * 70 + "\n"
+        
+        if mounter_info['type'] == 'arsenal':
+            result_text += f"✅ Primary Drive: {access_point}\n"
+            result_text += f"Mount Type: Arsenal Image Mounter (Fast, Direct Access)\n"
+            result_text += f"Status: Running in background (PID: {mounter_info.get('process_id')})\n"
+            
+            all_drives = mounter_info.get('all_drives', [])
+            accessible_drives = mounter_info.get('accessible_drives', [])
+            if len(all_drives) > 1:
+                result_text += f"\nℹ️  Multiple partitions detected:\n"
+                result_text += f"   All mounted drives: {', '.join(all_drives)}\n"
+                result_text += f"   Accessible drives: {', '.join(accessible_drives)}\n"
+                if len(accessible_drives) < len(all_drives):
+                    unreadable = set(all_drives) - set(accessible_drives)
+                    result_text += f"   ⚠️  Unreadable drives (FAT12/corrupt): {', '.join(sorted(unreadable))}\n"
+```
+
+[`handlers/image_handlers.py:535-556`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L535-L556)
+
+[32] 경로 대응표의 항목.
+
+```python
+    def add_mapping(self, linux_path: str, windows_path: str, inode: int, 
+                   size: Optional[int] = None) -> bool:
+        """
+        Add or update path mapping
+        
+        Args:
+            linux_path: Original Linux path in image
+            windows_path: Extracted Windows file location
+            inode: Inode number
+            size: File size in bytes (optional)
+            
+        Returns:
+            True if mapping added successfully
+        """
+        linux_path = self.normalize_linux_path(linux_path)
+        windows_path = str(windows_path)
+        
+        self.path_mapping[linux_path] = {
+            'windows_path': windows_path,
+            'inode': inode,
+            'timestamp': datetime.now().isoformat(),
+            'size': size
+        }
+        
+        self.reverse_mapping[windows_path] = linux_path
+        
+        self._save_mappings()
+        
+        return True
+```
+
+[`utils/path_mapper.py:119-147`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/path_mapper.py#L119-L147)
+
+[33] 폴더 추출은 `extract_file`의 결과를 보지 않고 `file_count`를 늘리고 `icat` 실패는 예외가 아닌 결과 값으로 돌아온다.
+
+```python
+                file_inode = file_info.get('inode')
+                if file_inode:
+                    mounter.extract_file(file_inode, str(dest_file))
+                    extracted_count += 1
+                    
+                    if extracted_count % 50 == 0:
+                        logger.info(f"Extracted {extracted_count}/{len(files)} files...")
+                
+            except Exception as e:
+                logger.warning(f"Failed to extract {file_info.get('name', 'unknown') if isinstance(file_info, dict) else str(file_info)}: {e}")
+                failed_count += 1
+                continue
+```
+
+[`utils/extraction_manager.py:262-273`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L262-L273)
+
+```python
+            if result.returncode != 0:
+                error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+                return {'success': False, 'error': error_msg}
+```
+
+[`mounters/sleuthkit_mounter.py:817-819`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L817-L819)
+
+[34] (실행 확인) `icat`이 실패하는 항목 하나를 둔 시험 `config` 폴더를 `ExtractionManager.extract_folder`로 꺼내 추출 기록과 꺼낸 파일 크기를 확인했다.
+
+[35] `analyze_registry` 응답은 모듈 결과와 출력 폴더만 싣는다.
+
+```python
+        if success:
+            output_files = list(output_dir.rglob("*"))
+            file_count = len([f for f in output_files if f.is_file()])
+            
+            result = f"✅ Module: {module_config.get('name')}\n"
+            result += f"   File: {path.name}\n"
+            result += f"   Status: SUCCESS\n"
+            result += f"   Execution Time: {execution_time:.2f}s\n"
+            result += f"   Output Files: {file_count}\n"
+            result += f"   📁 Output Directory: {output_dir}\n"
+            result += f"   \n"
+            result += f"   💡 Next Steps:\n"
+            result += f"      1. Use 'browse_files_and_folders' tool with the Output Directory path above\n"
+            result += f"      2. Navigate into subdirectories to find CSV files\n"
+            result += f"      3. Use 'read_csv_data' tool to read specific CSV files\n"
+            
+            return result
+```
+
+[`handlers/registry_forensics_handler.py:391-407`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L391-L407)

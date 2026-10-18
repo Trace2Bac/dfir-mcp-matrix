@@ -1,0 +1,578 @@
+---
+cell: P04
+details:
+- id: P04.01
+- id: P04.02
+- id: P04.03
+- id: P04.04
+---
+
+# P04 조사 단위 관리
+
+### P04.01 사건 시작 시 ID 확정
+
+**구현.** 이 방식은 디스크 이미지를 준비하는 `prepare_disk_image`에 적용된다 [1].
+조사 단위는 준비한 이미지 하나이고 사건을 따로 만들거나 여는 도구는 없다.
+`prepare_disk_image`는 이미지 파일 이름, 판별한 OS, 이미지 해시의 앞 12글자를 이어 `unique_image_id`를 정한다 [1].
+해시는 이미지의 앞 10 MiB만 읽은 SHA-256이다 [2].
+같은 이름의 사건 폴더 `cases/<unique_image_id>`를 만들고 응답에 `Image Root: /<unique_image_id>/`와 사건 폴더 경로를 싣는다 [1][3].
+`unique_image_id`와 사건 폴더 경로는 등록부 `PREPARED_IMAGES`의 그 이미지 항목에 들어간다 [3].
+이후 도구는 `/<unique_image_id>/…` 꼴의 경로나 준비한 접근 폴더 아래 경로로 이미지를 가리키고 서버는 그 경로로 찾은 항목의 `case_dir` 아래에 출력을 쓴다 [4][5].
+이미지를 여럿 준비하면 항목이 나란히 남아 경로마다 다른 이미지에 묶인다 [3][4].
+이름 줄기가 `disk01`인 시험 이미지를 준비하자 `unique_image_id`는 `disk01_windows_5e492a138d5e`가 되었고 같은 이름의 사건 폴더가 생겼다 [6].
+
+`analyze_memory`는 등록부를 쓰지 않아 이미지 ID에 묶이지 않는다 [7].
+
+**한계.** 앞 10 MiB 뒤의 바이트만 다른 두 이미지는 이름과 OS가 같으면 같은 `unique_image_id`와 같은 사건 폴더를 받는다 [1][2].
+10 MiB 뒤의 바이트 하나를 바꾼 사본의 해시는 원래 이미지의 해시와 같았다 [8].
+해시를 계산하다 예외가 나면 이미지 경로 문자열의 MD5를 해시 자리에 쓴다 [2].
+준비하지 않은 로컬 경로를 받는 Windows 아티팩트 도구와 `identify_file_type`의 대체 경로는 등록부를 거치지 않으므로 이미지 ID에 묶이지 않는다 [9][10][11].
+
+### P04.02 호출마다 사건 ID 전달·검사
+
+**구현.** 이 방식은 경로 대조 함수 `validate_file_access`를 부르는 파일 읽기 도구와 분석 도구, 둘러보기 도구에 적용된다 [4][12].
+`/`로 시작하는 경로는 첫 조각을 등록부의 `unique_image_id`들과 대조하고 같은 항목이 있으면 그 이미지로 정한다 [4].
+같은 항목이 없고 경로가 준비한 이미지의 접근 위치나 사건 폴더 아래에도 없으면 `SecurityError`로 거부한다 [4].
+`browse_files_and_folders`도 경로의 첫 조각을 `unique_image_id`와 대조하고 맞는 이미지가 없으면 쓸 수 있는 이미지 경로의 앞부분을 돌려준다 [12].
+시험 이미지를 준비한 뒤 첫 조각이 등록되지 않은 ID인 경로와 접근 폴더 위로 올라가는 경로를 주자 둘 다 거부되었다 [6].
+
+`analyze_memory`는 이 대조를 부르지 않는다 [7].
+
+**한계.** SleuthKit으로 준비한 이미지 가운데 OS가 `linux`나 `macos`인 것이 있으면 첫 조각이 ID가 아닌 `/` 경로도 받아들이고 등록부 차례에서 처음 만난 그 이미지로 정한다 [4].
+준비한 이미지가 하나도 없을 때는 사건 폴더 이름에 첫 조각이 문자열로 들어 있고 그 폴더의 `extracted`에 같은 이름의 파일이 있으면 그 폴더를 사건으로 정해 받아들인다 [4].
+`analyze_registry`·`analyze_prefetch`·`analyze_mft`·`analyze_shimcache`는 대조에 실패해도 디스크에 있는 경로이면 이미지 없이 분석한다 [9].
+`analyze_jump_lists`·`analyze_lnk_files`·`analyze_amcache`도 등록부에 없는 경로를 디스크에 있으면 받는다 [10].
+`identify_file_type`은 대조에 실패하면 받은 경로를 그대로 읽는다 [11].
+
+### P04.03 폴더·DB·manifest에 사건 ID 연결
+
+**구현.** 이 방식은 사건 폴더, 등록부 항목, 분석 도구의 출력 폴더, 추출 폴더에 적용된다 [1][3][5][13][14].
+사건 폴더 이름과 등록부 항목의 `unique_image_id`·`case_dir`가 이미지 ID를 담는다 [1][3].
+Windows 아티팩트 도구의 출력 폴더는 공통 함수 `get_case_output_directory`가 `<case_dir>/<자료 이름>/<모듈>_<식별자>`로 정한다 [5].
+SleuthKit으로 꺼낸 파일은 `cases/<unique_image_id>/extracted_files` 아래에, 레지스트리 폴더 추출은 `extract/<unique_image_id>` 아래에 둔다 [13][14].
+레지스트리 폴더 추출 기록 `extraction_registry.json`은 이미지 ID를 키로 쓴다 [14].
+
+**한계.** 이미지 ID를 이름에 쓰지 않는 저장물이 있다.
+`analyze_sqlite_database`는 CSV를 `cases/<이미지 이름>_<전체 해시>/sqlite_analysis` 아래에 쓴다 [15].
+시험 이미지에서 SQLite 조회 결과는 `disk01_windows_5e492a138d5e`가 아닌 `disk01_<전체 해시>` 폴더에 쓰였다 [6].
+`analyze_memory`는 메모리 파일 이름의 줄기로 `cases/<줄기>/memory/<플러그인>` 폴더를 정한다 [7].
+`kape_parse_artifact`와 SleuthKit을 쓰는 Windows 아티팩트 도구는 꺼낸 파일을 설정의 임시 폴더 아래 `<도구>_extract_<inode>` 폴더에 둔다 [16].
+이미지에 묶이지 않은 호출은 `local_analysis`, `local_kape_<모듈>`, `standalone_event_logs_<시각>`, `<상위 폴더>_prefetch` 같은 폴더에 쓴다 [5][17].
+서버 로그, `operations_logs`의 기록, `kape_operations.log`는 이미지와 관계없이 한 파일씩이고 항목에 이미지 ID 필드가 없다 [18].
+
+### P04.04 사건별 폴더·DB 분리
+
+**구현.** 이 방식은 준비한 이미지마다 두는 사건 폴더에 적용된다 [1].
+서버는 준비한 이미지마다 `cases/<unique_image_id>` 폴더를 따로 두고 그 이미지를 가리키는 호출의 출력과 꺼낸 파일을 그 아래에 쓴다 [1][5][13].
+SleuthKit 파일 추출의 경로 대응표 `path_mapping.json`도 그 이미지의 사건 폴더 안에 둔다 [13].
+`analyze_registry`와 `kape_parse_artifact`는 같은 출력 폴더가 비어 있지 않으면 다시 실행하지 않고 그 폴더를 돌려주므로 앞선 결과도 사건 폴더별로 남는다 [19][20].
+
+서버는 연결이나 세션마다 상태를 나누지 않는다.
+`remote_server.py`의 SSE 연결은 모두 같은 프로세스의 `create_server` 객체와 모듈 전역 `PREPARED_IMAGES`를 쓴다 [21].
+
+**한계.** 여러 경로를 받는 `analyze_event_logs`·`analyze_jump_lists`·`analyze_amcache`는 처음 대조에 성공한 경로의 이미지 항목으로 모든 경로의 출력 폴더를 정한다 [10][17].
+그래서 다른 이미지의 경로를 함께 주면 그 출력도 첫 이미지의 사건 폴더에 쓰인다 [10][17].
+`<도구>_extract_<inode>` 임시 폴더는 이미지 ID 없이 inode 번호로만 이름을 짓는다 [16].
+`kape_parse_artifact`는 이 폴더를 지우지 않으므로 다른 이미지에서 같은 inode의 파일을 꺼내면 앞 이미지에서 꺼낸 파일이 남은 폴더 전체를 KAPE의 `--msource`로 넘긴다 [16][22].
+이 경로는 코드로만 확인했다.
+`analyze_memory`는 이름이 같은 메모리 파일을 위치가 달라도 같은 폴더에 쓴다 [7].
+다른 폴더의 `mem.raw` 두 개를 차례로 분석하자 두 결과가 같은 `cases/mem/memory/windows.pslist` 폴더의 같은 파일에 쓰였다 [8].
+WSL LVM 경로는 이미지마다 `/mnt/ubuntu_forensics`에 마운트한다 [23].
+그래서 LVM 이미지를 둘 준비하면 두 항목이 같은 마운트 위치를 가리키고 앞 이미지의 경로로 읽어도 나중에 마운트한 파일시스템의 파일을 읽는다 [23][24].
+이 경로는 코드로만 확인했다.
+SleuthKit 준비 객체의 접근 폴더는 이미지 파일 이름의 줄기로만 짓는다 [25].
+그래서 이름 줄기가 같은 두 이미지는 접근 폴더와 메타데이터 파일 하나를 함께 쓰고 한 이미지를 정리하면 다른 이미지의 메타데이터 파일도 지워진다 [25][26].
+이 경로는 코드로만 확인했다.
+
+### 근거
+
+[1] `prepare_disk_image`가 `unique_image_id`와 사건 폴더를 정한다.
+
+```python
+        unique_image_id = f"{image_name}_{os_family}_{image_hash_full[:12]}"  # short hash: keep case paths under Windows MAX_PATH (260)
+        logger.info(f"Unique image ID (with OS): {unique_image_id}")
+        
+        case_dir = CASES_DIR / unique_image_id
+        case_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Case directory created: {case_dir}")
+```
+
+[`handlers/image_handlers.py:271-276`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L271-L276)
+
+[`handlers/image_handlers.py:142-155`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L142-L155)
+
+[2] 이미지 해시는 앞 10 MiB의 SHA-256이고 실패하면 경로 문자열의 MD5다.
+
+```python
+        try:
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image path does not exist: {image_path}")
+
+            file_size = os.path.getsize(image_path)
+            if file_size == 0:
+                logger.warning(f"Image file is empty: {image_path}")
+                return hashlib.md5(image_path.encode()).hexdigest()
+
+            hash_obj = hashlib.sha256()
+            sample_size = min(sample_size_mb * 1024 * 1024, file_size)
+            
+            with open(image_path, 'rb') as f:
+                chunk = f.read(sample_size)
+                if not chunk:
+                    logger.warning(f"Could not read from image file: {image_path}")
+                    return hashlib.md5(image_path.encode()).hexdigest()
+                hash_obj.update(chunk)
+            
+            full_hash = hash_obj.hexdigest()
+            
+            logger.info(f"Image hash calculated: {full_hash} (Sample size: {len(chunk)} bytes)")
+            return full_hash
+            
+        except Exception as e:
+            logger.error(f"Failed to calculate image hash: {e}")
+            fallback_hash = hashlib.md5(image_path.encode()).hexdigest()
+            logger.info(f"Using fallback hash: {fallback_hash}")
+            return fallback_hash
+```
+
+[`utils/extraction_manager.py:79-107`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L79-L107)
+
+[3] 등록부 항목에 이미지 ID와 사건 폴더를 넣고 저장한다.
+
+```python
+        prep_info = {
+            'prep_time': datetime.now().isoformat(),
+            'access_point': access_point,
+            'unique_image_id': unique_image_id,
+            'status': 'prepared',
+            'hash': image_hash_full,
+            'name': image_name,
+            'case_dir': str(case_dir),
+            'fs_type': fs_type,
+            'os_family': os_family,
+            'partition_offset': partition_offset if 'partition_offset' in locals() else 0,
+            'partition_number': partition_number if 'partition_number' in locals() else 0,
+            'all_partitions': detection_result.get('all_partitions', []) if 'detection_result' in locals() else [],
+            'image_path': str(image_file),
+            'mount_type': mounter_info['type'],
+        }
+        
+        prep_info_with_mounter = prep_info.copy()
+        prep_info_with_mounter.update(mounter_info)
+        
+        PREPARED_IMAGES[str(image_file)] = prep_info_with_mounter
+        
+        save_prepared_images(PREPARED_IMAGES, BASE_OUTPUT_DIR)
+```
+
+[`handlers/image_handlers.py:496-518`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L496-L518)
+
+[4] `get_prepared_image_for_path`는 경로의 첫 조각을 이미지 ID와 대조하고 Linux·macOS 이미지와 캐시 폴더의 예외를 둔다.
+[`core/security.py:14-106`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/security.py#L14-L106)
+
+[5] 출력 폴더를 `case_dir` 아래에 정하고 이미지가 없으면 대체 이름을 쓴다.
+
+```python
+    if prepared_info and prepared_info.get('case_dir'):
+        case_dir = Path(prepared_info['case_dir'])
+        logger.debug(f"Using existing case_dir from prepared_info: {case_dir}")
+        
+    elif prepared_info:
+        unique_image_id = prepared_info.get('unique_image_id')
+        if unique_image_id:
+            case_dir = cases_dir / unique_image_id
+            logger.debug(f"Constructed case_dir from unique_image_id: {case_dir}")
+        else:
+            image_name = Path(prepared_info.get('image_path', 'unknown')).stem
+            image_hash = prepared_info.get('hash', 'UNKNOWN')
+            case_dir = cases_dir / f"{image_name}_{image_hash[:16]}"
+            logger.debug(f"Constructed case_dir from image_path and hash: {case_dir}")
+            
+    else:
+        if fallback_case_name:
+            case_dir = cases_dir / fallback_case_name
+            logger.debug(f"Using fallback_case_name: {case_dir}")
+        else:
+            case_dir = cases_dir / "local_analysis"
+            logger.debug(f"Using generic local_analysis case_dir: {case_dir}")
+    
+    output_dir = case_dir / artifact_name / f"{kape_module_name}_{module_id}"
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`core/forensic_helpers.py:94-119`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/forensic_helpers.py#L94-L119)
+
+[6] (실행 확인) 시험용 SleuthKit 실행 파일로 이미지를 준비하고 등록부, 사건 폴더, 경로 대조 결과, SQLite 출력 폴더를 확인했다.
+
+[7] `analyze_memory`는 메모리 파일 이름의 줄기로 출력 폴더를 정하고 경로 대조를 부르지 않는다.
+
+```python
+def _get_memory_output_directory(memory_file_path: str, plugin_name: str) -> Path:
+    """
+    Get output directory for memory analysis results
+    
+    Creates structure: forensic_output/cases/{memory_filename}/memory/{plugin_name}/
+    """
+    memory_file = Path(memory_file_path)
+    memory_filename = memory_file.stem
+    
+    output_dir = CASES_DIR / memory_filename / "memory" / plugin_name
+    return output_dir
+```
+
+[`handlers/memory_forensics_handler.py:121-131`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L121-L131)
+
+[`handlers/memory_forensics_handler.py:135-178`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/memory_forensics_handler.py#L135-L178)
+
+[8] (실행 확인) 앞 10 MiB 뒤의 바이트를 바꾼 사본의 해시와, 이름이 같은 메모리 파일 두 개의 출력 폴더를 확인했다.
+
+[9] 대조에 실패해도 디스크에 있는 경로를 받는 Windows 아티팩트 도구.
+
+```python
+        for path_str in paths:
+            path = Path(path_str)
+            
+            try:
+                prepared_info = validate_file_access(path_str, PREPARED_IMAGES)
+                validated_paths.append({
+                    'path': path,
+                    'type': 'prepared_image',
+                    'prepared_info': prepared_info
+                })
+            except SecurityError:
+                if path.exists():
+                    if path.is_file():
+                        validated_paths.append({
+                            'path': path,
+                            'type': 'file',
+                            'prepared_info': None
+                        })
+                    elif path.is_dir():
+                        validated_paths.append({
+                            'path': path,
+                            'type': 'folder',
+                            'prepared_info': None
+                        })
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=f"❌ ERROR: Path not found: {path_str}\n\n"
+                             f"Please provide valid registry hive files or folders."
+                    )]
+```
+
+[`handlers/registry_forensics_handler.py:87-116`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L87-L116)
+
+[`handlers/prefetch_forensics_handler.py:85-104`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L85-L104), [`handlers/mft_forensics_handler.py:90-110`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/mft_forensics_handler.py#L90-L110), [`handlers/shimcache_forensics_handler.py:138-155`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/shimcache_forensics_handler.py#L138-L155)
+
+[10] 점프 목록·LNK·Amcache 도구는 등록부에 없는 경로도 받고 첫 이미지 항목으로 출력 폴더를 정한다.
+[`handlers/jump_lists_forensics_handler.py:147-202`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L147-L202), [`handlers/lnk_forensics_handler.py:130-162`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/lnk_forensics_handler.py#L130-L162), [`handlers/amcache_forensics_handler.py:99-150`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/amcache_forensics_handler.py#L99-L150)
+
+[11] `identify_file_type`은 대조에 실패하면 받은 경로를 그대로 읽는다.
+
+```python
+        # CRITICAL SECURITY: Validate file access
+        from core.security import validate_file_access, SecurityError
+        try:
+            prepared_info = validate_file_access(file_path, PREPARED_IMAGES)
+            readable_path = get_readable_file_path(file_path)
+            target_file = Path(readable_path)
+        except SecurityError:
+            target_file = Path(file_path)
+            if not target_file.exists():
+                return [TextContent(type="text", text=f"ERROR: File not found: {file_path}")]
+```
+
+[`handlers/file_handlers.py:835-844`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L835-L844)
+
+[12] `browse_files_and_folders`가 경로의 첫 조각을 이미지 ID와 대조한다.
+[`handlers/file_handlers.py:152-192`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/file_handlers.py#L152-L192)
+
+[13] SleuthKit으로 꺼낸 파일과 경로 대응표를 사건 폴더의 `extracted_files`에 둔다.
+
+```python
+    extraction_dir = None
+    if unique_image_id:
+        extraction_dir = Path(BASE_OUTPUT_DIR) / "cases" / unique_image_id / "extracted_files"
+        extraction_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using case-specific extraction directory: {extraction_dir}")
+    
+    mapper = get_mapper(image_hash, str(extraction_dir) if extraction_dir else None)
+    
+    existing_windows_path = mapper.get_windows_path(linux_path)
+    if existing_windows_path:
+        logger.info(f"File already extracted: {linux_path} -> {existing_windows_path}")
+        return True, existing_windows_path, ""
+```
+
+[`utils/forensic_file_access.py:154-165`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L154-L165)
+
+[`utils/forensic_file_access.py:528-547`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L528-L547)
+
+[14] 레지스트리 폴더 추출은 `extract/<이미지 ID>` 아래에 두고 이미지 ID를 키로 기록한다.
+
+```python
+    def get_extraction_path(self, image_id: str, internal_path: str) -> Path:
+        """
+        Get full extraction path maintaining folder hierarchy
+        
+        Args:
+            image_id: Unique image identifier
+            internal_path: Internal path from disk image (e.g., /Windows/System32/config)
+        
+        Returns:
+            Full extraction path
+        """
+        clean_path = internal_path.lstrip('/').lstrip('\\')
+        
+        extraction_path = self.extraction_base_dir / image_id / clean_path
+        
+        return extraction_path
+```
+
+[`utils/extraction_manager.py:127-142`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L127-L142)
+
+[`utils/extraction_manager.py:277-298`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/extraction_manager.py#L277-L298)
+
+[15] `analyze_sqlite_database`는 이미지 이름과 전체 해시로 사건 폴더 이름을 따로 짓는다.
+
+```python
+        source_image = {
+            "name": Path(prepared_info.get("image_path", "unknown")).stem,
+            "hash": prepared_info.get("hash", "UNKNOWN"),
+            "drive": prepared_info.get("access_point", "")
+        }
+        
+        case_dir = CASES_DIR / f"{source_image['name']}_{source_image['hash']}"
+        sqlite_dir = case_dir / "sqlite_analysis" / db_file.stem
+        sqlite_dir.mkdir(parents=True, exist_ok=True)
+```
+
+[`handlers/database_handlers.py:58-66`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/database_handlers.py#L58-L66)
+
+[16] `kape_parse_artifact`는 꺼낸 파일을 `kape_extract_<inode>`에 두고 지우지 않는다.
+
+```python
+                resolve_result = mounter.resolve_path_to_inode(sleuthkit_path)
+                if not resolve_result.get('success'):
+                    return [TextContent(type="text", text=f"ERROR: Could not locate file in forensic image: {sleuthkit_path}")]
+                
+                file_inode = resolve_result.get('inode')
+                
+                temp_dir = Path(CONFIG['forensics']['temp_directory']) / f"kape_extract_{file_inode}"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                
+                extracted_file = temp_dir / artifact_file.name
+                extract_result = mounter.extract_file(file_inode, str(extracted_file))
+                
+                if not extract_result.get('success'):
+                    return [TextContent(type="text", text=f"ERROR: Failed to extract file from forensic image: {extract_result.get('error')}")]
+                
+                artifact_file = extracted_file
+                logger.info(f"Extracted forensic file to: {artifact_file}")
+```
+
+[`handlers/kape_handlers.py:206-222`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L206-L222)
+
+[`handlers/prefetch_forensics_handler.py:219-220`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L219-L220)
+
+[17] 이벤트 로그 도구는 첫 이미지 항목으로 출력 폴더를 정하고 이미지가 없으면 시각을 붙인 폴더를 쓴다.
+
+```python
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fallback_case_name = f"standalone_event_logs_{timestamp}" if not first_prepared_info else None
+    
+    output_dir = get_case_output_directory(
+        prepared_info=first_prepared_info,
+        artifact_name='event_logs',
+        kape_module_name='EvtxECmd',
+        module_id='event_logs',
+        cases_dir=CASES_DIR,
+        fallback_case_name=fallback_case_name
+    )
+```
+
+[`handlers/event_logs_forensics_handler.py:123-134`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/event_logs_forensics_handler.py#L123-L134)
+
+[18] 서버 로그와 기록 파일의 위치와 항목 모양.
+[`core/logging_setup.py:9-59`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/logging_setup.py#L9-L59), [`core/operation_logging.py:12-39`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/core/operation_logging.py#L12-L39), [`app_config.py:111-115`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/app_config.py#L111-L115)
+
+[19] (실행 확인) 같은 레지스트리 요청을 두 번 부르자 두 번째 응답은 `CACHED (already analyzed)`와 같은 사건 폴더의 출력 경로를 적었다.
+
+[20] `analyze_registry`와 `kape_parse_artifact`만 출력 폴더가 비어 있지 않은지 보고 앞선 결과를 돌려준다.
+
+```python
+    if output_dir.exists() and any(output_dir.iterdir()):
+        logger.info(f"Using cached results: {output_dir}")
+        result = f"✅ Module: {module_config.get('name')}\n"
+        result += f"   Source: {path.name}\n"
+        result += f"   Status: CACHED (already analyzed)\n"
+```
+
+[`handlers/registry_forensics_handler.py:334-338`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L334-L338)
+
+```python
+        if module_dir.exists() and any(module_dir.iterdir()):
+            return await get_cached_results(mounted_image, module_dir, kape_module, file_path)
+```
+
+[`handlers/kape_handlers.py:263-264`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L263-L264)
+
+[21] `remote_server.py`는 서버 객체 하나를 만들고 SSE 연결마다 그 객체를 실행한다.
+
+```python
+from server import create_server
+
+mcp_server = create_server()
+
+# POST endpoint clients use to send messages back; must match the route below.
+sse = SseServerTransport("/messages/")
+
+
+async def handle_sse(request: Request) -> None:
+    """
+    GET /sse  – opens a long-lived SSE stream.
+    The MCP SDK needs raw ASGI (scope, receive, send).
+    Starlette stores them on the Request object.
+    """
+    async with sse.connect_sse(
+        request.scope, request.receive, request._send
+    ) as (read_stream, write_stream):
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+        )
+```
+
+[`remote_server.py:26-47`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/remote_server.py#L26-L47)
+
+[22] KAPE에 꺼낸 파일의 상위 폴더를 `--msource`로 넘긴다.
+
+```python
+        cmd = [
+            str(kape_exe),
+            '--msource', str(artifact_file.parent),
+            '--mdest', str(module_dir),
+            '--module', kape_module
+        ]
+```
+
+[`handlers/kape_handlers.py:71-76`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/kape_handlers.py#L71-L76)
+
+[23] `prepare_disk_image`는 LVM 이미지마다 새 마운트 객체를 만들어 기본 마운트 위치 `/mnt/ubuntu_forensics`에 마운트한다.
+
+```python
+                        wsl_lvm_mounter = WSLLVMMounter(wsl_distribution="Ubuntu")
+                        lvm_mount_result = wsl_lvm_mounter.mount_lvm_image(str(image_file))
+```
+
+[`handlers/image_handlers.py:356-357`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L356-L357)
+
+```python
+    def mount_lvm_image(self, image_path: str, mount_point: str = "/mnt/ubuntu_forensics") -> Dict:
+```
+
+[`mounters/wsl_lvm_mounter.py:76-76`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L76-L76)
+
+[24] LVM 항목의 파일은 그 항목의 마운트 위치에서 `cat`으로 읽는다.
+
+```python
+            mounter = image_info.get('mounter')
+            if not mounter:
+                from mounters.wsl_lvm_mounter import WSLLVMMounter
+                mount_point = image_info.get('mount_point')
+                if not mount_point:
+                    raise FileNotFoundError(f"No mount point for image: {image_path}")
+                
+                mounter = WSLLVMMounter()
+                mounter.mounted_images[str(Path(image_path).resolve())] = {
+                    'mount_point': mount_point,
+                    'image_path': image_path,
+                    'filesystem': 'ext4'
+                }
+                image_info['mounter'] = mounter
+            
+            extract_result = mounter.extract_file(image_path, linux_path)
+```
+
+[`utils/forensic_file_access.py:365-380`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/utils/forensic_file_access.py#L365-L380)
+
+```python
+    def extract_file(self, image_path: str, file_path: str) -> Dict:
+        """Extract file from mounted image"""
+        ensure = self.ensure_mounted(image_path)
+        if not ensure['success']: return ensure
+        
+        mount_point = ensure['mount_point']
+        target = os.path.join(mount_point, file_path.lstrip('/')).replace('\\', '/')
+        result = self._run_wsl(f'cat "{target}"', timeout=60)
+        return {'success': True, 'content': result.stdout} if result.returncode == 0 else {'success': False, 'error': result.stderr}
+```
+
+[`mounters/wsl_lvm_mounter.py:281-289`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/wsl_lvm_mounter.py#L281-L289)
+
+[25] SleuthKit 준비 객체의 접근 폴더는 이미지 파일 이름 줄기로 짓고 그 안에 메타데이터 파일을 쓴다.
+
+```python
+        self.image_path = Path(image_path).resolve()
+        self.image_name = self.image_path.stem
+```
+
+[`mounters/sleuthkit_mounter.py:32-33`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L32-L33)
+
+```python
+        if not self.access_base:
+            raise ValueError("Access base directory not configured")
+        
+        self.access_point = Path(self.access_base) / self.image_name
+        
+        self.access_point.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"[+] Created forensic access point: {self.access_point}")
+        
+        metadata_file = self.access_point / ".forensic_metadata.json"
+        
+        import json
+        metadata = {
+            'image_path': str(self.image_path),
+            'fs_type': self.fs_type,
+            'os_family': self.os_family,
+            'partition_number': self.primary_partition['slot'],
+            'partition_offset': self.primary_partition['offset'],
+            'sector_size': 512,
+            'access_time': datetime.now().isoformat(),
+            'access_type': 'sleuthkit_ondemand',
+            'access_point': str(self.access_point),
+            'forensic_tool': 'SleuthKit',
+            'all_partitions': self.get_all_partitions(),
+            'note': 'Files accessed on-demand via SleuthKit commands (fls, icat) - forensically sound, no actual mounting'
+        }
+        
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+```
+
+[`mounters/sleuthkit_mounter.py:496-523`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L496-L523)
+
+[26] 준비 객체의 `cleanup`은 접근 폴더를 통째로 지운다.
+
+```python
+    def cleanup(self):
+        """
+        Cleanup forensic access point
+        NOTE: Since we're using on-demand access (no actual mounting), 
+        cleanup just involves removing the metadata directory
+        """
+        if self.access_point and self.access_point.exists():
+            try:
+                self.logger.info(f"\n[*] Cleaning up forensic access point: {self.access_point}")
+                shutil.rmtree(self.access_point)
+                self.logger.info("[+] Cleanup complete")
+                self.is_prepared = False
+            except Exception as e:
+                self.logger.error(f"[!] Cleanup failed: {e}")
+```
+
+[`mounters/sleuthkit_mounter.py:831-844`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/mounters/sleuthkit_mounter.py#L831-L844)

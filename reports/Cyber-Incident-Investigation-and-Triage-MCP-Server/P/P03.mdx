@@ -1,0 +1,160 @@
+---
+cell: P03
+details:
+- id: not_implemented
+---
+
+# P03 조사 진척 판단
+
+### 미구현
+
+**판단.** 서버는 대상별로 수행한 작업과 남은 작업을 표현하지 않고 완료 판단을 모델에 맡긴다.
+서버에는 증거 유형마다 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행을 적는 도구도 없다.
+
+도구 응답이 다룬 범위를 적는 곳은 그 호출 한 번의 결과에 그친다.
+`prepare_disk_image`는 SleuthKit으로 준비한 이미지에서 파티션이 둘 이상이면 찾은 파티션 수와 쓰는 파티션 번호를 싣고 다른 파티션을 고르지 않은 이유는 적지 않으며 파티션을 고르는 인자도 받지 않는다 [1][2].
+두 파티션을 가진 시험 이미지에서 응답은 `Partitions: 2 detected, using partition 2`를 실었다 [3].
+Arsenal로 마운트하면 읽지 못한 드라이브를 `Unreadable drives (FAT12/corrupt)`로 적는다 [1].
+APFS로 판별한 이미지에는 스냅숏과 암호화한 볼륨을 다루지 못한다는 고정 문장을 붙인다 [4].
+`analyze_macos_fsevents`는 찾은 FSEvents 파일 수와 꺼낸 파일 수를 따로 적고 앞의 10개만 꺼낸다는 사실은 적지 않는다 [5].
+`analyze_prefetch`와 `analyze_jump_lists`는 폴더에서 꺼낸 파일 수를 적고 0개면 찾은 파일이 없다는 문장으로 끝낸다 [6].
+`analyze_registry`는 실행한 모듈이 하나도 없으면 가능한 사유 세 가지를 고정 문장으로 돌려준다 [7][8].
+이름이 맞지 않아 건너뛴 모듈은 서버 로그에만 남기고 응답의 `Modules Executed`에는 고른 모듈 수를 그대로 적는다 [7].
+이 값들은 대상별로 모이지 않고 서버가 다음 호출에서 다시 쓰지 않는다.
+
+### 근거
+
+[1] `prepare_disk_image` 응답의 파티션 수와 Arsenal 드라이브 안내.
+
+```python
+        all_partitions = detection_result.get('all_partitions', [])
+        if len(all_partitions) > 1:
+            result_text += f"\nPartitions: {len(all_partitions)} detected, using partition {partition_number}\n"
+        
+        result_text += f"\n{'='*70}\n"
+        result_text += "ACCESS INFORMATION\n"
+        result_text += "=" * 70 + "\n"
+        
+        if mounter_info['type'] == 'arsenal':
+            result_text += f"✅ Primary Drive: {access_point}\n"
+            result_text += f"Mount Type: Arsenal Image Mounter (Fast, Direct Access)\n"
+            result_text += f"Status: Running in background (PID: {mounter_info.get('process_id')})\n"
+            
+            all_drives = mounter_info.get('all_drives', [])
+            accessible_drives = mounter_info.get('accessible_drives', [])
+            if len(all_drives) > 1:
+                result_text += f"\nℹ️  Multiple partitions detected:\n"
+                result_text += f"   All mounted drives: {', '.join(all_drives)}\n"
+                result_text += f"   Accessible drives: {', '.join(accessible_drives)}\n"
+                if len(accessible_drives) < len(all_drives):
+                    unreadable = set(all_drives) - set(accessible_drives)
+                    result_text += f"   ⚠️  Unreadable drives (FAT12/corrupt): {', '.join(sorted(unreadable))}\n"
+```
+
+[`handlers/image_handlers.py:535-556`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L535-L556)
+
+[2] `prepare_disk_image`의 입력 정의는 `image_path` 하나다.
+
+```python
+            Tool(
+                name="prepare_disk_image",
+                description="Prepare forensic disk image for analysis (E01, DD, VMDK, VHD formats)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "Full path to forensic disk image file"
+                        }
+                    },
+                    "required": ["image_path"]
+                }
+            ),
+```
+
+[`server.py:27-40`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/server.py#L27-L40)
+
+[3] (실행 확인) 시험용 `mmls`가 파티션 두 개를 내게 하고 `prepare_disk_image`를 불러 응답의 파티션 문장을 확인했다.
+
+[4] APFS 판별 이미지에 붙이는 제한 문장.
+
+```python
+            # Add APFS warning if detected
+            if 'apfs' in fs_type.lower():
+                result_text += f"\n{'='*70}\n"
+                result_text += "⚠️  APFS FILESYSTEM DETECTED - IMPORTANT LIMITATIONS\n"
+                result_text += "=" * 70 + "\n"
+                result_text += "SleuthKit 4.14.0 has LIMITED APFS support:\n\n"
+                result_text += "✅ What Works:\n"
+                result_text += "  • Basic file and directory access\n"
+                result_text += "  • Reading file contents\n"
+                result_text += "  • File metadata (timestamps, sizes)\n\n"
+                result_text += "❌ Known Limitations:\n"
+                result_text += "  • APFS snapshots are NOT supported\n"
+                result_text += "  • Encrypted APFS volumes cannot be accessed\n"
+                result_text += "  • FileVault encryption is NOT supported\n"
+                result_text += "  • Some APFS-specific features may be missing\n"
+                result_text += "  • Deleted file recovery is limited\n\n"
+                result_text += "💡 Recommendation:\n"
+                result_text += "  • Test file access before bulk operations\n"
+                result_text += "  • If encrypted, decrypt the image before analysis\n"
+                result_text += "  • HFS+ images have better support if available\n"
+                result_text += "  • Consider using a decrypted disk image or forensic duplicate\n"
+```
+
+[`handlers/image_handlers.py:666-686`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/image_handlers.py#L666-L686)
+
+[5] `analyze_macos_fsevents`는 찾은 파일 수를 적고 앞의 10개만 꺼낸다.
+[`handlers/macos_handlers.py:814-835`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L814-L835), [`handlers/macos_handlers.py:937-967`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L937-L967)
+
+```python
+                if list_result.returncode == 0:
+                    found_paths = list_result.stdout.strip().split('\n')
+                    fsevent_files = [os.path.basename(p) for p in found_paths if p.strip()]
+                    
+                    result_text += f"Found {len(fsevent_files)} FSEvents files\n\n"
+                    
+                    if fsevent_files:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            temp_path = Path(temp_dir)
+                            def extract_batch():
+                                count = 0
+                                for file_name in fsevent_files[:10]:
+                                    file_path = f"{rel_path}/{file_name}".replace('//', '/')
+                                    output_file = temp_path / file_name
+                                    extract_result = mounter.extract_file(image_path, file_path, str(output_file))
+                                    if extract_result.get('success'):
+                                        count += 1
+                                return count
+
+                            extracted_count = await asyncio.get_event_loop().run_in_executor(None, extract_batch)
+                            
+                            result_text += f"Extracted {extracted_count} FSEvents files for parsing\n\n"
+```
+
+[`handlers/macos_handlers.py:814-835`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/macos_handlers.py#L814-L835)
+
+[6] Prefetch·점프 목록 도구가 꺼낸 파일 수를 적는다.
+
+```python
+                result.append(f"   ✅ Extracted {extracted_count} .pf files")
+                
+                if extracted_count == 0:
+                    return "\n".join(result) + f"\n   ⚠️  No .pf files found in folder"
+```
+
+[`handlers/prefetch_forensics_handler.py:247-250`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/prefetch_forensics_handler.py#L247-L250)
+
+```python
+            result.append(f"   ✅ Extracted {extracted_count} Jump Lists files")
+            
+            if extracted_count == 0:
+                return "\n".join(result) + f"\n   ⚠️  No Jump Lists files found"
+```
+
+[`handlers/jump_lists_forensics_handler.py:389-392`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/jump_lists_forensics_handler.py#L389-L392)
+
+[7] `analyze_registry`는 건너뛴 모듈을 로그에만 남기고 결과가 없으면 가능한 사유를 적는다.
+[`handlers/registry_forensics_handler.py:142-180`](https://github.com/abhiii011/Cyber-Incident-Investigation-and-Triage-MCP-Server/blob/39e85090231cf0c9b7edcb1700d169372e50d8b1/handlers/registry_forensics_handler.py#L142-L180)
+
+[8] (실행 확인) 하이브 이름이 들어 있지 않은 이름의 파일을 `analyze_registry`에 주자 모듈을 실행하지 않고 가능한 사유 세 가지를 적은 응답을 돌려주었다.
