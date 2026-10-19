@@ -16,7 +16,7 @@ import reportLayout from './src/remark/reportLayout';
 const editUrlIn =
   (dir: string) =>
   ({docPath}: {docPath: string}) =>
-    `https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2/edit/main/${dir}/${docPath}`;
+    `https://github.com/Trace2Bac/dfir-mcp-matrix/edit/main/${dir}/${docPath}`;
 
 // 축 이름과 차례. 원본은 matrix/cells/<축>/index.mdx 머리말이다
 const axes: Record<string, {name: string; order: number}> = {};
@@ -46,7 +46,7 @@ const relabelAxes = (items: SidebarItem[]): SidebarItem[] => {
 
 const config: Config = {
   title: 'DFIR MCP Matrix',
-  tagline: 'DFIR MCP Architecture Matrix',
+  tagline: 'DFIR MCP Matrix',
   favicon: 'img/custom_logo.png',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -60,12 +60,12 @@ const config: Config = {
   // For GitHub pages deployment, it is often '/<projectName>/'
   // 로컬 개발 서버(docusaurus start)는 http://localhost:3000/ 에서 바로 열도록 /를 쓰고, build·serve는 GitHub Pages 경로를 쓴다.
   // 명령 줄에서 환경변수를 붙이는 방식(BASE_URL=/ …)은 Windows cmd에서 돌지 않아 실행한 명령으로 가른다. BASE_URL을 주면 그 값을 쓴다
-  baseUrl: process.env.BASE_URL ?? (process.argv.includes('start') ? '/' : '/dfir-mcp-architecture-matrix-v2/'),
+  baseUrl: process.env.BASE_URL ?? (process.argv.includes('start') ? '/' : '/dfir-mcp-matrix/'),
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
   organizationName: 'Trace2Bac', // Usually your GitHub org/user name.
-  projectName: 'dfir-mcp-architecture-matrix-v2', // Usually your repo name.
+  projectName: 'dfir-mcp-matrix', // Usually your repo name.
 
   onBrokenLinks: 'warn',
 
@@ -140,7 +140,7 @@ const config: Config = {
         },
 
         {
-          href: 'https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2',
+          href: 'https://github.com/Trace2Bac/dfir-mcp-matrix',
           label: 'GitHub',
           position: 'right',
         },
@@ -168,7 +168,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/Trace2Bac/dfir-mcp-architecture-matrix-v2',
+              href: 'https://github.com/Trace2Bac/dfir-mcp-matrix',
             },
           ],
         },

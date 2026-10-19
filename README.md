@@ -1,4 +1,4 @@
-# dfir-mcp-architecture-matrix-v2
+# dfir-mcp-matrix
 
 이 저장소는 DFIR MCP 서버들이 증거 무결성, 실행 통제, 결과 전달, 기록 같은 문제를 **어떻게 구현하는지** 비교하는 매트릭스입니다.
 서버마다 셀이 다루는 일을 어떤 방식으로 하는지 분류하고, 그 판단의 근거로 기준 커밋의 코드를 함께 남깁니다.
@@ -23,7 +23,7 @@
 
 ## 매트릭스 보기
 
-매트릭스는 **https://trace2bac.github.io/dfir-mcp-architecture-matrix-v2/** 에서 볼 수 있습니다.
+매트릭스는 **https://trace2bac.github.io/dfir-mcp-matrix/** 에서 볼 수 있습니다.
 로컬에서 띄우려면 다음을 실행합니다.
 
 ```

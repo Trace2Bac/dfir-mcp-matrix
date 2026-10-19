@@ -29,7 +29,7 @@ export default function MatrixGrid() {
 
   return (
     <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-      <h1 style={{ marginBottom: '0.5rem' }}>DFIR MCP 아키텍처 매트릭스</h1>
+      <h1 style={{ marginBottom: '0.5rem' }}>DFIR MCP 매트릭스</h1>
       <p style={{ color: 'var(--ifm-color-emphasis-700)', marginBottom: '2rem' }}>
         셀을 누르면 그 셀의 정의와 서버별 구현을 봅니다.
         {data.updated_at && <span style={{ color: 'var(--ifm-color-emphasis-600)', fontSize: '0.85rem' }}> · 최종 갱신 {data.updated_at}</span>}
