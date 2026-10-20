@@ -1,0 +1,189 @@
+---
+cell: P04
+details:
+- id: not_implemented
+---
+
+# P04 조사 단위 관리
+
+### 미구현
+
+**판단.** 서버에는 사건이나 세션 같은 조사 단위를 정하거나 나누는 장치가 없다.
+분석 도구는 호출마다 캡처 파일 경로 `pcap_file`을 받고 사건 ID나 세션 ID를 받지 않는다 [1].
+진입점 도구 `wireshark_open_file`도 결과 글만 돌려주고 연 파일을 서버에 남기지 않으므로 다음 호출은 경로를 다시 받는다 [2].
+
+서버를 만들 때 `tshark` 실행 객체 `WiresharkSuiteClient`는 하나만 만들어지고 모든 도구가 그 객체를 쓴다 [3].
+결과 캐시 `ResultCache`도 그 객체에 하나만 있다 [4].
+캐시 키는 파일의 실제 경로, 수정 시각, 크기와 실행한 명령이고 조사 단위를 담지 않는다 [5].
+SSE·Streamable HTTP 전송에서도 이 서버 객체 하나로 모든 연결을 받으므로 캐시는 연결 사이에 나뉘지 않는다 [3][6].
+
+`WIRESHARK_MCP_ALLOWED_DIRS`는 서버가 읽고 쓸 수 있는 폴더를 정하는 설정이고 사건을 가리키지 않는다 [7].
+파일을 쓰는 도구는 모델이 준 출력 경로에 쓰고 서버가 사건별 폴더나 파일 이름을 정하지 않는다 [8].
+`wireshark_yara_scan`이 만드는 임시 폴더는 허용 폴더 가운데 처음으로 쓸 수 있는 곳에 무작위 이름으로 생기고 호출이 끝나면 지워진다 [9].
+저장소의 `Dockerfile`은 이미지 안에 `/captures`와 `/results` 폴더를 만들지만 서버 코드는 이 두 폴더를 따로 다루지 않는다 [10].
+
+### 근거
+
+[1] 분석 도구는 캡처 파일 경로와 분석 인자만 받는다: [`src/wireshark_mcp/tools/extract.py:12-24`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L12-L24), [`src/wireshark_mcp/tools/stats.py:303-320`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L303-L320), [`src/wireshark_mcp/tools/analyze.py:80-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/analyze.py#L80-L88).
+
+[2] `wireshark_open_file`은 받은 경로로 두 명령을 실행하고 글을 돌려준다: [`src/wireshark_mcp/tools/registry.py:292-344`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L292-L344).
+
+```python
+    @mcp.tool()
+    async def wireshark_open_file(pcap_file: str) -> str:
+        """[Entry Point] Open a pcap and get protocol-aware tool recommendations. Returns protocols and relevant tools."""
+        phs_raw = await client.get_protocol_stats(pcap_file)
+        phs_result = parse_tool_result(normalize_tool_result(phs_raw))
+        if not phs_result["success"]:
+            return normalize_tool_result(phs_result)
+
+        file_info_raw = await client.get_file_info(pcap_file)
+        file_info = parse_tool_result(normalize_tool_result(file_info_raw))
+```
+
+[`src/wireshark_mcp/tools/registry.py:295-304`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L295-L304)
+
+[3] 서버를 만들 때 실행 객체 하나를 만들어 모든 도구 등록 함수에 넘기고 전송을 고른 뒤 그 서버 객체를 실행한다.
+
+```python
+    mcp = WiresharkMCP(
+        "Wireshark MCP",
+        instructions=SERVER_INSTRUCTIONS,
+        version=__version__,
+        dependencies=["tshark"],
+        log_level=log_level,
+        excluded_tools=excluded_tools(profile),
+    )
+    client = WiresharkSuiteClient(allowed_dirs=allowed_dirs)
+
+    # ── Core tools (always registered) ──────────────────────────────────
+    register_utility_tools(mcp, client)
+    register_stats_tools(mcp, client)
+    register_extract_tools(mcp, client)
+    register_agent_tools(mcp, client)
+    register_advanced_tools(mcp, client)
+
+    # ── Analysis tools + protocol-aware recommendations ────────────────
+    # Register the full analysis tool catalog once — the tool surface is static.
+    registry = ToolRegistry(mcp, client)
+    registry.register()
+
+    # Register the entry-point tool that recommends the most relevant tools
+    register_open_file_tool(mcp, client, registry)
+
+    # ── Resources and Prompts ───────────────────────────────────────────
+    register_resources(mcp, client)
+```
+
+[`src/wireshark_mcp/server.py:60-86`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L60-L86)
+
+```python
+    mcp = _build_server(
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        profile=getattr(args, "profile", DEFAULT_PROFILE),
+    )
+    _configure_windows_event_loop()
+
+    if args.transport == "sse":
+        logger.info("Starting SSE transport on http://%s:%d%s", args.host, args.port, args.mount_path)
+        mount_path = "/" + args.mount_path.strip("/") if args.mount_path.strip("/") else ""
+        mcp.run(
+            transport="sse",
+            host=args.host,
+            port=args.port,
+            sse_path=f"{mount_path}/sse",
+            message_path=f"{mount_path}/messages/",
+        )
+    elif args.transport == "streamable-http":
+        logger.info("Starting Streamable HTTP transport on http://%s:%d", args.host, args.port)
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run()
+```
+
+[`src/wireshark_mcp/server.py:364-386`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L364-L386)
+
+[4] 결과 캐시는 실행 객체를 만들 때 하나 생긴다.
+
+```python
+        self._version: str | None = None
+        self._cache = ResultCache()
+```
+
+[`src/wireshark_mcp/tshark/client.py:78-79`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L78-L79)
+
+[5] 캐시 키를 만드는 함수다.
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)
+
+[6] MCP Python SDK 2.1.1의 `MCPServer.run`은 고른 전송으로 같은 서버 객체를 실행하고 Streamable HTTP는 그 객체 하나로 앱을 만든다: [`src/mcp/server/mcpserver/server.py:394-415`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L394-L415), [`src/mcp/server/mcpserver/server.py:1098-1132`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L1098-L1132).
+
+[7] 허용 폴더는 환경변수에서 읽어 실행 객체에 넘긴다.
+
+```python
+    # Read allowed directories from environment
+    allowed_dirs_env = os.environ.get("WIRESHARK_MCP_ALLOWED_DIRS", "")
+    allowed_dirs = [d.strip() for d in allowed_dirs_env.split(",") if d.strip()] or None
+```
+
+[`src/wireshark_mcp/server.py:56-58`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L56-L58)
+
+```python
+        self._allowed_dirs: list[Path] | None = None
+        if allowed_dirs:
+            resolved_dirs = [Path(d).resolve() for d in allowed_dirs]
+            invalid_dirs = [str(path) for path in resolved_dirs if not path.is_dir()]
+            if invalid_dirs:
+                raise ValueError("Allowed directories must already exist and be directories")
+            self._allowed_dirs = resolved_dirs
+            logger.info("Path sandbox enabled: %s", self._allowed_dirs)
+```
+
+[`src/wireshark_mcp/tshark/client.py:81-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L81-L88)
+
+[8] 파일을 쓰는 도구는 출력 경로를 인자로 받아 허용 폴더 안인지만 확인한다: [`src/wireshark_mcp/tshark/_suite_ops.py:32-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L32-L250), [`src/wireshark_mcp/tshark/_extraction.py:81-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L81-L103), [`src/wireshark_mcp/tshark/_validation.py:113-158`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L113-L158).
+
+[9] 임시 폴더는 허용 폴더를 차례로 시도해 만든다.
+
+```python
+        for root in self._allowed_dirs:
+            try:
+                return {"success": True, "path": tempfile.mkdtemp(prefix=prefix, dir=root)}
+            except OSError:
+                continue
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:174-178`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L174-L178)
+
+[10] 이미지 안에 두 폴더를 만들고 `/captures`를 작업 폴더로 둔다.
+
+```dockerfile
+    && groupadd --gid 10001 wireshark-mcp \
+    && useradd --uid 10001 --gid 10001 --create-home wireshark-mcp \
+    && mkdir --parents /captures /results \
+    && chown wireshark-mcp:wireshark-mcp /captures /results
+
+USER wireshark-mcp
+WORKDIR /captures
+```
+
+[`Dockerfile:20-26`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L20-L26)

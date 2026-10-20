@@ -1,0 +1,1420 @@
+---
+cell: F02
+details:
+- id: F02.01
+- id: F02.03
+- id: F02.05
+- id: F02.08
+- id: F02.09
+---
+
+# F02 발견사항·결론 도출
+
+### F02.01 규칙·키 기반 판정·상관
+
+**구현.** 이 방식은 탐지 도구 8개, 바이트 서명·YARA 규칙·JA3 목록과 대조하는 도구 3개, `wireshark_quick_analysis`의 이상 요약, `wireshark_analyze_protocol`의 일부 `protocol` 값에 적용된다 [1].
+탐지 도구는 정해 둔 표시 필터로 tshark에서 필드를 뽑은 뒤 서버 코드의 문턱과 목록으로 판정한다.
+
+- `wireshark_detect_port_scan`은 SYN만 켜진 패킷의 출발 IP마다 서로 다른 목적지 포트 수를 세어 `threshold`(기본 15) 이상인 출발지를 스캐너 후보로 둔다 [2].
+- 같은 도구는 SYN과 FIN이 함께 켜진 패킷과 TCP 플래그가 하나도 없는 패킷을 50개까지 따로 찾는다 [3].
+- `wireshark_detect_dns_tunnel`은 50자를 넘는 질의 이름, 10개를 넘는 TXT 질의, 마지막 두 레이블이 같은 도메인 아래 20개를 넘는 하위 이름을 지표로 센다 [4].
+- `wireshark_detect_dos_attack`은 SYN이 50개와 초당 30개를 넘고 SYN·SYN-ACK 비율이 3을 넘거나 SYN-ACK가 없는 경우, ICMP가 200개와 초당 50개를 넘는 경우, 한 목적지로 가는 UDP가 200개를 넘고 전체 UDP가 초당 50개를 넘는 경우, UDP 길이가 512바이트를 넘는 DNS 응답이 50개를 넘는 경우를 지표로 센다 [5].
+- `wireshark_extract_credentials`는 `http.authbasic` 값, `ftp.request.command == PASS`인 패킷의 인자, 바이트에 `login`이 들어 있고 패킷 목록 글에도 `login`이나 `Password`가 있는 패킷을 평문 자격 증명 발견사항의 근거로 모은다 [6].
+- `wireshark_detect_beaconing`은 SYN만 켜진 패킷을 출발 IP, 목적지 IP, 목적지 포트로 묶고 연결이 `min_connections`(기본 10) 이상인 묶음만 판정한다 [7].
+- `wireshark_detect_exfiltration`은 목적지가 사설 IPv4 대역 셋(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)이 아닌 TCP를 외부 전송으로 보고 질의 이름 길이가 50을 넘는 DNS 질의를 의심 질의로 싣는다 [8].
+- `wireshark_detect_protocol_anomalies`는 목적지 포트가 80·443·8080·8443이 아닌 TCP에서 Wireshark가 HTTP·TLS·SSL로 표시한 흐름을 이상으로 고른다 [9].
+- `wireshark_detect_arp_spoofing`은 한 IP를 둘 이상의 MAC이 알리면 충돌로, 한 MAC이 IP를 넷 이상 알리면 라우터나 스캐너 가능성으로 표시한다 [10].
+- 같은 도구는 ARP 응답이 100개를 넘거나 보낸 IP와 대상 IP가 같은 ARP가 10개를 넘으면 따로 표시한다 [10].
+
+대조 도구 세 개는 정해 둔 바이트 서명, YARA 규칙, 사용자의 JA3 목록을 쓴다.
+
+- `wireshark_scan_file_signatures`는 실행 파일, 문서, 압축, 이미지 형식 8가지의 매직 바이트를 패킷 바이트에서 찾아 형식마다 패킷 수를 센다 [11].
+- `wireshark_yara_scan`은 `protocol`로 고른 HTTP·SMB·TFTP·IMF·DICOM 객체를 `dest_dir`나 서버가 만든 임시 폴더로 내보낸 뒤 패키지에 들어 있는 YARA 규칙 12개와 사용자 폴더 `~/.wireshark-mcp/yara`의 규칙으로 검사한다 [12][13].
+- 일치마다 규칙 메타데이터의 `severity`(없으면 `medium`)와 `category`를 싣고 `critical`·`high`가 하나라도 있으면 첫 줄 표시를 `[!]`로 둔다 [14].
+- `wireshark_extract_fingerprints`는 Client Hello의 JA3 값을 사용자가 `~/.wireshark-mcp/fingerprints`에 둔 목록과 열 단위로 대조해 일치하면 그 항목의 `label`과 `category`를 싣는다 [15].
+- 패키지에는 JA3 목록이 없어 사용자가 목록을 두지 않으면 이 대조를 하지 않는다 [15].
+
+요약과 프로토콜 분석의 일부 값도 정해 둔 규칙으로 표시를 붙이거나 결과 항목을 잇는다.
+
+- `wireshark_quick_analysis`는 tshark expert 정보에 `Retransmission`, `Duplicate ACK`, `Out-of-Order`, `Malformed`, `Reassembly error`, `Zero window`가 들어 있으면 정해 둔 표시와 함께 이상 항목으로 싣는다 [16].
+- `wireshark_analyze_protocol`의 `icmp_tunnel`은 데이터 길이가 48바이트를 넘는 ICMP를, `doh`는 HTTP/2 `content-type` 값에 `dns`가 들어 있는 흐름을 경고 제목 아래 싣는다 [17].
+- `modbus`는 예외 응답 수를 경고로 싣고 기능 코드 5·6·15·16인 패킷을 쓰기 작업으로 따로 싣는다 [18].
+- `ble_devices`는 같은 장치 이름을 알린 주소가 둘 이상이면 주소 회전이나 복제된 신원 가능성으로 묶어 `shared_name_groups`에 싣는다 [19].
+- `ble_devices`는 TxAdd 값으로 주소 종류를 `random`·`public`·`mixed`로 나눈다 [20].
+- `ble_pairing`은 Pairing Request와 Pairing Response의 IO 능력, OOB, MITM, Secure Connections 값으로 페어링 방식을 추정한다 [21].
+- `ble_pairing`은 추정한 방식이 Just Works이면 발견사항을 내고 Pairing Failed마다 발견사항을 낸다 [22].
+- `ble_connections`는 HCI 연결 갱신과 연결 해제 이벤트를 인터페이스와 연결 핸들로 연결 세션에 이어 세션마다 지속 시간을 계산한다 [23].
+- `ble_gatt_timeline`은 탐색 응답에서 얻은 handle 범위로 ATT 작업마다 서비스와 속성 이름을 붙인다 [24].
+
+`wireshark_yara_scan`은 기본 프로필 `full`에서만, `wireshark_scan_file_signatures`는 `full`과 `analysis`에서만 등록된다 [25].
+`wireshark_stats_expert_info`는 tshark의 expert 정보를 옮기고 `wireshark_geoip_enrich`는 공인 IP에 국가, 도시, ASN을 붙일 뿐 판정을 더하지 않는다 [26].
+
+**한계.** `wireshark_detect_port_scan`의 도구 설명은 SYN, FIN, NULL, Xmas 스캔을 찾는다고 적지만 코드는 FIN만 켜진 패킷과 FIN·PSH·URG가 켜진 패킷을 찾지 않는다 [27][3].
+같은 도구는 SYN과 FIN이 함께 켜진 패킷을 Xmas 스캔이라고 적는다 [27].
+SYN-FIN이나 NULL 패킷이 하나만 있어도 `threshold`와 관계없이 발견사항을 내고 문턱을 넘은 출발지가 없으면 관찰 문장은 스캐너 후보 출발지 수를 0으로 적는다 [2][28].
+`wireshark_detect_protocol_anomalies`의 표시 필터는 집합 원소를 쉼표 없이 띄어 써서 tshark 4.0.17의 표시 필터 문법에 맞지 않는다 [9][29].
+이 도구는 tshark 4.0.17 환경과 Windows의 4.6.7 환경에서 모두 필터 오류를 돌려주었다 [30].
+`wireshark_detect_exfiltration`은 두 하위 조회가 실패했는지 보지 않고 그 결과를 건너뛴다 [31].
+캡처 파일이 아닌 파일을 주자 두 조회가 모두 실패했는데도 응답은 성공이었고 외부 전송과 긴 DNS 질의가 없다는 `[OK]` 줄을 실었다 [32].
+`wireshark_scan_file_signatures`는 하위 조회가 실패하면 그 형식의 패킷 수를 0으로 둔다 [11].
+같은 파일로 부르자 여덟 조회가 모두 실패했는데도 응답은 "No embedded files detected via magic byte scan"이었다 [32].
+`wireshark_extract_credentials`는 바이트에 소문자 `login`이 있는 패킷을 프로토콜을 가리지 않고 10개까지 찾은 뒤 그 패킷 목록 글에 `Password`나 대소문자를 가리지 않은 `login`이 있을 때만 Telnet 근거를 싣는다 [6][33].
+HTTP 요청 URI에만 `login`이 있는 패킷 하나로 부르자 이 패킷이 `protocol` `Telnet`인 근거로 실렸고 평문 자격 증명 발견사항이 나왔다 [34].
+Telnet 서버가 로그인 안내를 보낸 패킷 하나로 부르자 그 패킷의 Info 열이 `Telnet Data ...`라 근거가 실리지 않았고 응답은 평문 자격 증명이 없다는 `[OK]` 줄이었다 [35].
+`wireshark_analyze_protocol`의 `icmp_tunnel`과 `doh`는 결과 행이 없어도 tshark가 낸 머리글 줄만으로 결과가 있다고 보아 경고 제목을 싣는다 [17].
+ICMP와 HTTP/2가 없는 캡처에서 두 값 모두 머리글 줄만 있는 결과에 `[W]` 제목을 실었다 [36].
+`ble_pairing`은 MITM과 Secure Connections 필드 값이 문자열 `True`일 때만 켜진 것으로 본다 [21].
+tshark 4.0.17은 `-T fields` 출력에서 참인 boolean 필드를 `1`로 쓰고 4.6.7은 `True`로 쓴다 [37][38].
+MITM과 Secure Connections가 켜지고 양쪽 IO 능력이 DisplayYesNo인 페어링을 4.0.17 환경에서 부르자 `Just Works`와 "no MITM protection requested"가 나왔고 `likely` 발견사항이 실렸다 [39].
+Windows의 4.6.7 환경에서는 같은 캡처가 `Numeric Comparison`이었고 발견사항이 없었다 [39].
+`ble_devices`의 주소 종류도 `True`·`False` 문자열만 읽어 4.0.17 환경에서는 세 장치가 모두 `unknown`이었고 Windows의 4.6.7 환경에서는 `random` 둘과 `public` 하나였다 [20][40].
+`wireshark_quick_analysis`는 expert 정보 글에서 정해 둔 낱말을 대소문자를 가려 찾고 하나도 없으면 `[OK] No notable anomalies`를 싣는다 [16].
+Wireshark 4.0.17의 TCP expert 문구는 재전송과 순서 어긋남을 소문자 `retransmission`·`out-of-order`로 적고 0 window를 `Zero Window`로 적어 서버가 찾는 `Retransmission`, `Out-of-Order`, `Zero window`와 일치하지 않는다 [41].
+재전송 패킷 하나가 있는 캡처에서 expert 정보에는 재전송 문구가 있었지만 이상 요약은 `[OK] No notable anomalies`였다 [42].
+
+### F02.03 통계·점수 산정
+
+**구현.** 이 방식은 `wireshark_detect_beaconing`, `wireshark_detect_dos_attack`, `wireshark_detect_dns_tunnel`, `wireshark_analyze_tcp_health`, `wireshark_detect_exfiltration`, `wireshark_yara_scan`에 적용된다 [1].
+
+- `wireshark_detect_beaconing`은 묶음마다 연결 시각 간격의 표준편차를 평균으로 나눈 값을 jitter로 계산한다 [43].
+- jitter가 `max_jitter`(기본 0.2) 이하이면 beacon 후보로 싣고 1에서 jitter를 뺀 값을 `confidence`로 싣는다 [44].
+- 후보는 `confidence`가 큰 차례로 정렬한다 [44].
+- `wireshark_detect_dos_attack`은 다섯 조회에서 읽은 시각의 최솟값과 최댓값 차이(1초 미만이면 1초)를 관찰 구간으로 두고 SYN, ICMP, UDP 수를 그 구간으로 나눠 초당 비율을 계산한다 [45].
+- 같은 도구는 SYN 수를 SYN-ACK 수로 나눈 비율도 계산한다 [45].
+- `wireshark_detect_dos_attack`과 `wireshark_detect_dns_tunnel`은 켜진 지표 수가 2 이상이면 `severity`를 `high`, 1이면 `medium`, 0이면 `info`로 둔다 [46].
+- `wireshark_analyze_tcp_health`는 재전송, 중복 ACK, 0 window, RST를 포함한 8가지 조건의 패킷 수를 세어 1 이상이면 `[i]`, 50 초과면 `[W]`, 200 초과면 `[!]`로 표시한다 [47].
+- `wireshark_detect_exfiltration`은 외부 TCP 흐름(출발 IP, 목적지 IP, 목적지 포트)마다 `tcp.len`을 더해 큰 차례로 10개를 크기 문턱 없이 `[W]` 표시와 함께 싣는다 [48].
+- `wireshark_yara_scan`은 일치를 `severity`마다 세어 `Severity breakdown`으로 싣는다 [14].
+
+약 60초 간격 SYN 12개와 30초 간격 SYN 5개가 있는 캡처에서 `wireshark_detect_beaconing`은 12개 묶음만 jitter 0.0052, `confidence` 0.9948의 후보로 실었다 [49].
+DNS 질의 5100개가 있는 캡처에서 `wireshark_detect_dos_attack`은 관찰 구간 50.0초와 UDP 초당 100.1개를 싣고 UDP flood 지표 하나로 `medium` 발견사항을 냈다 [50].
+
+### F02.05 사용 근거·변환 기록
+
+**구현.** 이 방식은 공통 발견사항 형식 `Finding`을 쓰는 `wireshark_detect_port_scan`, `wireshark_detect_dns_tunnel`, `wireshark_detect_dos_attack`, `wireshark_extract_credentials`, `wireshark_analyze_protocol`의 `ble_scan_activity`·`ble_pairing`과, 장치마다 필터를 싣는 `ble_devices`에 적용된다 [51][1].
+`Finding`의 `evidence` 항목은 근거마다 프레임 번호 `frame`, 스트림 `stream`, 필드 `field`, 그 근거를 다시 찾는 표시 필터 `filter`, 값 `value`, 설명 `description`을 싣는다 [51].
+`constraints`는 판정한 수 `scanned`, 조회 상한 `limit`, 잘림 여부 `truncated`, 관찰 구간 `time_window_seconds`, 한쪽만 잡힌 캡처 여부 `single_sided`, 문턱 `threshold`를 싣는다 [51].
+응답 `envelope`의 `scope`에는 캡처 파일과 도구에 따라 판정에 쓴 표시 필터나 문턱이 실린다 [52].
+
+- `wireshark_detect_port_scan`은 스캐너 후보마다 그 출발지의 SYN 패킷을 다시 찾는 필터와 처음 본 프레임 번호를 싣는다 [53].
+- `wireshark_detect_dns_tunnel`은 길이 지표와 TXT 지표에는 그 지표의 필터, 예시 질의, 첫 프레임 번호를 싣고 하위 이름 지표에는 하위 이름이 가장 많은 기준 도메인을 고르는 필터와 하위 이름 수만 싣는다 [54].
+- `wireshark_extract_credentials`는 HTTP와 FTP 근거마다 프레임 번호와 TCP 스트림 번호를 싣는다 [55].
+- `ble_pairing`은 추정한 방식과 판단에 쓴 조건을 `pairing_method`에, 요청과 응답의 원래 값을 `pairing_request`·`pairing_response`에 싣는다 [56].
+- `ble_devices`는 장치마다 처음과 마지막 프레임 번호와 그 장치를 다시 찾는 필터를 싣는다 [57].
+
+`wireshark_detect_beaconing`, `wireshark_detect_exfiltration`, `wireshark_detect_arp_spoofing`, `wireshark_analyze_tcp_health`, `wireshark_scan_file_signatures`, `wireshark_yara_scan`은 결과를 글로 돌려주고 근거 패킷의 프레임 번호를 싣지 않는다 [1].
+
+**한계.** `wireshark_detect_dos_attack`은 경고가 하나라도 있으면 `single_sided`를 참으로 둔다 [58].
+한쪽만 잡힌 캡처라는 경고 없이 UDP 조회 상한 경고만 난 캡처에서도 `single_sided`가 참으로 실렸다 [50].
+`wireshark_detect_port_scan`의 `constraints.truncated`도 경고가 있는지로 정해져 하위 조회가 실패했을 때도 참이 된다 [59].
+`wireshark_extract_credentials`의 `scanned`는 검사한 패킷 수가 아니라 모은 근거 수이고 근거가 없으면 0이다 [60].
+패킷 25개인 캡처에서 근거가 없자 `scanned`는 0이었다 [61].
+`wireshark_extract_credentials`의 Telnet 근거에는 프레임 번호와 스트림 번호가 없다 [6][34].
+`wireshark_detect_dos_attack`의 근거에는 프레임 번호가 없다 [62].
+`wireshark_detect_dns_tunnel`의 하위 이름 지표 근거에는 프레임 번호가 없다 [54].
+
+### F02.08 확신 수준·추정 범위 표시
+
+**구현.** 이 방식은 `Finding`을 내는 도구의 `confidence`와 `wireshark_detect_beaconing`의 숫자 `confidence`에 적용된다 [51][44].
+`Finding`의 `confidence`는 `candidate`, `likely`, `confirmed` 가운데 하나이고 `severity`와 따로 싣는다 [51].
+
+- `wireshark_detect_port_scan`은 SYN-FIN이나 NULL 패킷이 있으면 `likely`, SYN 출발지만 문턱을 넘으면 `candidate`로 둔다 [28].
+- `wireshark_detect_dns_tunnel`과 `wireshark_detect_dos_attack`은 지표가 켜지면 지표 수와 관계없이 `candidate`로 둔다 [46].
+- `wireshark_detect_port_scan`, `wireshark_detect_dns_tunnel`, `wireshark_detect_dos_attack`은 지표가 없으면 관찰되지 않았다는 `info` 발견사항을 `confirmed`로 싣는다 [63].
+- `wireshark_detect_port_scan`과 `wireshark_detect_dos_attack`은 하위 조회가 실패한 검사가 있으면 이 발견사항을 `candidate`로 두고 실패한 검사 이름을 관찰 문장과 `coverage.failed_checks`에 싣는다 [63].
+- `wireshark_detect_dos_attack`은 ICMP, UDP, DNS 증폭 검사가 실패하면 요약에 그 검사를 판단하지 못했다는 `inconclusive`를 적는다 [5].
+- `wireshark_extract_credentials`는 근거가 하나라도 있으면 `confirmed`로 둔다 [64].
+- `ble_pairing`은 Just Works 추정을 `likely`로, Pairing Failed를 `confirmed`로 두고 `ble_scan_activity`는 능동 스캐너 발견사항을 `confirmed`로 둔다 [22][65].
+- `wireshark_detect_beaconing`의 `confidence`는 1에서 jitter를 뺀 숫자다 [44].
+
+시험 캡처의 SYN 스캔은 기본 문턱에서 `candidate` 발견사항으로, 문턱 1000에서 `confirmed` 부재 발견사항으로 나왔다 [66].
+
+**한계.** 부재 발견사항의 `confirmed`는 조회 결과가 상한에서 잘렸는지를 보지 않는다 [67].
+DNS 질의 5100개가 있는 캡처에서 `wireshark_detect_dns_tunnel`은 5000개 상한 경고와 `coverage.status` `partial`을 실으면서 부재 발견사항을 `confirmed`로 실었다 [68].
+tshark가 캡처 파일이 패킷 중간에서 끊겼다고 알리면 실행기는 성공 응답에 그 알림을 `stderr`로 싣지만 탐지 도구는 이 값을 판정에 쓰지 않는다 [69].
+패킷 중간에서 끊긴 시험 캡처로 부르자 `wireshark_detect_dns_tunnel`과 `wireshark_detect_port_scan`은 경고 없이 `coverage.status` `complete`와 `confirmed` 부재 발견사항을 실었다 [70].
+같은 캡처에서 `wireshark_extract_fields`는 끊겼다는 알림을 `stderr`로 실었다 [70].
+`wireshark_extract_credentials`는 `login` 문자열만 일치한 근거로도 `confirmed`를 싣는다 [64][34].
+
+### F02.09 판정 제외 조건의 공개
+
+**구현.** 이 방식은 `wireshark_detect_beaconing`과 `wireshark_detect_port_scan`에 적용된다 [71][72].
+`wireshark_detect_beaconing`은 판정한 전체 묶음 수와 `min_connections` 이상인 묶음 수를 문턱과 함께 싣고 후보가 없으면 jitter 문턱도 싣는다 [71].
+연결 12개와 5개인 두 묶음이 있는 캡처에서 응답은 전체 묶음 2개와 문턱 이상 묶음 1개를 실었다 [49].
+`wireshark_detect_port_scan`은 평가한 SYN 출발지 수를 `constraints.scanned`와 `coverage.scanned`에, 문턱을 `scope.threshold`와 `constraints.threshold`에 싣는다 [72].
+문턱에 못 미친 출발지의 주소는 싣지 않는다 [2].
+
+다른 판정 도구는 뺀 항목의 수나 기준을 싣지 않는다.
+`wireshark_detect_exfiltration`은 사설 대역이 목적지인 흐름을 표시 필터에서 빼고 응답에는 "external"이라는 말만 싣는다 [8][48].
+`wireshark_detect_protocol_anomalies`는 표준 포트로 본 80·443·8080·8443을 필터에서 빼고 응답에 그 목록을 싣지 않는다 [9].
+`wireshark_detect_dns_tunnel`은 하위 이름 지표를 레이블이 셋 이상인 질의 이름에만 적용하고 그 조건을 싣지 않는다 [4].
+
+### 근거
+
+[1] 판정을 내는 도구의 정의: [`src/wireshark_mcp/tools/threat.py:25-808`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L25-L808), [`src/wireshark_mcp/tools/security.py:14-175`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L14-L175), [`src/wireshark_mcp/tools/anomaly.py:34-285`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L34-L285), [`src/wireshark_mcp/tools/protocol.py:26-147`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L26-L147), [`src/wireshark_mcp/tools/forensics.py:54-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L54-L148), [`src/wireshark_mcp/tools/yara_scan.py:80-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L80-L183), [`src/wireshark_mcp/tools/agents.py:46-154`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L46-L154), [`src/wireshark_mcp/tools/analyze.py:80-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/analyze.py#L80-L88).
+
+[2] 포트 스캔은 SYN만 켜진 패킷을 읽고 출발지마다 포트 수를 문턱과 비교한다.
+
+```python
+        # 1. SYN-only packets
+        syn_result = await client.extract_fields(
+            pcap_file,
+            ["frame.number", "ip.src", "ip.dst", "tcp.dstport"],
+            display_filter="tcp.flags.syn == 1 and tcp.flags.ack == 0",
+            limit=limit,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:30-36`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L30-L36)
+
+```python
+        scanners = {src: ports for src, ports in src_to_ports.items() if len(ports) >= threshold}
+        findings: list[Finding] = []
+        summary_lines: list[str] = []
+
+        if scanners or synfin_count > 0 or null_count > 0:
+```
+
+[`src/wireshark_mcp/tools/threat.py:123-127`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L123-L127)
+
+[3] SYN-FIN 검사와 NULL 검사는 따로 50개까지 찾는다.
+
+```python
+        # 2. Stealth scans: SYN-FIN check
+        synfin_result = await client.extract_fields(
+            pcap_file,
+            ["frame.number", "ip.src", "ip.dst", "tcp.dstport"],
+            display_filter="tcp.flags.syn == 1 and tcp.flags.fin == 1",
+            limit=50,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:67-73`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L67-L73)
+
+```python
+        # 3. Stealth scans: NULL scan check
+        null_result = await client.extract_fields(
+            pcap_file,
+            ["frame.number", "ip.src", "ip.dst", "tcp.dstport"],
+            display_filter="tcp.flags == 0",
+            limit=50,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:96-102`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L96-L102)
+
+[4] DNS 터널 지표의 길이, TXT, 하위 이름 규칙이다.
+
+```python
+                if len(qname) > 50:
+                    long_queries.append({"name": qname, "frame": frame_num, "src": src})
+                if qtype in ("16", "TXT"):
+                    txt_queries.append({"name": qname, "frame": frame_num, "src": src})
+
+                parts_domain = qname.split(".")
+                if len(parts_domain) >= 3:
+                    base = ".".join(parts_domain[-2:])
+                    subdomain = ".".join(parts_domain[:-2])
+                    unique_subdomains.setdefault(base, set()).add(subdomain)
+```
+
+[`src/wireshark_mcp/tools/threat.py:303-312`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L303-L312)
+
+```python
+        if len(txt_queries) > 10:
+            indicators += 1
+            sample_txt = txt_queries[0]
+            evidence_list.append(
+                FindingEvidence(
+                    field="dns.qry.type",
+                    filter="dns.flags.response == 0 and dns.qry.type == 16",
+                    description=f"High TXT query volume ({len(txt_queries)} queries, {len(set(q['name'] for q in txt_queries))} unique)",
+                    value=f"Sample TXT query: {sample_txt['name'][:60]}",
+                    frame=sample_txt.get("frame"),
+                )
+            )
+
+        suspicious_domains = {d: s for d, s in unique_subdomains.items() if len(s) > 20}
+        if suspicious_domains:
+            indicators += 1
+            top_domain, subs = max(suspicious_domains.items(), key=lambda x: len(x[1]))
+```
+
+[`src/wireshark_mcp/tools/threat.py:340-356`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L340-L356)
+
+[5] DoS 지표의 문턱: [`src/wireshark_mcp/tools/threat.py:614-694`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L614-L694).
+
+[6] Telnet 근거는 바이트에 `login`이 있는 패킷을 찾고 그 패킷 목록 글에 `Password`나 `login`이 있을 때만 만든다.
+
+```python
+        # 3. Telnet cleartext login search
+        telnet_data = await client.search_packet_contents(pcap_file, "login", "string", limit=10)
+        telnet_wrapped = parse_tool_result(telnet_data)
+        if not telnet_wrapped["success"]:
+            return normalize_tool_result(telnet_wrapped)
+        telnet_payload = telnet_wrapped.get("data")
+        if isinstance(telnet_payload, str) and (
+            "Login" in telnet_payload or "Password" in telnet_payload or "login" in telnet_payload.lower()
+        ):
+            evidence_list.append(
+                FindingEvidence(
+                    protocol="Telnet",
+                    filter='frame contains "login"',
+                    value="Cleartext login/password prompt pattern observed",
+                    description="Telnet/cleartext session with login prompt (follow stream to analyze)",
+                )
+            )
+```
+
+[`src/wireshark_mcp/tools/security.py:110-126`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L110-L126)
+
+HTTP와 FTP 조회: [`src/wireshark_mcp/tools/security.py:21-26`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L21-L26), [`src/wireshark_mcp/tools/security.py:66-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L66-L71).
+
+[7] beaconing은 출발 IP, 목적지 IP, 목적지 포트로 묶고 연결 수 문턱을 넘는 묶음만 판정한다.
+
+```python
+        # Group connections by (src, dst, port)
+        groups: dict[tuple[str, str, str], list[float]] = {}
+        for row in data_rows:
+            if len(row) < 4:
+                continue
+            src = row[0].strip().strip('"')
+            dst = row[1].strip().strip('"')
+            port = row[2].strip().strip('"')
+            epoch_str = row[3].strip().strip('"')
+            try:
+                epoch = float(epoch_str)
+            except (ValueError, TypeError):
+                continue
+            key = (src, dst, port)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(epoch)
+
+        # Analyze each group for beaconing behavior
+        findings: list[dict[str, object]] = []
+        for (src, dst, port), timestamps in groups.items():
+            if len(timestamps) < min_connections:
+                continue
+            timestamps.sort()
+            intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            jitter = _compute_jitter(intervals)
+            if jitter <= max_jitter:
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:58-84`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L58-L84)
+
+[8] 유출 탐지의 두 조회와 표시 필터다.
+
+```python
+        tcp_task = client.extract_fields(
+            pcap_file,
+            ["ip.src", "ip.dst", "tcp.dstport", "tcp.len"],
+            display_filter="tcp && !ip.dst == 10.0.0.0/8 && !ip.dst == 172.16.0.0/12 && !ip.dst == 192.168.0.0/16",
+            limit=limit,
+        )
+        dns_task = client.extract_fields(
+            pcap_file,
+            ["ip.src", "dns.qry.name", "dns.qry.name.len"],
+            display_filter="dns.qry.name.len > 50",
+            limit=1000,
+        )
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:131-142`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L131-L142)
+
+[9] 프로토콜 이상 탐지의 표시 필터와 고르는 프로토콜이다.
+
+```python
+        result = await client.extract_fields(
+            pcap_file,
+            fields,
+            display_filter="tcp && !tcp.dstport in {80 443 8080 8443}",
+            limit=limit,
+        )
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:222-227`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L222-L227)
+
+```python
+        # Known protocols that are suspicious on non-standard ports
+        known_protocols = {"HTTP", "TLS", "SSL"}
+
+        # Deduplicate by (dst, port, protocol)
+        seen: set[tuple[str, str, str]] = set()
+        anomalies: list[dict[str, str]] = []
+
+        for row in data_rows:
+            if len(row) < 4:
+                continue
+            src = row[0].strip().strip('"')
+            dst = row[1].strip().strip('"')
+            port = row[2].strip().strip('"')
+            protocol = row[3].strip().strip('"')
+
+            if protocol.upper() not in known_protocols:
+                continue
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:242-258`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L242-L258)
+
+[10] ARP 충돌, 여러 IP를 알리는 MAC, 응답 수, gratuitous ARP 표시다.
+
+```python
+                if mac and src_ip:
+                    ip_to_macs.setdefault(src_ip, set()).add(mac)
+                    mac_to_ips.setdefault(mac, set()).add(src_ip)
+
+                if opcode == "2":
+                    arp_reply_count += 1
+
+                if src_ip == dst_ip:
+                    gratuitous_count += 1
+```
+
+[`src/wireshark_mcp/tools/protocol.py:112-120`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L112-L120)
+
+```python
+        suspicious_ips = {ip: macs for ip, macs in ip_to_macs.items() if len(macs) > 1}
+        if suspicious_ips:
+            results.append(f"\n{CRIT} {len(suspicious_ips)} IP(s) have multiple MAC addresses!")
+            for ip, macs in suspicious_ips.items():
+                results.append(f"  IP {ip} -> MACs: {', '.join(sorted(macs))}")
+        else:
+            results.append(f"\n{OK} No IP-to-MAC conflicts detected.")
+
+        multi_ip_macs = {mac: ips for mac, ips in mac_to_ips.items() if len(ips) > 3}
+        if multi_ip_macs:
+            results.append(f"\n{INFO} {len(multi_ip_macs)} MAC(s) claim many IPs (possible router or scanner):")
+            for mac, ips in multi_ip_macs.items():
+                results.append(f"  MAC {mac} -> {len(ips)} IPs")
+
+        if arp_reply_count > 100:
+            results.append(f"\n{WARN} High ARP reply count ({arp_reply_count}), possible ARP storm.")
+
+        if gratuitous_count > 10:
+            results.append(f"\n{INFO} Gratuitous ARP count is elevated ({gratuitous_count}).")
+
+```
+
+[`src/wireshark_mcp/tools/protocol.py:127-146`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L127-L146)
+
+[11] 매직 바이트 목록과 조회 실패를 0건으로 두는 검색 함수다.
+
+```python
+        MAGIC_BYTES = {
+            "PE/EXE": "4d5a",
+            "ELF": "7f454c46",
+            "PDF": "255044462d",
+            "ZIP/Office": "504b0304",
+            "RAR": "526172211a07",
+            "GZIP": "1f8b08",
+            "PNG": "89504e470d0a1a0a",
+            "JPEG": "ffd8ff",
+        }
+```
+
+[`src/wireshark_mcp/tools/forensics.py:114-123`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L114-L123)
+
+```python
+        async def _search(file_type: str, magic_hex: str) -> tuple[str, int]:
+            result = await client.search_packet_contents(pcap_file, magic_hex, search_type="hex", limit=50)
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return file_type, 0
+            data = wrapped.get("data", "")
+            if not isinstance(data, str):
+                return file_type, 0
+            # Packet-list output is a header row plus one row per match; count real matches only.
+            rows = [ln for ln in data.splitlines() if ln.strip()]
+            return file_type, max(0, len(rows) - 1)
+```
+
+[`src/wireshark_mcp/tools/forensics.py:125-135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L125-L135)
+
+[12] 패키지 규칙과 사용자 폴더 규칙을 함께 컴파일한다.
+
+```python
+    rule_sources: dict[str, str] = {}
+
+    try:
+        data_ref = importlib_resources.files("wireshark_mcp") / "data" / "yara" / "basic_rules.yar"
+        with importlib_resources.as_file(data_ref) as fp:
+            rule_sources["builtin_basic"] = fp.read_text(encoding="utf-8")
+    except Exception:
+        logger.warning("Could not load bundled YARA rules")
+
+    user_dir = Path.home() / ".wireshark-mcp" / "yara"
+    if user_dir.exists():
+        for f in sorted(user_dir.glob("*.yar")):
+            try:
+                rule_sources[f"user_{f.stem}"] = f.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not load user YARA rule: %s", f)
+        for f in sorted(user_dir.glob("*.yara")):
+            try:
+                rule_sources[f"user_{f.stem}"] = f.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not load user YARA rule: %s", f)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:36-56`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L36-L56)
+
+패키지 규칙 파일: [`src/wireshark_mcp/data/yara/basic_rules.yar`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/data/yara/basic_rules.yar).
+
+[13] `wireshark_yara_scan`은 `dest_dir`가 없을 때만 임시 폴더를 만들고 내보낼 프로토콜은 다섯 값의 목록과 대조한다.
+
+```python
+        use_temp = not dest_dir
+        if use_temp:
+            temp_result = client._create_temporary_output_dir("wireshark_yara_")
+            if not temp_result["success"]:
+                return error_response(
+                    temp_result["error"]["message"],
+                    error_type=temp_result["error"]["type"],
+                )
+            export_dir = str(temp_result["path"])
+        else:
+            export_dir = dest_dir
+
+        try:
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:99-112`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L112)
+
+```python
+    VALID_EXPORT_PROTOCOLS = {"http", "smb", "tftp", "imf", "dicom"}
+```
+
+[`src/wireshark_mcp/tshark/client.py:43-43`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L43-L43)
+
+[14] 일치마다 규칙 메타데이터의 등급을 읽고 등급별로 센다.
+
+```python
+                if matches:
+                    for match in matches:
+                        severity = "medium"
+                        category = "unknown"
+                        description = match.rule
+
+                        if hasattr(match, "meta"):
+                            severity = match.meta.get("severity", "medium")
+                            category = match.meta.get("category", "unknown")
+                            description = match.meta.get("description", match.rule)
+
+                        icon = _severity_icon(severity)
+                        results.append(f"{icon} {fpath.name} | {match.rule} | {description} | {severity} | {category}")
+                        total_matches += 1
+                        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+            output: list[str] = []
+            if total_matches > 0:
+                crit_high = severity_counts.get("critical", 0) + severity_counts.get("high", 0)
+                if crit_high > 0:
+                    output.append(f"{CRIT} {total_matches} YARA match(es) in {len(files)} file(s)")
+                else:
+                    output.append(f"{WARN} {total_matches} YARA match(es) in {len(files)} file(s)")
+
+                breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(severity_counts.items()))
+                output.append(f"Severity breakdown: {breakdown}")
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:138-163`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L138-L163)
+
+[15] 사용자 JA3 목록을 열 단위로 대조한다.
+
+```python
+        db = _load_fingerprint_db()
+        if db:
+            matches = []
+            raw_data = wrapped.get("data", "")
+            if isinstance(raw_data, str):
+                for line in raw_data.splitlines():
+                    # Compare the JA3 column, not the whole row: a substring test against
+                    # the line also fires when the hash appears in SNI or an address.
+                    columns = [col.strip().strip('"') for col in line.split("\t")]
+                    for fp in db:
+                        if fp.get("ja3") and fp["ja3"] in columns:
+                            matches.append(
+                                f"{CRIT} MATCH: {fp['ja3']} -> "
+                                f"{fp.get('label', 'unlabelled')} ({fp.get('category', 'uncategorised')})"
+                            )
+```
+
+[`src/wireshark_mcp/tools/forensics.py:89-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L89-L103)
+
+사용자 목록을 읽는 함수: [`src/wireshark_mcp/tools/forensics.py:18-48`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L18-L48).
+
+[16] 빠른 분석의 이상 요약은 expert 정보의 문자열을 표시와 대응시킨다.
+
+```python
+    # Phase 6: Anomaly Summary
+    expert_data = _extract_data(expert_raw) if expert_raw else None
+    report.append(f"\n{section('6. Anomalies')}")
+    if expert_data:
+        anomaly_keywords = {
+            "Retransmission": INFO,
+            "Duplicate ACK": INFO,
+            "Out-of-Order": WARN,
+            "Malformed": CRIT,
+            "Reassembly error": WARN,
+            "Zero window": INFO,
+        }
+        found_any = False
+        for keyword, icon in anomaly_keywords.items():
+            if keyword in expert_data:
+                report.append(f"{icon} {keyword}")
+                found_any = True
+        if not found_any:
+            report.append(f"{OK} No notable anomalies")
+    else:
+        report.append("No expert info available")
+```
+
+[`src/wireshark_mcp/tools/agents.py:131-151`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L131-L151)
+
+[17] `icmp_tunnel`과 `doh`의 필터와 경고 제목, 결과가 비었는지 보는 조건이다.
+
+```python
+        "doh": _make_simple_extractor(
+            [
+                "ip.src",
+                "ip.dst",
+                "http2.header.value",
+            ],
+            'http2.header.name == "content-type" && http2.header.value contains "dns"',
+            "No DNS-over-HTTPS traffic found in this capture.",
+            f"{WARN} DNS-over-HTTPS detected (up to {{limit}}):\n{{data}}",
+        ),
+        "icmp_tunnel": _make_simple_extractor(
+            [
+                "ip.src",
+                "ip.dst",
+                "icmp.type",
+                "data.len",
+            ],
+            "icmp && data.len > 48",
+            "No large ICMP payloads found in this capture.",
+            f"{WARN} ICMP tunneling indicators (up to {{limit}}):\n{{data}}",
+        ),
+```
+
+[`src/wireshark_mcp/tools/protocol.py:565-585`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L565-L585)
+
+```python
+            data = wrapped.get("data", "")
+            if not isinstance(data, str) or len(data.strip()) < 20:
+                return success_response(empty_msg)
+
+            return success_response(header_tmpl.format(limit=limit, data=data))
+```
+
+[`src/wireshark_mcp/tools/protocol.py:510-514`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L510-L514)
+
+[18] Modbus 예외 응답과 쓰기 기능 코드 표시다.
+
+```python
+        if exception_count > 0:
+            output_parts.append(f"\n{WARN} Exception responses: {exception_count}")
+```
+
+[`src/wireshark_mcp/tools/ics.py:70-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L70-L71)
+
+```python
+        write_result = await client.extract_fields(
+            pcap_file,
+            write_fields,
+            display_filter="modbus.func_code in {5 6 15 16}",
+            limit=limit,
+        )
+        write_wrapped = parse_tool_result(write_result)
+        if write_wrapped["success"]:
+            write_data = write_wrapped.get("data", "")
+            if isinstance(write_data, str) and len(write_data.strip()) > 20:
+                output_parts.append(f"\n{INFO} Write Operations (FC 5/6/15/16):")
+                output_parts.append(write_data)
+```
+
+[`src/wireshark_mcp/tools/ics.py:83-94`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L83-L94)
+
+[19] 같은 장치 이름을 알린 주소를 묶는다.
+
+```python
+        # Dual-address same-name detection: one device name advertised by 2+ addresses.
+        name_to_addresses: dict[str, set[str]] = {}
+        for row in device_rows:
+            for name in row["names"]:
+                name_to_addresses.setdefault(name, set()).add(row["address"])
+        shared_name_groups = [
+            {
+                "device_name": name,
+                "addresses": sorted(addresses),
+                "frame_counts": {
+                    row["address"]: row["frame_count"] for row in device_rows if row["address"] in addresses
+                },
+            }
+            for name, addresses in sorted(name_to_addresses.items())
+            if len(addresses) >= 2
+        ]
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:639-654`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L639-L654)
+
+[20] TxAdd 값의 문자열로 주소 종류를 정한다.
+
+```python
+def _address_type(txadd_values: set[str]) -> str:
+    """Map observed TxAdd flag values to an address type label."""
+    flags = {v for v in txadd_values if v in {"True", "False"}}
+    if not flags:
+        return "unknown"
+    if len(flags) > 1:
+        return "mixed"
+    return "random" if flags == {"True"} else "public"
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:96-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L96-L103)
+
+[21] 페어링 방식 추정 규칙이다.
+
+```python
+def _infer_pairing_method(request: dict[str, Any] | None, response: dict[str, Any] | None) -> tuple[str, str]:
+    """Infer the LE pairing method from the request/response exchange.
+
+    Returns (method, note). Simplified from Vol 3 Part H Table 5.7; the note
+    carries the raw flags so a reviewer can re-check the inference.
+    """
+    if request is None or response is None:
+        return "unknown", "pairing request/response pair not both present in this capture"
+    # Core Vol 3 Part H, Tables 2.6-2.8: SC is negotiated by both
+    # devices, whereas either device can request MITM protection. Legacy
+    # OOB requires both flags; SC OOB needs only one.
+    secure_connections = request["sc"] == "True" and response["sc"] == "True"
+    oob_req, oob_rsp = request["oob"] == "0x01", response["oob"] == "0x01"
+    if (oob_req and oob_rsp) or (secure_connections and (oob_req or oob_rsp)):
+        return "OOB", "OOB data flag set"
+    mitm = request["mitm"] == "True" or response["mitm"] == "True"
+    if not mitm:
+        return "Just Works", "no MITM protection requested"
+    io_req, io_rsp = request["io_capability"], response["io_capability"]
+    displays = {"0x00", "0x01", "0x04"}
+    keyboards = {"0x02", "0x04"}
+    if io_req in ("0x01", "0x04") and io_rsp in ("0x01", "0x04") and secure_connections:
+        return "Numeric Comparison", "MITM requested, both sides display-confirm capable, secure connections"
+    if (io_req in keyboards and io_rsp in displays) or (io_rsp in keyboards and io_req in displays):
+        return "Passkey Entry", "MITM requested, keyboard/display pairing"
+    if io_req == io_rsp == "0x02":
+        return "Passkey Entry", "MITM requested, user enters the same passkey on both keyboards"
+    if io_req == "0x03" or io_rsp == "0x03":
+        return "Just Works", "MITM requested but a side is NoInputNoOutput, so it degrades to Just Works"
+    return "Just Works", "MITM requested, IO capabilities fall back to Just Works"
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:251-280`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L251-L280)
+
+[22] Just Works 발견사항과 Pairing Failed 발견사항이다.
+
+```python
+        method, method_note = _infer_pairing_method(pairing_request, pairing_response)
+
+        findings: list[Finding] = []
+        if method == "Just Works":
+            finding: Finding = {
+                "observation": (
+                    f"Pairing uses Just Works ({method_note}) — no authenticated MITM protection. "
+                    "A passive attacker that captures this exchange and later recovers the LTK can decrypt all traffic."
+                ),
+                "severity": "low",
+                "confidence": "likely",
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:1342-1352`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1342-L1352)
+
+Pairing Failed 발견사항: [`src/wireshark_mcp/tools/bluetooth.py:1372-1387`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1372-L1387).
+
+[23] 연결 갱신과 연결 해제를 인터페이스와 핸들로 세션에 잇는다.
+
+```python
+                        key = (interface, handle)
+                        if key not in active_sessions:
+                            active_sessions[key] = new_session(interface, handle)
+                        active_sessions[key]["updates"].append(update)
+                elif code == "0x05":  # HCI Disconnect Complete: reason attribution
+                    handle = _strip(parts[4])
+                    if not handle:
+                        continue
+                    reason_name = _reason_name(parts[11])
+                    reason_counts[reason_name] += 1
+                    try:
+                        time_value = float(_strip(parts[1]))
+                    except ValueError:
+                        time_value = None
+                    # Closing removes the active association, not the history.
+                    closed_session = active_sessions.pop((interface, handle), None)
+                    session = closed_session if closed_session is not None else new_session(interface, handle)
+                    session["disconnect"] = {"reason": reason_name, "time": time_value}
+                    connect_time = session["connect"]["time"] if session["connect"] else None
+                    if connect_time is not None and time_value is not None:
+                        session["session_duration_s"] = round(time_value - connect_time, 6)
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:1103-1123`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1103-L1123)
+
+[24] ATT 작업마다 handle 범위로 서비스 이름을 붙인다.
+
+```python
+            connection, server = _gatt_context(parts, opcode)
+            _services, service_ranges, labels = discoveries[(connection, server)]
+            attribute = labels.get(handle) if handle else None
+            service: str | None = None
+            handle_ints = _split_handles(handle) if handle else []
+            if handle_ints:
+                for lo, hi, label in service_ranges:
+                    if lo <= handle_ints[0] <= hi:
+                        service = label
+                        break
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:931-940`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L931-L940)
+
+[25] 파일을 쓰는 도구와 저수준 도구는 프로필에서 빠진다.
+
+```python
+# Tools that write a new file: pcap surgery, format conversion, saved filters.
+_WRITERS: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_editcap_deduplicate",
+        "wireshark_editcap_split",
+        "wireshark_editcap_time_shift",
+        "wireshark_editcap_trim",
+        "wireshark_export_objects",
+        "wireshark_extract_frames",
+        "wireshark_filter_save",
+        "wireshark_merge_pcaps",
+        "wireshark_text2pcap_import",
+        "wireshark_yara_scan",
+    }
+```
+
+[`src/wireshark_mcp/profiles.py:41-54`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L41-L54)
+
+```python
+_ADVANCED: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_decode_as",
+        "wireshark_decrypt_tls",
+        "wireshark_decrypt_wpa",
+        "wireshark_flow_graph",
+        "wireshark_get_capabilities",
+        "wireshark_get_packet_bytes",
+        "wireshark_scan_file_signatures",
+        "wireshark_set_protocol_prefs",
+    }
+)
+
+# What each profile removes from the full surface. `full` removes nothing.
+_EXCLUSIONS: Final[dict[str, frozenset[str]]] = {
+    "full": frozenset(),
+    "analysis": _CAPTURE | _WRITERS,
+    "core": _CAPTURE | _WRITERS | _ADVANCED,
+}
+```
+
+[`src/wireshark_mcp/profiles.py:60-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L60-L78)
+
+[26] expert 정보는 그대로 옮기고 GeoIP는 공인 IP만 조회한다.
+
+```python
+    @mcp.tool()
+    async def wireshark_stats_expert_info(pcap_file: str) -> str:
+        """[Expert Info] Automatic anomaly detection: retransmissions, errors, warnings, protocol issues."""
+        return _maybe_summarize(await client.get_expert_info(pcap_file), max_rows=80)
+```
+
+[`src/wireshark_mcp/tools/stats.py:513-516`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L513-L516)
+
+```python
+        unique_ips: set[str] = set()
+        for line in data.strip().splitlines()[1:]:
+            parts = line.split("\t")
+            for part in parts:
+                ip = part.strip().strip('"')
+                if ip and not _is_private_ip(ip):
+                    unique_ips.add(ip)
+```
+
+[`src/wireshark_mcp/tools/geoip.py:110-116`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L110-L116)
+
+[27] 도구 설명과 SYN-FIN 근거의 설명 문구다.
+
+```python
+    async def wireshark_detect_port_scan(pcap_file: str, threshold: int = 15) -> str:
+        """[Security] Detect port scanning (SYN, FIN, NULL, Xmas scans). threshold: min unique dst ports to flag."""
+```
+
+[`src/wireshark_mcp/tools/threat.py:25-26`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L25-L26)
+
+```python
+            if synfin_count > 0:
+                evidence.append(
+                    FindingEvidence(
+                        protocol="TCP",
+                        filter="tcp.flags.syn == 1 and tcp.flags.fin == 1",
+                        description=f"SYN-FIN stealth scan (Xmas scan) activity ({synfin_count} packets)",
+                        value=f"{synfin_count} SYN-FIN packets",
+                        frame=synfin_frames[0] if synfin_frames else None,
+                    )
+                )
+```
+
+[`src/wireshark_mcp/tools/threat.py:139-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L139-L148)
+
+[28] 스캐너 후보가 없어도 같은 관찰 문장을 쓰고 `confidence`는 SYN-FIN·NULL 유무로 정한다.
+
+```python
+            finding: Finding = {
+                "observation": f"Port scan candidate activity detected from {len(scanners)} source(s) (threshold: {threshold} ports).",
+                "severity": "high",
+                "confidence": "likely" if (synfin_count or null_count) else "candidate",
+                "evidence": evidence,
+```
+
+[`src/wireshark_mcp/tools/threat.py:160-164`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L160-L164)
+
+[29] tshark 4.0.17의 표시 필터 문법은 집합 원소를 쉼표로 나눈다: [`epan/dfilter/grammar.lemon:338-348`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/dfilter/grammar.lemon#L338-L348) (Wireshark 4.0.17).
+
+[30] (실행 확인) HTTP가 포트 3128로 가는 패킷 하나를 담은 캡처와 시험용 SYN 스캔 캡처로 `wireshark_detect_protocol_anomalies`를 불러 두 환경 모두 `"443" was unexpected in this context` 필터 오류를 받았다.
+
+[31] 유출 탐지는 두 조회의 성공 여부를 분기로만 쓰고 실패를 알리지 않는다.
+
+```python
+        output_parts = ["Data Exfiltration Detection Analysis"]
+
+        # --- TCP outbound volume analysis ---
+        tcp_volumes: dict[tuple[str, str, str], int] = {}
+        if tcp_wrapped["success"]:
+            tcp_data = tcp_wrapped.get("data", "")
+            if isinstance(tcp_data, str) and len(tcp_data.strip()) > 20:
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:150-156`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L150-L156)
+
+```python
+        # --- DNS query length analysis ---
+        long_dns_queries: list[dict[str, str]] = []
+        if dns_wrapped["success"]:
+            dns_data = dns_wrapped.get("data", "")
+            if isinstance(dns_data, str) and len(dns_data.strip()) > 20:
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:184-188`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L184-L188)
+
+[32] (실행 확인) 글자만 든 파일에 캡처 확장자를 붙여 `wireshark_detect_exfiltration`과 `wireshark_scan_file_signatures`를 불렀다.
+서버 로그에는 하위 조회마다 tshark 종료 코드 2가 남았고 두 응답은 모두 `success`가 참이었다.
+
+[33] 자격 증명 도구의 `login` 검색은 `frame contains` 필터로 고른 패킷의 패킷 목록 출력(번호, 시각, 주소, 프로토콜, 길이, Info 열)을 돌려준다.
+
+```python
+        if scope == "bytes":
+            if search_type == "hex":
+                display_filter = f"frame contains {match_pattern}"
+            else:
+                safe_pattern = match_pattern.replace("\\", "\\\\").replace('"', '\\"')
+                display_filter = f'frame contains "{safe_pattern}"'
+
+        elif scope == "details":
+            if search_type == "regex":
+                display_filter = f'frame matches "{match_pattern}"'
+            else:
+                import re
+
+                safe_pattern = re.escape(match_pattern)
+                display_filter = f'frame matches "{safe_pattern}"'
+
+        elif scope == "filter":
+            display_filter = match_pattern
+
+        else:
+            return json.dumps({"success": False, "error": f"Invalid scope: {scope}. Use 'bytes' or 'details'."})
+
+        return await self.get_packet_list(pcap_file, limit=limit, display_filter=display_filter)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:120-142`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L120-L142)
+
+```python
+            fields = [
+                "frame.number",
+                "_ws.col.Time",
+                "_ws.col.Source",
+                "_ws.col.Destination",
+                "_ws.col.Protocol",
+                "_ws.col.Length",
+                "_ws.col.Info",
+            ]
+
+        cmd = [self.tshark_path, "-r", pcap_file, "-T", "fields"]
+        for f in fields:
+            cmd.extend(["-e", f])
+
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+
+        cmd.extend(["-E", "header=y", "-E", "separator=/t", "-E", "quote=d", "-E", "occurrence=f"])
+
+        return await self._run_command(cmd, limit_lines=limit, offset_lines=offset)
+```
+
+[`src/wireshark_mcp/tshark/_packets.py:63-82`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L63-L82)
+
+[34] (실행 확인) URI가 `/login`인 HTTP GET 패킷 하나(인증 헤더 없음)를 담은 캡처로 `wireshark_extract_credentials`를 불러 `protocol` `Telnet`, `confidence` `confirmed`, `severity` `high`인 발견사항을 받았다.
+
+[35] (실행 확인) TCP 23에서 로그인 안내를 보내는 패킷 하나를 담은 캡처로 `wireshark_extract_credentials`를 불러 빈 `findings`와 `coverage.status` `complete`를 받았다.
+같은 패킷의 Info 열은 tshark 4.0.17에서 `Telnet Data ...`였고 Windows의 4.6.7에서 `9 bytes data`였다.
+
+[36] (실행 확인) ICMP와 HTTP/2가 없는 시험용 SYN 스캔 캡처로 `wireshark_analyze_protocol`의 `icmp_tunnel`과 `doh`를 불러 머리글 줄만 있는 결과와 `[W]` 제목을 받았다.
+
+[37] Wireshark 4.0.17은 boolean 값을 `1`이나 `0`으로 출력한다: [`epan/ftypes/ftype-integer.c:1162-1167`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/ftypes/ftype-integer.c#L1162-L1167).
+
+[38] Wireshark 4.6.7은 표시 형식의 boolean 값을 `True`나 `False`로 출력한다: [`epan/ftypes/ftype-integer.c:850-870`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/epan/ftypes/ftype-integer.c#L850-L870).
+
+[39] (실행 확인) 시험용 BLE 페어링 캡처의 Pairing Request·Response에서 IO 능력을 DisplayYesNo로, AuthReq를 MITM과 Secure Connections로 바꾼 사본을 두 환경에서 `ble_pairing`으로 불렀다.
+4.0.17 환경의 `pairing_request`에는 `mitm`과 `sc`가 `1`로, Windows 4.6.7 환경에는 `True`로 실렸다.
+
+[40] (실행 확인) 시험용 BLE 광고 캡처를 두 환경에서 `ble_devices`로 불러 장치마다 `address_type`을 대조했다.
+
+[41] Wireshark 4.0.17의 TCP expert 문구는 재전송과 순서 어긋남을 소문자로 적고 0 window를 `Zero Window`로 적는다: [`epan/dissectors/packet-tcp.c:9279-9292`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/dissectors/packet-tcp.c#L9279-L9292) (Wireshark 4.0.17).
+
+[42] (실행 확인) 같은 데이터 조각을 1초 뒤 같은 순서 번호로 다시 보낸 TCP 캡처로 `wireshark_quick_analysis`와 `wireshark_analyze_tcp_health`를 불렀다.
+`tshark -q -z expert`의 출력에는 `This frame is a (suspected) retransmission`이 있었고 `wireshark_analyze_tcp_health`는 재전송 1개를 셌다.
+Windows의 4.6.7에서도 expert 문구는 같았다.
+
+[43] jitter는 간격의 표준편차를 평균으로 나눈 값이다.
+
+```python
+def _compute_jitter(intervals: list[float]) -> float:
+    """Compute jitter coefficient (stddev / mean). Lower = more periodic."""
+    if len(intervals) < 2:
+        return 1.0
+    mean = statistics.mean(intervals)
+    if mean == 0:
+        return 1.0
+    return statistics.stdev(intervals) / mean
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:16-23`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L16-L23)
+
+[44] jitter 문턱 이하인 묶음을 후보로 싣고 `confidence`를 계산해 정렬한다.
+
+```python
+            if jitter <= max_jitter:
+                mean_interval = statistics.mean(intervals)
+                confidence = 1.0 - jitter
+                findings.append(
+                    {
+                        "src": src,
+                        "dst": dst,
+                        "port": port,
+                        "connections": len(timestamps),
+                        "mean_interval_sec": round(mean_interval, 3),
+                        "jitter": round(jitter, 4),
+                        "confidence": round(confidence, 4),
+                    }
+                )
+
+        # Sort by confidence descending
+        findings.sort(key=lambda f: float(str(f["confidence"])), reverse=True)
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:84-100`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L84-L100)
+
+[45] 관찰 구간, 초당 비율, SYN·SYN-ACK 비율 계산이다.
+
+```python
+        duration = max((max(all_timestamps) - min(all_timestamps)) if all_timestamps else 1.0, 1.0)
+        syn_rate = syn_count / duration
+        icmp_rate = icmp_count / duration
+        udp_rate = udp_count / duration
+```
+
+[`src/wireshark_mcp/tools/threat.py:593-596`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L593-L596)
+
+```python
+        elif syn_count > 50 and syn_rate > 30:
+            ratio = syn_count / max(synack_count, 1)
+            if ratio > 3 or synack_count == 0:
+```
+
+[`src/wireshark_mcp/tools/threat.py:625-627`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L625-L627)
+
+[46] 지표 수로 `severity`를 정하고 `confidence`는 `candidate`로 둔다: [`src/wireshark_mcp/tools/threat.py:369-403`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L369-L403), [`src/wireshark_mcp/tools/threat.py:704-743`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L704-L743).
+
+[47] TCP 상태 검사는 패킷 수로 표시를 정한다.
+
+```python
+        results: list[str] = []
+        for (name, _), count in zip(checks, counts, strict=True):
+            if count < 0:
+                results.append(f"  [-] {name}: N/A (filter not applicable)")
+                continue
+            severity = OK
+            if count > 0:
+                severity = INFO
+            if count > 50:
+                severity = WARN
+            if count > 200:
+                severity = CRIT
+            results.append(f"  {severity} {name}: {count} packets")
+```
+
+[`src/wireshark_mcp/tools/protocol.py:61-73`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L61-L73)
+
+[48] 외부 흐름마다 바이트를 더해 상위 10개를 표시와 함께 싣는다.
+
+```python
+                        key = (src, dst, port)
+                        tcp_volumes[key] = tcp_volumes.get(key, 0) + length
+
+        # Top 10 by volume
+        top_transfers = sorted(tcp_volumes.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        output_parts.append(f"\nTotal external TCP flows: {len(tcp_volumes)}")
+        if top_transfers:
+            output_parts.append(f"\n{WARN} Top 10 outbound transfers by volume:\n")
+            for (src, dst, port), total_bytes in top_transfers:
+                output_parts.append(f"  {WARN} {src} -> {dst}:{port} | {total_bytes} bytes")
+        else:
+            output_parts.append(f"\n{OK} No significant outbound TCP transfers to external IPs.")
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:170-182`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L170-L182)
+
+[49] (실행 확인) 10.0.0.5에서 198.51.100.7:443으로 60초 간격(하나 걸러 0.3초 늦춤) SYN 12개, 198.51.100.9:443으로 30초 간격 SYN 5개를 담은 캡처로 `wireshark_detect_beaconing`을 불렀다.
+
+[50] (실행 확인) 서로 다른 도메인의 DNS A 질의 5100개를 담은 캡처로 `wireshark_detect_dos_attack`을 불러 경고 `UDP search reached ceiling of 5000 packets.`, `constraints.single_sided` 참, `medium` 발견사항을 받았다.
+
+[51] 공통 발견사항 형식이다.
+
+```python
+class FindingEvidence(TypedDict, total=False):
+    frame: int | None
+    stream: int | None
+    protocol: str | None
+    filter: str | None
+    field: str | None
+    value: str | None
+    description: str | None
+
+
+class FindingConstraints(TypedDict, total=False):
+    scanned: int
+    limit: int
+    truncated: bool
+    time_window_seconds: float | None
+    single_sided: bool | None
+    threshold: Any
+
+
+class Finding(TypedDict, total=False):
+    observation: str
+    severity: Literal["info", "low", "medium", "high", "critical"]
+    confidence: Literal["candidate", "likely", "confirmed"]
+    evidence: list[FindingEvidence]
+    constraints: FindingConstraints
+    next_steps: list[str]
+```
+
+[`src/wireshark_mcp/tools/findings.py:6-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/findings.py#L6-L31)
+
+[52] 탐지 도구는 판정에 쓴 문턱이나 필터를 `scope`에 넣는다.
+
+```python
+        return envelope_response(
+            data={"findings": findings, "summary": "\n".join(summary_lines)},
+            scope={"pcap_file": pcap_file, "threshold": threshold},
+            coverage=coverage_data,
+            truncated=any_truncated,
+            warnings=warnings if warnings else None,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:244-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L244-L250)
+
+```python
+        return envelope_response(
+            data={"findings": findings, "summary": "\n".join(summary_lines)},
+            scope={"pcap_file": pcap_file, "filter": "dns.flags.response == 0"},
+            coverage={"status": "partial" if warnings else "complete", "scanned": total_queries, "limit": limit},
+            warnings=warnings if warnings else None,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:425-430`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L425-L430)
+
+[53] 스캐너 후보의 근거는 필터와 첫 프레임 번호를 싣는다.
+
+```python
+            for src, ports in sorted(scanners.items(), key=lambda x: len(x[1]), reverse=True):
+                targets = src_to_targets.get(src, set())
+                evidence.append(
+                    FindingEvidence(
+                        filter=f"ip.src == {src} and tcp.flags.syn == 1 and tcp.flags.ack == 0",
+                        description=f"SYN port scanner candidate: {len(ports)} unique ports across {len(targets)} target host(s)",
+                        value=f"Scanner {src} ({len(ports)} ports, {len(targets)} targets)",
+                        frame=src_sample_frames.get(src, [None])[0],
+                    )
+                )
+```
+
+[`src/wireshark_mcp/tools/threat.py:129-138`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L129-L138)
+
+[54] DNS 터널 지표의 근거: [`src/wireshark_mcp/tools/threat.py:327-364`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L327-L364).
+
+[55] HTTP 자격 증명 근거는 프레임, 스트림, 필드, 필터를 싣는다.
+
+```python
+                    evidence_list.append(
+                        FindingEvidence(
+                            frame=frame,
+                            stream=stream,
+                            protocol="HTTP",
+                            field="http.authbasic",
+                            value=mask_secret(cred),
+                            filter="http.authbasic",
+                            description=f"HTTP Basic Auth credential from {src_ip}",
+                        )
+                    )
+```
+
+[`src/wireshark_mcp/tools/security.py:53-63`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L53-L63)
+
+[56] 페어링 응답은 추정 방식과 원래 값을 함께 싣는다.
+
+```python
+        return envelope_response(
+            data={
+                "timeline": timeline,
+                "pairing_request": pairing_request,
+                "pairing_response": pairing_response,
+                "pairing_method": {"method": method, "note": method_note},
+                "key_material": key_material,
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:1402-1408`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1402-L1408)
+
+[57] 장치마다 프레임 범위와 다시 찾는 필터를 싣는다.
+
+```python
+        device_rows: list[dict[str, Any]] = []
+        for addr, dev in sorted(devices.items(), key=lambda kv: kv[1]["frame_count"], reverse=True):
+            device_rows.append(
+                {
+                    "address": addr,
+                    "address_type": _address_type(dev["txadd"]),
+                    "frame_count": dev["frame_count"],
+                    "pdu_types": dict(sorted(dev["pdu_types"].items(), key=lambda kv: kv[1], reverse=True)),
+                    "names": sorted(dev["names"]),
+                    "company_ids": sorted(dev["company_ids"]),
+                    "first_frame": dev["first_frame"],
+                    "last_frame": dev["last_frame"],
+                    "filter": f"btle.advertising_address == {addr}",
+                }
+            )
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:623-637`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L623-L637)
+
+[58] `single_sided`는 경고 목록이 비었는지로 정한다.
+
+```python
+                    constraints=FindingConstraints(
+                        time_window_seconds=round(duration, 2),
+                        single_sided=bool(warnings),
+                        limit=limit,
+                        truncated=any_truncated,
+                    ),
+```
+
+[`src/wireshark_mcp/tools/threat.py:712-717`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L712-L717)
+
+[59] 포트 스캔의 `truncated`는 경고 목록으로 정하고 경고에는 조회 실패도 들어간다.
+
+```python
+                "constraints": FindingConstraints(
+                    scanned=len(src_to_ports),
+                    limit=limit,
+                    truncated=bool(warnings),
+                    threshold=threshold,
+                ),
+```
+
+[`src/wireshark_mcp/tools/threat.py:165-170`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L165-L170)
+
+```python
+        else:
+            failed_checks.append("SYN-FIN stealth scan")
+            warnings.append(
+                f"SYN-FIN scan query failed: {synfin_wrapped.get('error', {}).get('message', 'query failed')}"
+            )
+```
+
+[`src/wireshark_mcp/tools/threat.py:90-94`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L90-L94)
+
+[60] 근거가 없을 때와 있을 때의 `scanned`다.
+
+```python
+        if not evidence_list:
+            return envelope_response(
+                data={
+                    "findings": [],
+                    "summary": f"{OK} No plaintext credentials (HTTP Basic Auth, FTP PASS, Telnet) observed in scanned packets.",
+                },
+                scope={"pcap_file": pcap_file},
+                coverage={"status": "complete" if not warnings else "partial", "scanned": 0, "limit": limit},
+                warnings=warnings if warnings else None,
+            )
+```
+
+[`src/wireshark_mcp/tools/security.py:128-137`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L128-L137)
+
+```python
+            "constraints": {
+                "scanned": len(evidence_list),
+                "limit": limit,
+                "truncated": bool(warnings),
+            },
+```
+
+[`src/wireshark_mcp/tools/security.py:144-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L144-L148)
+
+[61] (실행 확인) 시험용 SYN 스캔 캡처(패킷 25개)로 `wireshark_extract_credentials`를 불러 빈 `findings`와 `coverage.scanned` 0을 받았다.
+
+[62] SYN flood 근거에는 프레임 번호가 없다.
+
+```python
+                evidence_list.append(
+                    FindingEvidence(
+                        filter="tcp.flags.syn == 1 and tcp.flags.ack == 0",
+                        description=f"SYN flood candidate: {syn_count} SYNs ({syn_rate:.1f} syn/s) vs {synack_count} SYN-ACKs",
+                        value=f"Ratio {ratio:.1f}, {syn_rate:.1f} pps",
+                    )
+                )
+```
+
+[`src/wireshark_mcp/tools/threat.py:629-635`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L629-L635)
+
+[63] 부재 발견사항과 실패한 검사가 있을 때의 분기: [`src/wireshark_mcp/tools/threat.py:189-228`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L189-L228), [`src/wireshark_mcp/tools/threat.py:404-420`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L404-L420), [`src/wireshark_mcp/tools/threat.py:744-786`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L744-L786).
+
+[64] 자격 증명 발견사항은 늘 `confirmed`다.
+
+```python
+        finding: Finding = {
+            "observation": f"Discovered {len(evidence_list)} cleartext credential transmission(s) or login prompt(s).",
+            "severity": "high",
+            "confidence": "confirmed",
+            "evidence": evidence_list,
+```
+
+[`src/wireshark_mcp/tools/security.py:139-143`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L139-L143)
+
+[65] 능동 스캐너 발견사항은 `confirmed`다.
+
+```python
+        finding: Finding = {
+            "observation": observation,
+            "severity": "info",
+            "confidence": "confirmed",
+            "evidence": evidence,
+        }
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:802-807`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L802-L807)
+
+[66] (실행 확인) 출발지 하나가 포트 25개에 SYN을 보낸 시험용 캡처로 `wireshark_detect_port_scan`을 기본 문턱과 `threshold` 1000으로 불렀다.
+
+[67] DNS 터널은 잘림을 경고에만 싣고 부재 발견사항은 `confirmed`로 둔다.
+
+```python
+        data = wrapped.get("data", "")
+        warnings: list[str] = []
+        if wrapped.get("truncated") is True:
+            warnings.append(f"DNS query scan reached limit of {limit} queries; results represent partial capture.")
+```
+
+[`src/wireshark_mcp/tools/threat.py:266-269`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L266-L269)
+
+```python
+        else:
+            finding = {
+                "observation": f"No DNS tunneling candidate indicators observed across {total_queries} scanned queries.",
+                "severity": "info",
+                "confidence": "confirmed",
+                "evidence": [],
+                "constraints": FindingConstraints(
+                    scanned=total_queries,
+```
+
+[`src/wireshark_mcp/tools/threat.py:404-411`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L404-L411)
+
+[68] (실행 확인) 서로 다른 도메인의 DNS A 질의 5100개를 담은 캡처로 `wireshark_detect_dns_tunnel`을 불러 질의 4999개를 판정했다는 `confirmed` 부재 발견사항과 `coverage.status` `partial`을 받았다.
+
+[69] 실행기는 끊긴 캡처의 tshark 오류를 성공으로 바꾸고 알림을 `stderr`에 싣는다.
+
+```python
+            if proc.returncode != 0 and not truncated:
+                # A capture truncated mid-packet (a sniffer killed with pkill leaves
+                # exactly this) makes tshark exit 14 on 4.4+ and 2 on older releases
+                # while the rows dissected so far stay valid, and stderr carries the
+                # "cut short" note. Downgrade to a success envelope with that note
+                # instead of failing every tool on an otherwise usable capture.
+                if self._is_capture_short_read(binary, proc.returncode, error) and final_output:
+                    logger.warning(
+                        "tshark reported a truncated capture (exit %d); returning partial output: %s",
+                        proc.returncode,
+                        safe_command,
+                    )
+```
+
+[`src/wireshark_mcp/tshark/client.py:598-609`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L598-L609)
+
+```python
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:631-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L631-L632)
+
+[70] (실행 확인) 저장소의 시험 캡처 `truncated_capture.pcap`(tshark가 "cut short in the middle of a packet"을 알림)으로 `wireshark_detect_dns_tunnel`, `wireshark_detect_port_scan`, `wireshark_extract_fields`를 불렀다.
+
+[71] beaconing 응답은 전체 묶음 수와 문턱 이상 묶음 수를 싣는다.
+
+```python
+        output_parts = ["Beacon Detection Analysis"]
+        output_parts.append(f"Total connection groups analyzed: {len(groups)}")
+        output_parts.append(
+            f"Groups meeting threshold (>= {min_connections} connections): "
+            f"{sum(1 for ts in groups.values() if len(ts) >= min_connections)}"
+        )
+
+        if not findings:
+            output_parts.append(f"\n{OK} No beaconing patterns detected (jitter threshold: {max_jitter})")
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:103-111`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L103-L111)
+
+[72] 포트 스캔 응답의 `coverage`는 평가한 출발지 수를 싣는다.
+
+```python
+        coverage_data: dict[str, Any] = {
+            "status": "partial" if (warnings or failed_checks or any_truncated) else "complete",
+            "scanned": len(src_to_ports),
+            "limit": limit,
+        }
+        if failed_checks:
+            coverage_data["failed_checks"] = failed_checks
+```
+
+[`src/wireshark_mcp/tools/threat.py:236-242`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L236-L242)
+
+`scope`와 `constraints`의 문턱: [`src/wireshark_mcp/tools/threat.py:244-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L244-L250), [`src/wireshark_mcp/tools/threat.py:165-170`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L165-L170).

@@ -1,0 +1,266 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 파일을 쓰는 도구 11개가 분석 도구를 실행하는 경로와 `wireshark_export_objects`가 목적지 폴더를 만드는 경로에 적용된다 [1][2].
+`_run_command`는 분석 도구가 0이 아닌 종료 코드로 끝나면 `ExecutionError`와 표준 오류를 담은 실패 응답을 돌려준다 [1].
+쓰기 권한이 없는 폴더를 목적지로 준 `wireshark_merge_pcaps`, `wireshark_editcap_trim`, `wireshark_filter_save`, `wireshark_extract_frames`는 종료 코드 2와 쓰기 권한이 없다는 표준 오류를 담은 실패 응답으로 끝났다 [3].
+없는 하위 폴더 아래를 목적지로 준 `wireshark_editcap_trim`도 종료 코드 2의 실패 응답으로 끝났다 [3].
+시간 제한을 넘으면 분석 도구 프로세스를 끝내고 `TimeoutError` 실패 응답을 돌려주며 그 밖의 예외는 `ExecutionError` 실패 응답으로 돌려준다 [4].
+`export_objects`는 `os.makedirs`에서 난 예외를 처리하지 않는다 [2].
+MCP Python SDK 2.1.1은 도구 함수에서 처리하지 않은 예외를 `Error executing tool <도구 이름>` 글의 오류 결과로 돌려준다 [5].
+쓰기 권한이 없는 폴더 아래의 새 폴더를 `dest_dir`로 주자 `PermissionError`가 났고 `is_error`가 참인 결과가 왔다 [3].
+
+Wireshark 4.0.17의 `tshark --export-objects`는 꺼낸 파일을 열지 못하면 표준 오류에 그 파일 이름을 적고 다음 파일로 간다 [6].
+이때 종료 코드는 0이고 `_run_command`는 표준 오류를 성공 응답의 `stderr`에 싣는다 [1][7].
+쓰기 권한이 없는 폴더로 부른 `wireshark_export_objects`의 응답은 `success`가 참이고 `stderr`에 두 파일을 쓰지 못했다는 줄이 있었다 [3].
+
+`wireshark_capture`, `wireshark_filter_save`, `wireshark_extract_frames`는 분석 도구가 성공한 뒤 출력 파일이 있는지 본다 [8][9].
+있으면 저장 경로를 담은 새 글을 돌려준다 [8][9].
+없으면 `wireshark_capture`는 `Capture completed but file not found`를 성공 응답에 싣고 나머지 둘은 받은 응답을 그대로 돌려준다 [8][9].
+이 확인은 경로에 무엇이 있는지만 보고 이번 호출이 쓴 파일인지 가리지 않는다 [8][9].
+`wireshark_capture`는 성공한 실행의 `data`만 새 응답에 넣어 `dumpcap`의 표준 오류를 응답에 싣지 않는다 [8].
+저장한 파일을 다시 읽어 확인하거나 완료 표시를 남기는 코드는 없다.
+
+**한계.** 분석 도구가 실패하거나 시간 제한으로 끝나도 서버는 쓰다 만 출력 파일을 지우지 않는다 [1][4].
+잘린 캡처 파일을 입력으로 준 `wireshark_filter_save`와 `wireshark_merge_pcaps`는 실패 응답으로 끝났지만 목적지에는 각각 패킷 1개와 26개를 담은 파일이 남았다 [10].
+`ring_buffer`를 준 `wireshark_capture`에서 `dumpcap`은 `output_file`에 번호와 시각을 붙인 이름으로 쓰므로 `output_file` 경로에는 파일이 없다 [11].
+그래서 이 호출은 캡처 파일을 쓰고도 `Capture completed but file not found`를 담은 성공 응답을 돌려주었다 [12].
+허용 폴더 자체를 `output_file`로 준 같은 호출은 그 폴더가 있으므로 `Capture saved to`와 폴더 경로를 실었고 캡처 파일은 그 상위 폴더에 생겼다 [12].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `wireshark_yara_scan`, `wireshark_extract_frames`, `wireshark_filter_save`가 분석 도구의 표준 오류를 다루는 경로에 적용된다 [13][9].
+`wireshark_yara_scan`은 내보내기 응답에서 `success`만 보고 `stderr`는 읽지 않는다 [13].
+그다음 목적지 폴더에 파일이 없으면 `No files exported from <프로토콜> traffic`과 `nothing to scan`을 담은 성공 응답을 돌려준다 [13].
+쓰기 권한이 없는 폴더를 `dest_dir`로 준 호출은 꺼낸 파일을 쓰지 못했다는 표준 오류 없이 이 성공 응답을 받았다 [3].
+
+`wireshark_extract_frames`와 `wireshark_filter_save`는 출력 파일이 있으면 받은 응답에서 `_unwrap`으로 `data`만 꺼내 새 성공 응답을 만든다 [9][14].
+그래서 분석 도구가 종료 코드 0으로 끝나며 표준 오류에 적은 내용은 응답에 남지 않는다 [9][14].
+잘린 캡처 파일에서 프레임 1~5를 고른 `wireshark_extract_frames`의 응답은 `Extracted frames 1-5`였고 `stderr`가 없었으며 출력 파일에는 패킷 1개만 있었다 [10].
+같은 입력으로 부른 `wireshark_editcap_trim`의 응답은 `editcap`이 표준 오류에 적은 잘린 파일이라는 줄을 `stderr`에 실었다 [10].
+
+### 근거
+
+[1] 0이 아닌 종료 코드는 실패 응답이 되고 종료 코드 0의 표준 오류는 성공 응답의 `stderr`가 된다.
+
+```python
+            if proc.returncode != 0 and not truncated:
+                # A capture truncated mid-packet (a sniffer killed with pkill leaves
+                # exactly this) makes tshark exit 14 on 4.4+ and 2 on older releases
+                # while the rows dissected so far stay valid, and stderr carries the
+                # "cut short" note. Downgrade to a success envelope with that note
+                # instead of failing every tool on an otherwise usable capture.
+                if self._is_capture_short_read(binary, proc.returncode, error) and final_output:
+                    logger.warning(
+                        "tshark reported a truncated capture (exit %d); returning partial output: %s",
+                        proc.returncode,
+                        safe_command,
+                    )
+                else:
+                    logger.warning("Command failed (exit %d): %s", proc.returncode, safe_command)
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "type": "ExecutionError",
+                                "message": f"Command failed with exit code {proc.returncode}",
+                                "details": self._redact_diagnostics(error or final_output, cmd),
+                            },
+                        }
+                    )
+```
+
+[`src/wireshark_mcp/tshark/client.py:598-621`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L598-L621)
+
+```python
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:631-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L631-L632)
+
+[2] `export_objects`는 목적지 폴더를 예외 처리 없이 만든다.
+
+```python
+        output_validation = self._validate_output_path(dest_dir)
+        if not output_validation["success"]:
+            return json.dumps(output_validation)
+
+        os.makedirs(dest_dir, exist_ok=True)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:91-95`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L91-L95)
+
+[3] (실행 확인) 컨테이너의 `wireshark-mcp` 계정으로 쓰기 권한이 없는 폴더와 없는 하위 폴더를 목적지로 주고 파일을 쓰는 도구를 불렀다.
+`wireshark_merge_pcaps`, `wireshark_editcap_trim`, `wireshark_filter_save`, `wireshark_extract_frames`는 `Command failed with exit code 2`와 `You don't have permission to create or write to the file` 표준 오류로 끝났다.
+`wireshark_export_objects`는 `success`가 참이고 `stderr`에 두 파일을 쓰지 못했다는 줄이 있는 응답을 돌려주었고 그 폴더 아래 새 폴더를 준 호출은 `Error executing tool wireshark_export_objects` 오류 결과로 끝났다.
+같은 폴더를 `dest_dir`로 준 `wireshark_yara_scan`은 `No files exported from http traffic` 성공 응답을 돌려주었다.
+
+[4] 시간 제한과 예외는 실패 응답으로 바꾸고 출력 파일은 다루지 않는다.
+
+```python
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                logger.warning("Command timed out after %ds: %s", timeout, safe_command)
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "TimeoutError",
+                            "message": f"Command timed out after {timeout} seconds",
+                            "details": "The Wireshark subprocess was terminated.",
+                        },
+                    }
+                )
+```
+
+[`src/wireshark_mcp/tshark/client.py:559-574`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L559-L574)
+
+```python
+        except Exception as e:
+            logger.exception("Command execution failed: %s", self._redact_command(cmd))
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": {
+                        "type": "ExecutionError",
+                        "message": "Command execution failed",
+                        "details": str(e),
+                    },
+                }
+            )
+```
+
+[`src/wireshark_mcp/tshark/client.py:634-645`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L634-L645)
+
+[5] MCP Python SDK 2.1.1은 처리하지 않은 예외를 일반 글의 `is_error` 결과로 바꾼다: [`src/mcp/server/mcpserver/tools/base.py:208-210`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/tools/base.py#L208-L210), [`src/mcp/server/mcpserver/server.py:429-441`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L429-L441).
+
+[6] Wireshark 4.0.17의 `tshark`는 꺼낸 파일 쓰기의 결과를 보지 않고 다음 항목으로 가며 쓰기 함수는 열기 실패를 보고만 한다: [`ui/cli/tap-exportobject.c:122-146`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/cli/tap-exportobject.c#L122-L146), [`wsutil/filesystem.c:2343-2347`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wsutil/filesystem.c#L2343-L2347).
+
+[7] 성공 응답을 고쳐 쓸 때 `stderr` 필드를 남긴다.
+
+```python
+def _normalize_dict_payload(payload: dict[str, Any]) -> str:
+    if "success" in payload and isinstance(payload["success"], bool):
+        if payload["success"]:
+            envelope: dict[str, Any] = {"success": True, "data": payload.get("data")}
+            for extra_key in ("scope", "coverage", "pagination", "warnings", "truncated", "stderr"):
+                if extra_key in payload:
+                    envelope[extra_key] = payload[extra_key]
+            if "data" not in payload:
+                extra = {k: v for k, v in payload.items() if k != "success" and k not in envelope}
+                envelope["data"] = extra if extra else None
+            return json.dumps(envelope, ensure_ascii=False)
+```
+
+[`src/wireshark_mcp/tools/envelope.py:105-115`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/envelope.py#L105-L115)
+
+[8] `wireshark_capture`는 출력 경로가 있는지로 응답 글을 고르고 `data`만 싣는다.
+
+```python
+        res = await client.capture_packets(
+            interface, output_file, duration_seconds, packet_count, capture_filter, ring_buffer=ring_buffer
+        )
+
+        wrapped = parse_tool_result(res)
+        if not wrapped["success"]:
+            return normalize_tool_result(wrapped)
+
+        if os.path.exists(output_file):
+            return success_response(f"Capture saved to {output_file}\n{wrapped['data']}")
+
+        return success_response(f"Capture completed but file not found:\n{wrapped['data']}")
+```
+
+[`src/wireshark_mcp/tools/utility.py:67-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L67-L78)
+
+[9] 두 도구는 성공한 실행의 `data`만 꺼내 출력 경로를 담은 새 응답을 만든다.
+
+```python
+        result = await self._run_command(cmd)
+
+        ok, text = self._unwrap(result)
+        if ok and os.path.exists(output_file):
+            return self._ok(f"Extracted frames {frame_ranges} to {output_file}\n{text}")
+        return result
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:195-200`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L195-L200)
+
+```python
+        result = await self._run_command(cmd)
+
+        ok, text = self._unwrap(result)
+        if ok and os.path.exists(output_file):
+            return self._ok(f"Filtered packets saved to {output_file}\n{text}")
+        return result
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:245-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L245-L250)
+
+[10] (실행 확인) 저장소의 시험용 캡처 `truncated_capture.pcap`을 입력으로 파일을 쓰는 도구를 불렀다.
+`wireshark_filter_save`와 `wireshark_merge_pcaps`는 잘린 파일이라는 표준 오류와 종료 코드 2의 실패 응답으로 끝났고 출력 파일에는 각각 패킷 1개와 26개가 있었다.
+`wireshark_extract_frames`는 `stderr` 없이 `Extracted frames 1-5`를 돌려주었고 출력 파일에는 패킷 1개가 있었다.
+`wireshark_editcap_trim`의 응답은 `success`가 참이고 `stderr`에 `appears to have been cut short in the middle of a packet` 줄이 있었다.
+
+[11] Wireshark 4.0.17의 `dumpcap`은 링 버퍼를 쓰면 받은 이름 대신 링 버퍼가 지은 이름으로 파일을 연다: [`dumpcap.c:3928-3939`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/dumpcap.c#L3928-L3939), [`ringbuffer.c:239-258`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L239-L258).
+
+[12] (실행 확인) 네트워크를 끈 컨테이너에서 root 계정으로 서버를 실행하고 루프백 인터페이스에 `ring_buffer`를 `filesize:1,files:2`로 준 `wireshark_capture`를 불렀다.
+`output_file`이 `ring.pcapng`인 호출은 `ring_00001_<시각>.pcapng`을 남기고 `Capture completed but file not found`를 돌려주었다.
+허용 폴더 자체를 `output_file`로 준 호출은 `Capture saved to <허용 폴더>`를 돌려주었고 캡처 파일은 허용 폴더의 상위 폴더에 생겼다.
+
+[13] `wireshark_yara_scan`은 내보내기의 `success`만 보고 폴더가 비면 성공 응답을 돌려준다.
+
+```python
+        try:
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+            wrapped = parse_tool_result(export_result)
+            if not wrapped["success"]:
+                return error_response(
+                    f"Failed to export {protocol} objects: {wrapped.get('error', {}).get('message', 'unknown')}",
+                )
+
+            export_path = Path(export_dir)
+            files = [f for f in export_path.iterdir() if f.is_file()]
+
+            if not files:
+                return success_response(f"{OK} No files exported from {protocol} traffic — nothing to scan.")
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:111-123`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L111-L123)
+
+[14] `_unwrap`은 성공 응답에서 `data`만 돌려준다.
+
+```python
+    @staticmethod
+    def _unwrap(result: str) -> tuple[bool, str]:
+        """Extract (success, text) from a client envelope for internal reuse.
+
+        On a success envelope, returns the ``data`` text. On an error envelope,
+        returns ``(False, <original envelope>)`` so callers can propagate it
+        unchanged. Non-envelope strings are treated as raw success text.
+        """
+        try:
+            parsed = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            return True, result
+        if isinstance(parsed, dict) and "success" in parsed:
+            if parsed.get("success") is True:
+                data = parsed.get("data", "")
+                return True, data if isinstance(data, str) else json.dumps(data)
+            return False, result
+        return True, result
+```
+
+[`src/wireshark_mcp/tshark/client.py:107-124`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L107-L124)

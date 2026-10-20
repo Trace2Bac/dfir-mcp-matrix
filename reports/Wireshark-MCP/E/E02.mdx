@@ -1,0 +1,182 @@
+---
+cell: E02
+details:
+- id: E02.01
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 `capinfos`를 실행하는 `wireshark_open_file`, `wireshark_get_file_info`, `wireshark_quick_analysis`에 적용된다 [1][2][3].
+세 도구는 받은 캡처 파일 경로로 `capinfos`를 옵션 없이 실행한다 [1].
+Wireshark 4.0.17의 `capinfos`는 옵션이 없으면 모든 항목을 출력하고 그 가운데 파일 바이트 전체의 SHA256, RIPEMD160, SHA1을 계산해 싣는다 [4].
+해시는 `capinfos`가 파일을 `rb`로 열어 처음부터 끝까지 읽어 계산하므로 압축된 캡처 파일이면 압축된 파일 바이트의 해시다 [4].
+`capinfos`는 파일이 캡처 형식으로 열린 뒤에 해시를 계산하므로 캡처 파일로 열리지 않는 파일은 해시하지 않는다 [4].
+모델이 해시를 요청하지 않아도 `wireshark_open_file`과 `wireshark_get_file_info`의 응답에는 이 해시 줄이 실린다 [2][5].
+`wireshark_get_file_info`의 도구 설명은 형식, 패킷 수, 기간, 크기를 돌려준다고 적고 해시는 적지 않는다 [2].
+직접 만든 캡처 파일에서 응답의 SHA256과 SHA1은 Python `hashlib`로 계산한 값과 같았다 [5].
+보조 환경(Windows)의 Wireshark 4.6.7 `capinfos`는 SHA256과 SHA1만 내고 RIPEMD160은 내지 않았다 [6][7].
+
+서버는 이 해시를 따로 보관하지 않고 어느 도구도 이 값을 다시 읽어 지금 파일과 대조하지 않는다.
+해시 값은 그 응답에만 있다.
+같은 파일의 끝 바이트를 바꾸고 `wireshark_get_file_info`를 다시 부르자 다른 SHA256이 실렸고 앞 값과 다르다는 표시는 없었다 [5].
+결과 캐시 키에 들어가는 파일의 수정 시각과 크기는 캐시 항목을 고르는 데만 쓰이고 서버는 그 값이 바뀐 사실을 알리지 않는다 [8].
+
+같은 저장소의 `skills/tshark-cli-analysis/scripts/run_tshark.py`는 클라이언트 모델이 MCP를 거치지 않고 실행하는 스크립트다 [9].
+이 스크립트는 `tshark`를 실행하기 전과 뒤에 입력 파일의 SHA-256을 계산해 다르면 실행 기록에 `input_changed`를 참으로 적고 종료 코드 1로 끝난다 [9].
+서버는 이 스크립트를 실행하지 않는다.
+
+**한계.** `capinfos`를 찾지 못하면 해시를 계산하지 않는다 [10].
+서버 설정은 `capinfos`를 필수가 아닌 권장 도구로 두어 `capinfos`가 없어도 서버가 시작된다 [10].
+`capinfos` 경로를 없는 파일로 정한 서버에서 `wireshark_open_file`은 파일 정보 대신 `Detailed file metadata unavailable` 문장을 싣고 나머지 결과를 돌려주었다 [5].
+같은 서버의 `wireshark_get_file_info`는 `ToolNotFound` 오류였다 [5].
+`wireshark_quick_analysis`는 파일 정보 절을 10줄에서 자르므로 해시 줄이 응답에 실리지 않는다 [3][5].
+기준값은 도구를 부를 때마다 그 시점의 파일에서 새로 계산한다 [1].
+그래서 서버가 읽기 전에 바뀐 캡처 파일은 바뀐 상태가 그 응답의 기준값이 된다.
+
+### 근거
+
+[1] `get_file_info`는 경로를 검사하고 `capinfos`를 찾은 뒤 옵션 없이 실행한다.
+
+```python
+    async def get_file_info(self, pcap_file: str) -> str:
+        """Capinfos: Get file metadata."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        required = self._require_tool("capinfos")
+        if not required["success"]:
+            return json.dumps(required)
+
+        capinfos_path = self._get_checked_tool_path("capinfos")
+        return await self._run_command([capinfos_path, pcap_file])
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:19-30`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L19-L30)
+
+[2] 파일 정보 도구의 설명과 `wireshark_open_file`이 파일 정보를 응답에 붙이는 곳이다.
+
+```python
+    @mcp.tool()
+    async def wireshark_get_file_info(pcap_file: str) -> str:
+        """Get capture file metadata (type, packet count, duration, size) via capinfos."""
+        return normalize_tool_result(await client.get_file_info(pcap_file))
+```
+
+[`src/wireshark_mcp/tools/utility.py:26-29`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L26-L29)
+
+```python
+        file_info_raw = await client.get_file_info(pcap_file)
+        file_info = parse_tool_result(normalize_tool_result(file_info_raw))
+
+        detected_protocols: set[str] = set()
+        phs_data = phs_result.get("data", "")
+        if isinstance(phs_data, str):
+            detected_protocols = parse_protocol_hierarchy(phs_data)
+
+        recommended_tools = registry.recommended_tools_for_protocols(detected_protocols)
+
+        output_parts = ["File Info:"]
+        if file_info["success"]:
+            data = file_info.get("data", "N/A")
+            output_parts.append(data if isinstance(data, str) else str(data))
+        else:
+            output_parts.append("Detailed file metadata unavailable (capinfos not installed or file summary failed).")
+```
+
+[`src/wireshark_mcp/tools/registry.py:303-318`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L303-L318)
+
+[3] `wireshark_quick_analysis`는 파일 정보를 함께 실행하고 그 절을 10줄에서 자른다.
+
+```python
+    ) = await asyncio.gather(
+        _safe_run(client.get_file_info(pcap_file), ""),
+        _safe_run(client.get_protocol_stats(pcap_file), ""),
+```
+
+[`src/wireshark_mcp/tools/agents.py:60-62`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L60-L62)
+
+```python
+    # Phase 1: File Info
+    file_info = _extract_data(file_info_raw) if file_info_raw else None
+    report.append(section("1. File Info"))
+    if file_info:
+        report.append(_cap_lines(file_info, 10))
+    else:
+        report.append(f"{WARN} Could not read file info")
+```
+
+[`src/wireshark_mcp/tools/agents.py:70-76`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L70-L76)
+
+[4] Wireshark 4.0.17 `capinfos`의 해시 기본값, 계산, 출력이다: [`capinfos.c:139`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L139-L139), [`capinfos.c:743-747`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L743-L747), [`capinfos.c:1167-1189`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L1167-L1189), [`capinfos.c:1220-1231`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L1220-L1231).
+
+[5] (실행 확인) 직접 만든 HTTP 캡처 파일에 `wireshark_get_file_info`를 부르자 응답의 `SHA256`이 `29e9fa2e…1d15`, `SHA1`이 `25c33450…b2f2`로 `hashlib` 값과 같았고 `RIPEMD160` 줄도 있었다.
+`wireshark_open_file`의 응답에도 같은 세 줄이 있었고 `wireshark_quick_analysis`의 응답에는 `SHA256`이 없었다.
+사본의 끝 바이트를 바꾼 뒤 다시 부르자 `SHA256`이 `479bf2a0…2f31`로 바뀌었고 응답에 바뀌었다는 표시는 없었다.
+`capinfos` 경로를 없는 파일로 정한 서버에서 `wireshark_open_file`은 `Detailed file metadata unavailable (capinfos not installed or file summary failed).`를 실었고 `wireshark_get_file_info`는 `ToolNotFound`였다.
+
+[6] Wireshark 4.6.7 `capinfos`는 SHA256과 SHA1만 출력한다: [`capinfos.c:593-596`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/capinfos.c#L593-L596), [`capinfos.c:1054-1072`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/capinfos.c#L1054-L1072).
+
+[7] (실행 확인) Windows에서 같은 캡처 파일에 `wireshark_get_file_info`를 부르자 응답에 `SHA256`과 `SHA1` 줄만 있었고 값은 주 환경과 같았다.
+
+[8] 결과 캐시 키는 실제 경로, 수정 시각, 크기, 명령으로 만든다.
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)
+
+[9] 클라이언트 skill 스크립트의 실행 전후 해시 대조다: [`skills/tshark-cli-analysis/scripts/run_tshark.py:137-186`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/skills/tshark-cli-analysis/scripts/run_tshark.py#L137-L186).
+
+[10] `capinfos`는 권장 도구로 정해져 있고 찾지 못하면 `ToolNotFound`를 돌려준다.
+
+```python
+WIRESHARK_TOOL_REQUIREMENTS: dict[str, ToolRequirement] = {
+    "tshark": "required",
+    "capinfos": "recommended",
+    "mergecap": "recommended",
+    "editcap": "optional",
+    "dumpcap": "optional",
+    "text2pcap": "optional",
+}
+```
+
+[`src/wireshark_mcp/toolchain.py:18-25`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/toolchain.py#L18-L25)
+
+```python
+    def _require_tool(self, tool_name: str) -> dict[str, Any]:
+        """Return success or a ToolNotFound error payload for an optional suite tool."""
+        tool_path = self._tool_paths.get(tool_name)
+        if self._tool_is_available(tool_path):
+            return {"success": True}
+        return {
+            "success": False,
+            "error": {
+                "type": "ToolNotFound",
+                "message": f"{tool_name} tool not found",
+                "details": {
+                    "tool": tool_name,
+                    "requirement": WIRESHARK_TOOL_REQUIREMENTS[tool_name],
+                    "env_var": self._TOOL_ENV_VARS[tool_name],
+                },
+            },
+        }
+```
+
+[`src/wireshark_mcp/tshark/_capability.py:84-100`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L84-L100)

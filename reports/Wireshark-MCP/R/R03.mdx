@@ -1,0 +1,603 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+- id: R03.04
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 모든 도구의 `envelope`와 `WiresharkMCP.call_tool`에 적용된다 [1][2].
+성공한 결과는 `success` 참과 `data`를, 실패한 결과는 `success` 거짓과 `error`의 `type`·`message`·`details`를 싣는다 [1].
+실패 종류는 `FileNotFound`·`PermissionDenied`·`InvalidParameter`·`ToolNotFound`·`ExecutionError`·`TimeoutError`·`LimitExceeded`·`SecurityError`·`DependencyMissing` 같은 값으로 나뉜다 [3][4][5].
+`type`이 없는 오류는 `normalize_tool_result`가 `ToolError`로 채운다 [1].
+`WiresharkMCP.call_tool`은 글 블록의 JSON 최상위 `success`가 거짓이면 MCP 결과의 `isError`를 참으로 둔다 [2].
+이 판단은 응답 상한을 적용하기 전의 글로 한다 [2].
+없는 캡처 파일을 주자 `isError`가 참이고 `type`이 `FileNotFound`인 결과가 돌아왔다 [6].
+MCP Python SDK 2.1.1은 인자 검사 실패와 처리하지 못한 예외를 `isError`가 참인 글 결과로 돌려준다 [7].
+
+**한계.** 실행 함수 `_run_command`는 줄 상한으로 출력을 자른 실행의 종료 코드를 확인하지 않는다 [8].
+그래서 `tshark`가 0이 아닌 코드로 끝나도 출력이 `limit`보다 길면 성공 결과가 나간다 [8].
+뒤쪽에 손상된 레코드가 있는 캡처 파일을 `wireshark_get_packet_list`에 `limit` 5로 주자 성공 결과가 돌아왔고 `limit` 1000으로 주자 종료 코드 2의 `ExecutionError`가 돌아왔다 [9].
+
+여러 단계를 이어 실행하는 도구 가운데 일부는 하위 단계의 실패를 성공 결과로 돌려준다.
+`wireshark_quick_analysis`는 단계마다 예외와 실패를 문장으로 바꾸고 늘 `success` 참을 돌려준다 [10].
+`wireshark_analyze_tcp_health`는 하위 조회가 실패하면 그 항목을 `N/A (filter not applicable)`로 적는다 [11].
+`wireshark_scan_file_signatures`는 하위 검색이 실패한 형식을 0건으로 센다 [12].
+`wireshark_detect_exfiltration`은 두 하위 조회가 실패하면 그 결과를 건너뛰고 실패를 응답에 싣지 않는다 [13].
+없는 캡처 파일을 이 4개 도구에 주자 모두 `isError`가 거짓인 결과를 돌려줬다 [6].
+`wireshark_geoip_enrich`는 필드 추출이 실패하면 실패 `envelope`를 `success_response`로 다시 감싸 최상위 `success`를 참으로 둔다 [14].
+
+일부 도구는 하위 단계의 오류 종류를 버린다.
+`wireshark_detect_dos_attack`은 SYN 조회가 실패하면 `type`을 주지 않고 `error_response`를 불러 `ToolError`를 돌려준다 [15].
+없는 캡처 파일을 주자 `FileNotFound` 대신 `ToolError`가 실렸다 [6].
+`wireshark_yara_scan`도 객체 내보내기 실패를 `type` 없이 돌려준다 [16].
+SDK가 만든 오류 결과는 `envelope`가 아닌 평문이다 [7][6].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 `envelope`를 쓰는 도구 전체에 적용된다 [1].
+일치가 없으면 `success` 참인 결과를, 입력 파일이 없거나 실행이 실패하면 `success` 거짓과 오류 종류를 돌려준다 [1][3].
+`wireshark_aggregate`는 일치가 없으면 `matched_packets` 0과 빈 `groups`를 싣는다 [17].
+탐지 도구와 BLE 분석은 대상 트래픽이 없으면 빈 `findings`나 빈 목록과 `summary` 문장을 싣는다 [18][19].
+프로토콜 분석기는 추출 결과가 20자보다 짧으면 `No … found` 문장을 싣는다 [20].
+`wireshark_follow_stream`은 `search_content`가 스트림에 없으면 그 사실을 적은 성공 결과를 돌려준다 [21].
+
+**한계.** 필드가 여러 개인 프로토콜 분석기의 머리글 줄은 20자를 넘는다 [20].
+그래서 일치하는 패킷이 없어도 `No … found` 문장 대신 머리글 줄만 실린 결과가 나간다 [20].
+DNS 패킷만 있는 캡처 파일로 `dhcp`·`wireguard`·`mqtt` 분석을 부르자 머리글 줄만 실렸고 MQTT 분석은 `Total MQTT messages: 0`을 적었다 [22].
+입력 파일이 없을 때 성공 결과를 돌려준 도구 4개는 입력 파일이 없을 때와 일치가 없을 때 같은 문장을 돌려준다 [6].
+`wireshark_detect_exfiltration`과 `wireshark_scan_file_signatures`는 없는 캡처 파일에 대해 내보낸 데이터나 파일 서명이 없다는 `[OK]` 문장을 돌려줬다 [6].
+Modbus 분석의 쓰기 연산 조회는 실패하면 그 절을 빼고 응답에 실패를 알리지 않는다 [23].
+`tshark` 4.0.17은 이 조회의 필터 `modbus.func_code in {5 6 15 16}`을 받지 않아 Modbus 요청 20개가 있는 캡처 파일에서 이 조회가 매번 실패했다 [24].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `wireshark_detect_port_scan`과 `wireshark_detect_dos_attack`에 적용된다 [25][15].
+두 도구는 하위 조회 가운데 실패한 것의 이름을 `coverage.failed_checks`에 싣고 `warnings`에 실패 문구를 더한다 [25][15].
+실패한 조회가 있으면 `coverage.status`를 `partial`로 둔다 [25][15].
+
+**한계.** 목록에는 실패한 조회만 실린다 [25][15].
+`wireshark_detect_port_scan`의 SYN 조회와 `wireshark_detect_dos_attack`의 SYN 조회가 실패하면 도구 전체가 오류로 끝나 이 목록이 만들어지지 않는다 [25][15].
+
+### R03.04 시간 초과·부분 완료 표시
+
+**구현.** 이 방식은 실행 함수의 시간 초과·출력 상한 오류와 `coverage`를 싣는 도구에 적용된다 [3][17].
+`_run_command`는 시간 제한(기본 30초)을 넘으면 프로세스를 끝내고 `type`이 `TimeoutError`인 오류를 돌려준다 [3].
+출력 상한을 넘어 프로세스를 끝낸 경우는 `LimitExceeded`다 [3].
+`wireshark_aggregate`는 스트리밍 읽기가 시간 제한, 행 상한, 오류로 끝나면 오류와 함께 `coverage`의 `status`를 `partial`로, `scanned`를 그때까지 읽은 행 수로 싣는다 [17][26].
+묶음 상한이나 고유 값 상한에 닿아 일부를 세지 않았으면 성공 결과에도 `coverage.status`를 `partial`로 둔다 [17].
+탐지 도구, 자격 증명 도구, BLE 분석은 줄 상한에 닿으면 `coverage.status`를 `partial`로 둔다 [25][18][19].
+
+**한계.** 패킷 중간에서 끝난 캡처 파일은 성공 결과로 돌아가고 부분 결과라는 상태 값이 없다 [8].
+`_run_command`는 `tshark`가 종료 코드 14나 `cut short` 문구와 함께 종료 코드 2를 내고 출력이 있으면 성공 `envelope`를 만든다 [8].
+남는 표시는 `tshark`의 표준 오류 글을 담은 `stderr`뿐이다 [8].
+같은 캡처 파일에 `wireshark_aggregate`는 `coverage.status`를 `complete`로 실었다 [27].
+`_maybe_summarize`를 거치는 통계 도구 5개는 `stderr`도 버리므로 이 캡처 파일로 부른 `wireshark_stats_endpoints`의 응답에는 잘린 캡처 파일이라는 표시가 없었다 [28][27].
+줄 상한으로 출력이 잘린 경우 `_run_command`는 `stderr`를 싣지 않고 종료 코드도 보지 않는다 [8].
+`wireshark_aggregate`의 스트리밍 읽기는 시간 초과로 끝나면 읽은 행 수를 넘기지 않으므로 `coverage.scanned`가 0이 된다 [26][17].
+
+`coverage.status`의 `partial`은 상한이나 실패가 없어도 다른 경고가 있으면 붙는다 [17][29][30].
+`wireshark_aggregate`는 숫자가 아닌 수치 칸 경고나 쉼표가 들어 있는 고유 값 경고만 있어도 `partial`을 싣는다 [17][29].
+`wireshark_detect_dos_attack`은 단방향 캡처 경고만 있어도 `partial`을 싣는다 [30].
+DNS 질의 300개를 모두 읽은 `wireshark_aggregate` 호출과 SYN 100개뿐인 캡처 파일의 `wireshark_detect_dos_attack` 호출이 모두 `partial`을 실었다 [31].
+
+### 근거
+
+[1] `envelope`의 성공·실패 형태와 오류 객체를 채우는 함수다.
+
+```python
+def _error_object(error: Any) -> dict[str, Any]:
+    if isinstance(error, dict):
+        error_type = error.get("type")
+        message = error.get("message")
+        details = error.get("details")
+        normalized: dict[str, Any] = {
+            "type": error_type if isinstance(error_type, str) and error_type else "ToolError",
+            "message": message if isinstance(message, str) and message else "Tool failed",
+        }
+        if details is not None:
+            normalized["details"] = details
+        for key, value in error.items():
+            if key not in normalized and key not in {"type", "message", "details"}:
+                normalized[key] = value
+        return normalized
+
+    if isinstance(error, str) and error.strip():
+        return {"type": "ToolError", "message": error.strip()}
+
+    return {"type": "ToolError", "message": "Tool failed"}
+
+
+def success_response(data: Any, compact: bool = False) -> str:
+    if compact and isinstance(data, str):
+        return data
+    return json.dumps({"success": True, "data": data})
+```
+
+[`src/wireshark_mcp/tools/envelope.py:13-38`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/envelope.py#L13-L38)
+
+[`src/wireshark_mcp/tools/envelope.py:80-147`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/envelope.py#L80-L147)
+
+[2] `call_tool`은 상한을 적용하기 전에 `success` 거짓을 찾아 `is_error`를 정한다.
+
+```python
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[Any, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        result = await super().call_tool(name, arguments, context)
+        if isinstance(result, CallToolResult):
+            # Check is_error on original content BEFORE capping
+            is_error = bool(getattr(result, "is_error", False))
+            if not is_error and isinstance(result.content, (list, tuple)):
+                for block in result.content:
+                    if isinstance(block, TextContent):
+                        try:
+                            parsed = json.loads(block.text)
+                            if isinstance(parsed, dict) and parsed.get("success") is False:
+                                is_error = True
+                                break
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+
+            capped_content = self._cap_content(result.content, name)
+            return result.model_copy(update={"content": capped_content, "is_error": is_error})
+        return result
+```
+
+[`src/wireshark_mcp/mcp_app.py:394-417`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L394-L417)
+
+[3] 실행 함수의 시간 초과·출력 상한·실행 실패 오류다: [`src/wireshark_mcp/tshark/client.py:520-645`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L520-L645).
+
+[4] 파일 검사의 오류 종류다: [`src/wireshark_mcp/tshark/_validation.py:43-84`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L43-L84).
+
+[5] 도구가 없을 때와 선택 라이브러리가 없을 때의 오류 종류다: [`src/wireshark_mcp/tshark/_capability.py:84-100`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L84-L100), [`src/wireshark_mcp/tools/geoip.py:86-99`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L86-L99), [`src/wireshark_mcp/tools/yara_scan.py:86-97`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L86-L97).
+
+[6] (실행 확인) 없는 캡처 파일 경로를 주자 `wireshark_get_packet_list`는 `isError` 참과 `FileNotFound`를, `wireshark_detect_dos_attack`은 `isError` 참과 `ToolError`를 돌려줬다.
+`wireshark_quick_analysis`·`wireshark_analyze_tcp_health`·`wireshark_detect_exfiltration`·`wireshark_scan_file_signatures`는 `isError` 거짓과 `success` 참을 돌려줬다.
+잘못된 `protocol` 값을 `wireshark_analyze_protocol`에 주자 `isError` 참과 `Error executing tool`로 시작하는 평문이 돌아왔다.
+
+[7] MCP Python SDK 2.1.1은 `call_tool`이 낸 예외를 글 하나와 `is_error`로 바꾼다: [`src/mcp/server/mcpserver/server.py:422-441`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L422-L441).
+
+[8] `_run_command`는 잘린 캡처 파일의 종료 코드를 성공으로 낮추고 줄 상한으로 잘린 출력은 종료 코드를 보지 않으며 `stderr`도 싣지 않는다.
+
+```python
+            if proc.returncode != 0 and not truncated:
+                # A capture truncated mid-packet (a sniffer killed with pkill leaves
+                # exactly this) makes tshark exit 14 on 4.4+ and 2 on older releases
+                # while the rows dissected so far stay valid, and stderr carries the
+                # "cut short" note. Downgrade to a success envelope with that note
+                # instead of failing every tool on an otherwise usable capture.
+                if self._is_capture_short_read(binary, proc.returncode, error) and final_output:
+                    logger.warning(
+                        "tshark reported a truncated capture (exit %d); returning partial output: %s",
+                        proc.returncode,
+                        safe_command,
+                    )
+                else:
+                    logger.warning("Command failed (exit %d): %s", proc.returncode, safe_command)
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "type": "ExecutionError",
+                                "message": f"Command failed with exit code {proc.returncode}",
+                                "details": self._redact_diagnostics(error or final_output, cmd),
+                            },
+                        }
+                    )
+```
+
+[`src/wireshark_mcp/tshark/client.py:598-621`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L598-L621)
+
+```python
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:631-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L631-L632)
+
+[9] (실행 확인) DNS 질의 300개 뒤에 손상된 레코드 머리를 둔 캡처 파일을 `wireshark_get_packet_list`에 `limit` 5와 기본값으로 주자 `success` 참과 `truncated` 참이 돌아왔고 `stderr`가 없었다.
+같은 파일에 `limit` 1000을 주거나 `wireshark_extract_fields`에 `limit` 400을 주면 종료 코드 2의 `ExecutionError`가 돌아왔다.
+
+[10] `wireshark_quick_analysis`는 하위 호출의 예외를 기본값으로 바꾸고 실패를 문장으로 적는다.
+
+```python
+def _extract_data(result: str) -> str | None:
+    wrapped = parse_tool_result(result)
+    if wrapped["success"]:
+        data = wrapped.get("data", "")
+        if isinstance(data, str) and len(data.strip()) > 10:
+            return data
+    return None
+
+
+async def _safe_run(coro: Any, default: str | None = None) -> str | None:
+    try:
+        return await coro  # type: ignore[no-any-return]
+    except Exception as e:
+        logger.debug("Safe run caught exception: %s", e)
+        return default
+```
+
+[`src/wireshark_mcp/tools/agents.py:19-33`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L19-L33)
+
+[`src/wireshark_mcp/tools/agents.py:70-100`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L70-L100)
+
+[11] `wireshark_analyze_tcp_health`는 실패한 조회를 -1로 두고 `N/A`로 적는다.
+
+```python
+        async def _count_check(display_filter: str) -> int:
+            raw = await client.get_packet_list(pcap_file, limit=10000, display_filter=display_filter)
+            wrapped = parse_tool_result(raw)
+            if not wrapped["success"]:
+                return -1
+            data = wrapped.get("data", "")
+            if isinstance(data, str):
+                lines = [ln for ln in data.strip().splitlines() if ln.strip()]
+                return max(0, len(lines) - 1)
+            return 0
+```
+
+[`src/wireshark_mcp/tools/protocol.py:41-50`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L41-L50)
+
+```python
+        results: list[str] = []
+        for (name, _), count in zip(checks, counts, strict=True):
+            if count < 0:
+                results.append(f"  [-] {name}: N/A (filter not applicable)")
+```
+
+[`src/wireshark_mcp/tools/protocol.py:61-64`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L61-L64)
+
+[12] 파일 서명 검색은 실패를 0건으로 돌려준다.
+
+```python
+        async def _search(file_type: str, magic_hex: str) -> tuple[str, int]:
+            result = await client.search_packet_contents(pcap_file, magic_hex, search_type="hex", limit=50)
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return file_type, 0
+            data = wrapped.get("data", "")
+            if not isinstance(data, str):
+                return file_type, 0
+            # Packet-list output is a header row plus one row per match; count real matches only.
+            rows = [ln for ln in data.splitlines() if ln.strip()]
+            return file_type, max(0, len(rows) - 1)
+
+        tasks = [_search(ft, mh) for ft, mh in MAGIC_BYTES.items()]
+        results = await asyncio.gather(*tasks)
+
+        found = [(ft, hits) for ft, hits in results if hits > 0]
+
+        if found:
+            output_parts = [f"{WARN} Embedded files detected in traffic:"]
+            for ft, hits in found:
+                output_parts.append(f"  {WARN} {ft}: {hits} packet(s)")
+            return success_response("\n".join(output_parts))
+
+        return success_response(f"{OK} No embedded files detected via magic byte scan")
+```
+
+[`src/wireshark_mcp/tools/forensics.py:125-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L125-L148)
+
+[13] `wireshark_detect_exfiltration`은 실패한 조회를 건너뛰고 결과를 적는다: [`src/wireshark_mcp/tools/anomaly.py:128-217`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L128-L217).
+
+[14] `wireshark_geoip_enrich`는 실패한 결과를 `success_response`에 넘긴다.
+
+```python
+        result = await client.extract_fields(pcap_file, ["ip.src", "ip.dst"], display_filter="ip", limit=10000)
+        wrapped = parse_tool_result(result)
+        if not wrapped["success"]:
+            return success_response(wrapped)
+
+        data = wrapped.get("data", "")
+        if not isinstance(data, str) or len(data.strip()) < 10:
+            return success_response("No IP packets found in capture.")
+```
+
+[`src/wireshark_mcp/tools/geoip.py:101-108`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L101-L108)
+
+[15] `wireshark_detect_dos_attack`의 SYN 조회 실패 처리, 실패 목록, `coverage`다: [`src/wireshark_mcp/tools/threat.py:445-447`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L445-L447), [`src/wireshark_mcp/tools/threat.py:494-496`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L494-L496), [`src/wireshark_mcp/tools/threat.py:788-802`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L788-L802).
+
+[16] `wireshark_yara_scan`은 내보내기 실패를 `type` 없이 돌려준다.
+
+```python
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+            wrapped = parse_tool_result(export_result)
+            if not wrapped["success"]:
+                return error_response(
+                    f"Failed to export {protocol} objects: {wrapped.get('error', {}).get('message', 'unknown')}",
+                )
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:112-117`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L112-L117)
+
+[17] `wireshark_aggregate`의 실패 `coverage`와 성공 결과다.
+
+```python
+        streamed = await client.stream_fields(
+            pcap_file,
+            extracted_fields,
+            accumulator.add,
+            display_filter,
+            max_rows=scan_limit,
+            timeout=scan_timeout,
+        )
+        matched_packets = streamed.get("rows", 0)
+        if not streamed.get("success", False):
+            stream_error = streamed.get("error", {})
+            error_type = stream_error.get("type", "ExecutionError")
+            message = stream_error.get("message", "tshark field stream failed")
+            details = stream_error.get("details")
+            return error_response(
+                message,
+                error_type,
+                details,
+                coverage={
+                    "status": "partial",
+                    "scanned": matched_packets,
+                    "limit": scan_limit,
+                },
+            )
+```
+
+[`src/wireshark_mcp/tools/stats.py:391-414`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L391-L414)
+
+```python
+        total_groups = len(groups)
+        result: dict[str, Any] = {
+            "display_filter": display_filter,
+            "group_by": group_fields,
+            "distinct": distinct_fields,
+            "numeric_operations": {field: sorted(operations) for field, operations in numeric_operations.items()},
+            "time_bucket_seconds": time_bucket_seconds,
+            "sort_by": resolved_sort,
+            "matched_packets": matched_packets,
+            "groups_total": total_groups,
+            "groups_returned": min(total_groups, top_k),
+            "truncated": total_groups > top_k,
+            "groups": groups[:top_k],
+        }
+        if skipped_invalid_time:
+            result["skipped_invalid_time"] = skipped_invalid_time
+        if time_field_normalized:
+            result["normalized_group_by"] = "frame.time_relative is implicit in time buckets"
+        return envelope_response(
+            result,
+            warnings=agg_warnings if agg_warnings else None,
+            coverage={
+                "status": "complete" if not agg_warnings else "partial",
+                "scanned": matched_packets,
+                "limit": scan_limit,
+            },
+            stderr=streamed.get("stderr"),
+        )
+```
+
+[`src/wireshark_mcp/tools/stats.py:461-488`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L461-L488)
+
+[18] 탐지·자격 증명 도구는 대상이 없으면 빈 `findings`와 문장을, 줄 상한에 닿으면 `partial`을 싣는다: [`src/wireshark_mcp/tools/security.py:128-137`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L128-L137), [`src/wireshark_mcp/tools/threat.py:266-279`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L266-L279), [`src/wireshark_mcp/tools/threat.py:425-430`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L425-L430).
+
+[19] BLE 분석은 대상이 없으면 빈 목록을, 줄 상한에 닿으면 `partial`과 경고를 싣는다.
+
+```python
+        data = wrapped.get("data", "")
+        warnings: list[str] = []
+        truncated = wrapped.get("truncated") is True
+        if truncated:
+            warnings.append(
+                f"Advertising rows hit the limit of {limit}; frame counts are lower bounds. Raise limit for full inventory."
+            )
+
+        if not isinstance(data, str) or not data.strip():
+            return envelope_response(
+                data={
+                    "devices": [],
+                    "shared_name_groups": [],
+                    "summary": (
+                        f"{OK} No BLE over-the-air advertising frames found. "
+                        "HCI-side captures (btsnoop/H4) expose GATT traffic via wireshark_extract_gatt_timeline instead."
+                    ),
+                },
+                scope={"pcap_file": pcap_file, "filter": "btle.advertising_address and not btle.scanning_address"},
+                coverage={"status": "complete", "frames_scanned": 0, "devices": 0, "limit": limit},
+            )
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:561-581`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L561-L581)
+
+```python
+        return envelope_response(
+            data={
+                "devices": device_rows,
+                "shared_name_groups": shared_name_groups,
+                "summary": "\n".join(summary_lines),
+            },
+            scope={"pcap_file": pcap_file, "filter": "btle.advertising_address and not btle.scanning_address"},
+            coverage={
+                "status": "partial" if truncated else "complete",
+                "frames_scanned": rows,
+                "devices": len(device_rows),
+                "limit": limit,
+            },
+            truncated=truncated or None,
+            warnings=warnings or None,
+        )
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:670-685`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L670-L685)
+
+[20] 프로토콜 분석기는 추출 결과가 20자보다 짧을 때만 `No … found` 문장을 싣는다.
+
+```python
+    def _make_simple_extractor(
+        fields: list[str],
+        display_filter: str,
+        empty_msg: str,
+        header_tmpl: str,
+    ) -> ProtocolHandler:
+        async def _extractor(pcap_file: str, limit: int) -> str:
+            result = await client.extract_fields(
+                pcap_file,
+                fields,
+                display_filter=display_filter,
+                limit=limit,
+            )
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return normalize_tool_result(wrapped)
+
+            data = wrapped.get("data", "")
+            if not isinstance(data, str) or len(data.strip()) < 20:
+                return success_response(empty_msg)
+
+            return success_response(header_tmpl.format(limit=limit, data=data))
+
+        return _extractor
+```
+
+[`src/wireshark_mcp/tools/protocol.py:493-516`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L493-L516)
+
+[21] `wireshark_follow_stream`은 검색어가 없으면 그 사실을 성공 결과로 적는다.
+
+```python
+        if search_content:
+            lines = [line for line in lines if search_content in line]
+            if not lines:
+                return self._ok(f"No occurrences of '{search_content}' found in stream {stream_index}.")
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:182-185`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L182-L185)
+
+[22] (실행 확인) DNS 패킷만 있는 3,000패킷 캡처 파일로 `wireshark_analyze_protocol`의 `dhcp`·`wireguard`를 부르자 머리글 줄만 실렸고 `mqtt`는 `Total MQTT messages: 0`과 머리글 줄을 실었다.
+
+[23] Modbus 분석은 쓰기 연산 조회가 실패하면 그 절을 싣지 않는다.
+
+```python
+        # Extract write operations separately
+        write_fields = [
+            "ip.src",
+            "ip.dst",
+            "modbus.func_code",
+            "modbus.reference_num",
+            "modbus.data",
+        ]
+        write_result = await client.extract_fields(
+            pcap_file,
+            write_fields,
+            display_filter="modbus.func_code in {5 6 15 16}",
+            limit=limit,
+        )
+        write_wrapped = parse_tool_result(write_result)
+        if write_wrapped["success"]:
+            write_data = write_wrapped.get("data", "")
+            if isinstance(write_data, str) and len(write_data.strip()) > 20:
+                output_parts.append(f"\n{INFO} Write Operations (FC 5/6/15/16):")
+                output_parts.append(write_data)
+
+        return success_response("\n".join(output_parts))
+```
+
+[`src/wireshark_mcp/tools/ics.py:75-96`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L75-L96)
+
+[24] (실행 확인) Modbus/TCP 요청 20개가 있는 캡처 파일로 `modbus` 분석을 부르자 쓰기 연산 조회가 종료 코드 2로 실패했고 응답에는 쓰기 연산 절도 실패 표시도 없었다.
+
+[25] `wireshark_detect_port_scan`의 SYN 조회 실패 처리, 실패 목록, `coverage`다: [`src/wireshark_mcp/tools/threat.py:37-43`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L37-L43), [`src/wireshark_mcp/tools/threat.py:65-121`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L65-L121), [`src/wireshark_mcp/tools/threat.py:231-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L231-L250).
+
+[26] 스트리밍 읽기의 시간 초과 결과에는 행 수가 없다.
+
+```python
+        try:
+            result = await asyncio.wait_for(consume(), timeout=timeout)
+            if not result["success"]:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                await stop_stderr_reader()
+            return result
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            await stop_stderr_reader()
+            return {
+                "success": False,
+                "error": {"type": "TimeoutError", "message": f"Command timed out after {timeout} seconds"},
+            }
+```
+
+[`src/wireshark_mcp/tshark/client.py:453-471`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L453-L471)
+
+[27] (실행 확인) 패킷 중간에서 끝나는 저장소 시험 캡처 파일을 넣자 `wireshark_get_packet_list`는 `success` 참과 `cut short` 문장을 담은 `stderr`를, `wireshark_aggregate`는 `coverage.status` `complete`와 같은 `stderr`를, `wireshark_stats_endpoints`는 `stderr` 없는 성공 결과를 돌려줬다.
+Windows의 `tshark` 4.6.7에서도 `wireshark_aggregate`는 `complete`와 `stderr`를 실었다.
+
+[28] `_maybe_summarize`는 표를 새 `envelope`에 담는다.
+
+```python
+def _maybe_summarize(raw_result: str, max_rows: int = 50) -> str:
+    """Apply tabular summarization to successful string results."""
+    wrapped = parse_tool_result(raw_result)
+    if wrapped["success"] and isinstance(wrapped.get("data"), str):
+        return success_response(summarize_tabular(wrapped["data"], max_rows))
+    return normalize_tool_result(raw_result)
+```
+
+[`src/wireshark_mcp/tools/stats.py:292-297`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L292-L297)
+
+[29] 누적기는 쉼표가 들어 있는 고유 값과 숫자가 아닌 수치 칸에도 경고를 만든다.
+
+```python
+        if self.ambiguous_commas:
+            warnings.append(
+                "Distinct field(s) contained comma delimiters; distinct count may combine multiple occurrences "
+                "with literal comma characters."
+            )
+        if self.invalid_numeric_fields:
+            warnings.append(
+                "Numeric aggregation skipped invalid, non-finite, or multi-occurrence values for: "
+                + ", ".join(sorted(self.invalid_numeric_fields))
+            )
+```
+
+[`src/wireshark_mcp/tools/stats.py:216-225`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L216-L225)
+
+[30] `wireshark_detect_dos_attack`은 단방향 캡처 의심 경고를 `warnings`에 넣고 `warnings`가 있으면 `partial`을 싣는다.
+
+```python
+        # Single-sided capture detection
+        if (
+            synack_count is not None
+            and syn_count > 50
+            and synack_count == 0
+            and "SYN-ACK response analysis" not in failed_checks
+        ):
+            warnings.append(
+                "Asymmetric or single-sided capture suspected: 0 SYN-ACK responses observed despite SYN activity. "
+                "SYN ratios may reflect tap vantage point rather than a true denial-of-service attack."
+            )
+```
+
+[`src/wireshark_mcp/tools/threat.py:598-608`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L598-L608)
+
+```python
+        coverage_dos: dict[str, Any] = {
+            "status": "partial" if (warnings or failed_checks or any_truncated) else "complete",
+            "scanned": syn_count + (synack_count or 0) + icmp_count + udp_count + large_dns,
+            "limit": limit,
+        }
+```
+
+[`src/wireshark_mcp/tools/threat.py:788-792`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L788-L792)
+
+[31] (실행 확인) DNS 질의 300개가 있는 캡처 파일을 `wireshark_aggregate`에 `dns.qry.name`의 평균을 구하도록 주자 300개를 모두 읽고 수치 칸 경고 하나와 `coverage.status` `partial`을 실었다.
+SYN 100개만 있는 캡처 파일을 `wireshark_detect_dos_attack`에 주자 단방향 캡처 경고 하나와 `truncated` 거짓, `coverage.status` `partial`을 실었다.

@@ -1,0 +1,96 @@
+---
+cell: F04
+details:
+- id: not_applicable
+---
+
+# F04 발견사항·결론 기록 관리
+
+### 비적용
+
+**판단.** 서버에는 발견사항, 결론, 가설, 단서 메모를 받아 남기는 도구가 없다.
+도구 52개의 입력 인자는 캡처 파일과 출력 경로, 표시 필터, 필드, 상한, 문턱, 복호화 입력 같은 실행 조건이고 발견사항이나 메모를 받는 인자가 없다 [1].
+파일을 쓰는 도구 10개와 실시간 캡처 도구는 캡처 파일을 자르거나 합치거나 거르거나 객체를 내보내거나 내보낸 객체를 검사하는 도구이고 모두 증거에서 얻은 자료를 쓴다 [2].
+`wireshark_yara_scan`은 `dest_dir`을 주지 않으면 내보낸 객체를 검사 뒤 임시 폴더째 지운다 [3].
+
+탐지 도구가 만드는 `findings`와 요약은 응답으로만 돌려주고 서버에 남기지 않는다 [4].
+실행기의 결과 캐시는 tshark 표준 출력을 캡처 파일과 명령에 대응시켜 프로세스 메모리에 두는 것이고 발견사항을 담지 않는다 [5].
+
+### 근거
+
+[1] (실행 확인) `wireshark-mcp serve`를 stdio로 실행해 MCP SDK 클라이언트로 도구 52개의 입력 schema 인자 이름을 모았다.
+인자는 `pcap_file`, `output_file`, `display_filter`, `fields`, `limit`, `threshold`, `keylog_file` 같은 실행 조건 61가지였다.
+
+[2] 파일을 쓰는 도구 목록이다.
+
+```python
+# is useless for a client handed a pcap to read.
+_CAPTURE: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_capture",
+        "wireshark_list_interfaces",
+    }
+)
+
+# Tools that write a new file: pcap surgery, format conversion, saved filters.
+_WRITERS: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_editcap_deduplicate",
+        "wireshark_editcap_split",
+        "wireshark_editcap_time_shift",
+        "wireshark_editcap_trim",
+        "wireshark_export_objects",
+        "wireshark_extract_frames",
+        "wireshark_filter_save",
+        "wireshark_merge_pcaps",
+        "wireshark_text2pcap_import",
+        "wireshark_yara_scan",
+    }
+```
+
+[`src/wireshark_mcp/profiles.py:33-54`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L33-L54)
+
+[3] YARA 검사의 임시 폴더는 검사 뒤 지운다.
+
+```python
+        finally:
+            if use_temp and os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:181-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L181-L183)
+
+[4] 탐지 도구는 발견사항을 응답 `envelope`로 만들어 돌려준다.
+
+```python
+        return envelope_response(
+            data={"findings": findings, "summary": "\n".join(summary_lines)},
+            scope={"pcap_file": pcap_file, "threshold": threshold},
+            coverage=coverage_data,
+            truncated=any_truncated,
+            warnings=warnings if warnings else None,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:244-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L244-L250)
+
+[5] 실행기는 표준 출력만 메모리 캐시에 넣는다.
+
+```python
+            # The stdout-only cache cannot retain the short-read warning. Do not
+            # turn a second read of an incomplete capture into an unqualified hit.
+            if pcap_file and raw_to_cache is not None and proc.returncode == 0:
+                self._cache.put(pcap_file, cmd, raw_to_cache)
+```
+
+[`src/wireshark_mcp/tshark/client.py:626-629`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L626-L629)
+
+```python
+"""In-memory LRU cache for tshark read-only command results.
+
+Cache key: (file_path, file_mtime, file_size, command_args_tuple)
+This ensures cache invalidation when the pcap file changes.
+"""
+```
+
+[`src/wireshark_mcp/tshark/cache.py:1-5`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L1-L5)

@@ -1,0 +1,349 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.05
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 서버 프로세스 메모리에 두는 상태는 `tshark` 결과 캐시 `ResultCache`, 컴파일한 YARA 규칙, 사용자가 둔 JA3 값 목록, GeoIP 데이터베이스를 여는 객체다 [1][2][3][4].
+결과 캐시는 명령 인자에 `-r`이 있는 명령의 표준 출력 전체를 담고 `-r` 다음 인자를 캐시 키의 캡처 파일로 쓴다 [1][5].
+`-w`나 `--export-objects`로 파일을 쓰는 `tshark` 명령과 고른 프레임을 새 파일에 쓰는 `editcap -r` 명령도 캐시를 거친다 [5][6].
+같은 명령을 다시 받으면 그 명령을 실행하지 않고 담아 둔 출력에서 요청한 `limit`·`offset` 범위를 잘라 돌려준다 [5].
+출력 파일을 지운 뒤 `wireshark_extract_frames`를 같은 인자로 다시 부르자 성공 응답이 돌아왔고 출력 파일은 다시 생기지 않았다 [7].
+캐시는 서버를 만들 때 생기는 실행 객체 하나에 있고 모든 도구와 연결이 함께 쓴다 [8].
+
+다음 출력은 캐시에 넣지 않는다.
+
+- 출력 바이트 상한을 넘었거나 줄 수 상한으로 읽기를 멈춘 출력 [5][9]
+- 종료 코드가 0이 아닌 출력(잘린 캡처 파일이라 부분 결과를 돌려준 경우 포함) [5]
+- 크기가 캐시 전체 한도의 4분의 1(12.5 MiB)을 넘는 출력 [10]
+- `capinfos`, `mergecap`, `text2pcap`, `-r`을 쓰지 않는 `editcap` 명령처럼 명령에 `-r`이 없는 출력과 `wireshark_aggregate`가 쓰는 필드 스트림 [5][11]
+
+YARA 규칙은 처음 검사할 때 내장 규칙과 `~/.wireshark-mcp/yara/`의 규칙 파일을 컴파일해 모듈 변수에 두고 그 뒤로는 다시 읽지 않는다 [2].
+`wireshark_extract_fingerprints`가 대조하는 JA3 값 목록도 처음 읽은 `~/.wireshark-mcp/fingerprints/`의 내용을 모듈 변수에 두고 다시 읽지 않는다 [3].
+`wireshark_geoip_enrich`는 처음 찾은 GeoIP 데이터베이스를 연 객체를 모듈 변수에 둔다 [4].
+이 상태는 파일이나 DB에 쓰지 않으므로 프로세스가 끝나면 사라진다 [1][2][3][4].
+
+열린 사건, 작업 목록, 진행 기록 같은 상태는 없다.
+파일을 쓰는 도구가 만든 캡처 파일과 내보낸 객체는 도구의 출력이고 서버는 이 파일을 다시 읽어 상태로 쓰지 않는다.
+
+### P06.05 만료
+
+**구현.** 이 방식은 결과 캐시에 적용된다 [1].
+캐시는 항목마다 넣은 시각을 두고 300초가 지난 항목은 다시 찾을 때 버린다 [1][12].
+항목이 128개에 닿거나 담은 출력이 모두 50 MiB를 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [1][10].
+키에는 캡처 파일의 실제 경로, 수정 시각(나노초), 크기, 실행한 명령이 들어 있어 수정 시각이나 크기가 바뀐 파일은 새 항목이 된다 [13].
+명령이 `-w`로 파일을 쓰면 그 출력 파일의 항목을 지운다 [14].
+출력 경로를 `-w` 없이 받는 `editcap`과 `text2pcap` 명령에는 이 처리가 적용되지 않는다 [14][15].
+수정 시각을 바꾼 캡처 파일에 같은 도구를 다시 부르자 캐시 대신 새로 실행한 결과가 돌아왔다 [16].
+
+YARA 규칙, JA3 값 목록, GeoIP 데이터베이스 객체에는 만료가 없다 [2][3][4].
+그래서 서버가 실행되는 동안 규칙 파일이나 JA3 목록 파일을 바꾸거나 더해도 처음 읽은 내용으로 검사하고 대조한다 [2][3].
+
+**한계.** 유효 시간이 지난 항목은 같은 키를 다시 찾거나 개수·크기 한도로 밀려나기 전에는 메모리에 남는다 [12][10].
+키는 파일 내용을 보지 않으므로 수정 시각과 크기를 그대로 둔 채 내용을 바꾼 캡처 파일에는 앞서 담아 둔 결과를 돌려준다 [13].
+첫 패킷의 출발지 주소 한 바이트를 바꾸고 수정 시각을 되돌린 캡처 파일에 같은 서버로 `wireshark_stats_endpoints`를 다시 부르자 바꾸기 전과 같은 종단점 목록이 돌아왔다 [16].
+새로 시작한 서버는 바뀐 주소를 실었다 [16].
+
+### 근거
+
+[1] 결과 캐시의 한도와 시간 기준이다: [`src/wireshark_mcp/tshark/cache.py:1-145`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L1-L145).
+
+```python
+DEFAULT_MAX_ENTRIES = 128
+DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50 MB total cache size
+DEFAULT_TTL_SECONDS = 300  # 5 minutes
+```
+
+[`src/wireshark_mcp/tshark/cache.py:15-17`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L15-L17)
+
+[2] YARA 규칙은 한 번 컴파일해 모듈 변수에 둔다: [`src/wireshark_mcp/tools/yara_scan.py:27-68`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L27-L68).
+
+```python
+def _load_yara_rules() -> Any:
+    """Load and compile YARA rules from bundled + user directories."""
+    global _compiled_rules
+    if _compiled_rules is not None:
+        return _compiled_rules
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:30-34`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L30-L34)
+
+```python
+    user_dir = Path.home() / ".wireshark-mcp" / "yara"
+    if user_dir.exists():
+        for f in sorted(user_dir.glob("*.yar")):
+            try:
+                rule_sources[f"user_{f.stem}"] = f.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not load user YARA rule: %s", f)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:45-51`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L45-L51)
+
+[3] JA3 값 목록은 한 번 읽어 모듈 변수에 둔다.
+
+```python
+    global _FINGERPRINT_DB
+    if _FINGERPRINT_DB is not None:
+        return _FINGERPRINT_DB
+
+    fingerprints: list[dict[str, str]] = []
+
+    user_dir = Path.home() / ".wireshark-mcp" / "fingerprints"
+    if user_dir.exists():
+        for f in sorted(user_dir.glob("*.json")):
+            try:
+                db = json.loads(f.read_text(encoding="utf-8"))
+                fingerprints.extend(db.get("fingerprints", []))
+            except Exception:
+                logger.warning("Could not load user fingerprint file: %s", f)
+
+    _FINGERPRINT_DB = fingerprints
+    return _FINGERPRINT_DB
+```
+
+[`src/wireshark_mcp/tools/forensics.py:32-48`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L32-L48)
+
+[4] GeoIP 데이터베이스 객체는 한 번 열어 모듈 변수에 둔다.
+
+```python
+def _get_reader() -> Any:
+    """Get or create a GeoIP2 database reader (singleton)."""
+    global _geoip2_reader
+    if _geoip2_reader is not None:
+        return _geoip2_reader
+
+    db_path = _find_geoip_db()
+    if db_path is None:
+        return None
+
+    _geoip2_reader = geoip2.database.Reader(str(db_path))
+    logger.info("GeoIP database loaded: %s", db_path)
+    return _geoip2_reader
+```
+
+[`src/wireshark_mcp/tools/geoip.py:58-70`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L58-L70)
+
+[5] `-r`가 있는 명령만 캐시를 찾고 성공한 전체 출력만 캐시에 넣는다.
+
+```python
+        pcap_file = None
+        if "-r" in cmd:
+            r_idx = cmd.index("-r")
+            if r_idx + 1 < len(cmd):
+                pcap_file = cmd[r_idx + 1]
+
+        # The cache stores the full, unpaginated stdout keyed by the command only.
+        # Pagination is applied *after* retrieval so different offset/limit values
+        # over the same command never pollute one another.
+        if pcap_file:
+            cached = self._cache.get(pcap_file, cmd)
+            if cached is not None:
+                logger.debug("Cache hit for: %s", self._redact_command(cmd[:4]))
+                text, truncated = self._paginate(cached, limit_lines, offset_lines)
+                return self._ok(text, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:504-518`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L504-L518)
+
+```python
+            for out_path in self._output_paths(cmd):
+                self._cache.invalidate_file(out_path)
+
+            # The stdout-only cache cannot retain the short-read warning. Do not
+            # turn a second read of an incomplete capture into an unqualified hit.
+            if pcap_file and raw_to_cache is not None and proc.returncode == 0:
+                self._cache.put(pcap_file, cmd, raw_to_cache)
+
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:623-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L623-L632)
+
+[6] 파일을 쓰는 `tshark` 명령과 `editcap -r` 명령에도 `-r` 다음에 입력 캡처 파일이 온다: [`src/wireshark_mcp/tshark/_suite_ops.py:194`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L194-L194), [`src/wireshark_mcp/tshark/_suite_ops.py:244`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L244-L244), [`src/wireshark_mcp/tshark/_extraction.py:96-102`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L96-L102).
+
+[7] (실행 확인) `full` 프로필에서 `wireshark_extract_frames`를 부른 뒤 출력 파일을 지우고 같은 인자로 다시 부르자 응답은 `success: true`와 빈 `data`였고 출력 파일은 다시 생기지 않았다.
+
+[8] 결과 캐시는 실행 객체를 만들 때 하나 생기고 서버는 실행 객체를 하나만 만든다.
+
+```python
+        self._version: str | None = None
+        self._cache = ResultCache()
+```
+
+[`src/wireshark_mcp/tshark/client.py:78-79`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L78-L79)
+
+```python
+    client = WiresharkSuiteClient(allowed_dirs=allowed_dirs)
+```
+
+[`src/wireshark_mcp/server.py:68-68`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L68-L68)
+
+[9] 출력을 읽는 함수는 상한을 넘거나 줄 수로 멈춘 출력을 캐시 대상에서 뺀다: [`src/wireshark_mcp/tshark/client.py:200-307`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L200-L307).
+
+```python
+            raw_to_cache = "\n".join(lines) if not truncated and not stdout_exceeded else None
+            return final_output, error, truncated, raw_to_cache, (stdout_exceeded or stderr_exceeded)
+```
+
+[`src/wireshark_mcp/tshark/client.py:272-273`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L272-L273)
+
+```python
+            exceeded = stdout_exceeded or stderr_exceeded
+        output = stdout.decode("utf-8", errors="replace")
+        error = stderr.decode("utf-8", errors="replace")
+        final_output, truncated = self._paginate(output, limit_lines, offset_lines)
+        return final_output, error, truncated, output if not exceeded else None, exceeded
+```
+
+[`src/wireshark_mcp/tshark/client.py:303-307`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L303-L307)
+
+[10] 넣을 때 크기 한도와 개수 한도로 오래된 항목을 밀어낸다.
+
+```python
+    def put(self, pcap_file: str, cmd: list[str], result: str) -> None:
+        """Store a result in the cache."""
+        made = self._make_key(pcap_file, cmd)
+        if made is None:
+            return
+        key, path = made
+
+        result_size = len(result.encode("utf-8", errors="replace"))
+
+        if result_size > self._max_bytes // 4:
+            return
+
+        if key in self._cache:
+            old_result, _ = self._cache[key]
+            self._current_bytes -= len(old_result.encode("utf-8", errors="replace"))
+            del self._cache[key]
+
+        while self._current_bytes + result_size > self._max_bytes and self._cache:
+            self._evict_oldest()
+
+        while len(self._cache) >= self._max_entries:
+            self._evict_oldest()
+
+        self._cache[key] = (result, time.time())
+        self._key_paths[key] = path
+        self._current_bytes += result_size
+```
+
+[`src/wireshark_mcp/tshark/cache.py:77-102`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L77-L102)
+
+[11] 필드 스트림은 캐시를 거치지 않는다.
+
+```python
+    async def _stream_field_rows(
+        self,
+        cmd: list[str],
+        consumer: FieldRowConsumer,
+        *,
+        max_rows: int,
+        timeout: int = 30,
+    ) -> FieldStreamResult:
+        """Run one fields command and fold decoded rows through a consumer.
+
+        This seam owns subprocess lifetime, byte/row limits, stderr draining,
+        timeout, and cancellation. Callers only keep their aggregate state.
+        Streamed results intentionally bypass the raw-output cache.
+        """
+```
+
+[`src/wireshark_mcp/tshark/client.py:309-322`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L309-L322)
+
+[12] 찾을 때 유효 시간이 지났으면 그 항목을 버린다.
+
+```python
+    def get(self, pcap_file: str, cmd: list[str]) -> str | None:
+        """Look up a cached result. Returns None on miss."""
+        made = self._make_key(pcap_file, cmd)
+        if made is None:
+            self._misses += 1
+            return None
+        key, _ = made
+
+        entry = self._cache.get(key)
+        if entry is None:
+            self._misses += 1
+            return None
+
+        result, timestamp = entry
+        if time.time() - timestamp > self._ttl:
+            self._evict(key, len(result))
+            self._misses += 1
+            return None
+
+        self._cache.move_to_end(key)
+        self._hits += 1
+        return result
+```
+
+[`src/wireshark_mcp/tshark/cache.py:54-75`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L54-L75)
+
+[13] 캐시 키는 실제 경로, 수정 시각, 크기, 명령으로 만든다.
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)
+
+[14] `-w`의 출력 경로를 찾아 그 파일의 캐시 항목을 지운다.
+
+```python
+    @staticmethod
+    def _output_paths(cmd: list[str]) -> list[str]:
+        """Return files a command writes to via `-w`, so their cache can be dropped."""
+        paths: list[str] = []
+        for i, arg in enumerate(cmd):
+            if arg == "-w" and i + 1 < len(cmd):
+                paths.append(cmd[i + 1])
+        return paths
+```
+
+[`src/wireshark_mcp/tshark/client.py:126-133`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L126-L133)
+
+```python
+    def invalidate_file(self, pcap_file: str) -> int:
+        """Remove every cache entry for a single file. Returns the count removed."""
+        try:
+            target = str(Path(pcap_file).resolve())
+        except OSError:
+            return 0
+
+        keys = [key for key, path in self._key_paths.items() if path == target]
+        for key in keys:
+            entry = self._cache.get(key)
+            if entry is not None:
+                self._evict(key, len(entry[0].encode("utf-8", errors="replace")))
+            self._key_paths.pop(key, None)
+        return len(keys)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:104-117`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L104-L117)
+
+[15] `editcap`과 `text2pcap` 명령은 출력 경로를 `-w` 없이 마지막 위치 인자로 받는다: [`src/wireshark_mcp/tshark/_suite_ops.py:72-77`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L72-L77), [`src/wireshark_mcp/tshark/_suite_ops.py:135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L135-L135), [`src/wireshark_mcp/tshark/_suite_ops.py:153`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L153-L153), [`src/wireshark_mcp/tshark/_suite_ops.py:194`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L194-L194), [`src/wireshark_mcp/tshark/_suite_ops.py:223-231`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L223-L231).
+
+[16] (실행 확인) 컨테이너 안 폴더에 `syn_scan_burst.pcap` 사본을 두고 한 서버 객체로 `wireshark_stats_endpoints`를 부른 뒤 첫 패킷의 출발지 주소 끝 바이트를 바꾸고 `os.utime`으로 수정 시각을 되돌렸다.
+같은 서버의 두 번째 호출 결과는 첫 호출과 같았고(`192.168.1.50` 25개) 새로 만든 서버의 결과에는 `192.168.1.51` 1개가 따로 실렸다.
+수정 시각을 1초 늦춘 뒤 같은 서버로 다시 부르자 새로 만든 서버와 같은 결과가 돌아왔다.

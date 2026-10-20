@@ -1,0 +1,254 @@
+---
+cell: P01
+details:
+- id: P01.02
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.02 메타데이터 조회
+
+**구현.** 이 방식은 진입점 도구 `wireshark_open_file`에 적용된다 [1].
+`wireshark_open_file`은 먼저 `tshark`의 프로토콜 계층 통계(`-z io,phs`)를 실행하고 통계의 줄마다 첫 낱말을 프로토콜 이름으로 읽는다 [1][2].
+서버는 읽은 프로토콜 이름을 프로토콜별 추천 표 `PROTOCOL_TOOL_MAP`과 대조해 그 캡처 파일에 맞는 분석 도구와 `wireshark_analyze_protocol`의 `protocol` 값을 고른다 [3][4].
+예를 들어 `http`가 있으면 HTTP 요청 추출, 객체 내보내기, 자격 증명 추출, YARA 검사를 고르고 `btle`이 있으면 BLE 분석 값 4개를 고른다 [3].
+`ip`가 있으면 포트 스캔·DoS 탐지와 GeoIP 조회를, `tcp`가 있으면 TCP 상태 분석을 고른다 [3].
+고른 도구는 응답의 `Recommended Tools` 아래에 그 도구 설명의 첫 줄과 함께 실린다 [1][4].
+시험용 캡처 파일 4개를 열자 파일마다 다른 프로토콜 목록과 그에 맞춘 추천 도구가 실렸다 [5].
+HTTP를 표준이 아닌 포트(8081)로 주고받은 캡처 파일에서도 `http`가 프로토콜 목록에 올라 HTTP 도구가 추천되었다 [6].
+
+캡처 파일 형식은 서버 코드가 판별하지 않는다.
+`tshark`와 `capinfos`는 Wireshark의 파일 읽기 라이브러리 wiretap으로 파일을 열며 형식을 스스로 알아낸다 [7].
+`wireshark_open_file`과 `wireshark_get_file_info`의 응답에는 `capinfos`가 읽은 파일 형식과 캡슐화 종류가 실리고 서버는 이 값으로 방법을 고르지 않는다 [1][5].
+캡처 파일이 아닌 글 파일을 주자 `tshark`가 형식을 알 수 없다는 오류로 끝났고 서버는 그 오류를 응답으로 돌려주었다 [5].
+서버에는 증거의 OS나 대상 환경을 판별하는 코드가 없다.
+
+서버 지침은 `wireshark_open_file`로 시작하라고 적는다 [8].
+사용법 리소스는 처음 보는 입력에는 이 도구를 쓰고 이미 아는 프레임, 스트림, 증상은 그 범위를 바로 조회하라고 적으며 이 도구가 필수가 아니라고 적는다 [8][9].
+이 도구를 거치지 않은 호출에는 추천이 없고 분석 도구는 모델이 고른 도구와 값을 그 파일의 내용과 대조하지 않고 실행한다.
+`wireshark_analyze_protocol`은 `protocol` 값에 맞는 처리 함수를 찾아 실행하고 그 프로토콜이 캡처 파일에 있는지는 보지 않는다 [10].
+서버가 시작할 때 하는 대조는 추천 표의 도구 이름이 프로필로 빼기 전의 분석 도구 목록에 있는지와 `protocol` 값이 도구 schema의 값 목록에 있는지 확인해 로그에 경고를 남기는 것뿐이다 [11][12].
+
+### 근거
+
+[1] `wireshark_open_file`은 프로토콜 계층 통계와 `capinfos` 정보를 얻고 프로토콜 이름으로 추천 도구를 고른다.
+
+```python
+    async def wireshark_open_file(pcap_file: str) -> str:
+        """[Entry Point] Open a pcap and get protocol-aware tool recommendations. Returns protocols and relevant tools."""
+        phs_raw = await client.get_protocol_stats(pcap_file)
+        phs_result = parse_tool_result(normalize_tool_result(phs_raw))
+        if not phs_result["success"]:
+            return normalize_tool_result(phs_result)
+
+        file_info_raw = await client.get_file_info(pcap_file)
+        file_info = parse_tool_result(normalize_tool_result(file_info_raw))
+
+        detected_protocols: set[str] = set()
+        phs_data = phs_result.get("data", "")
+        if isinstance(phs_data, str):
+            detected_protocols = parse_protocol_hierarchy(phs_data)
+
+        recommended_tools = registry.recommended_tools_for_protocols(detected_protocols)
+```
+
+[`src/wireshark_mcp/tools/registry.py:296-311`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L296-L311)
+
+```python
+        if detected_protocols:
+            output_parts.append(f"\nProtocols ({len(detected_protocols)}):")
+            output_parts.append(", ".join(sorted(detected_protocols)))
+
+        if recommended_tools:
+            output_parts.append(f"\nRecommended Tools ({len(recommended_tools)}):")
+            for tool_name in recommended_tools:
+                output_parts.append(f"  {tool_name}: {registry.tool_doc(tool_name)}")
+        else:
+            output_parts.append("\nNo protocol-specific recommendations. Core tools are available.")
+```
+
+[`src/wireshark_mcp/tools/registry.py:320-329`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L320-L329)
+
+[2] 프로토콜 계층 통계 명령과 그 출력에서 프로토콜 이름을 읽는 함수다.
+
+```python
+    async def get_protocol_stats(self, pcap_file: str) -> str:
+        """Protocol Hierarchy (-z io,phs)."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        return await self._run_command([self.tshark_path, "-r", pcap_file, "-q", "-z", "io,phs"])
+```
+
+[`src/wireshark_mcp/tshark/_stats.py:13-19`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_stats.py#L13-L19)
+
+```python
+def parse_protocol_hierarchy(phs_output: str) -> set[str]:
+    """Parse tshark `-z io,phs` output into a set of protocol names.
+
+    Handles the typical hierarchy format::
+
+        eth  frames:100 bytes:12345
+          ip  frames:90 bytes:11000
+            tcp  frames:80 bytes:10000
+              http  frames:30 bytes:5000
+    """
+    protocols: set[str] = set()
+    for line in phs_output.splitlines():
+        match = re.match(r"^\s*(\w[\w.-]*)\s+frames:", line)
+        if match:
+            protocols.add(match.group(1).lower())
+    return protocols
+```
+
+[`src/wireshark_mcp/tools/registry.py:274-289`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L274-L289)
+
+[3] 프로토콜 이름별 추천 도구 표의 `http`·`ip`·`tcp`·`btle` 항목이다: [`src/wireshark_mcp/tools/registry.py:46-179`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L46-L179).
+
+```python
+PROTOCOL_TOOL_MAP: dict[str, list[Recommendation]] = {
+    "http": [
+        Recommendation("wireshark_extract_http_requests"),
+        Recommendation("wireshark_export_objects"),
+        Recommendation("wireshark_extract_credentials"),
+        Recommendation("wireshark_yara_scan"),
+    ],
+```
+
+[`src/wireshark_mcp/tools/registry.py:46-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L46-L52)
+
+```python
+    "ip": [
+        Recommendation("wireshark_detect_port_scan"),
+        Recommendation("wireshark_detect_dos_attack"),
+        Recommendation("wireshark_geoip_enrich"),
+    ],
+    "tcp": [
+        Recommendation("wireshark_analyze_tcp_health"),
+    ],
+```
+
+[`src/wireshark_mcp/tools/registry.py:84-91`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L84-L91)
+
+[4] 감지한 프로토콜 이름을 추천 표와 대조해 추천할 호출을 만든다.
+
+```python
+    def recommended_tools_for_protocols(self, detected_protocols: set[str]) -> list[str]:
+        """Return calls worth making for the detected protocols, as rendered strings."""
+        recommended: set[str] = set()
+        excluded: frozenset[str] = getattr(self._mcp, "excluded_tools", frozenset())
+        for protocol in detected_protocols:
+            for rec in PROTOCOL_TOOL_MAP.get(protocol.lower().strip(), []):
+                if rec.tool in self._catalog and rec.tool not in excluded:
+                    recommended.add(rec.render())
+        return sorted(recommended)
+
+    def tool_doc(self, tool_name: str) -> str:
+        """Return the first docstring line for a registered tool, or empty string.
+
+        Accepts either a bare tool name or a rendered call from
+        `recommended_tools_for_protocols`.
+        """
+        fn = self._catalog.get(tool_name.split("(", 1)[0])
+        return (fn.__doc__ or "").strip().split("\n")[0] if fn else ""
+```
+
+[`src/wireshark_mcp/tools/registry.py:249-266`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L249-L266)
+
+[5] (실행 확인) 시험용 캡처 파일 `syn_scan_burst.pcap`·`ble_advertising.pcap`·`dns_tunnel_candidate.pcap`과 직접 만든 HTTP 캡처 파일을 `wireshark_open_file`로 열자 파일마다 프로토콜 목록(`eth, ip, tcp`, `bluetooth, btle, btle_rf` 등)과 다른 추천 도구가 실렸고 응답의 파일 정보에 `File type`과 `File encapsulation`이 있었다.
+글 파일을 주자 `isn't a capture file in a format TShark understands` 오류가 `is_error` 응답으로 돌아왔다.
+
+[6] (실행 확인) 같은 HTTP 교환을 포트 80과 8081로 만든 두 캡처 파일 모두에서 프로토콜 목록에 `http`가 있었고 추천 도구 8개가 같았다.
+
+[7] Wireshark 4.0.17의 `wtap_open_offline`은 형식을 정하지 않은 호출(`WTAP_TYPE_AUTO`)에서 서명으로 판별하는 형식부터 시도하고 이어서 확장자에 맞는 추정 형식을 먼저 시도한다: [`wiretap/file_access.c:945-1100`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wiretap/file_access.c#L945-L1100).
+`capinfos`는 이 함수에 `WTAP_TYPE_AUTO`를 넘겨 파일을 연다: [`capinfos.c:1220`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L1220-L1220).
+
+[8] 서버 지침은 `wireshark_open_file`로 시작하라고 적고 사용법 리소스는 이 도구가 권장일 뿐 필수가 아니라고 적는다.
+
+```python
+SERVER_INSTRUCTIONS = (
+    "Analyze packet captures with the advertised Wireshark tools. Start with "
+    "wireshark_open_file for capture context. For full-capture totals, grouped "
+    "distributions, distinct counts, top-k results, or time buckets, prefer "
+    "wireshark_aggregate over shell pipelines or paginated extraction. It scans the "
+    "full filter automatically; top_k limits only returned groups. Use packet-level "
+    "tools afterward to verify the highest-value findings."
+)
+```
+
+[`src/wireshark_mcp/server.py:27-34`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L27-L34)
+
+```python
+## Tips for Efficient Analysis
+
+- `wireshark_open_file` is recommended, not required: all tools stay available for the session
+```
+
+[`src/wireshark_mcp/resources.py:186-188`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/resources.py#L186-L188)
+
+[9] 사용법 리소스의 첫 단계는 처음 보는 입력에 `wireshark_open_file`을 쓰라고 적는다.
+
+```python
+1. **Start with the user's question**: For unfamiliar input use `wireshark_open_file`; for a known frame/stream/symptom query that scope directly
+```
+
+[`src/wireshark_mcp/resources.py:162-162`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/resources.py#L162-L162)
+
+[10] `wireshark_analyze_protocol`은 값에 맞는 처리 함수를 바로 부른다.
+
+```python
+    async def wireshark_analyze_protocol(pcap_file: str, protocol: Protocol, limit: int = 100) -> str:
+        """[Protocol] Analyze one protocol with preset fields and filter. Returns a summary and bounded rows; BLE values add device inventory, scanners, GATT timeline, connection lifecycle, pairing."""
+        handler = handlers.get(protocol)
+        if handler is None:
+            return error_response(
+                f"Unknown protocol {protocol!r}. Supported: {', '.join(sorted(handlers))}.",
+                error_type="ValueError",
+            )
+        return await handler(pcap_file, limit)
+```
+
+[`src/wireshark_mcp/tools/analyze.py:80-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/analyze.py#L80-L88)
+
+[11] 시작할 때 추천 표의 도구 이름이 `_catalog`에 있는지 보고 `protocol` 값이 도구의 값 목록에 있는지 보아 경고만 남긴다.
+
+```python
+    def _warn_on_unknown_recommendations(self) -> None:
+        """Flag any PROTOCOL_TOOL_MAP entry that names a tool we never registered."""
+        from .analyze import supported_protocols
+
+        referenced = {rec.tool for recs in PROTOCOL_TOOL_MAP.values() for rec in recs}
+        for tool_name in sorted(referenced - self._catalog.keys()):
+            logger.warning("PROTOCOL_TOOL_MAP references unregistered tool: %s", tool_name)
+
+        # A `protocol` value not in the tool's enum renders a call that fails schema
+        # validation, so catch it here rather than at the caller.
+        known = set(supported_protocols())
+        bad = {rec.protocol for recs in PROTOCOL_TOOL_MAP.values() for rec in recs if rec.protocol} - known
+        for value in sorted(bad):
+            logger.warning("PROTOCOL_TOOL_MAP references unsupported protocol value: %s", value)
+```
+
+[`src/wireshark_mcp/tools/registry.py:234-247`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L234-L247)
+
+[12] `_catalog`에는 프로필로 빼는 도구도 들어가고 프로필로 빼는 도구는 등록할 때만 건너뛴다.
+
+```python
+        for factory in factories:
+            for name, fn in factory(self._client):
+                self._catalog[name] = fn
+
+        registered: list[str] = []
+        excluded: frozenset[str] = getattr(self._mcp, "excluded_tools", frozenset())
+        for name in sorted(self._catalog):
+            if name in excluded:
+                continue
+            try:
+                self._mcp.add_tool(self._catalog[name], name=name)
+                registered.append(name)
+            except Exception as exc:
+                logger.warning("Failed to register tool %s: %s", name, exc)
+```
+
+[`src/wireshark_mcp/tools/registry.py:215-228`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/registry.py#L215-L228)

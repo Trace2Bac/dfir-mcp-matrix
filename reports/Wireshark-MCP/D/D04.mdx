@@ -1,0 +1,402 @@
+---
+cell: D04
+details:
+- id: D04.01
+- id: D04.02
+- id: D04.04
+- id: D04.05
+---
+
+# D04 출력 경로 제한
+
+### D04.01 서버가 출력 위치 결정
+
+**구현.** 이 방식은 `dest_dir` 없이 부른 `wireshark_yara_scan`이 캡처에서 꺼낸 파일을 두는 임시 폴더에 적용된다 [1].
+서버는 `_create_temporary_output_dir`로 허용 폴더 목록의 앞에서부터 `mkdtemp`를 시도해 처음 만든 `wireshark_yara_` 접두어의 폴더를 쓴다 [2].
+이 폴더를 `tshark --export-objects`의 목적지로 넘기고 호출이 끝나면 `finally`에서 지운다 [1].
+허용 폴더가 없으면 임시 폴더를 만들지 않고 `PermissionDenied`로 끝난다 [2][3].
+허용 폴더 목록에 입력 캡처 파일의 폴더를 앞에 적은 서버에서는 임시 폴더가 그 입력 폴더 안에 생겼다 [3].
+그 밖의 파일을 쓰는 도구는 목적지를 호출 인자 `output_file`, `output_prefix`, `dest_dir`로 받는다 [4].
+
+### D04.02 실제 경로와 허용 폴더 대조
+
+**구현.** 이 방식은 파일을 쓰는 도구 11개의 목적지 인자에 적용된다 [4][5].
+허용 폴더는 환경변수 `WIRESHARK_MCP_ALLOWED_DIRS`에 쉼표로 나눠 적은 폴더다 [6].
+서버는 시작할 때 이 값을 `resolve()`로 실제 경로로 바꾸고 폴더가 아닌 값이 있으면 `ValueError`를 낸다 [6].
+`_validate_output_path`는 허용 폴더가 없으면 쓰기를 거부한다 [5].
+허용 폴더가 있으면 목적지를 `resolve()`로 링크와 `..`를 해석한 실제 경로로 바꾸고 허용 폴더 가운데 하나의 아래인지 `relative_to`로 대조한다 [5][7].
+밖이면 `PermissionDenied`로 거부한다 [5].
+허용 폴더 밖의 절대 경로, 허용 폴더 안에서 밖을 가리키는 링크를 거치는 경로, 상위 폴더로 나가는 경로는 모두 거부되었고 파일이 생기지 않았다 [8].
+저장된 파생물을 고치거나 지우는 전용 도구는 없다.
+`Dockerfile`은 `/captures`와 `/results` 폴더를 만들지만 `WIRESHARK_MCP_ALLOWED_DIRS`는 정하지 않고 서버를 `analysis` 프로필로 실행한다 [9].
+
+**한계.** 서버는 대조에 쓴 실제 경로가 아니라 받은 문자열을 그대로 분석 도구 명령에 넣는다 [10].
+대조한 뒤 도구가 파일을 열기 전에 경로 안의 링크가 바뀌는 경우는 실행으로 확인하지 않았다.
+`wireshark_editcap_split`과 `ring_buffer`를 준 `wireshark_capture`는 대조한 경로 자체가 아니라 그 경로로 지은 다른 이름에 쓴다 [11][12].
+`editcap`과 `dumpcap`은 받은 경로에서 마지막 조각의 `.` 앞까지를 접두어로 삼고 그 뒤에 `_`, 번호, 시각을 붙인 이름으로 파일을 만든다 [11][12].
+그래서 허용 폴더 자체를 `output_prefix`나 `output_file`로 주면 대조는 통과하고 파일은 허용 폴더의 상위 폴더에 생겼다 [13].
+`wireshark_set_protocol_prefs`는 받은 `prefs`를 검사 없이 `tshark`의 `-o`로 넘기고 이 경로에는 목적지 대조가 적용되지 않는다 [14].
+이 도구는 파일을 쓰는 도구 목록에 없어 `analysis` 프로필에서도 등록된다 [15].
+허용 폴더를 정하지 않은 `analysis` 프로필 서버에서 출력 파일 경로를 값으로 받는 해석 설정으로 다른 폴더의 경로를 넘기자 성공 응답이 왔고 그 경로에 `tshark`가 쓴 파일이 생겼다 [16].
+
+### D04.04 이름·확장자·충돌 검사
+
+**구현.** 이 방식은 Windows에서 실행한 서버가 받는 목적지 경로에 적용된다 [17].
+`_is_unsafe_windows_path`는 `\\.\`나 `\\?\`로 시작하는 장치 경로, 조각에 `:`가 있는 경로, `CON`·`NUL`·`COM1`·`LPT1` 같은 예약 이름 조각을 거부한다 [17].
+`_validate_output_path`는 허용 폴더 대조보다 먼저 이 검사를 해 `InvalidParameter`로 거부한다 [17].
+Windows에서 예약 이름이나 `:`가 있는 목적지를 준 `wireshark_editcap_trim`과 장치 경로를 준 `wireshark_export_objects`는 모두 거부되었고 파일이 생기지 않았다 [18].
+다른 운영체제에서 이 함수는 검사 없이 `False`를 돌려준다 [17].
+확장자와 이미 있는 이름은 검사하지 않는다.
+
+### D04.05 서버가 파일 이름 결정
+
+**구현.** 이 방식은 `wireshark_export_objects`와 `dest_dir`를 준 `wireshark_yara_scan`이 꺼낸 파일의 이름에 적용된다 [19][1].
+목적지 폴더는 호출 인자 `dest_dir`이고 그 안의 파일 이름은 서버 코드가 아니라 Wireshark 4.0.17의 `tshark`가 정한다 [19][20].
+`tshark`는 전송에 적힌 파일 이름을 쓰고 이름이 없으면 `object`와 프레임 번호, 콘텐츠 유형으로 이름을 짓는다 [20].
+이름 안의 `<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, `*`와 제어 문자는 `%`와 16진수 두 자리로 바꾼다 [21].
+같은 이름의 파일이 이미 있으면 확장자 앞에 `(1)`, `(2)` 같은 번호를 붙인 새 이름을 지어 앞 파일을 덮어쓰지 않는다 [20][21].
+`report.txt`가 이미 있는 폴더로 내보내자 앞 파일은 그대로 남고 `report(1).txt`가 새로 생겼다 [22].
+서버 코드는 이 이름을 검사하거나 바꾸지 않는다 [19].
+
+**한계.** 원래 이름과 `(1)`부터 `(999)`까지의 이름이 모두 있으면 `tshark`는 `(999)` 이름의 파일을 덮어쓴다 [20][23].
+
+### 근거
+
+[1] `wireshark_yara_scan`은 `dest_dir`가 없을 때만 임시 폴더를 만들고 그 폴더만 지운다.
+
+```python
+        use_temp = not dest_dir
+        if use_temp:
+            temp_result = client._create_temporary_output_dir("wireshark_yara_")
+            if not temp_result["success"]:
+                return error_response(
+                    temp_result["error"]["message"],
+                    error_type=temp_result["error"]["type"],
+                )
+            export_dir = str(temp_result["path"])
+        else:
+            export_dir = dest_dir
+
+        try:
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:99-112`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L112)
+
+```python
+            if use_temp:
+                output.append(f"\nExported files: {export_dir} (temporary)")
+            else:
+                output.append(f"\nExported files saved to: {export_dir}")
+
+            return success_response("\n".join(output))
+
+        finally:
+            if use_temp and os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:174-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L174-L183)
+
+[2] 임시 폴더는 허용 폴더 목록의 앞에서부터 처음 만들 수 있는 폴더 안에 만든다.
+
+```python
+    def _create_temporary_output_dir(self, prefix: str) -> dict[str, Any]:
+        """Create a private temporary directory inside an explicitly allowed root."""
+        if not self._allowed_dirs:
+            return {
+                "success": False,
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": (
+                        "Temporary file writes are disabled. Set WIRESHARK_MCP_ALLOWED_DIRS "
+                        "to one or more dedicated writable directories."
+                    ),
+                },
+            }
+
+        for root in self._allowed_dirs:
+            try:
+                return {"success": True, "path": tempfile.mkdtemp(prefix=prefix, dir=root)}
+            except OSError:
+                continue
+        return {
+            "success": False,
+            "error": {
+                "type": "PermissionDenied",
+                "message": "No configured allowed directory is writable",
+            },
+        }
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:160-185`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L160-L185)
+
+[3] (실행 확인) 허용 폴더 목록을 입력 폴더, 출력 폴더 차례로 정한 서버와 허용 폴더가 없는 서버에서 `dest_dir` 없이 `wireshark_yara_scan`을 불렀다.
+앞 서버의 응답은 입력 폴더 아래 `wireshark_yara_` 접두어의 임시 폴더를 실었고 호출 뒤 그 폴더는 없었다.
+뒤 서버는 `Temporary file writes are disabled` 오류로 끝났다.
+
+[4] 목적지를 받는 인자 이름은 셋이다.
+
+```python
+# Parameters naming a filesystem destination. The guard test uses these to catch a
+# new writer that was never added above. `output_mode` is a format selector, not a
+# path, and is deliberately absent.
+OUTPUT_PATH_PARAMS: frozenset[str] = frozenset({"output_file", "output_prefix", "dest_dir"})
+```
+
+[`src/wireshark_mcp/tool_annotations.py:36-39`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tool_annotations.py#L36-L39)
+
+[5] 목적지 검사는 허용 폴더가 없으면 거부하고 있으면 실제 경로로 바꿔 대조한다.
+
+```python
+        if not self._allowed_dirs:
+            logger.warning("Blocked file write because WIRESHARK_MCP_ALLOWED_DIRS is not configured")
+            return {
+                "success": False,
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": (
+                        "File writes are disabled. Set WIRESHARK_MCP_ALLOWED_DIRS "
+                        "to one or more dedicated writable directories."
+                    ),
+                },
+            }
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:127-138`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L127-L138)
+
+```python
+        try:
+            path = Path(filepath).resolve()
+        except OSError:
+            return {
+                "success": False,
+                "error": {"type": "InvalidParameter", "message": "Output path could not be resolved"},
+            }
+
+        if not any(self._is_path_within(path, allowed) for allowed in self._allowed_dirs):
+            logger.warning("Output path sandbox violation: %s", filepath)
+            return {
+                "success": False,
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": "Access denied: output path is outside allowed directories",
+                },
+            }
+
+        return {"success": True}
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:140-158`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L140-L158)
+
+[6] 허용 폴더는 환경변수에서 읽고 시작할 때 실제 경로로 바꾼다.
+
+```python
+    # Read allowed directories from environment
+    allowed_dirs_env = os.environ.get("WIRESHARK_MCP_ALLOWED_DIRS", "")
+    allowed_dirs = [d.strip() for d in allowed_dirs_env.split(",") if d.strip()] or None
+```
+
+[`src/wireshark_mcp/server.py:56-58`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L56-L58)
+
+```python
+        self._allowed_dirs: list[Path] | None = None
+        if allowed_dirs:
+            resolved_dirs = [Path(d).resolve() for d in allowed_dirs]
+            invalid_dirs = [str(path) for path in resolved_dirs if not path.is_dir()]
+            if invalid_dirs:
+                raise ValueError("Allowed directories must already exist and be directories")
+            self._allowed_dirs = resolved_dirs
+            logger.info("Path sandbox enabled: %s", self._allowed_dirs)
+```
+
+[`src/wireshark_mcp/tshark/client.py:81-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L81-L88)
+
+[7] 대조는 실제 경로의 `relative_to`로 한다.
+
+```python
+    @staticmethod
+    def _is_path_within(path: Path, parent: Path) -> bool:
+        """Check if path is within parent directory (symlink-safe)."""
+        try:
+            path.resolve().relative_to(parent.resolve())
+            return True
+        except ValueError:
+            return False
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:86-93`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L86-L93)
+
+[8] (실행 확인) 허용 폴더 밖의 절대 경로, 허용 폴더 안의 링크가 밖을 가리키는 경로, 상위 폴더로 나가는 경로를 `wireshark_editcap_trim`의 `output_file`로 주고 허용 폴더 밖 경로를 `wireshark_export_objects`의 `dest_dir`로 주었다.
+네 호출 모두 `Access denied: output path is outside allowed directories`로 끝났고 허용 폴더 밖에 파일이 생기지 않았다.
+
+[9] 컨테이너 이미지는 두 폴더를 만들고 기본 명령에 `analysis` 프로필을 준다.
+
+```dockerfile
+    && groupadd --gid 10001 wireshark-mcp \
+    && useradd --uid 10001 --gid 10001 --create-home wireshark-mcp \
+    && mkdir --parents /captures /results \
+    && chown wireshark-mcp:wireshark-mcp /captures /results
+
+USER wireshark-mcp
+WORKDIR /captures
+
+EXPOSE 8080
+
+ENTRYPOINT ["wireshark-mcp"]
+CMD ["serve", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8080", "--allow-insecure-http", "--profile", "analysis"]
+```
+
+[`Dockerfile:20-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L20-L31)
+
+[10] 검사를 통과한 뒤 받은 문자열을 명령에 넣는다: [`src/wireshark_mcp/tshark/_suite_ops.py:43-49`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L43-L49), [`src/wireshark_mcp/tshark/_suite_ops.py:240-245`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L240-L245), [`src/wireshark_mcp/tshark/_extraction.py:91-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L91-L103), [`src/wireshark_mcp/tshark/_capture.py:35-40`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L35-L40).
+
+[11] Wireshark 4.0.17의 `editcap`은 분할할 때 출력 이름을 접두어와 확장자로 나누고 번호와 첫 패킷 시각을 붙인다: [`editcap.c:201-250`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/editcap.c#L201-L250), [`editcap.c:1787-1795`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/editcap.c#L1787-L1795).
+
+[12] Wireshark 4.0.17의 `dumpcap`은 링 버퍼를 쓰면 받은 이름 대신 링 버퍼가 지은 이름으로 파일을 연다: [`dumpcap.c:3928-3939`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/dumpcap.c#L3928-L3939), [`ringbuffer.c:305-329`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L305-L329), [`ringbuffer.c:239-258`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L239-L258).
+
+[13] (실행 확인) 허용 폴더 자체를 `wireshark_editcap_split`의 `output_prefix`로, 다른 서버에서 `ring_buffer`를 준 `wireshark_capture`의 `output_file`로 주었다.
+두 호출 모두 성공 응답이 왔고 허용 폴더의 상위 폴더에 허용 폴더 이름 뒤에 번호와 시각을 붙인 이름의 파일이 생겼다.
+캡처는 네트워크를 끈 컨테이너에서 루프백 인터페이스로만 실행했다.
+
+[14] `wireshark_set_protocol_prefs`는 `prefs`를 나눠 `tshark`의 `-o` 값으로 그대로 넘긴다.
+
+```python
+    @mcp.tool()
+    async def wireshark_set_protocol_prefs(
+        pcap_file: str,
+        prefs: str,
+        fields: str = "",
+        display_filter: str = "",
+        limit: int = 100,
+    ) -> str:
+        """[Dissection] Protocol preference overrides. Prefs: 'tcp.desegment_tcp_streams:TRUE;http.ssl.port:8443'."""
+        pref_list = [p.strip() for p in prefs.split(";") if p.strip()]
+        field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else []
+        return normalize_tool_result(
+            await client.extract_with_prefs(pcap_file, pref_list, field_list, display_filter, limit)
+        )
+```
+
+[`src/wireshark_mcp/tools/advanced.py:26-39`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/advanced.py#L26-L39)
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file]
+        for pref in prefs:
+            cmd.extend(["-o", pref])
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:381-383`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L381-L383)
+
+[15] `analysis` 프로필은 캡처 도구와 `_WRITERS`만 빼고 `wireshark_set_protocol_prefs`는 `core`에서만 뺀다.
+
+```python
+# Dissection overrides, decryption, and low-level views. Real capabilities, but
+# each one needs the caller to already know what they are doing — none is part of
+# a normal triage path.
+_ADVANCED: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_decode_as",
+        "wireshark_decrypt_tls",
+        "wireshark_decrypt_wpa",
+        "wireshark_flow_graph",
+        "wireshark_get_capabilities",
+        "wireshark_get_packet_bytes",
+        "wireshark_scan_file_signatures",
+        "wireshark_set_protocol_prefs",
+    }
+)
+
+# What each profile removes from the full surface. `full` removes nothing.
+_EXCLUSIONS: Final[dict[str, frozenset[str]]] = {
+    "full": frozenset(),
+    "analysis": _CAPTURE | _WRITERS,
+    "core": _CAPTURE | _WRITERS | _ADVANCED,
+}
+```
+
+[`src/wireshark_mcp/profiles.py:57-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L57-L78)
+
+[16] (실행 확인) 허용 폴더를 정하지 않은 `analysis` 프로필 서버(도구 40개)에서 `wireshark_set_protocol_prefs`의 `prefs`로 출력 파일 경로를 값으로 받는 해석 설정에 다른 폴더의 경로를 넘겼다.
+두 번 모두 `is_error`가 거짓이었고 그 경로에 `Wireshark SSL debug log`로 시작하는 78바이트 파일이 생겼다.
+
+[17] Windows 경로 검사는 장치 경로, `:`가 있는 조각, 예약 이름을 거부하고 다른 운영체제에서는 바로 `False`를 돌려준다.
+
+```python
+    @staticmethod
+    def _is_unsafe_windows_path(filepath: str) -> bool:
+        """Reject Windows device namespaces, reserved names, and NTFS ADS paths."""
+        if sys.platform != "win32":
+            return False
+
+        normalized = filepath.replace("/", "\\")
+        if normalized.startswith(("\\\\.\\", "\\\\?\\")):
+            return True
+
+        path = PureWindowsPath(filepath)
+        parts = path.parts[1:] if path.anchor else path.parts
+        for part in parts:
+            if ":" in part:
+                return True
+            base_name = part.rstrip(" .").split(".", 1)[0].rstrip(" ").upper()
+            if base_name in _WINDOWS_RESERVED_NAMES:
+                return True
+        return False
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:23-41`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L23-L41)
+
+```python
+        if self._is_unsafe_windows_path(filepath):
+            return {
+                "success": False,
+                "error": {
+                    "type": "InvalidParameter",
+                    "message": "Windows device paths, reserved names, and alternate data streams are not allowed",
+                },
+            }
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:118-125`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L118-L125)
+
+[18] (실행 확인) Windows에서 허용 폴더 안의 `NUL.pcap`, `com1`, `:`가 있는 이름을 `wireshark_editcap_trim`의 `output_file`로 주고 장치 경로를 `wireshark_export_objects`의 `dest_dir`로 주었다.
+네 호출 모두 `Windows device paths, reserved names, and alternate data streams are not allowed`로 끝났고 허용 폴더에는 같은 서버에서 일반 이름으로 쓴 `ok.pcap`만 남았다.
+
+[19] `export_objects`는 목적지 폴더만 넘기고 그 안의 이름은 정하지 않는다.
+
+```python
+    async def export_objects(self, pcap_file: str, protocol: str, dest_dir: str) -> str:
+        """Export Objects (--export-objects protocol,dest_dir)."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        proto_validation = self._validate_protocol(protocol, self.VALID_EXPORT_PROTOCOLS)
+        if not proto_validation["success"]:
+            return json.dumps(proto_validation)
+
+        output_validation = self._validate_output_path(dest_dir)
+        if not output_validation["success"]:
+            return json.dumps(output_validation)
+
+        os.makedirs(dest_dir, exist_ok=True)
+        cmd = [
+            self.tshark_path,
+            "-r",
+            pcap_file,
+            "--export-objects",
+            f"{protocol},{dest_dir}",
+        ]
+        return await self._run_command(cmd)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:81-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L81-L103)
+
+[20] Wireshark 4.0.17의 `tshark`는 꺼낸 파일마다 이름을 짓고 같은 이름이 있으면 번호를 올려 다시 짓는다: [`ui/cli/tap-exportobject.c:122-146`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/cli/tap-exportobject.c#L122-L146).
+
+[21] Wireshark 4.0.17은 금지 글자를 `%xx`로 바꾸고 번호를 확장자 앞에 붙인다: [`epan/export_object.c:79-139`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/export_object.c#L79-L139).
+
+[22] (실행 확인) `report.txt`를 미리 둔 폴더를 `dest_dir`로 `wireshark_export_objects`를 불렀다.
+앞 `report.txt`의 내용과 수정 시각은 그대로였고 `report(1).txt`와 `data.bin`이 새로 생겼다.
+
+[23] Wireshark 4.0.17의 이름 재시도 상한 `gui_max_export_objects` 기본값은 1000이다: [`epan/prefs.c:4163-4163`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/prefs.c#L4163-L4163).

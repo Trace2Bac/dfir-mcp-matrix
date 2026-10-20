@@ -1,0 +1,69 @@
+---
+cell: I03
+details:
+- id: not_applicable
+---
+
+# I03 외부 전송 범위 구성
+
+### 비적용
+
+**판단.** 서버 코드가 외부 서비스에 조사 자료를 보내는 요청은 없다 [1].
+서버 코드는 스스로 외부 연결을 열지 않는다 [1].
+`wireshark_geoip_enrich`는 캡처 파일의 공인 주소를 로컬 GeoLite2 데이터베이스 파일에서 찾아 결과를 만들고 주소를 외부로 보내지 않는다 [2][3].
+SSE와 Streamable HTTP 전송으로 나가는 도구 응답은 서버가 MCP 클라이언트에 돌려주는 응답이다 [4].
+`tshark`의 이름 풀이가 켜졌을 때 나가는 역방향 DNS 조회에는 캡처 파일의 주소가 들어간다 [5].
+이 조회는 분석 도구가 스스로 하는 통신이고 서버 코드가 보내는 요청이 아니다.
+
+### 근거
+
+[1] (실행 확인) 기준 커밋의 `src/wireshark_mcp/`를 `git grep`으로 찾았다.
+`socket`, `urllib`, `http.client`, `requests`, `httpx`, `aiohttp`를 불러오거나 `urlopen`을 부르는 코드는 없었다.
+
+[2] `wireshark_geoip_enrich`는 공인 주소마다 `reader.city`를 불러 결과 표를 만든다: [`src/wireshark_mcp/tools/geoip.py:101-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L101-L148).
+
+[3] `reader`는 로컬 데이터베이스 파일로 만든 `geoip2.database.Reader`이고 `geoip2` 5.3.0의 `Reader`는 그 파일을 `maxminddb.open_database`로 연다.
+
+```python
+def _get_reader() -> Any:
+    """Get or create a GeoIP2 database reader (singleton)."""
+    global _geoip2_reader
+    if _geoip2_reader is not None:
+        return _geoip2_reader
+
+    db_path = _find_geoip_db()
+    if db_path is None:
+        return None
+
+    _geoip2_reader = geoip2.database.Reader(str(db_path))
+    logger.info("GeoIP database loaded: %s", db_path)
+    return _geoip2_reader
+```
+
+[`src/wireshark_mcp/tools/geoip.py:58-70`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L58-L70)
+
+`geoip2` 5.3.0: [`src/geoip2/database.py:124-128`](https://github.com/maxmind/GeoIP2-python/blob/93467015f685d979b6b490c920ee55d2d6929997/src/geoip2/database.py#L124-L128).
+
+[4] `serve`는 고른 전송으로 MCP 서버를 실행한다.
+
+```python
+    if args.transport == "sse":
+        logger.info("Starting SSE transport on http://%s:%d%s", args.host, args.port, args.mount_path)
+        mount_path = "/" + args.mount_path.strip("/") if args.mount_path.strip("/") else ""
+        mcp.run(
+            transport="sse",
+            host=args.host,
+            port=args.port,
+            sse_path=f"{mount_path}/sse",
+            message_path=f"{mount_path}/messages/",
+        )
+    elif args.transport == "streamable-http":
+        logger.info("Starting Streamable HTTP transport on http://%s:%d", args.host, args.port)
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run()
+```
+
+[`src/wireshark_mcp/server.py:372-386`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L372-L386)
+
+[5] (실행 확인) `--network none` 컨테이너 안에서 질의를 기록하는 DNS 수신 프로그램을 두고 네트워크 주소 이름 풀이를 켠 `tshark` 실행을 서버 도구로 부르자 `multivalue_fields.pcap`의 두 주소에 대한 PTR 질의가 왔다.

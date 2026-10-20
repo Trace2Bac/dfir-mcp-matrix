@@ -1,0 +1,74 @@
+---
+cell: L03
+details:
+- id: L03.03
+---
+
+# L03 기록 실패 처리
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 서버 코드가 로거 `wireshark_mcp`에 쓰는 모든 항목에 적용된다 [1].
+`serve`는 `basicConfig`로 표준 오류에 쓰는 `StreamHandler` 하나를 루트 로거에 붙이고 그 처리기의 오류 처리를 바꾸지 않는다 [1][2].
+`WiresharkMCP`를 만들 때 MCP Python SDK 2.1.1의 `MCPServer`가 `configure_logging`으로 `basicConfig`를 한 번 더 부른다 [3].
+CPython 3.12.15의 `basicConfig`는 루트 로거에 처리기가 이미 있으면 처리기를 바꾸지 않으므로 처리기는 `serve`가 붙인 하나로 남는다 [2].
+CPython 3.12.15의 `StreamHandler.emit`은 쓰기나 비우기에서 난 예외를 `handleError`로 넘긴다 [4].
+`handleError`는 `--- Logging error ---`와 예외를 `sys.stderr`에 쓰려 하고 그 쓰기에서 `OSError`가 나면 아무것도 하지 않는다 [5].
+기록을 받는 곳과 실패를 알리는 곳이 같은 표준 오류여서 표준 오류에 쓰지 못하면 실패를 알리는 글도 남지 않는다 [1][5].
+로거를 부르는 서버 코드는 그 결과를 확인하지 않고 응답을 만든다 [6].
+서버 프로세스의 표준 오류를 `/dev/full`에 연결하고 `--log-level DEBUG`로 도구 호출 14번을 보내자 모든 호출이 표준 오류를 파일로 받은 실행과 같은 응답을 돌려줬다 [7].
+응답에 기록 실패를 알리는 내용은 없었다 [7].
+
+### 근거
+
+[1] `serve`는 표준 오류에 쓰는 `basicConfig`를 부른다.
+
+```python
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+```
+
+[`src/wireshark_mcp/server.py:345-350`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L345-L350)
+
+[2] CPython 3.12.15의 `basicConfig`는 루트 로거에 처리기가 없을 때만 `stream`으로 `StreamHandler`를 만든다: [`Lib/logging/__init__.py:2096-2100`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L2096-L2100), [`Lib/logging/__init__.py:2120-2123`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L2120-L2123).
+
+[3] MCP Python SDK 2.1.1의 `MCPServer`는 만들어질 때 `configure_logging`을 부르고 이 함수는 `logging.basicConfig`를 부른다: [`src/mcp/server/mcpserver/server.py:258-259`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L258-L259), [`src/mcp/server/mcpserver/utilities/logging.py:19-39`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/utilities/logging.py#L19-L39).
+
+[4] CPython 3.12.15의 `StreamHandler.emit`은 쓰기 예외를 `handleError`로 넘긴다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1148-L1168).
+
+[5] `handleError`는 표준 오류에 실패를 쓰고 그 쓰기의 `OSError`는 호출한 쪽으로 넘기지 않는다: [`Lib/logging/__init__.py:1066-1112`](https://github.com/python/cpython/blob/e848e4b09ca4bc67c0041c9ce7526dae471d4c36/Lib/logging/__init__.py#L1066-L1112).
+
+[6] `_cap_content`와 `_run_command`는 로거를 부른 뒤 그 결과와 관계없이 응답을 만든다.
+
+```python
+    def _cap_content(self, result: Any, tool_name: str) -> Any:
+        """Apply the ceiling to text blocks, leaving other content shapes alone."""
+        # Structured tools return (content, structured_data); cap only the text side.
+        if isinstance(result, tuple) and len(result) == 2:
+            return (self._cap_content(result[0], tool_name), result[1])
+
+        if not isinstance(result, (list, tuple)):
+            return result
+
+        capped: list[Any] = []
+        for block in result:
+            if isinstance(block, TextContent):
+                text = cap_result_text(block.text, self._max_result_chars)
+                if text != block.text:
+                    logger.debug("Capped %s result from %d to %d chars", tool_name, len(block.text), len(text))
+                    block = block.model_copy(update={"text": text})
+            capped.append(block)
+        return capped
+```
+
+[`src/wireshark_mcp/mcp_app.py:419-436`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L419-L436)
+
+`_run_command`: [`src/wireshark_mcp/tshark/client.py:534-645`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L534-L645).
+
+[7] (실행 확인) MCP SDK 클라이언트의 `stdio_client`에 `/dev/full`을 연 파일을 `errlog`로 넘겨 서버 표준 오류를 그곳에 연결하고 `--log-level DEBUG`로 도구 호출 14번을 보냈다.
+14번 모두 표준 오류를 파일로 받은 같은 수준의 실행과 `is_error`, 응답 글 길이, 응답 앞부분이 같았다.
+클라이언트 쪽 실행은 종료 코드 0으로 끝났다.

@@ -1,0 +1,209 @@
+---
+cell: I02
+details:
+- id: I02.02
+---
+
+# I02 분석 도구 통신 차단
+
+### I02.02 DNS 조회 끄기
+
+**구현.** 이 방식은 `wireshark_aggregate`가 `tshark`를 실행하는 `stream_fields`에 적용된다 [1].
+`stream_fields`는 `tshark` 명령의 실행 파일 바로 뒤에 `-n`을 두고 그 뒤에 모델이 준 필드와 표시 필터를 붙인다 [1].
+Wireshark 4.0.17에서 `-n`은 네트워크 주소 이름 풀이와 외부 resolver 사용을 포함한 이름 풀이 설정을 모두 끈다 [2].
+`tshark` 설명서는 `-n`과 `-N`이 `-o`로 준 값을 포함한 환경설정의 이름 풀이 값보다 앞선다고 적는다 [3].
+이름 풀이 설정이 꺼져 있으면 `tshark`는 주소의 역방향 DNS 조회도 표시 필터에 적힌 호스트 이름의 조회도 하지 않는다 [4].
+사용자 환경설정 파일에서 네트워크 이름 풀이를 켠 상태로 `wireshark_aggregate`를 부르자 DNS 조회가 나가지 않았다 [5].
+
+서버가 `tshark`를 실행하는 다른 경로는 `-n`을 붙이지 않는다 [6].
+Wireshark 4.0.17의 기본 환경설정은 네트워크 주소 이름 풀이를 끄고 외부 resolver 사용을 켠다 [7].
+그래서 환경설정이 기본값이면 다른 경로도 DNS 조회를 하지 않는다 [7][5].
+기본 환경설정에서 `wireshark_get_packet_list`를 부른 호출과 호스트 이름을 넣은 표시 필터로 부른 호출은 조회를 보내지 않았다 [5].
+`tshark`는 실행한 사용자의 환경설정을 읽은 뒤 명령 행 옵션을 적용한다 [8].
+같은 사용자 환경설정 파일에서 네트워크 이름 풀이를 켜자 `wireshark_get_packet_list`와 `wireshark_extract_fields`는 캡처 파일의 주소마다 역방향 조회를 보냈다 [5].
+
+`wireshark_set_protocol_prefs`는 모델이 준 `prefs` 값을 `;`로 나눠 각각 `tshark`의 `-o` 값으로 넘기고 값을 목록과 대조하지 않는다 [9].
+그래서 모델은 이 도구로 네트워크 이름 풀이를 켤 수 있다 [9][8].
+이 도구로 네트워크 이름 풀이를 켜자 캡처 파일의 주소마다 역방향 조회가 나갔고 표시 필터에 넣은 호스트 이름의 조회도 나갔다 [5].
+이 도구는 `full`과 `analysis` 프로필에 등록되고 `core` 프로필에서는 빠진다 [10].
+
+다른 분석 도구에도 통신을 끊거나 끄는 장치가 없다.
+`_run_command`와 `_stream_field_rows`는 하위 프로세스에 `env`를 주지 않아 분석 도구는 서버 프로세스의 환경변수를 그대로 물려받는다 [11].
+저장소에는 분석 도구를 네트워크 없는 컨테이너나 network namespace에서 실행하는 구성이 없다.
+`Dockerfile`에도 분석 도구의 네트워크를 끊는 설정이 없다 [12].
+`wireshark_capture`는 모델이 준 `interface` 값을 캡처 실행 파일의 `-i` 값으로 그대로 넘긴다 [13].
+Debian 패키지 4.0.17을 설치한 이미지에서 원격 캡처 주소 형식의 장치 이름을 주자 `dumpcap`은 그런 장치가 없다는 오류로 끝났고 그 주소로 연결을 시도하지 않았다 [14].
+원격 캡처를 지원하는 다른 libpcap 빌드에서 이 값이 연결을 여는지는 확인하지 못했다.
+`geoip2` 5.3.0의 `Reader`는 로컬 데이터베이스 파일만 연다 [15].
+YARA 라이브러리가 스스로 통신하는지는 확인하지 않았다.
+
+### 근거
+
+[1] `stream_fields`는 `tshark` 명령에 `-n`을 넣고 모델이 준 필드와 표시 필터를 더한다.
+
+```python
+    async def stream_fields(
+        self,
+        pcap_file: str,
+        fields: list[str],
+        consumer: FieldRowConsumer,
+        display_filter: str = "",
+        max_rows: int = 1_000_000,
+        timeout: int = 30,
+    ) -> FieldStreamResult:
+        """Consume tshark field rows without materializing its complete stdout."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            error = validation.get("error")
+            return {"success": False, "error": error if isinstance(error, dict) else {"message": str(error)}}
+
+        cmd = [self.tshark_path, "-n", "-r", pcap_file, "-T", "fields"]
+        for field in fields:
+            cmd.extend(["-e", field])
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+        cmd.extend(["-E", "header=y", "-E", "separator=/t", "-E", "aggregator=,", "-E", "quote=d"])
+        return await self._stream_field_rows(cmd, consumer, max_rows=max_rows, timeout=timeout)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:58-79`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L58-L79)
+
+[2] Wireshark 4.0.17에서 `-n`은 `disable_name_resolution`을 부르고 이 함수는 이름 풀이 값을 모두 거짓으로 둔다: [`ui/dissect_opts.c:70-72`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/dissect_opts.c#L70-L72), [`epan/addr_resolv.c:2941-2950`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/addr_resolv.c#L2941-L2950).
+
+[3] Wireshark 4.0.17의 `tshark` 설명서는 `-n`·`-N`이 `-o`를 포함한 환경설정보다 앞서고 기본값은 `d`, `m`, `N`만 켜진 상태라고 적는다: [`doc/tshark.adoc:693-713`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/doc/tshark.adoc#L693-L713).
+
+[4] 주소 이름 풀이와 표시 필터의 호스트 이름 조회는 `network_name`이 거짓이면 조회하지 않는다: [`epan/addr_resolv.c:1121-1125`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/addr_resolv.c#L1121-L1125), [`epan/addr_resolv.c:3540-3547`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/addr_resolv.c#L3540-L3547).
+
+[5] (실행 확인) `--network none` 컨테이너 안에서 `/etc/resolv.conf`를 `127.0.0.1`로 바꾸고 `127.0.0.1:53`에 받은 질의를 기록하며 NXDOMAIN으로 답하는 UDP 수신 프로그램을 두었다.
+서버는 MCP SDK 클라이언트로 실행하고 `multivalue_fields.pcap`(`10.1.1.5`·`93.184.216.34`)을 주었다.
+기본 환경설정에서 `wireshark_get_packet_list`, 호스트 이름을 넣은 표시 필터의 `wireshark_get_packet_list`, `wireshark_aggregate`는 질의를 보내지 않았다.
+`wireshark_set_protocol_prefs`의 `prefs`로 네트워크 주소 이름 풀이를 켜자 두 주소의 PTR 질의가 왔고 같은 값에 호스트 이름을 넣은 표시 필터를 더하자 그 이름의 A 질의가 왔다.
+`HOME` 아래 Wireshark 환경설정 파일에서 네트워크 주소 이름 풀이를 켠 서버에서는 `wireshark_get_packet_list`와 `wireshark_extract_fields`가 두 주소의 PTR 질의를 보냈고 `wireshark_aggregate`는 질의를 보내지 않았다.
+
+[6] `-n`은 `stream_fields` 한 곳에만 있고 다른 메서드는 `-r`부터 명령을 만든다: [`src/wireshark_mcp/tshark/_extraction.py:30`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L30), [`src/wireshark_mcp/tshark/_packets.py:73`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L73), [`src/wireshark_mcp/tshark/_stats.py:19`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_stats.py#L19), [`src/wireshark_mcp/tshark/_suite_ops.py:244`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L244).
+
+[7] Wireshark 4.0.17의 이름 풀이 기본값은 `network_name`이 거짓이고 `use_external_net_name_resolver`가 참이다: [`epan/addr_resolv.c:276-285`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/addr_resolv.c#L276-L285).
+
+[8] `tshark`는 환경설정을 읽은 뒤 명령 행의 `-o`를 `prefs_set_pref`로 적용한다: [`tshark.c:1178-1180`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L1178-L1180), [`tshark.c:1404-1411`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L1404-L1411).
+
+[9] `wireshark_set_protocol_prefs`는 `prefs`를 나눠 `extract_with_prefs`에 넘기고 이 메서드는 값마다 `-o`를 붙인다.
+
+```python
+    @mcp.tool()
+    async def wireshark_set_protocol_prefs(
+        pcap_file: str,
+        prefs: str,
+        fields: str = "",
+        display_filter: str = "",
+        limit: int = 100,
+    ) -> str:
+        """[Dissection] Protocol preference overrides. Prefs: 'tcp.desegment_tcp_streams:TRUE;http.ssl.port:8443'."""
+        pref_list = [p.strip() for p in prefs.split(";") if p.strip()]
+        field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else []
+        return normalize_tool_result(
+            await client.extract_with_prefs(pcap_file, pref_list, field_list, display_filter, limit)
+        )
+```
+
+[`src/wireshark_mcp/tools/advanced.py:26-39`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/advanced.py#L26-L39)
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file]
+        for pref in prefs:
+            cmd.extend(["-o", pref])
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:381-383`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L381-L383)
+
+[10] `core` 프로필만 `wireshark_set_protocol_prefs`를 뺀다.
+
+```python
+_ADVANCED: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_decode_as",
+        "wireshark_decrypt_tls",
+        "wireshark_decrypt_wpa",
+        "wireshark_flow_graph",
+        "wireshark_get_capabilities",
+        "wireshark_get_packet_bytes",
+        "wireshark_scan_file_signatures",
+        "wireshark_set_protocol_prefs",
+    }
+)
+
+# What each profile removes from the full surface. `full` removes nothing.
+_EXCLUSIONS: Final[dict[str, frozenset[str]]] = {
+    "full": frozenset(),
+    "analysis": _CAPTURE | _WRITERS,
+    "core": _CAPTURE | _WRITERS | _ADVANCED,
+}
+```
+
+[`src/wireshark_mcp/profiles.py:60-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L60-L78)
+
+[11] 두 실행 함수는 하위 프로세스에 `stdout`·`stderr`·`stdin`만 정한다.
+
+```python
+        process_kwargs: dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "stdin": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if create_no_window:
+                process_kwargs["creationflags"] = create_no_window
+
+        try:
+            proc = await asyncio.create_subprocess_exec(*cmd, **process_kwargs)
+```
+
+[`src/wireshark_mcp/tshark/client.py:338-349`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L338-L349)
+
+```python
+            process_kwargs: dict[str, Any] = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "stdin": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if create_no_window:
+                    process_kwargs["creationflags"] = create_no_window
+            proc = await asyncio.create_subprocess_exec(*cmd, **process_kwargs)
+```
+
+[`src/wireshark_mcp/tshark/client.py:537-546`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L537-L546)
+
+[12] 이미지는 사용자, 작업 폴더, 포트, 실행 명령만 정한다.
+
+```dockerfile
+USER wireshark-mcp
+WORKDIR /captures
+
+EXPOSE 8080
+
+ENTRYPOINT ["wireshark-mcp"]
+CMD ["serve", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8080", "--allow-insecure-http", "--profile", "analysis"]
+```
+
+[`Dockerfile:25-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L25-L31)
+
+[13] `capture_packets`는 `interface` 값을 `-i` 뒤에 그대로 둔다.
+
+```python
+        output_validation = self._validate_output_path(output_file)
+        if not output_validation["success"]:
+            return json.dumps(output_validation)
+
+        backend = self._select_capture_backend_path()
+        cmd = [backend, "-i", interface, "-w", output_file]
+```
+
+[`src/wireshark_mcp/tshark/_capture.py:35-40`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L35-L40)
+
+[14] (실행 확인) `--network none` 컨테이너 안에서 `127.0.0.1:2002`에 연결을 기록하는 TCP 수신 프로그램을 두고 `WIRESHARK_MCP_ALLOWED_DIRS`를 준 서버에 `wireshark_capture`를 두 번 불렀다.
+`lo`는 캡처 파일을 만들었다.
+이 수신 주소를 가리키는 원격 캡처 주소 형식의 이름은 `dumpcap: There is no device named …` 오류로 끝났고 수신 프로그램에 연결이 오지 않았다.
+
+[15] `geoip2` 5.3.0의 `Reader`는 받은 파일을 `maxminddb.open_database`로 연다: [`src/geoip2/database.py:124-128`](https://github.com/maxmind/GeoIP2-python/blob/93467015f685d979b6b490c920ee55d2d6929997/src/geoip2/database.py#L124-L128).

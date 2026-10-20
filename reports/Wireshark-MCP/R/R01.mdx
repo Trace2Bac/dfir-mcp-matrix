@@ -1,0 +1,525 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `tshark`·`capinfos` 출력을 클라이언트 함수 결과 그대로 돌려주는 도구에 적용된다 [1][2].
+실행 함수 `_run_command`는 하위 프로세스의 표준 출력을 바꾸지 않고 `_ok`로 감싸 `success`와 `data`를 가진 JSON 글을 만든다 [1].
+코드는 이 공통 형식을 `envelope`라고 부른다 [1].
+`wireshark_get_packet_list`·`wireshark_get_packet_details`·`wireshark_get_packet_bytes`·`wireshark_extract_fields`·`wireshark_get_file_info`·`wireshark_stats_protocol_hierarchy`·`wireshark_flow_graph`와 복호화·해석 설정 도구는 이 `envelope`를 `normalize_tool_result`에 넘겨 그대로 돌려준다 [2][3].
+`normalize_tool_result`는 `success`·`data`·`truncated`·`stderr` 같은 키를 옮겨 다시 쓰고 `data` 안의 글은 바꾸지 않는다 [3].
+`wireshark_get_file_info`는 `capinfos`가 낸 글을 `data`에 그대로 싣는다 [4].
+
+**한계.** `wireshark_get_packet_list`와 `wireshark_extract_fields`는 `tshark -E header=y`의 머리글 줄도 출력 줄로 센다 [5][6].
+그래서 `offset`을 0보다 크게 준 다음 쪽에는 머리글 줄이 없고 열 이름 없이 값 줄만 실린다 [6][7].
+`wireshark_get_packet_context`는 기준 패킷 앞뒤 `count`개를 머리글 줄을 포함한 `count * 2 + 1`줄로 요청하므로 기준 패킷 뒤쪽 패킷이 하나 덜 실린다 [8][6].
+DNS 질의 300개가 있는 캡처 파일에서 10번 패킷과 `count` 5를 주자 5~14번 패킷 10개만 실렸다 [9].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 `wireshark_aggregate`, 탐지 도구, `wireshark_extract_credentials`, `wireshark_analyze_protocol`의 BLE 분석과 서버가 필드를 정해 둔 추출 도구에 적용된다 [10][11][12][13].
+추출 도구는 서버가 정한 `tshark` 필드 목록으로 `-T fields`를 실행한다 [14].
+`wireshark_extract_http_requests`는 메서드·URI·호스트·User-Agent 4개 필드를, `wireshark_extract_dns_queries`는 질의 이름·종류·응답 여부 3개 필드를 고른다 [14].
+`wireshark_analyze_protocol`은 프로토콜 값마다 정해 둔 필드 목록과 표시 필터로 출력을 뽑는다 [15].
+`wireshark_aggregate`·탐지 도구·BLE 분석은 탭으로 나뉜 줄을 칸으로 나누고 필요한 칸을 `dict`의 키로 옮긴다 [10][11][13].
+`wireshark_extract_credentials`는 줄마다 패킷 번호, TCP 스트림 번호, 출발 주소, 자격 증명 칸을 읽어 근거 항목 `FindingEvidence`의 `frame`·`stream`·`value`·`description`에 넣는다 [12][16].
+
+**한계.** Modbus 분석은 칸이 8개 이상인 줄만 센다 [17].
+`tshark`는 줄 끝의 빈 칸 뒤에도 탭을 쓰지만 서버는 출력 전체에 `strip()`을 적용한 뒤 줄을 나누므로 마지막 줄의 끝 탭이 사라진다 [17].
+예외 코드 칸이 빈 Modbus 요청 20개를 넣자 기능 코드 분포가 `FC 3: 19`로 실려 마지막 패킷이 빠졌다 [18].
+
+`wireshark_extract_credentials`는 줄 상한으로 잘린 추출 결과 끝의 안내 줄도 자격 증명 줄로 읽어 근거 항목을 만든다 [19][6].
+HTTP Basic 인증 요청 60개가 있는 캡처 파일에서 근거 항목 50개 가운데 마지막 항목은 패킷 번호가 없고 `value`에 안내 줄을 가린 글이 실렸다 [20].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 `wireshark_aggregate`, `wireshark_quick_analysis`, 프로토콜 분석기, 탐지 도구, `wireshark_detect_arp_spoofing`, `wireshark_scan_file_signatures`에 적용된다 [10][21][22][11][23][24].
+`wireshark_aggregate`는 표시 필터에 맞는 패킷을 끝까지 읽으며 묶음마다 패킷 수, 고유 값 수, 합계·최솟값·최댓값·평균을 계산한다 [10][25].
+시간 묶음을 주면 `frame.time_relative`를 정한 폭의 구간으로 내려 묶는다 [25].
+`wireshark_quick_analysis`는 HTTP 호스트와 DNS 질의 이름의 출현 수를 센다 [21].
+MQTT·Modbus·S7comm·DNP3·CoAP·Zigbee·WebSocket 분석은 메시지 종류와 기능 코드의 분포, 고유 값 수, 전체 패킷 수를 글로 적는다 [22][17].
+BLE 분석은 ATT·SMP 연산 코드, PDU 종류, HCI 끊김 사유 코드를 서버 코드의 표로 이름을 붙이고 연결 간격 값을 밀리초로 바꿔 `interval_ms`에 싣는다 [13].
+탐지 도구는 출발지별 포트 수, SYN·SYN-ACK 비율, 초당 패킷 수 같은 값을 계산해 싣는다 [11].
+`wireshark_detect_arp_spoofing`은 ARP 패킷 수, ARP 응답 수, 보낸 주소와 대상 주소가 같은 ARP 수를 세어 글로 적는다 [23].
+`wireshark_scan_file_signatures`는 파일 형식 8종마다 그 서명 바이트가 들어 있는 패킷 수를 센다 [24].
+
+**한계.** 프로토콜 분석기의 `Total … packets` 값은 `limit` 줄 안에서 센 값이다 [17][22].
+줄 상한으로 잘린 출력에는 빈 줄과 잘림 안내 줄이 붙는데 서버는 이 두 줄도 패킷 줄로 센다 [17][6].
+Modbus 요청 20개가 있는 캡처 파일에 `limit` 5를 주자 값 줄 4개가 실리고 `Total Modbus packets: 6`이 실렸다 [18].
+`wireshark_quick_analysis`의 호스트 출현 수는 앞 500줄 안에서 센 값이고 응답에 그 범위가 없다 [21].
+`wireshark_analyze_tcp_health`는 항목마다 패킷 목록을 10,000줄까지만 읽어 줄 수로 패킷 수를 센다 [26].
+그래서 10,000줄을 넘는 항목의 수는 실제 수가 아니고 잘림 안내 줄이 한 줄로 더해진다 [26][6].
+`wireshark_scan_file_signatures`는 형식마다 패킷 목록을 머리글 줄을 포함해 50줄까지 받아 줄 수로 센다 [24].
+그래서 한 형식의 일치가 49개를 넘으면 늘 50이 실리고 이 값에는 잘림 안내 줄이 한 줄 포함된다 [24][6].
+PNG 서명이 들어 있는 패킷 80개가 있는 캡처 파일에서 `PNG: 50 packet(s)`가 실렸다 [27].
+`wireshark_detect_dos_attack`의 패킷 수와 `wireshark_detect_arp_spoofing`의 `Total ARP packets`도 줄 상한에 닿으면 빈 줄과 안내 줄을 함께 센다 [23][6].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 `wireshark_aggregate`, 탐지 도구, `wireshark_extract_credentials`, BLE 분석의 응답에 적용된다 [10][11][12][13].
+`wireshark_aggregate`는 결과에 적용한 `display_filter`, `group_by`, `distinct`, 수치 연산, 시간 묶음 폭, 정렬 기준을 함께 싣는다 [10].
+탐지 도구, `wireshark_extract_credentials`, BLE 분석은 `scope`에 캡처 파일 경로를 싣는다 [11][12][13].
+DNS 터널 탐지와 BLE 분석은 실행한 표시 필터도 `scope`에 싣는다 [11][13].
+근거 항목 `FindingEvidence`마다 그 근거를 다시 골라낼 표시 필터를 `filter`에 싣는다 [12][11].
+
+**한계.** 글로 결과를 돌려주는 프로토콜 분석기, `wireshark_quick_analysis`, 이상 탐지 도구 3개, `wireshark_analyze_tcp_health`는 결과가 서버가 가공한 것이라는 표시도 입력 파일과 필터도 싣지 않는다 [22][21][28][26].
+`wireshark_detect_port_scan`의 `scope`에는 파일 경로와 문턱값만 있고 실행한 필터 3개는 근거 항목에만 있다 [11].
+`wireshark_aggregate`의 결과에는 캡처 파일 경로가 없다 [10].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `wireshark_quick_analysis`, `wireshark_geoip_enrich`, BLE 스캐너 분석에 적용된다 [21][29][13].
+`wireshark_quick_analysis`는 HTTP 호스트와 DNS 질의 이름을 출현 수 차례로 정렬해 각각 8개만 싣는다 [21].
+`wireshark_geoip_enrich`는 Python `ipaddress`의 `is_private`가 참인 주소를 빼고 나머지 값만 조회해 싣는다 [29][30].
+BLE 스캐너 분석은 스캐너마다 요청을 받은 대상 주소를 많은 차례로 10개까지 `top_targets`에 싣고 근거 항목은 앞 스캐너 5개에만 만든다 [13].
+
+**한계.** `wireshark_quick_analysis`는 골라 낸 8개 밖의 호스트 수를 싣지 않는다 [21].
+
+`wireshark_geoip_enrich`에서 멀티캐스트 주소는 `is_private`가 거짓이라 빠지지 않는다 [30][31].
+주소로 읽히지 않는 값도 빠지지 않고 조회 대상에 들어간다 [30].
+목적지가 멀티캐스트·공인·사설 주소인 패킷 10,010개가 있는 캡처 파일에서 `224.0.0.251`과 필드 추출의 잘림 안내 줄이 공인 주소로 세어졌다 [31].
+
+### 근거
+
+[1] `_run_command`는 출력을 `_ok`로 감싸 돌려준다.
+
+```python
+    @staticmethod
+    def _ok(data: str, stderr: str = "", truncated: bool = False) -> str:
+        """Wrap successful command output in the canonical success envelope.
+
+        Every client method returns this shape (or an error envelope), so the
+        raw text lives in ``data`` and is never re-parsed by consumers — output
+        that happens to look like JSON can no longer be mistaken for an error.
+        Diagnostic stderr is kept in a separate field so it never corrupts
+        structured (``-T json`` / ``-T fields``) output in ``data``.
+        """
+        envelope: dict[str, Any] = {"success": True, "data": data}
+        if stderr:
+            envelope["stderr"] = stderr
+        if truncated:
+            envelope["truncated"] = True
+        return json.dumps(envelope)
+```
+
+[`src/wireshark_mcp/tshark/client.py:90-105`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L90-L105)
+
+[`src/wireshark_mcp/tshark/client.py:623-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L623-L632)
+
+[2] 패킷·필드 도구는 클라이언트 결과를 `normalize_tool_result`로만 넘긴다: [`src/wireshark_mcp/tools/extract.py:12-92`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L12-L92), [`src/wireshark_mcp/tools/utility.py:26-29`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L26-L29), [`src/wireshark_mcp/tools/advanced.py:11-62`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/advanced.py#L11-L62), [`src/wireshark_mcp/tools/stats.py:490-493`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L490-L493).
+
+[3] `normalize_tool_result`는 `envelope`의 키를 옮겨 다시 쓴다.
+
+```python
+def _normalize_dict_payload(payload: dict[str, Any]) -> str:
+    if "success" in payload and isinstance(payload["success"], bool):
+        if payload["success"]:
+            envelope: dict[str, Any] = {"success": True, "data": payload.get("data")}
+            for extra_key in ("scope", "coverage", "pagination", "warnings", "truncated", "stderr"):
+                if extra_key in payload:
+                    envelope[extra_key] = payload[extra_key]
+            if "data" not in payload:
+                extra = {k: v for k, v in payload.items() if k != "success" and k not in envelope}
+                envelope["data"] = extra if extra else None
+            return json.dumps(envelope, ensure_ascii=False)
+
+        normalized_err = _error_object(payload.get("error"))
+        err_envelope: dict[str, Any] = {"success": False, "error": normalized_err}
+        for extra_key in ("scope", "coverage", "warnings", "stderr"):
+            if extra_key in payload:
+                err_envelope[extra_key] = payload[extra_key]
+        return json.dumps(err_envelope, ensure_ascii=False)
+
+    if "error" in payload:
+        return json.dumps({"success": False, "error": _error_object(payload.get("error"))}, ensure_ascii=False)
+
+    return success_response(payload)
+```
+
+[`src/wireshark_mcp/tools/envelope.py:105-127`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/envelope.py#L105-L127)
+
+[4] (실행 확인) `wireshark_get_file_info`는 `capinfos`의 출력 줄을 바꾸지 않고 `data`에 실었다.
+
+[5] `wireshark_get_packet_list`는 머리글을 켜고 줄 상한과 시작 위치를 실행 함수에 넘긴다.
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file, "-T", "fields"]
+        for f in fields:
+            cmd.extend(["-e", f])
+
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+
+        cmd.extend(["-E", "header=y", "-E", "separator=/t", "-E", "quote=d", "-E", "occurrence=f"])
+
+        return await self._run_command(cmd, limit_lines=limit, offset_lines=offset)
+```
+
+[`src/wireshark_mcp/tshark/_packets.py:73-82`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L73-L82)
+
+[6] `_paginate`는 머리글 줄을 포함한 줄 목록에서 시작 위치와 상한을 적용하고 잘린 출력 끝에 빈 줄과 안내 줄을 붙인다.
+
+```python
+    @staticmethod
+    def _paginate(output: str, limit_lines: int, offset_lines: int) -> tuple[str, bool]:
+        """Slice full command output to an offset/limit window.
+
+        Returns the windowed text and whether it was truncated. A truncation
+        footer is appended so callers can page forward. Applied *after* caching
+        so the cache always holds the complete output.
+        """
+        lines = output.splitlines()
+        total_lines = len(lines)
+
+        if offset_lines > 0:
+            lines = lines[offset_lines:]
+
+        truncated = False
+        if limit_lines > 0 and len(lines) > limit_lines:
+            lines = lines[:limit_lines]
+            truncated = True
+
+        final_output = "\n".join(lines)
+        if truncated:
+            final_output += (
+                f"\n\n[Showing {limit_lines}/{total_lines} lines. Next: offset={offset_lines + limit_lines}]"
+            )
+        return final_output, truncated
+```
+
+[`src/wireshark_mcp/tshark/client.py:156-180`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L156-L180)
+
+[7] (실행 확인) 3,000패킷 캡처 파일에서 `limit` 5, `offset` 5로 부르자 머리글 없이 5~9번 패킷 줄이 실렸다.
+
+[8] `wireshark_get_packet_context`는 `count * 2 + 1`을 머리글 줄을 포함한 줄 상한으로 넘긴다.
+
+```python
+    @mcp.tool()
+    async def wireshark_get_packet_context(pcap_file: str, frame_number: int, count: int = 5) -> str:
+        """[Context] Packets surrounding a specific frame (count before and after)."""
+        start = max(1, frame_number - count)
+        limit = count * 2 + 1
+        d_filter = f"frame.number >= {start}"
+        return normalize_tool_result(
+            await client.get_packet_list(pcap_file, limit=limit, offset=0, display_filter=d_filter)
+        )
+```
+
+[`src/wireshark_mcp/tools/extract.py:31-39`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L31-L39)
+
+[9] (실행 확인) DNS 질의 300개가 있는 캡처 파일을 `wireshark_get_packet_context`에 `frame_number` 10, `count` 5로 주자 5~14번 패킷 줄과 `[Showing 11/297 lines. Next: offset=11]`이 실렸다.
+
+[10] `wireshark_aggregate`는 필드 칸을 누적기에 넘기고 계산 조건과 묶음 결과를 함께 싣는다: [`src/wireshark_mcp/tools/stats.py:303-488`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L303-L488).
+
+[11] 탐지 도구 3개는 필드 칸을 읽어 근거 항목과 계산값, `scope`를 만든다: [`src/wireshark_mcp/tools/threat.py:25-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L25-L250), [`src/wireshark_mcp/tools/threat.py:252-430`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L252-L430), [`src/wireshark_mcp/tools/threat.py:432-802`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L432-L802).
+
+[12] `wireshark_extract_credentials`는 근거 항목과 요약, `scope`를 만든다: [`src/wireshark_mcp/tools/security.py:14-175`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L14-L175).
+
+[13] BLE 분석은 칸을 읽어 장치·스캐너·연결·연산 항목을 만들고 코드 표로 이름을 붙인다: [`src/wireshark_mcp/tools/bluetooth.py:542-685`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L542-L685), [`src/wireshark_mcp/tools/bluetooth.py:687-824`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L687-L824), [`src/wireshark_mcp/tools/bluetooth.py:1137-1151`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1137-L1151), [`src/wireshark_mcp/tools/bluetooth.py:17-60`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L17-L60).
+
+[14] HTTP·DNS 추출 도구는 서버가 정한 필드를 고른다.
+
+```python
+    async def wireshark_extract_http_requests(pcap_file: str, limit: int = 100) -> str:
+        """[HTTP] Extract HTTP request details (method, URI, host, user-agent) as TSV."""
+        return normalize_tool_result(
+            await client.extract_fields(
+                pcap_file,
+                ["http.request.method", "http.request.uri", "http.host", "http.user_agent"],
+                display_filter="http.request",
+                limit=limit,
+            )
+        )
+
+    async def wireshark_extract_dns_queries(pcap_file: str, limit: int = 100) -> str:
+        """[DNS] Extract DNS query details (name, type, response flag) as TSV."""
+        return normalize_tool_result(
+            await client.extract_fields(
+                pcap_file, ["dns.qry.name", "dns.qry.type", "dns.flags.response"], display_filter="dns", limit=limit
+            )
+        )
+```
+
+[`src/wireshark_mcp/tools/extract.py:98-115`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L98-L115)
+
+[15] `wireshark_analyze_protocol`은 프로토콜 값으로 처리기를 고른다: [`src/wireshark_mcp/tools/analyze.py:71-88`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/analyze.py#L71-L88), [`src/wireshark_mcp/tools/protocol.py:493-586`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L493-L586), [`src/wireshark_mcp/tools/ics.py:15-38`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L15-L38).
+
+[16] 근거 항목의 필드다.
+
+```python
+class FindingEvidence(TypedDict, total=False):
+    frame: int | None
+    stream: int | None
+    protocol: str | None
+    filter: str | None
+    field: str | None
+    value: str | None
+    description: str | None
+```
+
+[`src/wireshark_mcp/tools/findings.py:6-13`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/findings.py#L6-L13)
+
+[17] Modbus 분석은 `strip()`한 출력을 줄로 나눠 칸 수가 8 이상인 줄만 세고 전체 수를 줄 수로 적는다.
+
+```python
+        lines = data.strip().splitlines()
+        func_codes: dict[str, int] = {}
+        exception_count = 0
+        unit_ids: set[str] = set()
+
+        for line in lines[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 8:
+                unit_id = parts[5].strip().strip('"')
+                func_code = parts[6].strip().strip('"')
+                exception_code = parts[7].strip().strip('"')
+
+                if unit_id:
+                    unit_ids.add(unit_id)
+                if func_code:
+                    func_codes[func_code] = func_codes.get(func_code, 0) + 1
+                if exception_code and exception_code != "":
+                    exception_count += 1
+
+        output_parts.append(f"Total Modbus packets: {len(lines) - 1}")
+```
+
+[`src/wireshark_mcp/tools/ics.py:43-62`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L43-L62)
+
+[18] (실행 확인) 예외 코드 칸이 빈 Modbus/TCP 요청 20개를 만든 캡처 파일에 `limit` 100으로 부르자 `Total Modbus packets: 20`과 `FC 3: 19`가, `limit` 5로 부르자 값 줄 4개와 `Total Modbus packets: 6`, `FC 3: 4`가 실렸다.
+
+[19] `wireshark_extract_credentials`는 머리글 다음의 비지 않은 줄을 모두 읽어 마지막 칸이 비지 않으면 근거 항목을 만든다.
+
+```python
+        if isinstance(http_auth_data, str) and http_auth_data.strip():
+            lines = [line for line in http_auth_data.strip().splitlines() if line.strip()]
+            start_idx = 1 if lines and ("http.authbasic" in lines[0] or "frame.number" in lines[0]) else 0
+            for line in lines[start_idx:]:
+                parts = line.split("\t")
+                cred = parts[-1].strip().strip('"')
+                if cred:
+                    frame = (
+                        int(parts[0].strip().strip('"'))
+                        if len(parts) > 0 and parts[0].strip().strip('"').isdigit()
+                        else None
+                    )
+                    stream = (
+                        int(parts[1].strip().strip('"'))
+                        if len(parts) > 1 and parts[1].strip().strip('"').isdigit()
+                        else None
+                    )
+                    src_ip = parts[2].strip().strip('"') if len(parts) > 2 else "unknown"
+                    evidence_list.append(
+                        FindingEvidence(
+                            frame=frame,
+                            stream=stream,
+                            protocol="HTTP",
+                            field="http.authbasic",
+                            value=mask_secret(cred),
+                            filter="http.authbasic",
+                            description=f"HTTP Basic Auth credential from {src_ip}",
+                        )
+                    )
+```
+
+[`src/wireshark_mcp/tools/security.py:35-63`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L35-L63)
+
+[20] (실행 확인) 시험용 계정 값으로 HTTP Basic 인증 요청 60개를 만든 캡처 파일을 `wireshark_extract_credentials`에 넣자 근거 항목 50개 가운데 마지막 항목은 `frame`·`stream`이 `null`이고 `description`이 `HTTP Basic Auth credential from unknown`이었다.
+
+[21] `wireshark_quick_analysis`는 호스트와 질의 이름을 500줄까지 읽어 세고 8개씩 싣는다.
+
+```python
+    # Phase 5: Key Hostnames
+    report.append(f"\n{section('5. Hostnames')}")
+    http_hosts_data = _extract_data(http_hosts_raw) if http_hosts_raw else None
+    http_hosts: dict[str, int] = {}
+    if http_hosts_data:
+        for line in http_hosts_data.splitlines()[1:]:
+            host = line.strip().strip('"')
+            if host:
+                http_hosts[host] = http_hosts.get(host, 0) + 1
+
+    dns_data = _extract_data(dns_raw) if dns_raw else None
+    dns_domains: dict[str, int] = {}
+    if dns_data:
+        for line in dns_data.splitlines()[1:]:
+            domain = line.strip().strip('"')
+            if domain:
+                dns_domains[domain] = dns_domains.get(domain, 0) + 1
+
+    if http_hosts:
+        report.append("HTTP:")
+        for host, count in sorted(http_hosts.items(), key=lambda x: x[1], reverse=True)[:8]:
+            report.append(f"  {host} ({count})")
+    if dns_domains:
+        report.append("DNS:")
+        for domain, count in sorted(dns_domains.items(), key=lambda x: x[1], reverse=True)[:8]:
+            report.append(f"  {domain} ({count})")
+    if not http_hosts and not dns_domains:
+        report.append("No HTTP/DNS hostname data found")
+```
+
+[`src/wireshark_mcp/tools/agents.py:102-129`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L102-L129)
+
+[`src/wireshark_mcp/tools/agents.py:60-68`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L60-L68)
+
+[22] 프로토콜 분석기는 분포와 전체 수를 글로 적는다: [`src/wireshark_mcp/tools/protocol.py:335-456`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L335-L456), [`src/wireshark_mcp/tools/ics.py:98-222`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L98-L222), [`src/wireshark_mcp/tools/iot.py:15-135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/iot.py#L15-L135).
+
+[23] `wireshark_detect_dos_attack`과 `wireshark_detect_arp_spoofing`은 `strip()`한 출력을 줄로 나눈 수로 패킷 수를 센다.
+
+```python
+        syn_lines = syn_wrapped.get("data", "").strip().splitlines() if isinstance(syn_wrapped.get("data"), str) else []
+        syn_start = 1 if syn_lines and ("frame.number" in syn_lines[0] or "ip.src" in syn_lines[0]) else 0
+        syn_count = max(0, len(syn_lines) - syn_start)
+```
+
+[`src/wireshark_mcp/tools/threat.py:453-455`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L453-L455)
+
+```python
+        lines = data.strip().splitlines()
+        for line in lines[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 4:
+                mac = parts[0].strip().strip('"')
+                src_ip = parts[1].strip().strip('"')
+                dst_ip = parts[2].strip().strip('"')
+                opcode = parts[3].strip().strip('"')
+
+                if mac and src_ip:
+                    ip_to_macs.setdefault(src_ip, set()).add(mac)
+                    mac_to_ips.setdefault(mac, set()).add(src_ip)
+
+                if opcode == "2":
+                    arp_reply_count += 1
+
+                if src_ip == dst_ip:
+                    gratuitous_count += 1
+
+        results: list[str] = []
+        results.append(f"Total ARP packets: {len(lines) - 1}")
+        results.append(f"ARP replies: {arp_reply_count}")
+        results.append(f"Gratuitous ARP: {gratuitous_count}")
+```
+
+[`src/wireshark_mcp/tools/protocol.py:103-125`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L103-L125)
+
+[24] `wireshark_scan_file_signatures`는 형식마다 패킷 목록을 50줄까지 받아 비지 않은 줄 수에서 1을 뺀다.
+
+```python
+        async def _search(file_type: str, magic_hex: str) -> tuple[str, int]:
+            result = await client.search_packet_contents(pcap_file, magic_hex, search_type="hex", limit=50)
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return file_type, 0
+            data = wrapped.get("data", "")
+            if not isinstance(data, str):
+                return file_type, 0
+            # Packet-list output is a header row plus one row per match; count real matches only.
+            rows = [ln for ln in data.splitlines() if ln.strip()]
+            return file_type, max(0, len(rows) - 1)
+```
+
+[`src/wireshark_mcp/tools/forensics.py:125-135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L125-L135)
+
+[25] 누적기는 시간 구간을 내림으로 정하고 묶음마다 수와 수치를 쌓는다.
+
+```python
+    def add(self, row: list[str]) -> None:
+        padded = row + [""] * max(0, self.field_count - len(row))
+        key_parts: list[Any] = []
+        if self.time_bucket_seconds > 0:
+            try:
+                relative_time = float(padded[self.indexes["frame.time_relative"]])
+                bucket_start = math.floor(relative_time / self.time_bucket_seconds) * self.time_bucket_seconds
+                if not math.isfinite(bucket_start):
+                    self.skipped_invalid_time += 1
+                    return
+            except (TypeError, ValueError, OverflowError):
+                self.skipped_invalid_time += 1
+                return
+            key_parts.append(round(bucket_start, 9))
+
+        key_parts.extend(padded[self.indexes[field]] for field in self.group_fields)
+        key = tuple(key_parts)
+        if len(self.grouped_counts) >= MAX_AGGREGATE_GROUPS and key not in self.grouped_counts:
+            self.dropped_groups += 1
+            return
+        self.grouped_counts[key] += 1
+        self._add_distinct(key, padded)
+        self._add_numeric(key, padded)
+```
+
+[`src/wireshark_mcp/tools/stats.py:129-151`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L129-L151)
+
+[26] `wireshark_analyze_tcp_health`는 패킷 목록을 10,000줄까지 읽어 줄 수를 센다.
+
+```python
+        async def _count_check(display_filter: str) -> int:
+            raw = await client.get_packet_list(pcap_file, limit=10000, display_filter=display_filter)
+            wrapped = parse_tool_result(raw)
+            if not wrapped["success"]:
+                return -1
+            data = wrapped.get("data", "")
+            if isinstance(data, str):
+                lines = [ln for ln in data.strip().splitlines() if ln.strip()]
+                return max(0, len(lines) - 1)
+            return 0
+```
+
+[`src/wireshark_mcp/tools/protocol.py:41-50`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L41-L50)
+
+[27] (실행 확인) PNG 서명이 들어 있는 패킷 80개를 만든 캡처 파일을 `wireshark_scan_file_signatures`에 넣자 `PNG: 50 packet(s)`가 실렸고 잘림 표시는 없었다.
+
+[28] 이상 탐지 도구 3개는 결과를 글로 이어 `success_response`로 돌려준다: [`src/wireshark_mcp/tools/anomaly.py:102-126`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L102-L126), [`src/wireshark_mcp/tools/anomaly.py:150-217`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L150-L217), [`src/wireshark_mcp/tools/anomaly.py:267-285`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L267-L285).
+
+[29] `wireshark_geoip_enrich`는 `_is_private_ip`가 거짓인 값을 모두 모아 조회한다.
+
+```python
+        data = wrapped.get("data", "")
+        if not isinstance(data, str) or len(data.strip()) < 10:
+            return success_response("No IP packets found in capture.")
+
+        unique_ips: set[str] = set()
+        for line in data.strip().splitlines()[1:]:
+            parts = line.split("\t")
+            for part in parts:
+                ip = part.strip().strip('"')
+                if ip and not _is_private_ip(ip):
+                    unique_ips.add(ip)
+
+        if not unique_ips:
+            return success_response(f"{INFO} All IPs are private/reserved — no GeoIP data to enrich.")
+
+        results: list[str] = []
+        results.append(f"{'IP':<18} {'Country':<8} {'City':<20} {'ASN':<10} {'Org'}")
+        results.append("-" * 80)
+
+        enriched = 0
+        for ip in sorted(unique_ips)[:limit]:
+```
+
+[`src/wireshark_mcp/tools/geoip.py:106-126`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L106-L126)
+
+[30] `_is_private_ip`는 `ipaddress`의 `is_private`만 보고 주소로 읽히지 않는 값에는 거짓을 돌려준다.
+
+```python
+def _is_private_ip(ip_str: str) -> bool:
+    """Check if an IP address is private/reserved."""
+    try:
+        return ipaddress.ip_address(ip_str).is_private
+    except ValueError:
+        return False
+```
+
+[`src/wireshark_mcp/tools/geoip.py:73-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L73-L78)
+
+[31] (실행 확인) GeoIP 데이터베이스가 없어 `wireshark_geoip_enrich` 함수를 같은 프로세스에서 부르고 조회 함수만 모든 주소에 `AddressNotFoundError`를 내는 시험용 함수로 바꾼 뒤 목적지가 `224.0.0.251`·`8.8.8.8`·`192.168.1.1`인 패킷 10,010개를 넣자 머리 줄에 `Enriched 3/3 public IPs`가 실리고 `224.0.0.251`, `8.8.8.8`, 잘림 안내 줄이 행으로 실렸다.

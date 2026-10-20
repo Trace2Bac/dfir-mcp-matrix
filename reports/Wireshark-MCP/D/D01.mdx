@@ -1,0 +1,268 @@
+---
+cell: D01
+details:
+- id: D01.01
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 파일을 쓰는 도구 11개와 `tshark` 환경설정 값을 받는 `wireshark_set_protocol_prefs`에 적용된다 [1][2].
+이 도구는 `wireshark_capture`, `wireshark_merge_pcaps`, `wireshark_text2pcap_import`, `wireshark_filter_save`, `wireshark_editcap_trim`, `wireshark_editcap_split`, `wireshark_editcap_time_shift`, `wireshark_editcap_deduplicate`, `wireshark_extract_frames`, `wireshark_export_objects`, `wireshark_yara_scan`이다 [1].
+캡처 파일을 만드는 도구는 호출 인자 `output_file`이나 `output_prefix`가 가리키는 경로에 `dumpcap`, `mergecap`, `text2pcap`, `tshark`, `editcap`이 쓴 pcap·pcapng 파일을 남긴다 [3].
+`wireshark_export_objects`는 `tshark --export-objects`가 캡처 안의 HTTP·SMB·TFTP·IMF·DICOM 전송에서 꺼낸 파일을 호출 인자 `dest_dir` 폴더에 남긴다 [4].
+`wireshark_yara_scan`은 `dest_dir`를 받으면 같은 방법으로 꺼낸 파일을 그 폴더에 남긴다 [5].
+꺼낸 파일마다 YARA 규칙을 대조한 결과는 응답에만 싣는다 [5].
+서버 코드에는 이 파일을 호출 뒤에 지우는 곳이 없다 [3][4].
+도구를 부른 뒤 출력 파일과 꺼낸 파일은 서버를 끝낸 뒤에도 목적지에 남아 있었다 [6].
+`wireshark_set_protocol_prefs`는 받은 `prefs`를 `tshark`의 `-o`로 넘기므로 기록 파일 경로를 정하는 환경설정을 주면 `tshark`가 그 경로에 파일을 쓴다 [2][7].
+이 파일도 서버가 지우지 않는다 [7].
+남긴 파일 전체의 보관 기간, 용량, 대상을 정하는 설정이나 코드는 없다.
+한 호출이 도구의 원래 출력과 그 가공본을 함께 파일로 남기는 경로는 없다.
+
+파일을 쓰는 도구 11개의 출력은 사용자가 허용 폴더를 정했을 때만 생긴다.
+환경변수 `WIRESHARK_MCP_ALLOWED_DIRS`가 없으면 파일을 쓰는 도구는 도구를 실행하지 않고 `PermissionDenied`로 끝난다 [8][6].
+도구 프로필 `analysis`와 `core`는 이 11개 도구를 등록하지 않는다 [9].
+저장소의 `Dockerfile`이 만드는 이미지는 기본 명령에서 `analysis` 프로필로 서버를 실행한다 [10].
+`wireshark_set_protocol_prefs`는 허용 폴더를 정하지 않아도 실행되고 `analysis` 프로필에서도 등록되며 `core` 프로필에서만 빠진다 [7][9][11].
+
+`wireshark_yara_scan`에 `dest_dir`를 주지 않으면 서버는 허용 폴더 안에 `wireshark_yara_` 접두어의 임시 폴더를 만들어 꺼낸 파일을 두고 `finally`에서 그 폴더를 지운다 [5].
+이 호출 뒤에는 임시 폴더가 남지 않았다 [6].
+그 밖의 도구는 결과를 응답으로만 돌려준다.
+`tshark` 실행 결과를 담는 캐시 `ResultCache`는 프로세스 메모리에만 두고 파일로 쓰지 않는다 [12].
+
+### 근거
+
+[1] 파일을 만들거나 덮어쓰는 도구 목록이다.
+
+```python
+# Tools that create or overwrite files on disk. Everything else only reads captures.
+WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "wireshark_capture",
+        "wireshark_editcap_deduplicate",
+        "wireshark_editcap_split",
+        "wireshark_editcap_time_shift",
+        "wireshark_editcap_trim",
+        "wireshark_export_objects",
+        "wireshark_extract_frames",
+        "wireshark_filter_save",
+        "wireshark_merge_pcaps",
+        "wireshark_text2pcap_import",
+        "wireshark_yara_scan",  # exports objects to dest_dir before scanning
+    }
+)
+```
+
+[`src/wireshark_mcp/tool_annotations.py:19-34`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tool_annotations.py#L19-L34)
+
+[2] `wireshark_set_protocol_prefs`는 `prefs`를 나눠 `tshark`의 `-o` 값으로 그대로 넘긴다.
+
+```python
+    @mcp.tool()
+    async def wireshark_set_protocol_prefs(
+        pcap_file: str,
+        prefs: str,
+        fields: str = "",
+        display_filter: str = "",
+        limit: int = 100,
+    ) -> str:
+        """[Dissection] Protocol preference overrides. Prefs: 'tcp.desegment_tcp_streams:TRUE;http.ssl.port:8443'."""
+        pref_list = [p.strip() for p in prefs.split(";") if p.strip()]
+        field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else []
+        return normalize_tool_result(
+            await client.extract_with_prefs(pcap_file, pref_list, field_list, display_filter, limit)
+        )
+```
+
+[`src/wireshark_mcp/tools/advanced.py:26-39`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/advanced.py#L26-L39)
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file]
+        for pref in prefs:
+            cmd.extend(["-o", pref])
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:381-383`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L381-L383)
+
+[3] 캡처 파일을 쓰는 도구는 받은 출력 경로를 분석 도구 명령에 넣고 실행 결과를 돌려준다: [`src/wireshark_mcp/tshark/_suite_ops.py:32-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L32-L250), [`src/wireshark_mcp/tshark/_capture.py:25-40`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L25-L40), [`src/wireshark_mcp/tools/utility.py:31-116`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L31-L116).
+
+[4] `export_objects`는 `dest_dir`를 만들고 `--export-objects`의 목적지로 넘긴다.
+
+```python
+    async def export_objects(self, pcap_file: str, protocol: str, dest_dir: str) -> str:
+        """Export Objects (--export-objects protocol,dest_dir)."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        proto_validation = self._validate_protocol(protocol, self.VALID_EXPORT_PROTOCOLS)
+        if not proto_validation["success"]:
+            return json.dumps(proto_validation)
+
+        output_validation = self._validate_output_path(dest_dir)
+        if not output_validation["success"]:
+            return json.dumps(output_validation)
+
+        os.makedirs(dest_dir, exist_ok=True)
+        cmd = [
+            self.tshark_path,
+            "-r",
+            pcap_file,
+            "--export-objects",
+            f"{protocol},{dest_dir}",
+        ]
+        return await self._run_command(cmd)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:81-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L81-L103)
+
+[5] `wireshark_yara_scan`은 `dest_dir`가 없을 때만 임시 폴더를 만들고 그 폴더만 지운다.
+
+```python
+        use_temp = not dest_dir
+        if use_temp:
+            temp_result = client._create_temporary_output_dir("wireshark_yara_")
+            if not temp_result["success"]:
+                return error_response(
+                    temp_result["error"]["message"],
+                    error_type=temp_result["error"]["type"],
+                )
+            export_dir = str(temp_result["path"])
+        else:
+            export_dir = dest_dir
+
+        try:
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:99-112`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L112)
+
+```python
+            if use_temp:
+                output.append(f"\nExported files: {export_dir} (temporary)")
+            else:
+                output.append(f"\nExported files saved to: {export_dir}")
+
+            return success_response("\n".join(output))
+
+        finally:
+            if use_temp and os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:174-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L174-L183)
+
+[6] (실행 확인) 허용 폴더를 정하지 않은 서버와 정한 서버에 파일을 쓰는 도구를 불렀다.
+허용 폴더가 없을 때 `wireshark_editcap_trim`과 `wireshark_yara_scan`은 `PermissionDenied`로 끝나고 파일이 생기지 않았다.
+허용 폴더를 정한 서버에서 `wireshark_editcap_trim`, `wireshark_editcap_split`, `wireshark_export_objects`, `dest_dir`를 준 `wireshark_yara_scan`의 출력은 서버를 끝낸 뒤에도 남았다.
+`dest_dir` 없이 부른 `wireshark_yara_scan`의 응답은 임시 폴더 경로를 실었고 호출 뒤 그 폴더는 없었다.
+
+[7] (실행 확인) 허용 폴더를 정하지 않은 `analysis` 프로필 서버(도구 40개)에서 `wireshark_set_protocol_prefs`의 `prefs`로 출력 파일 경로를 값으로 받는 해석 설정에 다른 폴더의 경로를 넘겼다.
+응답은 성공이었고 그 경로에 `Wireshark SSL debug log`로 시작하는 78바이트 파일이 생겨 서버를 끝낸 뒤에도 남았다.
+
+[8] 허용 폴더가 없으면 목적지 검사가 쓰기를 거부한다.
+
+```python
+        if not self._allowed_dirs:
+            logger.warning("Blocked file write because WIRESHARK_MCP_ALLOWED_DIRS is not configured")
+            return {
+                "success": False,
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": (
+                        "File writes are disabled. Set WIRESHARK_MCP_ALLOWED_DIRS "
+                        "to one or more dedicated writable directories."
+                    ),
+                },
+            }
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:127-138`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L127-L138)
+
+[9] `analysis`와 `core` 프로필은 캡처 도구와 파일을 쓰는 도구를 뺀다.
+
+```python
+# Tools that write a new file: pcap surgery, format conversion, saved filters.
+_WRITERS: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_editcap_deduplicate",
+        "wireshark_editcap_split",
+        "wireshark_editcap_time_shift",
+        "wireshark_editcap_trim",
+        "wireshark_export_objects",
+        "wireshark_extract_frames",
+        "wireshark_filter_save",
+        "wireshark_merge_pcaps",
+        "wireshark_text2pcap_import",
+        "wireshark_yara_scan",
+    }
+)
+```
+
+[`src/wireshark_mcp/profiles.py:41-55`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L41-L55)
+
+```python
+# What each profile removes from the full surface. `full` removes nothing.
+_EXCLUSIONS: Final[dict[str, frozenset[str]]] = {
+    "full": frozenset(),
+    "analysis": _CAPTURE | _WRITERS,
+    "core": _CAPTURE | _WRITERS | _ADVANCED,
+}
+```
+
+[`src/wireshark_mcp/profiles.py:73-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L73-L78)
+
+[10] 컨테이너 이미지의 기본 명령은 `analysis` 프로필을 고른다.
+
+```dockerfile
+ENTRYPOINT ["wireshark-mcp"]
+CMD ["serve", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8080", "--allow-insecure-http", "--profile", "analysis"]
+```
+
+[`Dockerfile:30-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L30-L31)
+
+[11] `wireshark_set_protocol_prefs`는 `core` 프로필만 빼는 고급 도구 묶음에 들어 있다.
+
+```python
+_ADVANCED: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_decode_as",
+        "wireshark_decrypt_tls",
+        "wireshark_decrypt_wpa",
+        "wireshark_flow_graph",
+        "wireshark_get_capabilities",
+        "wireshark_get_packet_bytes",
+        "wireshark_scan_file_signatures",
+        "wireshark_set_protocol_prefs",
+    }
+)
+```
+
+[`src/wireshark_mcp/profiles.py:60-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L60-L71)
+
+[12] 결과 캐시는 `OrderedDict`에 결과 문자열을 담는 메모리 캐시다.
+
+```python
+class ResultCache:
+    """LRU cache for tshark command results, keyed by file identity + command."""
+
+    def __init__(
+        self,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    ) -> None:
+        self._cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        # key -> resolved file path, so a single file can be invalidated on write.
+        self._key_paths: dict[str, str] = {}
+        self._max_entries = max_entries
+        self._max_bytes = max_bytes
+        self._ttl = ttl_seconds
+        self._current_bytes = 0
+        self._hits = 0
+        self._misses = 0
+```
+
+[`src/wireshark_mcp/tshark/cache.py:20-37`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L20-L37)

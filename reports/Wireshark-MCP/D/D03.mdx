@@ -1,0 +1,71 @@
+---
+cell: D03
+details:
+- id: not_implemented
+---
+
+# D03 파생물 무결성 검증
+
+### 미구현
+
+**판단.** 서버는 파일을 쓰는 도구가 만든 캡처 파일과 꺼낸 파일의 해시나 상태 값을 계산해 남기지 않고 뒤에 대조하지도 않는다 [1].
+파일을 쓰는 도구의 응답은 분석 도구의 출력과 출력 경로만 싣고 출력 파일의 해시나 크기는 싣지 않는다 [1][2].
+
+`wireshark_get_file_info`는 모델이 고른 캡처 파일에 `capinfos`를 선택지 없이 실행하고 그 출력을 돌려준다 [3].
+Wireshark 4.0.17의 `capinfos`는 선택지가 없으면 파일의 SHA256, RIPEMD160, SHA1 값을 함께 출력한다 [4][5].
+이 도구는 증거와 파생물을 가리지 않고 받은 파일의 값을 돌려줄 뿐 그 값을 남기거나 다른 값과 대조하지 않는다 [3].
+
+결과 캐시 `ResultCache`는 키에 입력 캡처 파일의 실제 경로, `st_mtime_ns`, `st_size`를 넣는다 [6].
+그래서 입력 파일이 바뀌면 앞 결과를 쓰지 않고 분석 도구를 다시 실행한다 [6].
+이 값은 분석 도구가 읽은 입력 파일의 상태 값이고 서버가 만든 출력 파일의 기준값이 아니다 [6].
+
+### 근거
+
+[1] 파일을 쓰는 도구는 분석 도구의 실행 결과를 그대로 돌려주거나 출력 경로를 담은 글을 돌려준다: [`src/wireshark_mcp/tshark/_suite_ops.py:32-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L32-L250), [`src/wireshark_mcp/tshark/_extraction.py:81-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L81-L103), [`src/wireshark_mcp/tools/utility.py:57-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L57-L78).
+
+[2] (실행 확인) 파일을 쓰는 도구 11개를 허용 폴더 안의 목적지로 불렀다.
+성공 응답의 `data`와 `stderr`에는 출력 경로와 분석 도구의 출력만 있었고 출력 파일의 해시는 없었다.
+
+[3] `get_file_info`는 `capinfos <파일>`만 실행한다.
+
+```python
+    async def get_file_info(self, pcap_file: str) -> str:
+        """Capinfos: Get file metadata."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        required = self._require_tool("capinfos")
+        if not required["success"]:
+            return json.dumps(required)
+
+        capinfos_path = self._get_checked_tool_path("capinfos")
+        return await self._run_command([capinfos_path, pcap_file])
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:19-30`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L19-L30)
+
+[4] Wireshark 4.0.17의 `capinfos`는 해시 계산을 기본으로 켠다: [`capinfos.c:139-139`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L139-L139).
+
+[5] (실행 확인) `wireshark_merge_pcaps`의 출력에 `wireshark_get_file_info`를 부르자 응답에 `SHA256:`, `RIPEMD160:`, `SHA1:` 줄이 있었다.
+
+[6] 캐시 키는 입력 파일의 실제 경로, 수정 시각, 크기와 명령 인자로 만든다.
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)

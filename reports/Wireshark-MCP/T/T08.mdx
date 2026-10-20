@@ -1,0 +1,628 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.02
+- id: T08.03
+- id: T08.04
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 실행기 `_run_command`와 행을 흘려 읽는 실행기 `_stream_field_rows`를 거치는 모든 Wireshark 도구 실행에 적용된다 [1][2].
+`_run_command`는 종료 코드가 0이 아니면 `ExecutionError`와 `Command failed with exit code <값>`을 돌려주고 표준 오류를 `details`에 싣는다 [1].
+표준 오류가 비어 있으면 표준 출력을 `details`에 싣는다 [1].
+`_stream_field_rows`도 종료 코드가 0이 아니면 같은 오류를 돌려주고 그때까지 읽은 행 수 `rows`를 함께 싣는다 [2].
+
+`tshark`가 캡처 파일이 패킷 중간에서 끊겼다고 알린 경우는 실패로 정하지 않는다 [3].
+`_is_capture_short_read`는 실행 파일 이름이 `tshark`이고 종료 코드가 14이거나, 종료 코드가 2이면서 표준 오류에 `cut short`가 있으면 참이다 [3].
+이때 `_run_command`는 출력이 있으면 성공 응답을 돌려주고 표준 오류를 `stderr`에 싣는다 [1][4].
+`_stream_field_rows`는 행을 하나 이상 읽었으면 성공으로 정하고 표준 오류를 `stderr`에 싣는다 [2].
+이 결과는 캐시에 넣지 않는다 [4].
+코드 주석은 4.4 이전의 `tshark`가 이 경우 종료 코드 2를, 4.4 이후가 14를 쓴다고 적는다 [2].
+Wireshark 4.0.17의 `tshark`는 파일을 처리하다 난 오류를 모두 종료 코드 2로 끝낸다 [5].
+Wireshark 4.6.7의 `tshark`는 패킷을 읽다 난 오류를 모두 `WS_EXIT_READ_ERROR`로 끝내고 그 값은 14다 [6].
+실행 확인에서 마지막 패킷이 잘린 시험용 캡처를 `wireshark_get_packet_list`로 읽자 주 환경은 종료 코드 2, Windows는 종료 코드 14로 끝났고 두 환경 모두 성공 응답의 `stderr`에 `cut short` 문구를 실었다 [7][8].
+캡처 파일이 아닌 입력은 주 환경에서 종료 코드 2, Windows에서 3으로 끝났고 두 환경 모두 `ExecutionError`를 돌려주었다 [7][8].
+
+이 예외는 `tshark`에만 적용된다 [3].
+같은 잘린 캡처를 `wireshark_get_file_info`로 읽자 `capinfos`는 정보를 출력하고 종료 코드 1로 끝났고 응답은 `ExecutionError`였다 [7].
+`check_capabilities`의 `-v` 실행은 실행기를 거치지 않고 종료 코드를 보지 않은 채 표준 출력 첫 줄을 버전으로 읽는다 [9].
+
+**한계.** 출력이 줄 수 상한으로 잘리면 종료 코드를 보지 않는다 [1].
+`_run_command`는 종료 코드 확인을 `truncated`가 거짓일 때만 하고 `truncated`가 참이면 표준 오류도 응답에 싣지 않는다 [1][4].
+실행 확인에서 잘린 캡처를 `limit` 1로 읽자 두 환경 모두 `truncated`가 참인 성공 응답이 왔고 `stderr`가 없었다 [7][8].
+
+Wireshark 4.6.7의 `tshark`에서 종료 코드 14는 끊긴 캡처만이 아니라 모든 읽기 오류를 뜻한다 [6].
+`_is_capture_short_read`는 종료 코드 14에는 표준 오류 문구를 보지 않는다 [3].
+실행 확인에서 두 번째 패킷 머리의 길이를 손상시킨 캡처를 Windows에서 읽자 `tshark`는 `damaged or corrupt` 문구와 함께 종료 코드 14로 끝났다 [8].
+`wireshark_get_packet_list`와 `wireshark_aggregate`는 이 결과를 성공으로 돌려주었고 서버 로그는 끊긴 캡처라고 적었다 [8].
+
+`wireshark_aggregate`는 끊긴 캡처를 성공으로 받으면 `coverage.status`를 `complete`로 둔다 [10].
+실행 확인에서 두 환경 모두 `stderr`에만 `cut short` 문구가 있고 `coverage.status`는 `complete`였다 [7][8].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 `_run_command`, `_stream_field_rows`, `check_capabilities`의 `-v` 실행에 적용된다 [11][12][9].
+`_run_command`는 출력 읽기 전체에 시간 제한을 두고 넘으면 프로세스를 끊은 뒤 `TimeoutError`와 `The Wireshark subprocess was terminated.`를 돌려준다 [11].
+시간 제한은 기본 30초이고 `wireshark_capture`만 `max(30, duration + 10)`초를 준다 [11][13].
+`wireshark_aggregate`의 시간 제한은 환경변수 `WIRESHARK_MCP_AGGREGATE_TIMEOUT`(기본 30초, 5~600초)으로 정한다 [14].
+`-v` 실행은 5초를 넘으면 끊고 `version`을 `unknown`으로 둔다 [9].
+호출이 취소되면 두 실행기 모두 프로세스를 끊는다 [11][12].
+
+출력이 상한을 넘어도 프로세스를 끊고 시간 초과와 다른 오류로 구별한다.
+`_run_command`는 표준 출력이 16 MiB, 표준 오류가 1 MiB를 넘으면 끊고 `LimitExceeded`를 돌려준다 [15].
+`_stream_field_rows`는 표준 출력이 50 MiB를 넘거나 행이 `max_rows`보다 많으면 끊고 `LimitExceeded`를 돌려준다 [2][16].
+`wireshark_aggregate`의 `max_rows`는 환경변수 `WIRESHARK_MCP_AGGREGATE_SCAN_LIMIT`(기본 1,000,000행)이다 [14].
+끊기 전에 나온 출력은 응답에 싣지 않는다 [11][15].
+실행 확인에서 150만 패킷 캡처에 시간 제한 1초로 프로토콜 계층 통계를 실행하자 `TimeoutError`가 왔다 [7].
+같은 캡처를 `-T json`으로 읽자 `LimitExceeded`가 왔고 `wireshark_aggregate`는 시간 제한 5초에서 `TimeoutError`를, 시간 제한 600초에서 행 상한 `LimitExceeded`를 돌려주었다 [7].
+
+**한계.** `_stream_field_rows`의 시간 초과 결과에는 그때까지 읽은 행 수가 없다 [12].
+그래서 `wireshark_aggregate`의 시간 초과 응답은 `coverage.scanned`를 0으로 싣는다 [14].
+실행 확인에서 시간 제한 5초로 끊긴 집계의 `coverage`는 `partial`이었고 `scanned`는 0이었다 [7].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 `tshark`의 끊긴 캡처 판정, 출력 길이나 줄 수로 결과를 정하는 도구, 출력 파일을 확인하는 파일 쓰기 도구에 적용된다 [3][17][18][13].
+`_is_capture_short_read`는 종료 코드 2일 때 표준 오류에서 `cut short`를 찾는다 [3].
+`wireshark_quick_analysis`는 실행마다 `success`가 참이고 출력이 10자를 넘을 때만 그 출력을 쓰고 아니면 그 절에 빈 결과 문구를 싣는다 [17].
+`wireshark_analyze_protocol`의 처리기와 몇몇 탐지 도구는 출력이 20자보다 짧으면 해당 트래픽이 없다는 문구를 돌려준다 [18].
+이 기준은 `protocol.py`, `ics.py`, `iot.py`, `anomaly.py`에 16곳 있고 `dhcp`는 `No DHCP traffic found in this capture.`를 돌려준다 [18].
+`wireshark_geoip_enrich`는 필드 추출 출력이 10자보다 짧으면 `No IP packets found in capture.`를 돌려준다 [19].
+`wireshark_scan_file_signatures`는 시그니처마다 패킷 목록을 검색하고 머리 줄을 뺀 줄 수를 일치 건수로 센다 [20].
+`wireshark_yara_scan`은 객체를 내보낸 폴더에 파일이 없으면 검사하지 않고 그 사실을 성공 응답으로 알린다 [21].
+`wireshark_capture`는 실행이 성공해도 출력 파일이 있는지 확인하고 없으면 `Capture completed but file not found`를 싣는다 [13].
+`wireshark_extract_frames`와 `wireshark_filter_save`는 출력 파일이 있을 때만 저장 위치 문장을 더한다 [22].
+
+**한계.** 다음 도구는 실패한 실행을 빈 결과와 구별하지 않는다.
+
+`wireshark_quick_analysis`는 실패한 실행과 출력이 짧은 실행에 같은 문구를 싣는다 [17].
+실행 확인에서 캡처 파일이 아닌 입력으로 부르자 일곱 실행이 모두 실패했는데 응답은 성공이었고 절마다 빈 결과 문구가 실렸다 [7].
+`wireshark_scan_file_signatures`는 실패한 검색을 일치 0건으로 센다 [20].
+실행 확인에서 같은 입력으로 부르자 검색 8번이 모두 실패했는데 응답은 `No embedded files detected via magic byte scan`이었다 [7].
+`wireshark_geoip_enrich`는 필드 추출이 실패하면 실패 결과를 성공 응답의 `data`에 넣어 돌려준다 [19].
+데이터베이스가 없어 이 경로는 실행하지 않았다.
+`wireshark_capture`는 출력 파일이 없을 때도 성공 응답을 돌려준다 [13].
+`wireshark_detect_exfiltration`은 두 추출이 실패해도 각각 0건으로 보고 외부 전송과 긴 DNS 질의가 없다는 문구를 성공 응답에 싣는다 [23].
+실행 확인에서 캡처 파일이 아닌 입력으로 부르자 두 추출이 모두 실패했는데 응답은 성공이었고 두 항목 모두 없다는 문구가 실렸다 [24].
+`wireshark_analyze_tcp_health`는 실패한 점검을 `N/A (filter not applicable)`로 적어 필터가 맞지 않는 경우와 실행 실패를 구별하지 않는다 [25].
+`wireshark_analyze_tcp_health`는 재전송 대화 추출이 실패하면 그 절에 제목만 싣고 실패를 알리지 않는다 [25].
+TLS 핸드셰이크, SMTP, QUIC, MQTT, Modbus 처리기와 `wireshark_extract_fingerprints`는 보조 추출이 실패하면 그 절을 알리지 않고 뺀다 [26].
+
+20자 기준은 머리 줄만 있는 출력을 걸러내지 못한다 [18].
+필드 추출 실행은 늘 머리 줄을 출력하므로 맞는 패킷이 없어도 필드 이름이 20자를 넘으면 이 기준을 통과한다 [18][27].
+실행 확인에서 DHCP가 없는 캡처로 부르자 응답은 필드 이름 8개로 된 머리 줄 하나를 성공 응답의 `data`로 실었다 [7].
+
+### T08.04 입력별 부분 완료 집계
+
+**구현.** 이 방식은 `wireshark_detect_port_scan`, `wireshark_detect_dos_attack`, `wireshark_yara_scan`에 적용된다 [28][29][21].
+`wireshark_detect_port_scan`은 SYN 추출이 실패하면 그 오류를 돌려주고 SYN-FIN 검사와 NULL 검사는 실패하면 검사 이름을 `failed_checks`에 넣고 계속한다 [28].
+실패한 검사가 있으면 `coverage.status`를 `partial`로, `coverage.failed_checks`에 검사 이름을 싣고 실패한 검사의 오류 문구를 `warnings`에 싣는다 [28].
+`wireshark_detect_dos_attack`은 SYN 추출이 실패하면 오류를 돌려주고 SYN-ACK, ICMP, UDP, DNS 증폭 검사 4개는 같은 방식으로 `failed_checks`에 모은다 [29].
+탐지가 없고 실패한 검사가 있으면 요약에 실패한 검사의 개수를 싣는다 [29].
+`wireshark_yara_scan`은 내보낸 파일마다 검사하고 검사하지 못한 파일 수를 세어 `<n> exported file(s) could not be scanned; result is incomplete`를 싣는다 [21].
+같은 응답에 내보낸 파일 수와 일치 건수를 싣는다 [21].
+
+여러 실행을 묶는 `wireshark_quick_analysis`와 `wireshark_scan_file_signatures`는 실행별 실패를 세지 않는다 [17][20].
+
+**한계.** `dest_dir`를 주면 `wireshark_yara_scan`은 그 폴더에 이미 있던 파일도 검사하고 내보낸 파일 수에 센다 [21].
+이 경로는 실행해 확인하지 않았다.
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 `wireshark_yara_scan`의 `yara-python` 검사와 `wireshark_aggregate`의 행 집계에 적용된다 [21][30].
+`rules.match`가 예외를 내면 그 파일을 검사하지 못한 파일로 세고 서버 로그에 적은 뒤 다음 파일을 검사한다 [21].
+행을 흘려 읽는 실행기는 행을 넘겨받는 소비 함수가 예외를 내면 프로세스를 끊고 `ExecutionError`와 `Command output could not be consumed`를 돌려준다 [30].
+`wireshark_aggregate`는 서버 코드의 집계 함수 `_AggregateAccumulator.add`를 소비 함수로 넘기고 실행기의 실패를 `coverage.status`가 `partial`인 오류로 싣는다 [14].
+실행 확인에서 시험 프로세스 안에서만 집계 함수가 예외를 내도록 바꾸고 부르자 이 오류가 왔고 `coverage.scanned`는 0이었다 [24].
+
+처리하지 않은 예외는 도구 호출 밖으로 나간다.
+MCP Python SDK 2.1.1은 도구 함수의 예외를 `Error executing tool <이름>` 오류로 바꾼다 [31].
+실행 확인에서 캡처 실행 파일이 하나도 없을 때 `wireshark_list_interfaces`의 응답은 이 한 줄이었다 [7].
+Bluetooth LE 해석 코드와 탐지 코드는 필드 값을 숫자로 바꾸다 `ValueError`가 나면 그 값만 건너뛴다 [32].
+
+**한계.** `wireshark_geoip_enrich`는 IP 조회에서 `AddressNotFoundError` 밖의 예외가 나면 서버 로그에만 적고 그 IP의 칸을 `—`로 채운다 [19].
+그 IP도 처리한 건수 `Enriched <n>/<m>`에 들어가므로 응답으로는 조회 실패와 값이 없는 IP를 구별할 수 없다 [19].
+`wireshark_quick_analysis`는 실행 중 난 예외를 빈 문자열로 바꾸고 그 절에 빈 결과 문구를 싣는다 [17].
+
+### 근거
+
+[1] `_run_command`는 종료 코드가 0이 아니면 오류로 정하고 출력이 잘리지 않았을 때만 이 확인을 하며 끊긴 캡처는 성공으로 바꾼다.
+
+```python
+            if proc.returncode != 0 and not truncated:
+                # A capture truncated mid-packet (a sniffer killed with pkill leaves
+                # exactly this) makes tshark exit 14 on 4.4+ and 2 on older releases
+                # while the rows dissected so far stay valid, and stderr carries the
+                # "cut short" note. Downgrade to a success envelope with that note
+                # instead of failing every tool on an otherwise usable capture.
+                if self._is_capture_short_read(binary, proc.returncode, error) and final_output:
+                    logger.warning(
+                        "tshark reported a truncated capture (exit %d); returning partial output: %s",
+                        proc.returncode,
+                        safe_command,
+                    )
+                else:
+                    logger.warning("Command failed (exit %d): %s", proc.returncode, safe_command)
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "type": "ExecutionError",
+                                "message": f"Command failed with exit code {proc.returncode}",
+                                "details": self._redact_diagnostics(error or final_output, cmd),
+                            },
+                        }
+                    )
+```
+
+[`src/wireshark_mcp/tshark/client.py:598-621`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L598-L621)
+
+[2] 행을 흘려 읽는 실행기는 끊긴 캡처에서 행이 있으면 성공으로 정하고 그 밖의 종료 코드는 오류로 정한다.
+
+```python
+            # Same downgrade as _run_command: exit 14 means the capture was
+            # truncated mid-packet; the rows already streamed are still valid.
+            # Old tshark (3.x/4.0/4.2) reports a mid-packet truncation with exit
+            # code 2; 4.4+ uses the dedicated warning code 14. Either way the rows
+            # dissected so far are valid, so both downgrade when output exists.
+            if proc.returncode != 0 and not (self._is_capture_short_read(binary, proc.returncode, stderr) and rows > 0):
+                return {
+                    "success": False,
+                    "rows": rows,
+                    "bytes_read": bytes_read,
+                    "error": {
+                        "type": "ExecutionError",
+                        "message": f"Command failed with exit code {proc.returncode}",
+                        "details": self._redact_diagnostics(stderr, cmd),
+                    },
+                }
+            result: FieldStreamResult = {"success": True, "rows": rows, "bytes_read": bytes_read}
+            if stderr:
+                result["stderr"] = self._redact_diagnostics(stderr, cmd)
+            return result
+```
+
+[`src/wireshark_mcp/tshark/client.py:432-451`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L432-L451)
+
+[3] 끊긴 캡처 판정은 `tshark`의 종료 코드 14, 또는 종료 코드 2와 `cut short` 문구다.
+
+```python
+    @staticmethod
+    def _is_capture_short_read(binary: str, returncode: int | None, stderr: str) -> bool:
+        """Exit 2 is generic on older tshark: only a short-read diagnostic qualifies."""
+        return binary in {"tshark", "tshark.exe"} and (
+            returncode == 14 or (returncode == 2 and "cut short" in stderr.lower())
+        )
+```
+
+[`src/wireshark_mcp/tshark/client.py:52-57`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L52-L57)
+
+[4] 결과는 종료 코드가 0일 때만 캐시에 넣고 출력이 잘리면 표준 오류를 싣지 않는다.
+
+```python
+            for out_path in self._output_paths(cmd):
+                self._cache.invalidate_file(out_path)
+
+            # The stdout-only cache cannot retain the short-read warning. Do not
+            # turn a second read of an incomplete capture into an unqualified hit.
+            if pcap_file and raw_to_cache is not None and proc.returncode == 0:
+                self._cache.put(pcap_file, cmd, raw_to_cache)
+
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:623-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L623-L632)
+
+[5] Wireshark 4.0.17의 `tshark`는 파일 처리 오류에 종료 코드 2를 쓴다: [`tshark.c:2286-2310`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L2286-L2310).
+
+[6] Wireshark 4.6.7의 `tshark`는 읽기 오류를 `PROCESS_FILE_READ_ERROR`로 정하고 `WS_EXIT_READ_ERROR`(14)로 끝낸다: [`tshark.c:4371-4376`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/tshark.c#L4371-L4376), [`tshark.c:2659-2664`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/tshark.c#L2659-L2664), [`include/ws_exit_codes.h:29`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/include/ws_exit_codes.h#L29).
+
+[7] (실행 확인) 주 환경에서 저장소의 시험용 캡처, 캡처 파일이 아닌 입력, 직접 만든 150만 패킷 캡처로 도구와 실행기를 부르고 도구 경로 환경변수를 없는 파일로 바꾼 프로세스에서도 불렀다.
+
+[8] (실행 확인) Windows에서 Wireshark 4.6.7로 같은 입력과 두 번째 패킷 머리를 손상시킨 캡처를 읽었다.
+
+[9] `-v` 실행은 5초 시간 제한만 두고 종료 코드를 보지 않는다.
+
+```python
+                proc = await asyncio.create_subprocess_exec(tool_path, "-v", **process_kwargs)
+                try:
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return {"available": True, "version": "unknown"}
+                version_line = stdout.decode("utf-8").split("\n")[0]
+                version = version_line.split()[-1] if version_line else "unknown"
+                return {"available": True, "version": version}
+            except Exception:
+                return {"available": True, "version": "unknown"}
+```
+
+[`src/wireshark_mcp/tshark/_capability.py:125-136`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L125-L136)
+
+[10] `wireshark_aggregate`는 성공한 실행에 경고가 없으면 `coverage.status`를 `complete`로 둔다.
+
+```python
+        return envelope_response(
+            result,
+            warnings=agg_warnings if agg_warnings else None,
+            coverage={
+                "status": "complete" if not agg_warnings else "partial",
+                "scanned": matched_packets,
+                "limit": scan_limit,
+            },
+            stderr=streamed.get("stderr"),
+        )
+```
+
+[`src/wireshark_mcp/tools/stats.py:479-488`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L479-L488)
+
+[11] `_run_command`는 출력 읽기 전체에 시간 제한을 두고 넘거나 취소되면 프로세스를 끊는다: [`src/wireshark_mcp/tshark/client.py:548-580`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L548-L580).
+
+[12] 행을 흘려 읽는 실행기는 시간 초과에 행 수 없이 `TimeoutError`를 돌려준다.
+
+```python
+        try:
+            result = await asyncio.wait_for(consume(), timeout=timeout)
+            if not result["success"]:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                await stop_stderr_reader()
+            return result
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            await stop_stderr_reader()
+            return {
+                "success": False,
+                "error": {"type": "TimeoutError", "message": f"Command timed out after {timeout} seconds"},
+            }
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            await stop_stderr_reader()
+            raise
+```
+
+[`src/wireshark_mcp/tshark/client.py:453-478`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L453-L478)
+
+[13] `wireshark_capture`는 출력 파일이 없어도 성공 응답을 돌려주고 실행기에 캡처 시간보다 10초 긴 시간 제한을 준다.
+
+```python
+    @mcp.tool()
+    async def wireshark_capture(
+        interface: str,
+        output_file: str,
+        duration_seconds: int = 10,
+        packet_count: int = 0,
+        capture_filter: str = "",
+        ring_buffer: str = "",
+    ) -> str:
+        """Capture live network traffic. capture_filter: BPF syntax. ring_buffer: "filesize:1024,files:5"."""
+        res = await client.capture_packets(
+            interface, output_file, duration_seconds, packet_count, capture_filter, ring_buffer=ring_buffer
+        )
+
+        wrapped = parse_tool_result(res)
+        if not wrapped["success"]:
+            return normalize_tool_result(wrapped)
+
+        if os.path.exists(output_file):
+            return success_response(f"Capture saved to {output_file}\n{wrapped['data']}")
+
+        return success_response(f"Capture completed but file not found:\n{wrapped['data']}")
+```
+
+[`src/wireshark_mcp/tools/utility.py:57-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L57-L78)
+
+```python
+        return await self._run_command(cmd, timeout=max(30, duration + 10))
+```
+
+[`src/wireshark_mcp/tshark/_capture.py:129-129`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L129-L129)
+
+[14] `wireshark_aggregate`의 행 상한과 시간 제한은 환경변수로 정하고 실패하면 읽은 행 수를 `coverage.scanned`에 싣는다: [`src/wireshark_mcp/tools/stats.py:24-63`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L24-L63), [`src/wireshark_mcp/tools/stats.py:391-414`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L391-L414).
+
+```python
+        streamed = await client.stream_fields(
+            pcap_file,
+            extracted_fields,
+            accumulator.add,
+            display_filter,
+            max_rows=scan_limit,
+            timeout=scan_timeout,
+        )
+        matched_packets = streamed.get("rows", 0)
+        if not streamed.get("success", False):
+            stream_error = streamed.get("error", {})
+            error_type = stream_error.get("type", "ExecutionError")
+            message = stream_error.get("message", "tshark field stream failed")
+            details = stream_error.get("details")
+            return error_response(
+                message,
+                error_type,
+                details,
+                coverage={
+                    "status": "partial",
+                    "scanned": matched_packets,
+                    "limit": scan_limit,
+                },
+            )
+```
+
+[`src/wireshark_mcp/tools/stats.py:391-414`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L391-L414)
+
+[15] `_run_command`는 출력 상한을 넘으면 `LimitExceeded`를 돌려준다.
+
+```python
+            if byte_limit_exceeded:
+                logger.warning("Command exceeded output limit and was terminated: %s", safe_command)
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "LimitExceeded",
+                            "message": "Wireshark subprocess output exceeded the safety limit",
+                            "details": (
+                                f"stdout is limited to {self.MAX_STDOUT_BYTES} bytes and "
+                                f"stderr to {self.MAX_STDERR_BYTES} bytes"
+                            ),
+                        },
+                    }
+                )
+```
+
+[`src/wireshark_mcp/tshark/client.py:582-596`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L582-L596)
+
+[16] 행을 흘려 읽는 실행기의 출력 상한과 행 상한이다.
+
+```python
+                if bytes_read > self.MAX_STREAM_STDOUT_BYTES:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    return {
+                        "success": False,
+                        "rows": rows,
+                        "bytes_read": bytes_read,
+                        "error": {
+                            "type": "LimitExceeded",
+                            "message": f"Streamed stdout exceeded {self.MAX_STREAM_STDOUT_BYTES} bytes",
+                        },
+                    }
+                line = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not header_seen:
+                    header_seen = True
+                    continue
+                if not line:
+                    continue
+                if rows >= max_rows:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    return {
+                        "success": False,
+                        "rows": rows,
+                        "bytes_read": bytes_read,
+                        "error": {
+                            "type": "LimitExceeded",
+                            "message": f"Matching packet rows exceed the {max_rows} row limit",
+                        },
+                    }
+```
+
+[`src/wireshark_mcp/tshark/client.py:386-415`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L386-L415)
+
+[17] `wireshark_quick_analysis`는 예외를 빈 값으로 바꾸고 `success`와 출력 길이로 절마다 결과를 쓸지 정한다: [`src/wireshark_mcp/tools/agents.py:19-33`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L19-L33), [`src/wireshark_mcp/tools/agents.py:46-154`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L46-L154).
+
+```python
+def _extract_data(result: str) -> str | None:
+    wrapped = parse_tool_result(result)
+    if wrapped["success"]:
+        data = wrapped.get("data", "")
+        if isinstance(data, str) and len(data.strip()) > 10:
+            return data
+    return None
+
+
+async def _safe_run(coro: Any, default: str | None = None) -> str | None:
+    try:
+        return await coro  # type: ignore[no-any-return]
+    except Exception as e:
+        logger.debug("Safe run caught exception: %s", e)
+        return default
+```
+
+[`src/wireshark_mcp/tools/agents.py:19-33`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L19-L33)
+
+[18] 출력 길이 20자 기준으로 빈 결과를 정한다: [`src/wireshark_mcp/tools/protocol.py:284-292`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L284-L292), [`src/wireshark_mcp/tools/protocol.py:499-514`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L499-L514), [`src/wireshark_mcp/tools/ics.py:37`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L37), [`src/wireshark_mcp/tools/anomaly.py:48`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L48).
+
+[19] `wireshark_geoip_enrich`는 추출 실패를 성공 응답에 넣고 조회 예외를 서버 로그에만 적는다: [`src/wireshark_mcp/tools/geoip.py:101-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L101-L148).
+
+[20] 파일 시그니처 검색은 실패한 검색을 0건으로 센다.
+
+```python
+        async def _search(file_type: str, magic_hex: str) -> tuple[str, int]:
+            result = await client.search_packet_contents(pcap_file, magic_hex, search_type="hex", limit=50)
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return file_type, 0
+            data = wrapped.get("data", "")
+            if not isinstance(data, str):
+                return file_type, 0
+            # Packet-list output is a header row plus one row per match; count real matches only.
+            rows = [ln for ln in data.splitlines() if ln.strip()]
+            return file_type, max(0, len(rows) - 1)
+```
+
+[`src/wireshark_mcp/tools/forensics.py:125-135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L125-L135)
+
+[21] `wireshark_yara_scan`은 파일마다 검사하고 예외가 난 파일 수를 세어 결과가 불완전하다고 싣는다: [`src/wireshark_mcp/tools/yara_scan.py:111-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L111-L183).
+
+[22] 프레임 추출과 필터 저장은 출력 파일이 있을 때만 저장 위치를 더한다.
+
+```python
+        result = await self._run_command(cmd)
+
+        ok, text = self._unwrap(result)
+        if ok and os.path.exists(output_file):
+            return self._ok(f"Extracted frames {frame_ranges} to {output_file}\n{text}")
+        return result
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:195-200`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L195-L200)
+
+```python
+        result = await self._run_command(cmd)
+
+        ok, text = self._unwrap(result)
+        if ok and os.path.exists(output_file):
+            return self._ok(f"Filtered packets saved to {output_file}\n{text}")
+        return result
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:245-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L245-L250)
+
+[23] `wireshark_detect_exfiltration`은 두 추출의 `success`가 거짓이면 그 결과를 건너뛰고 0건과 없다는 문구를 싣는다: [`src/wireshark_mcp/tools/anomaly.py:144-205`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L144-L205).
+
+```python
+        # --- DNS query length analysis ---
+        long_dns_queries: list[dict[str, str]] = []
+        if dns_wrapped["success"]:
+            dns_data = dns_wrapped.get("data", "")
+            if isinstance(dns_data, str) and len(dns_data.strip()) > 20:
+                rows = _rows_with_header(dns_data)
+                if len(rows) > 1:
+                    for row in rows[1:]:
+                        if len(row) < 3:
+                            continue
+                        src = row[0].strip().strip('"')
+                        qname = row[1].strip().strip('"')
+                        qlen = row[2].strip().strip('"')
+                        long_dns_queries.append({"src": src, "query": qname, "length": qlen})
+
+        output_parts.append(f"\nLong DNS queries (>50 chars): {len(long_dns_queries)}")
+        if long_dns_queries:
+            output_parts.append(f"\n{CRIT} Suspicious long DNS queries (first 10):\n")
+            for entry in long_dns_queries[:10]:
+                output_parts.append(f"  {CRIT} {entry['src']} | len={entry['length']} | {entry['query']}")
+        else:
+            output_parts.append(f"\n{OK} No abnormally long DNS queries detected.")
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:184-205`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L184-L205)
+
+[24] (실행 확인) 컨테이너에서 서버의 `call_tool`을 같은 프로세스에서 불러 캡처 파일이 아닌 입력으로 `wireshark_detect_exfiltration`을 부르고 집계 함수가 예외를 내도록 시험 프로세스 안에서만 바꾼 뒤 `wireshark_aggregate`를 불렀다.
+
+[25] `wireshark_analyze_tcp_health`는 실패한 점검을 `N/A`로 적고 재전송 대화 추출이 실패하면 그 내용을 싣지 않는다.
+
+```python
+        results: list[str] = []
+        for (name, _), count in zip(checks, counts, strict=True):
+            if count < 0:
+                results.append(f"  [-] {name}: N/A (filter not applicable)")
+                continue
+```
+
+[`src/wireshark_mcp/tools/protocol.py:61-65`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L61-L65)
+
+```python
+        results.append("\n--- Top Conversations with Issues ---")
+        retrans_wrapped = parse_tool_result(retrans_conv)
+        if retrans_wrapped["success"]:
+            results.append(retrans_wrapped.get("data", "No retransmission data"))
+```
+
+[`src/wireshark_mcp/tools/protocol.py:75-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L75-L78)
+
+[26] 처리기의 보조 추출은 `success`가 참일 때만 그 절을 싣는다: [`src/wireshark_mcp/tools/protocol.py:195-197`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L195-L197), [`src/wireshark_mcp/tools/protocol.py:225-229`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L225-L229), [`src/wireshark_mcp/tools/protocol.py:238-242`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L238-L242), [`src/wireshark_mcp/tools/protocol.py:327-331`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L327-L331), [`src/wireshark_mcp/tools/protocol.py:450-454`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L450-L454), [`src/wireshark_mcp/tools/ics.py:90-94`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L90-L94), [`src/wireshark_mcp/tools/forensics.py:83-87`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L83-L87).
+
+[27] 필드 추출은 늘 `-E header=y`로 `tshark`를 실행한다.
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file, "-T", "fields"]
+        for f in fields:
+            cmd.extend(["-e", f])
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+
+        cmd.extend(
+            [
+                "-E",
+                "header=y",
+                "-E",
+                f"separator={separator}",
+                "-E",
+                f"aggregator={aggregator}",
+                "-E",
+                "quote=d",
+            ]
+        )
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:30-47`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L30-L47)
+
+[28] 포트 스캔 탐지는 보조 검사의 실패를 `failed_checks`와 `coverage`에 싣는다: [`src/wireshark_mcp/tools/threat.py:65-121`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L65-L121), [`src/wireshark_mcp/tools/threat.py:231-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L231-L250).
+
+```python
+        any_truncated = (
+            syn_wrapped.get("truncated") is True
+            or synfin_wrapped.get("truncated") is True
+            or null_wrapped.get("truncated") is True
+        )
+        coverage_data: dict[str, Any] = {
+            "status": "partial" if (warnings or failed_checks or any_truncated) else "complete",
+            "scanned": len(src_to_ports),
+            "limit": limit,
+        }
+        if failed_checks:
+            coverage_data["failed_checks"] = failed_checks
+
+        return envelope_response(
+            data={"findings": findings, "summary": "\n".join(summary_lines)},
+            scope={"pcap_file": pcap_file, "threshold": threshold},
+            coverage=coverage_data,
+            truncated=any_truncated,
+            warnings=warnings if warnings else None,
+        )
+```
+
+[`src/wireshark_mcp/tools/threat.py:231-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L231-L250)
+
+[29] DoS 탐지는 검사 4개의 실패를 `failed_checks`에 모으고 실패 개수를 요약에 싣는다: [`src/wireshark_mcp/tools/threat.py:432-800`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L432-L800).
+
+[30] 행을 흘려 읽는 실행기는 소비 함수가 낸 예외를 처리해 프로세스를 끊고 `ExecutionError`를 돌려준다.
+
+```python
+        except Exception as exc:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            await stop_stderr_reader()
+            logger.exception("Stream command failed while consuming rows: %s", self._redact_command(cmd))
+            return {
+                "success": False,
+                "error": {
+                    "type": "ExecutionError",
+                    "message": "Command output could not be consumed",
+                    "details": str(exc),
+                },
+            }
+```
+
+[`src/wireshark_mcp/tshark/client.py:479-493`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L479-L493)
+
+[31] MCP Python SDK 2.1.1의 도구 실행은 예외를 `UnexpectedToolError`로 바꾼다: [`src/mcp/server/mcpserver/tools/base.py:199-210`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/tools/base.py#L199-L210).
+
+[32] 해석 코드는 값 변환의 `ValueError`가 나면 그 값을 건너뛴다: [`src/wireshark_mcp/tools/bluetooth.py:86-92`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L86-L92), [`src/wireshark_mcp/tools/threat.py:14-19`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L14-L19), [`src/wireshark_mcp/tools/anomaly.py:66-70`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L66-L70).

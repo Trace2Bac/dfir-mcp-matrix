@@ -1,0 +1,208 @@
+---
+cell: P05
+details:
+- id: P05.01
+- id: P05.03
+- id: P05.04
+- id: P05.05
+---
+
+# P05 사건 자료 정리
+
+### P05.01 모델 도구로 삭제·초기화
+
+**구현.** 이 방식은 `wireshark_capture`의 `ring_buffer` 인자에 적용된다 [1].
+`wireshark_capture`는 `ring_buffer`로 파일 크기(`filesize`)와 파일 개수(`files`)를 받으면 캡처 실행 파일(`dumpcap`, 없으면 `tshark`)에 `-b filesize:<KiB>`와 `-b files:<개수>`를 넘긴다 [1].
+서버는 파일 개수를 1개에서 10개까지 받는다 [1].
+`ring_buffer`를 받지 않은 호출은 링 버퍼를 쓰지 않고 서버가 이 값을 스스로 정하는 경로는 없다 [1].
+Wireshark 4.0.17의 링 버퍼는 새 파일을 열 때 개수 한도를 넘으면 같은 자리를 쓰던 가장 오래된 파일을 지운다 [2].
+루프백에서 파일 크기 4 KiB, 개수 2개로 캡처하자 번호가 187번까지 올라간 파일 가운데 마지막 2개만 남았다 [3].
+링 버퍼 캡처의 응답은 `Capture completed but file not found`였고 남은 파일과 지운 파일을 적지 않았다 [3][4].
+
+이 인자 밖에는 사건 자료를 지우거나 초기화하는 MCP 도구와 사용자 명령이 없다.
+결과 캐시를 비우는 `ResultCache.clear`는 있지만 서버 코드에서 부르는 곳이 없다 [5].
+사용자 CLI의 `uninstall`은 클라이언트 설정에서 이 서버의 항목을 지우고 캡처 파일이나 서버가 만든 파일은 건드리지 않는다 [6].
+
+### P05.03 자동 정리
+
+**구현.** 이 방식은 `wireshark_yara_scan`의 임시 내보내기 폴더에 적용된다 [7].
+`wireshark_yara_scan`은 `dest_dir`를 받지 않으면 허용 폴더 안에 `wireshark_yara_` 접두어의 임시 폴더를 `mkdtemp`로 만들고 객체를 그 폴더로 내보낸다 [7][8].
+검사를 마치거나 도중에 실패하면 `finally`에서 그 폴더를 통째로 지운다 [7].
+`dest_dir`를 받은 호출은 내보낸 파일을 지우지 않는다 [7].
+임시 폴더를 쓴 두 호출 뒤에 허용 폴더에는 원래 캡처 파일만 남았고 `dest_dir`를 준 호출 뒤에는 내보낸 파일이 남았다 [9].
+내보낼 객체가 없던 호출에서도 임시 폴더가 지워졌다 [9].
+
+**한계.** `wireshark_yara_scan`의 응답은 호출이 끝나면 지워지는 임시 폴더를 `Exported files: <경로> (temporary)`로 적고 지웠다는 사실은 적지 않는다 [7][9].
+`wireshark_yara_scan`은 임시 폴더를 `ignore_errors=True`로 지우므로 지우지 못해도 알리지 않는다 [7].
+
+### P05.04 원본 증거까지 삭제 대상에 포함
+
+**구현.** 이 방식은 `wireshark_capture`의 링 버퍼 캡처에 적용된다 [1].
+링 버퍼가 지우는 파일은 서버가 실시간 캡처로 수집한 캡처 파일이다 [1][2].
+서버는 개수 한도만 넘기고 한도를 넘어 지워질 파일을 다른 곳으로 옮기거나 남기지 않는다 [1].
+그래서 한도를 넘는 동안 수집한 앞부분의 패킷은 캡처 파일로 남지 않는다 [3].
+
+### P05.05 원본 증거를 삭제 대상에서 제외
+
+**구현.** 이 방식은 `wireshark_yara_scan`의 임시 폴더 정리에 적용된다 [7].
+지우는 대상은 그 호출이 `mkdtemp`로 새로 만든 폴더 하나다 [7][8].
+분석한 캡처 파일은 이 폴더 밖에 있으므로 지우는 대상에 없다 [9].
+
+### 근거
+
+[1] `wireshark_capture`의 링 버퍼 인자 검사와 캡처 명령 구성이다: [`src/wireshark_mcp/tshark/_capture.py:25-129`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L25-L129).
+
+```python
+    MAX_CAPTURE_DURATION = 300
+    MAX_CAPTURE_PACKETS = 1_000_000
+    MAX_CAPTURE_KIB = 102_400
+    MAX_RING_FILES = 10
+    _RING_PART = re.compile(r"^(filesize|files):(\d{1,9})$")
+```
+
+[`src/wireshark_mcp/tshark/_capture.py:14-18`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L14-L18)
+
+```python
+            if ring_parts["filesize"] * ring_parts["files"] > self.MAX_CAPTURE_KIB:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "InvalidParameter",
+                            "message": f"ring_buffer total storage must not exceed {self.MAX_CAPTURE_KIB} KiB",
+                        },
+                    }
+                )
+
+        for key in ("filesize", "files"):
+            if key in ring_parts:
+                cmd.extend(["-b", f"{key}:{ring_parts[key]}"])
+
+        if "filesize" not in ring_parts:
+            cmd.extend(["-a", f"filesize:{self.MAX_CAPTURE_KIB}"])
+
+        if duration > 0:
+            cmd.extend(["-a", f"duration:{duration}"])
+        if packet_count > 0:
+            cmd.extend(["-c", str(packet_count)])
+
+        return await self._run_command(cmd, timeout=max(30, duration + 10))
+```
+
+[`src/wireshark_mcp/tshark/_capture.py:106-129`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capture.py#L106-L129)
+
+[2] Wireshark 4.0.17의 링 버퍼는 파일 개수가 정해져 있으면 그 자리의 앞 파일을 지우고 새 파일을 연다: [`ringbuffer.c:213-260`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L213-L260), [`ringbuffer.c:438-472`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L438-L472).
+
+[3] (실행 확인) 네트워크를 끈 컨테이너에서 root로 `wireshark_capture`를 `lo` 인터페이스, `duration_seconds=4`, `ring_buffer="filesize:4,files:2"`로 부르고 그동안 루프백으로 UDP 패킷 467개를 보냈다.
+캡처가 끝난 뒤 출력 폴더에는 `ring_00186_<시각>.pcapng`와 `ring_00187_<시각>.pcapng` 두 파일만 있었고 응답은 `Capture completed but file not found:`였다.
+
+[4] 캡처 도구는 받은 출력 경로에 파일이 있는지만 보고 응답 문장을 고른다.
+
+```python
+        res = await client.capture_packets(
+            interface, output_file, duration_seconds, packet_count, capture_filter, ring_buffer=ring_buffer
+        )
+
+        wrapped = parse_tool_result(res)
+        if not wrapped["success"]:
+            return normalize_tool_result(wrapped)
+
+        if os.path.exists(output_file):
+            return success_response(f"Capture saved to {output_file}\n{wrapped['data']}")
+
+        return success_response(f"Capture completed but file not found:\n{wrapped['data']}")
+```
+
+[`src/wireshark_mcp/tools/utility.py:67-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L67-L78)
+
+[5] 결과 캐시를 비우는 함수다.
+
+```python
+    def clear(self) -> None:
+        """Clear the entire cache."""
+        self._cache.clear()
+        self._key_paths.clear()
+```
+
+[`src/wireshark_mcp/tshark/cache.py:119-122`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L119-L122)
+
+[6] `uninstall`은 클라이언트 설정의 서버 항목을 지운다.
+
+```python
+    if action in {"update", "uninstall"} and not present:
+        return content
+    if action == "uninstall":
+        del servers[SERVER_NAME]
+```
+
+[`src/wireshark_mcp/installer/_config_edit.py:90-93`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/installer/_config_edit.py#L90-L93)
+
+[7] `wireshark_yara_scan`의 임시 폴더 생성과 정리다: [`src/wireshark_mcp/tools/yara_scan.py:99-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L183).
+
+```python
+        use_temp = not dest_dir
+        if use_temp:
+            temp_result = client._create_temporary_output_dir("wireshark_yara_")
+            if not temp_result["success"]:
+                return error_response(
+                    temp_result["error"]["message"],
+                    error_type=temp_result["error"]["type"],
+                )
+            export_dir = str(temp_result["path"])
+        else:
+            export_dir = dest_dir
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:99-109`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L109)
+
+```python
+            if use_temp:
+                output.append(f"\nExported files: {export_dir} (temporary)")
+            else:
+                output.append(f"\nExported files saved to: {export_dir}")
+
+            return success_response("\n".join(output))
+
+        finally:
+            if use_temp and os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:174-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L174-L183)
+
+[8] 임시 폴더는 허용 폴더를 차례로 시도해 `mkdtemp`로 만든다.
+
+```python
+    def _create_temporary_output_dir(self, prefix: str) -> dict[str, Any]:
+        """Create a private temporary directory inside an explicitly allowed root."""
+        if not self._allowed_dirs:
+            return {
+                "success": False,
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": (
+                        "Temporary file writes are disabled. Set WIRESHARK_MCP_ALLOWED_DIRS "
+                        "to one or more dedicated writable directories."
+                    ),
+                },
+            }
+
+        for root in self._allowed_dirs:
+            try:
+                return {"success": True, "path": tempfile.mkdtemp(prefix=prefix, dir=root)}
+            except OSError:
+                continue
+        return {
+            "success": False,
+            "error": {
+                "type": "PermissionDenied",
+                "message": "No configured allowed directory is writable",
+            },
+        }
+```
+
+[`src/wireshark_mcp/tshark/_validation.py:160-185`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L160-L185)
+
+[9] (실행 확인) 허용 폴더에 HTTP 캡처 파일 하나를 두고 `wireshark_yara_scan`을 `dest_dir` 없이 `http`와 `tftp`로 한 번씩 불렀다.
+`http` 호출의 응답은 `Exported files: /work/s2/yroot/wireshark_yara_tcifgh1x (temporary)`를 적었고 두 호출 뒤 허용 폴더에는 캡처 파일만 있었다.
+`dest_dir`를 준 호출 뒤에는 그 폴더에 내보낸 `sample.txt`가 남았다.

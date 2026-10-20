@@ -1,0 +1,156 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `tshark`·`capinfos` 출력을 그대로 싣는 도구에 적용된다 [1][2].
+`wireshark_get_packet_list`는 `tshark`의 `_ws.col.Time` 열을 바꾸지 않고 싣는다 [1].
+서버는 `tshark`에 시각 형식 옵션 `-t`를 넘기지 않는다 [1].
+이 열은 첫 패킷 기준 상대 초로 실렸다 [3].
+`wireshark_get_packet_details`와 `wireshark_extract_fields`는 `frame.time`·`frame.time_epoch`·`frame.time_relative` 같은 필드를 `tshark`가 낸 문자열 그대로 싣는다 [2][4].
+`wireshark_get_file_info`는 `capinfos`의 첫 패킷·마지막 패킷 시각 줄을 그대로 싣는다 [3].
+`capinfos` 4.0.17은 이 시각을 서버 프로세스의 현지 시간대로 바꿔 시간대 표기 없이 적는다 [5].
+같은 캡처 파일에서 컨테이너(UTC)는 `2023-11-14 22:13:20.000000`을, Windows(KST)는 `2023-11-15 07:13:20.000000`을 실었다 [3].
+
+서버가 시각을 바꾼 값만 싣는 도구도 있다.
+BLE 분석은 `frame.time_relative` 문자열을 `float`로 바꿔 `time`에 싣고 원래 문자열을 싣지 않는다 [6].
+`wireshark_aggregate`는 시간 묶음을 주면 `frame.time_relative`를 묶음 폭으로 내린 `time_bucket_start`·`time_bucket_end`만 싣는다 [7].
+`wireshark_detect_beaconing`은 `frame.time_epoch`로 연결 간격을 계산해 평균 간격만 싣고 시각은 싣지 않는다 [8].
+
+`capinfos`의 줄 이름과 `frame.time`의 형식은 Wireshark 버전에 따라 다르고 서버는 이를 맞추지 않는다 [4][3].
+4.0.17의 `capinfos`는 `First packet time:`을, Windows의 4.6.7은 `Earliest packet time:`을 적었다 [3].
+4.6.7은 `_ws.col.Time` 열의 머리글을 `_ws.col.cls_time`으로 적었다 [3].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 `frame.time`을 싣는 `wireshark_get_packet_details`와 `wireshark_extract_fields`에 적용된다 [2][4].
+`tshark` 4.0.17은 `frame.time`을 표시용 문자열로 낼 때 시간대 이름을 붙인다 [4].
+컨테이너에서 이 값은 `Nov 14, 2023 22:13:20.000000000 UTC`였다 [3].
+`tshark` 4.6.7은 같은 필드를 ISO 8601 형식으로 내고 현지 시각이면 오프셋을 붙인다 [9].
+Windows에서 `wireshark_extract_fields`의 이 값은 `2023-11-15T07:13:20.000000000+0900`이었다 [3].
+4.6.7은 `wireshark_get_packet_details`가 쓰는 `-T json` 출력에서는 절대 시각을 UTC로 바꿔 `Z`를 붙인다 [2][10].
+Windows에서 같은 패킷을 `wireshark_get_packet_details`가 쓰는 클라이언트 메서드로 읽자 `frame.time`은 `2023-11-14T22:13:20.000000000Z`였다 [11].
+서버는 이 값들을 바꾸지 않는다 [2].
+
+**한계.** 서버가 만든 시각 값에는 시간대, 단위, 기준점이 없다.
+BLE 분석의 `time`은 첫 패킷 기준 초지만 필드 이름과 값에 단위와 기준점이 없다 [6].
+`wireshark_aggregate`의 `time_bucket_start`·`time_bucket_end`도 첫 패킷 기준 초이고 응답에는 묶음 폭 `time_bucket_seconds`만 단위를 밝힌다 [7].
+`_ws.col.Time` 열과 `capinfos`의 시각에도 단위나 시간대 표기가 없다 [1][5].
+
+### 근거
+
+[1] 패킷 목록의 기본 열이고 `tshark` 명령에 `-t`가 없다.
+
+```python
+        if custom_columns:
+            fields = custom_columns
+        else:
+            fields = [
+                "frame.number",
+                "_ws.col.Time",
+                "_ws.col.Source",
+                "_ws.col.Destination",
+                "_ws.col.Protocol",
+                "_ws.col.Length",
+                "_ws.col.Info",
+            ]
+
+        cmd = [self.tshark_path, "-r", pcap_file, "-T", "fields"]
+        for f in fields:
+            cmd.extend(["-e", f])
+
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+
+        cmd.extend(["-E", "header=y", "-E", "separator=/t", "-E", "quote=d", "-E", "occurrence=f"])
+
+        return await self._run_command(cmd, limit_lines=limit, offset_lines=offset)
+```
+
+[`src/wireshark_mcp/tshark/_packets.py:60-82`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L60-L82)
+
+[2] 패킷 상세와 필드 추출은 `tshark` 출력을 그대로 넘긴다: [`src/wireshark_mcp/tshark/_packets.py:84-109`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L84-L109), [`src/wireshark_mcp/tshark/_extraction.py:14-56`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L14-L56), [`src/wireshark_mcp/tools/extract.py:20-56`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L20-L56).
+
+[3] (실행 확인) 3,000패킷 캡처 파일에서 패킷 목록의 `_ws.col.Time` 열은 `0.000000`, `0.100000`처럼 첫 패킷 기준 초였다.
+컨테이너의 `tshark` 4.0.17은 `frame.time`을 `Nov 14, 2023 22:13:20.000000000 UTC`로, `frame.time_epoch`를 `1700000000.000000000`으로, `capinfos`의 첫 줄 시각을 `First packet time:   2023-11-14 22:13:20.000000`으로 실었다.
+Windows의 4.6.7은 `frame.time`을 `2023-11-15T07:13:20.000000000+0900`으로, `capinfos` 시각을 `Earliest packet time: 2023-11-15 07:13:20.000000`으로 싣고 `_ws.col.Time` 열의 머리글을 `_ws.col.cls_time`으로 적었다.
+
+[4] Wireshark 4.0.17은 절대 시각 필드의 표시용 문자열에 시간대를 붙인다: [`epan/ftypes/ftype-time.c:378-402`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/ftypes/ftype-time.c#L378-L402).
+
+[5] `capinfos` 4.0.17은 `localtime`으로 바꾼 시각을 시간대 없이 적는다: [`capinfos.c:386-408`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capinfos.c#L386-L408).
+
+[6] BLE 분석은 상대 시각을 `float`로 바꿔 `time`에 싣는다.
+
+```python
+            frame_raw = _strip(parts[0])
+            frame = int(frame_raw) if frame_raw.isdigit() else None
+            try:
+                time_value: float | None = float(_strip(_col(parts, 1)))
+            except ValueError:
+                time_value = None
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:921-926`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L921-L926)
+
+[`src/wireshark_mcp/tools/bluetooth.py:1300-1306`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1300-L1306)
+
+[7] 시간 묶음의 시작과 끝을 계산해 싣는다.
+
+```python
+    def _render_groups(self) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        for key, count in self.grouped_counts.items():
+            key_index = 0
+            rendered_key: dict[str, Any] = {}
+            if self.time_bucket_seconds > 0:
+                bucket_start = key[key_index]
+                rendered_key["time_bucket_start"] = bucket_start
+                rendered_key["time_bucket_end"] = round(bucket_start + self.time_bucket_seconds, 9)
+                key_index += 1
+```
+
+[`src/wireshark_mcp/tools/stats.py:228-237`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L228-L237)
+
+[`src/wireshark_mcp/tools/stats.py:129-142`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L129-L142)
+
+[8] 비컨 탐지는 시각으로 간격만 계산한다.
+
+```python
+        # Analyze each group for beaconing behavior
+        findings: list[dict[str, object]] = []
+        for (src, dst, port), timestamps in groups.items():
+            if len(timestamps) < min_connections:
+                continue
+            timestamps.sort()
+            intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            jitter = _compute_jitter(intervals)
+            if jitter <= max_jitter:
+                mean_interval = statistics.mean(intervals)
+                confidence = 1.0 - jitter
+                findings.append(
+                    {
+                        "src": src,
+                        "dst": dst,
+                        "port": port,
+                        "connections": len(timestamps),
+                        "mean_interval_sec": round(mean_interval, 3),
+                        "jitter": round(jitter, 4),
+                        "confidence": round(confidence, 4),
+                    }
+                )
+```
+
+[`src/wireshark_mcp/tools/anomaly.py:76-97`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L76-L97)
+
+[9] Wireshark 4.6.7은 표시용 절대 시각을 ISO 8601로 낸다: [`epan/ftypes/ftype-time.c:438-505`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/epan/ftypes/ftype-time.c#L438-L505).
+
+[10] Wireshark 4.6.7은 JSON 출력의 절대 시각 표현을 UTC ISO 8601로 정하고 `-T json` 출력이 이 표현을 쓴다: [`epan/ftypes/ftype-time.c:483-498`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/epan/ftypes/ftype-time.c#L483-L498), [`epan/print.c:1015-1019`](https://github.com/wireshark/wireshark/blob/b439fb7b47a9fe9a01ccbb6078ac20737155af80/epan/print.c#L1015-L1019).
+
+[11] (실행 확인) Windows의 `tshark` 4.6.7(KST)에서 클라이언트 메서드 `get_packet_details`와 `extract_fields`로 같은 패킷의 `frame.time`을 읽자 `2023-11-14T22:13:20.000000000Z`와 `2023-11-15T07:13:20.000000000+0900`이 나왔다.
+컨테이너의 `tshark` 4.0.17(`TZ=Asia/Seoul`)에서는 두 경로 모두 `Nov 15, 2023 07:13:20.000000000 KST`였다.

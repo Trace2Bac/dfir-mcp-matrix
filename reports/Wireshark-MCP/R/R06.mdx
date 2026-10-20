@@ -1,0 +1,203 @@
+---
+cell: R06
+details:
+- id: R06.01
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### R06.01 값 가림·필드 제외
+
+**구현.** 이 방식은 `wireshark_extract_credentials`의 응답과, 복호화 인자를 담은 명령 줄을 적는 서버 로그와 오류 응답에 적용된다 [1][2].
+`wireshark_extract_credentials`는 HTTP Basic 인증 값과 FTP `PASS` 인자를 근거 항목의 `value`에 싣기 전에 `mask_secret`으로 가린다 [1][3].
+`mask_secret`은 값에 `:`가 있으면 앞부분을 사용자 이름으로 보고 그대로 두고 뒷부분만 가린다 [3].
+가린 부분은 앞 글자 하나를 남기고 나머지 글자 수만큼 `*`로 바꾸며 두 글자 이하이면 `**`로 바꾼다 [3].
+`summary`의 줄도 가린 `value`를 쓴다 [1].
+Telnet 근거는 값을 싣지 않고 로그인 문구를 보았다는 고정 문장만 싣는다 [1].
+시험 캡처 파일에서 HTTP Basic 근거는 사용자 이름과 비밀번호 첫 글자만, FTP 근거는 비밀번호 첫 글자만 보이게 실렸다 [4].
+
+실행 함수는 명령 줄을 로그에 적을 때 `_redact_command`로 WPA 키 인자와 TLS 키 로그 경로 인자를 `<redacted>`로 바꾼다 [2].
+명령이 실패해 표준 오류를 오류 응답의 `details`에 실을 때는 `_redact_diagnostics`로 같은 인자를 지운다 [2][5].
+`wireshark_decrypt_wpa`에 형식이 맞지 않는 시험용 암호를 주자 오류 응답의 `details`와 서버 로그의 명령 줄에 그 인자가 `<redacted>`로 실렸다 [6].
+
+증거에서 나온 비밀 값을 가리지 않고 싣는 도구도 있다.
+BLE 페어링 분석은 SMP 메시지의 장기 키 LTK, 식별 키 IRK, EDIV를 `key_material`에 그대로 싣는다 [7].
+시험 캡처 파일에서 세 값이 가림 없이 실렸고 `summary`는 값이 `key_material`에 있다고 적었다 [4].
+`wireshark_analyze_protocol`의 Kerberos 분석은 암호화된 인증 자료 `kerberos.cipher`를 다른 필드와 함께 싣는다 [8].
+`wireshark_analyze_protocol`의 SMTP 분석은 `smtp.req.parameter`를 그대로 싣고 AUTH 명령의 인자도 가리지 않는다 [9].
+AUTH PLAIN 명령이 들어 있는 시험 캡처 파일에서 인코딩한 사용자 이름과 비밀번호가 그대로 실렸다 [10].
+`wireshark_follow_stream`, `wireshark_get_packet_details`, `wireshark_get_packet_bytes`, `wireshark_extract_fields`, `wireshark_search_packets`는 패킷 내용을 가리지 않고 돌려준다 [11].
+`wireshark_aggregate`의 `group_by`에 `http.authorization`·`http.cookie`를 주면 그 값이 묶음 키로 그대로 실린다 [12].
+
+**한계.** FTP 비밀번호에 `:`가 있으면 `mask_secret`은 그 앞부분을 사용자 이름으로 보고 가리지 않는다 [3].
+`:`가 들어간 9자 시험 문자열을 넣자 앞 4자와 `:`, 뒷부분 첫 글자가 보였다 [13].
+세 글자 이상인 값은 가린 뒤에도 원래 길이와 첫 글자가 남는다 [3][13].
+명령이 성공했을 때 `stderr`로 싣는 표준 오류에는 `_redact_diagnostics`를 적용하지 않는다 [14].
+성공한 실행의 표준 오류에 복호화 인자가 실리는 경우가 있는지는 확인하지 못했다.
+
+### 근거
+
+[1] `wireshark_extract_credentials`는 값을 가려 근거 항목에 싣는다: [`src/wireshark_mcp/tools/security.py:35-63`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L35-L63), [`src/wireshark_mcp/tools/security.py:80-126`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L80-L126), [`src/wireshark_mcp/tools/security.py:157-165`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L157-L165).
+
+[2] 명령 줄과 진단 글에서 복호화 인자를 지운다.
+
+```python
+    @staticmethod
+    def _redact_command(cmd: list[str]) -> str:
+        """Render a command without exposing passphrases or key-log paths."""
+        redacted: list[str] = []
+        for arg in cmd:
+            if arg.startswith("uat:80211_keys:"):
+                redacted.append("uat:80211_keys:<redacted>")
+            elif arg.startswith("tls.keylog_file:"):
+                redacted.append("tls.keylog_file:<redacted>")
+            else:
+                redacted.append(arg)
+        return " ".join(redacted)
+
+    @staticmethod
+    def _redact_diagnostics(text: str, cmd: list[str]) -> str:
+        """Remove sensitive command arguments from subprocess diagnostics."""
+        for arg in cmd:
+            if arg.startswith(("uat:80211_keys:", "tls.keylog_file:")):
+                text = text.replace(arg, "<redacted>")
+        return text
+```
+
+[`src/wireshark_mcp/tshark/client.py:135-154`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L135-L154)
+
+[3] `mask_secret`이다.
+
+```python
+def mask_secret(secret: str, keep_chars: int = 1) -> str:
+    """Mask sensitive credentials while preserving structure for investigation."""
+    s = secret.strip()
+    if not s:
+        return ""
+    if ":" in s:
+        user, passw = s.split(":", 1)
+        return f"{user}:{mask_secret(passw, keep_chars=keep_chars)}"
+    if len(s) <= 2:
+        return "**"
+    visible = min(keep_chars, max(1, len(s) // 3))
+    return s[:visible] + "*" * (len(s) - visible)
+```
+
+[`src/wireshark_mcp/tools/findings.py:34-45`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/findings.py#L34-L45)
+
+[4] (실행 확인) 저장소의 평문 자격 증명 시험 캡처 파일에서 HTTP Basic 근거와 FTP 근거의 `value`는 첫 글자 뒤가 `*`로 바뀌어 실렸다.
+저장소의 BLE 페어링 시험 캡처 파일에서 `key_material`에 `ltk`·`ediv`·`irk` 값이 그대로 실렸다.
+
+[5] 실패한 명령의 표준 오류를 지운 뒤 `details`에 싣는다.
+
+```python
+                else:
+                    logger.warning("Command failed (exit %d): %s", proc.returncode, safe_command)
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": {
+                                "type": "ExecutionError",
+                                "message": f"Command failed with exit code {proc.returncode}",
+                                "details": self._redact_diagnostics(error or final_output, cmd),
+                            },
+                        }
+                    )
+```
+
+[`src/wireshark_mcp/tshark/client.py:610-621`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L610-L621)
+
+[6] (실행 확인) `wireshark_decrypt_wpa`에 따옴표가 든 시험용 암호를 주자 `tshark`가 종료 코드 1로 끝났고 오류 `details`의 `-o` 인자와 서버 로그의 명령 줄에 키 인자가 `<redacted>`로 실렸다.
+
+[7] BLE 페어링 분석은 키 값을 `key_material`에 넣는다.
+
+```python
+            elif opcode == "0x06":  # Encryption Information: LTK
+                ltk = _strip(_col(parts, 13))
+                if ltk:
+                    key_material["ltk"] = ltk
+            elif opcode == "0x07":  # Master Identification: EDIV (+ rand, not a filterable field set here)
+                ediv = _strip(_col(parts, 14))
+                if ediv:
+                    key_material["ediv"] = ediv
+            elif opcode == "0x08":  # Identity Information: IRK
+                irk = _strip(_col(parts, 15))
+                if irk:
+                    key_material["irk"] = irk
+```
+
+[`src/wireshark_mcp/tools/bluetooth.py:1328-1339`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1328-L1339)
+
+[`src/wireshark_mcp/tools/bluetooth.py:1395-1416`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1395-L1416)
+
+[8] Kerberos 분석은 `kerberos.cipher`를 추출한다.
+
+```python
+        cmd = [
+            self.tshark_path,
+            "-r",
+            pcap_file,
+            "-Y",
+            "kerberos",
+            "-T",
+            "fields",
+            "-e",
+            "frame.number",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "kerberos.msg_type",
+            "-e",
+            "kerberos.CNameString",
+            "-e",
+            "kerberos.realm",
+            "-e",
+            "kerberos.SNameString",
+            "-e",
+            "kerberos.cipher",
+            "-E",
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:403-427`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L403-L427)
+
+[9] SMTP 분석은 `smtp.req.parameter`를 담은 필드 추출 글을 그대로 응답에 넣는다.
+
+```python
+    async def _smtp(pcap_file: str, limit: int) -> str:
+        smtp_result = await client.extract_fields(
+            pcap_file,
+            ["ip.src", "ip.dst", "smtp.req.parameter", "smtp.rsp.parameter"],
+            display_filter="smtp",
+            limit=limit,
+        )
+        wrapped = parse_tool_result(smtp_result)
+        if not wrapped["success"]:
+            return normalize_tool_result(wrapped)
+
+        data = wrapped.get("data", "")
+        if not isinstance(data, str) or len(data.strip()) < 20:
+            return success_response("No SMTP traffic found in this capture.")
+
+        output_parts = [data]
+```
+
+[`src/wireshark_mcp/tools/protocol.py:201-216`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L201-L216)
+
+[10] (실행 확인) 시험용 가짜 계정으로 EHLO, AUTH PLAIN, MAIL FROM 명령을 만든 캡처 파일로 `smtp` 분석을 부르자 `smtp.req.parameter` 칸에 인코딩한 인증 인자가 가림 없이 실렸다.
+
+[11] 패킷 내용 도구는 클라이언트 결과를 그대로 넘긴다: [`src/wireshark_mcp/tools/extract.py:12-92`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L12-L92).
+
+[12] `http.authorization`·`http.cookie`는 쉼표로 나누지 않는 문자열 필드로 정해져 있고 묶음 키는 칸 값 그대로다: [`src/wireshark_mcp/tools/stats.py:75-87`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L75-L87), [`src/wireshark_mcp/tools/stats.py:144-145`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L144-L145), [`src/wireshark_mcp/tools/stats.py:238-240`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L238-L240).
+
+[13] (실행 확인) `mask_secret`을 시험 문자열로 직접 부르자 `:`가 없는 8자 값은 1자가, `:`가 있는 9자 값은 6자가 보였고 모두 원래 길이를 유지했다.
+
+[14] 성공한 명령의 표준 오류는 그대로 `stderr`가 된다.
+
+```python
+            stderr_note = error if (error and not truncated) else ""
+            return self._ok(final_output, stderr_note, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:631-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L631-L632)

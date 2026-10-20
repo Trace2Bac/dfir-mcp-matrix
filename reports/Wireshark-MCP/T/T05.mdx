@@ -1,0 +1,409 @@
+---
+cell: T05
+details:
+- id: T05.01
+- id: T05.02
+- id: T05.03
+---
+
+# T05 분석 도구 검증
+
+### T05.01 저장소·의존성 고정
+
+**구현.** 이 방식은 선택 의존성 `yara-python`·`geoip2`와 패키지에 함께 넣은 YARA 규칙 파일에 적용된다 [1][2][3].
+`pyproject.toml`은 두 라이브러리를 선택 의존성 `yara`·`geoip`·`all`에 하한만 적는다 [1].
+`uv.lock`은 `yara-python` 4.5.4와 `geoip2` 5.3.0을 배포 파일 해시와 함께 고정한다 [2].
+`geoip2`가 데이터베이스 파일을 읽는 데 쓰는 `maxminddb`도 `uv.lock`이 3.1.1로 고정한다 [2].
+YARA 규칙 `data/yara/basic_rules.yar`는 패키지에 들어 있으므로 기준 커밋이 내용을 정한다 [3].
+MCP SDK `mcp` 2.1.1도 `uv.lock`이 고정하지만 증거를 해석하지 않는 서버 실행용 라이브러리라 이 방식으로 세지 않는다 [2].
+
+Wireshark 도구는 저장소가 버전을 정하지 않는다 [4][5].
+`Dockerfile`은 Debian 패키지 `tshark`를 버전 없이 설치하고 기반 이미지는 태그 `python:3.12-slim-bookworm`으로만 정한다 [4].
+Homebrew 정의는 `wireshark`에 버전 없이 의존한다 [5].
+
+사용자 폴더의 참조 자료는 저장소가 내용이나 버전을 정하지 않는다 [6][7].
+`wireshark_yara_scan`은 `~/.wireshark-mcp/yara/`의 `.yar`·`.yara` 파일을 저장소 규칙과 함께 컴파일한다 [6].
+컴파일에 성공하면 그 결과를 모듈 변수에 두고 서버가 끝날 때까지 규칙 파일을 다시 읽지 않는다 [6].
+사용자 규칙은 확장자를 뺀 파일 이름으로 묶이므로 이름이 같은 `.yar`·`.yara` 파일이 있으면 `.yara` 파일만 컴파일된다 [6].
+`wireshark_extract_fingerprints`는 `~/.wireshark-mcp/fingerprints/`의 JSON 파일에서 JA3 목록을 읽고 처음 읽은 목록을 서버가 끝날 때까지 쓴다 [7].
+
+**한계.** README가 적은 설치 방법 `pip install wireshark-mcp`는 `uv.lock`을 쓰지 않는다 [8].
+Claude·Codex 플러그인 설정은 서버를 `uv run --locked --no-dev`로 실행하지만 선택 의존성을 고르는 인자는 없다 [9].
+`Dockerfile`은 PyPI의 `wireshark-mcp==3.1.0`을 `pip`로 설치하고 선택 의존성을 설치하지 않는다 [4].
+그래서 두 라이브러리의 고정 버전은 사용자가 저장소의 잠금 파일로 선택 의존성을 설치할 때만 적용된다 [1][2].
+
+### T05.02 설정·호출 인자로 지정
+
+**구현.** 이 방식은 Wireshark 도구 6개의 실행 파일 위치와 GeoIP 데이터베이스 파일 위치에 적용된다 [10][11].
+서버는 시작할 때 도구마다 `WIRESHARK_MCP_TSHARK_PATH` 같은 환경변수를 읽고 값이 있으면 그 값을 실행 경로로 쓴다 [10][12].
+값이 없으면 `PATH`에서 도구 이름을 찾는다 [12].
+`wireshark_geoip_enrich`는 환경변수 `GEOIP_DB_PATH`를 먼저 보고 없으면 사용자 폴더의 GeoLite2 파일 3개와 시스템 폴더 3곳의 `GeoLite2-City.mmdb`를 차례로 찾아 처음 있는 파일을 쓴다 [11].
+두 경우 모두 위치만 정하고 그 파일의 버전은 정하지 않는다 [11][12].
+환경변수가 가리키는 실행 파일은 실행기가 실행 직전에 파일 이름만 도구 이름과 대조하고 내용과 버전은 보지 않는다 [13].
+이름이 `tshark`인 대리 실행 파일을 `WIRESHARK_MCP_TSHARK_PATH`로 가리키자 서버가 도구를 실행할 때마다 그 파일을 실행했다 [14].
+GeoIP 리더는 처음 연 파일을 서버가 끝날 때까지 쓴다 [15].
+
+**한계.** `GEOIP_DB_PATH`가 없는 파일을 가리키면 알리지 않고 다음 후보를 찾는다 [11].
+
+### T05.03 실행 시 버전 조회
+
+**구현.** 이 방식은 `wireshark_get_capabilities`에 적용된다 [16].
+`check_capabilities`는 실행할 수 있는 도구마다 `-v`를 실행해 표준 출력 첫 줄의 마지막 낱말을 `version`으로 돌려준다 [17].
+5초 안에 끝나지 않거나 예외가 나면 `unknown`으로 둔다 [17].
+이 값은 이 도구의 응답에만 실리고 다른 도구의 실행 조건이나 결과에 쓰이지 않는다 [16][18].
+`wireshark://capabilities` 리소스는 버전을 묻지 않고 실행 파일이 있는지만 적는다 [19].
+`core` 프로필은 `wireshark_get_capabilities`를 등록하지 않는다 [20].
+`yara-python`·`geoip2`의 버전과 YARA 규칙, GeoIP 데이터베이스의 버전은 읽지 않는다 [6][15].
+
+**한계.** 첫 줄의 마지막 낱말은 버전 번호만 담지 않는다 [17].
+Debian 패키지 4.0.17에서는 `4.0.17-0+deb12u3).`가, Windows의 4.6.7에서는 `(v4.6.7-0-gb439fb7b47a9).`가 `version`으로 돌아왔다 [21][22].
+
+### 근거
+
+[1] `pyproject.toml`의 선택 의존성은 하한만 적는다.
+
+```toml
+[project.optional-dependencies]
+geoip = ["geoip2>=4.0"]
+yara = ["yara-python>=4.3"]
+all = ["geoip2>=4.0", "yara-python>=4.3"]
+```
+
+[`pyproject.toml:41-44`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/pyproject.toml#L41-L44)
+
+[2] `uv.lock`은 선택 의존성을 해시와 함께 고정한다: [`uv.lock:1146-1150`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L1146-L1150), [`uv.lock:2436-2453`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L2436-L2453), [`uv.lock:1233-1235`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L1233-L1235).
+
+```text
+[[package]]
+name = "geoip2"
+version = "5.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "maxminddb" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/8d/a62c6e56545049605777ad47de2274a72ed60e3991433ca3f1bcdd761ef5/geoip2-5.3.0.tar.gz", hash = "sha256:66df653e16c535f9bb45e3c7ce992fbe008911d9c7c349540574ea2fe8931db5", size = 177948, upload-time = "2026-07-16T22:34:01.497Z" }
+```
+
+[`uv.lock:908-917`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L908-L917)
+
+```text
+[[package]]
+name = "yara-python"
+version = "4.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/38/347d1fcde4edabd338d5872ca5759ccfb95ff1cf5207dafded981fd08c4f/yara_python-4.5.4.tar.gz", hash = "sha256:4c682170f3d5cb3a73aa1bd0dc9ab1c0957437b937b7a83ff6d7ffd366415b9c", size = 551142, upload-time = "2025-05-27T14:15:49.035Z" }
+```
+
+[`uv.lock:2497-2501`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L2497-L2501)
+
+[3] 저장소 규칙은 패키지 자료로 읽는다: [`src/wireshark_mcp/data/yara/basic_rules.yar:1-190`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/data/yara/basic_rules.yar#L1-L190).
+
+```python
+    try:
+        data_ref = importlib_resources.files("wireshark_mcp") / "data" / "yara" / "basic_rules.yar"
+        with importlib_resources.as_file(data_ref) as fp:
+            rule_sources["builtin_basic"] = fp.read_text(encoding="utf-8")
+    except Exception:
+        logger.warning("Could not load bundled YARA rules")
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:38-43`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L38-L43)
+
+[4] `Dockerfile`은 `tshark`를 버전 없이, 서버 패키지는 버전을 정해 `pip`로 설치한다.
+
+```dockerfile
+FROM python:3.12-slim-bookworm
+
+ARG WIRESHARK_MCP_VERSION=3.1.0
+
+LABEL org.opencontainers.image.title="Wireshark MCP" \
+      org.opencontainers.image.description="MCP server for trustworthy Wireshark and tshark packet analysis" \
+      org.opencontainers.image.source="https://github.com/bx33661/Wireshark-MCP" \
+      org.opencontainers.image.licenses="MIT"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates tshark \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir --upgrade "setuptools>=83" \
+    && python -m pip install --no-cache-dir "wireshark-mcp==${WIRESHARK_MCP_VERSION}" \
+```
+
+[`Dockerfile:1-19`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L1-L19)
+
+[5] Homebrew 정의는 `wireshark`에 버전 없이 의존한다.
+
+```text
+  # ── Dependencies ──────────────────────────────────────────────────────────────
+  depends_on "openssl@3"
+  depends_on "python@3.12"
+  depends_on "rust" => :build
+  depends_on "wireshark" # provides tshark (and optionally capinfos, editcap, ...)
+```
+
+[`homebrew/Formula/wireshark-mcp.rb:17-21`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/homebrew/Formula/wireshark-mcp.rb#L17-L21)
+
+[6] 사용자 규칙을 읽어 저장소 규칙과 함께 한 번 컴파일한다: [`src/wireshark_mcp/tools/yara_scan.py:27-68`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L27-L68).
+
+```python
+    user_dir = Path.home() / ".wireshark-mcp" / "yara"
+    if user_dir.exists():
+        for f in sorted(user_dir.glob("*.yar")):
+            try:
+                rule_sources[f"user_{f.stem}"] = f.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not load user YARA rule: %s", f)
+        for f in sorted(user_dir.glob("*.yara")):
+            try:
+                rule_sources[f"user_{f.stem}"] = f.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not load user YARA rule: %s", f)
+
+    if not rule_sources:
+        return None
+
+    try:
+        _compiled_rules = _yara_module.compile(sources=rule_sources)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:45-62`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L45-L62)
+
+[7] JA3 목록은 사용자 폴더에서 한 번 읽는다: [`src/wireshark_mcp/tools/forensics.py:18-48`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L18-L48).
+
+```python
+    global _FINGERPRINT_DB
+    if _FINGERPRINT_DB is not None:
+        return _FINGERPRINT_DB
+
+    fingerprints: list[dict[str, str]] = []
+
+    user_dir = Path.home() / ".wireshark-mcp" / "fingerprints"
+    if user_dir.exists():
+        for f in sorted(user_dir.glob("*.json")):
+            try:
+                db = json.loads(f.read_text(encoding="utf-8"))
+                fingerprints.extend(db.get("fingerprints", []))
+            except Exception:
+                logger.warning("Could not load user fingerprint file: %s", f)
+
+    _FINGERPRINT_DB = fingerprints
+    return _FINGERPRINT_DB
+```
+
+[`src/wireshark_mcp/tools/forensics.py:32-48`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L32-L48)
+
+[8] README의 설치 방법이다: [`README.md:76-83`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/README.md#L76-L83).
+
+[9] 플러그인 설정의 실행 인자다: [`.codex-plugin/mcp.json:4-5`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/.codex-plugin/mcp.json#L4-L5).
+
+```json
+  "mcpServers": {
+    "wireshark-mcp": {
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "--locked", "--no-dev", "wireshark-mcp", "serve", "--transport", "stdio"]
+    }
+  }
+```
+
+[`.claude-plugin/plugin.json:10-15`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/.claude-plugin/plugin.json#L10-L15)
+
+[10] 도구마다 위치를 정하는 환경변수 이름이다.
+
+```python
+WIRESHARK_TOOL_ENV_VARS: dict[str, str] = {
+    "tshark": "WIRESHARK_MCP_TSHARK_PATH",
+    "capinfos": "WIRESHARK_MCP_CAPINFOS_PATH",
+    "mergecap": "WIRESHARK_MCP_MERGECAP_PATH",
+    "editcap": "WIRESHARK_MCP_EDITCAP_PATH",
+    "dumpcap": "WIRESHARK_MCP_DUMPCAP_PATH",
+    "text2pcap": "WIRESHARK_MCP_TEXT2PCAP_PATH",
+}
+```
+
+[`src/wireshark_mcp/toolchain.py:9-16`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/toolchain.py#L9-L16)
+
+[11] GeoIP 데이터베이스 파일 위치를 차례로 찾는다.
+
+```python
+def _find_geoip_db() -> Path | None:
+    """Search for GeoLite2 database in standard locations."""
+    candidates = []
+
+    env_path = os.environ.get("GEOIP_DB_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    user_dir = Path.home() / ".wireshark-mcp" / "geoip"
+    candidates.extend(
+        [
+            user_dir / "GeoLite2-City.mmdb",
+            user_dir / "GeoLite2-Country.mmdb",
+            user_dir / "GeoLite2-ASN.mmdb",
+        ]
+    )
+
+    system_paths = [
+        Path("/usr/share/GeoIP"),
+        Path("/usr/local/share/GeoIP"),
+        Path("/opt/homebrew/share/GeoIP"),
+    ]
+    for sp in system_paths:
+        candidates.append(sp / "GeoLite2-City.mmdb")
+
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+```
+
+[`src/wireshark_mcp/tools/geoip.py:27-55`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L27-L55)
+
+[12] 환경변수 값이 있으면 그 값을, 없으면 `PATH`에서 찾은 경로를 쓴다: [`src/wireshark_mcp/tshark/client.py:64-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L64-L71).
+
+```python
+    def _resolve_tool_path(self, tool_name: str, preferred: str | None = None) -> str | None:
+        """Resolve a suite tool using env overrides, PATH, or the provided value."""
+        env_override = os.environ.get(self._TOOL_ENV_VARS[tool_name])
+        if env_override:
+            return env_override
+
+        if preferred and preferred != tool_name:
+            return shutil.which(preferred) or preferred
+
+        return shutil.which(tool_name) or preferred
+```
+
+[`src/wireshark_mcp/tshark/_capability.py:31-40`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L31-L40)
+
+[13] 실행기는 실행 파일의 이름만 목록과 대조한다: [`src/wireshark_mcp/tshark/client.py:46-46`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L46-L46), [`src/wireshark_mcp/tshark/_validation.py:95-98`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_validation.py#L95-L98).
+
+```python
+        binary = self._get_binary_name(cmd[0]) if cmd else ""
+        if binary not in self._ALLOWED_BINARIES:
+            logger.error("Blocked execution of disallowed binary: %s", binary)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": {
+                        "type": "SecurityError",
+                        "message": f"Execution of '{binary}' is not allowed",
+                        "details": f"Allowed binaries: {', '.join(sorted(self._ALLOWED_BINARIES))}",
+                    },
+                }
+            )
+```
+
+[`src/wireshark_mcp/tshark/client.py:520-532`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L520-L532)
+
+[14] (실행 확인) 컨테이너에서 시작·끝 시각을 남기고 실제 tshark를 이어 실행하는 대리 실행 파일을 `WIRESHARK_MCP_TSHARK_PATH`로 가리키고 도구를 불렀다.
+
+[15] GeoIP 리더는 한 번 만든 것을 다시 쓴다.
+
+```python
+def _get_reader() -> Any:
+    """Get or create a GeoIP2 database reader (singleton)."""
+    global _geoip2_reader
+    if _geoip2_reader is not None:
+        return _geoip2_reader
+
+    db_path = _find_geoip_db()
+    if db_path is None:
+        return None
+
+    _geoip2_reader = geoip2.database.Reader(str(db_path))
+    logger.info("GeoIP database loaded: %s", db_path)
+    return _geoip2_reader
+```
+
+[`src/wireshark_mcp/tools/geoip.py:58-70`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L58-L70)
+
+[16] `wireshark_get_capabilities`는 `check_capabilities`의 결과를 돌려준다.
+
+```python
+    @mcp.tool()
+    async def wireshark_get_capabilities() -> str:
+        """Get Wireshark suite capabilities for this MCP server instance (available tools and versions)."""
+        return normalize_tool_result(await client.check_capabilities())
+```
+
+[`src/wireshark_mcp/tools/utility.py:20-23`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/utility.py#L20-L23)
+
+[17] `check_capabilities`는 `-v` 출력 첫 줄의 마지막 낱말을 버전으로 둔다.
+
+```python
+        async def get_version(tool_path: str | None) -> dict[str, Any]:
+            if tool_path is None or not self._tool_is_available(tool_path):
+                return {"available": False}
+            try:
+                process_kwargs: dict[str, Any] = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                    "stdin": subprocess.DEVNULL,
+                }
+                if sys.platform == "win32":
+                    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    if create_no_window:
+                        process_kwargs["creationflags"] = create_no_window
+                proc = await asyncio.create_subprocess_exec(tool_path, "-v", **process_kwargs)
+                try:
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return {"available": True, "version": "unknown"}
+                version_line = stdout.decode("utf-8").split("\n")[0]
+                version = version_line.split()[-1] if version_line else "unknown"
+                return {"available": True, "version": version}
+            except Exception:
+                return {"available": True, "version": "unknown"}
+```
+
+[`src/wireshark_mcp/tshark/_capability.py:112-136`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L112-L136)
+
+[18] 클라이언트의 `_version`은 `None`으로 만든 뒤 다른 곳에서 값을 넣거나 읽지 않는다.
+
+```python
+        self._version: str | None = None
+```
+
+[`src/wireshark_mcp/tshark/client.py:78-78`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L78-L78)
+
+[19] 리소스는 버전 없이 실행 파일이 있는지만 적는다: [`src/wireshark_mcp/tshark/_capability.py:61-82`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_capability.py#L61-L82).
+
+```python
+    @mcp.resource("wireshark://capabilities")
+    def get_capabilities() -> str:
+        """Machine-readable capability summary for the current Wireshark toolchain."""
+        return json.dumps(client.describe_capabilities(), indent=2)
+```
+
+[`src/wireshark_mcp/resources.py:217-220`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/resources.py#L217-L220)
+
+[20] `core` 프로필이 빼는 도구 집합이다.
+
+```python
+_ADVANCED: Final[frozenset[str]] = frozenset(
+    {
+        "wireshark_decode_as",
+        "wireshark_decrypt_tls",
+        "wireshark_decrypt_wpa",
+        "wireshark_flow_graph",
+        "wireshark_get_capabilities",
+        "wireshark_get_packet_bytes",
+        "wireshark_scan_file_signatures",
+        "wireshark_set_protocol_prefs",
+    }
+)
+```
+
+[`src/wireshark_mcp/profiles.py:60-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/profiles.py#L60-L71)
+
+[21] (실행 확인) 컨테이너의 Debian 패키지 tshark 4.0.17에서 `wireshark_get_capabilities`를 불렀다.
+
+[22] (실행 확인) Windows에서 Wireshark 4.6.7로 `check_capabilities`를 같은 프로세스에서 불렀다.

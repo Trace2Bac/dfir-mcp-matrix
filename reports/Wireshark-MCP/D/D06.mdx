@@ -1,0 +1,229 @@
+---
+cell: D06
+details:
+- id: D06.02
+- id: D06.03
+- id: D06.04
+---
+
+# D06 산출물 식별·재생성 처리
+
+### D06.02 입력·작업별 고유 이름
+
+**구현.** 이 방식은 `wireshark_editcap_split`의 분할 파일과 `ring_buffer`를 준 `wireshark_capture`의 캡처 파일에 적용된다 [1][2].
+두 이름 규칙은 서버 코드가 아니라 Wireshark 4.0.17의 `editcap`과 `dumpcap`이 정한다 [1][2].
+`editcap`은 받은 경로의 마지막 조각에서 마지막 `.` 앞까지를 접두어로 삼아 `<접두어>_<5자리 번호>_<시각><확장자>` 이름으로 쓴다 [1].
+번호는 분할할 때마다 0부터 매기고 시각은 그 분할 파일 첫 패킷의 기록 시각이다 [1].
+이 시각은 입력마다 다른 값이라 첫 패킷 시각이 다른 캡처를 같은 접두어로 분할하면 이름이 다르다 [1].
+같은 입력을 같은 접두어로 다시 분할하면 같은 이름이 되고 앞 파일을 덮어쓴다 [1][3].
+같은 캡처를 같은 `output_prefix`로 1초 넘게 사이를 두고 다시 분할하자 세 파일이 같은 이름으로 모두 다시 쓰였다 [3].
+
+`dumpcap`은 링 버퍼 파일마다 `<접두어>_<5자리 번호>_<YYYYMMDDHHMMSS><확장자>` 이름을 짓고 시각은 그 파일을 연 때의 현지 시각이다 [2].
+그래서 1초 넘게 사이를 두고 같은 `output_file`로 다시 캡처하면 앞 파일과 이름이 다르다 [2].
+같은 `output_file`로 두 번 캡처하자 시각만 다른 두 파일이 남았다 [4].
+
+그 밖의 파일을 쓰는 도구는 호출 인자로 받은 이름에 그대로 쓴다 [5].
+`ring_buffer`를 주지 않은 `wireshark_capture`도 `output_file` 이름 그대로 쓴다 [5].
+`dest_dir` 없이 부른 `wireshark_yara_scan`의 임시 폴더 이름은 `mkdtemp`가 짓지만 호출이 끝나면 지운다 [6].
+
+**한계.** 링 버퍼 이름의 시각은 초 단위라 같은 초에 같은 `output_file`로 시작한 캡처는 같은 이름을 쓰고 `dumpcap`은 그 파일을 `O_TRUNC`로 열어 덮어쓴다 [2].
+
+### D06.03 버전·이력 보존
+
+**구현.** 이 방식은 `wireshark_export_objects`와 `dest_dir`를 준 `wireshark_yara_scan`이 이미 파일이 있는 폴더로 다시 내보낼 때 적용된다 [7][6].
+이 규칙은 서버 코드가 아니라 Wireshark 4.0.17의 `tshark`가 정한다 [7].
+`tshark`는 같은 이름의 파일이 있으면 확장자 앞에 `(1)`, `(2)` 같은 번호를 붙인 새 이름으로 쓰고 앞 파일을 지우지 않는다 [7].
+`report.txt`가 있는 폴더로 내보내자 앞 파일은 내용과 수정 시각이 그대로 남고 새 내용은 `report(1).txt`로 생겼다 [8].
+번호가 붙은 파일과 앞 파일을 가르는 것은 이름의 번호뿐이고 서버는 어느 호출이 어느 파일을 썼는지 남기지 않는다 [7][9].
+
+**한계.** 원래 이름과 `(1)`부터 `(999)`까지의 이름이 모두 있으면 `tshark`는 `(999)` 이름의 파일을 덮어쓴다 [7][10].
+같은 서버 프로세스에서 같은 캡처 파일과 같은 인자로 다시 부른 호출이 결과 캐시로 처리되면 `tshark`를 실행하지 않아 번호를 붙인 새 파일도 생기지 않는다 [11][12].
+
+### D06.04 덮어쓰기 선택·충돌 감지
+
+**구현.** 이 방식은 파일을 쓰는 도구 가운데 `wireshark_export_objects`, `wireshark_filter_save`, `wireshark_extract_frames`와 `dest_dir`를 준 `wireshark_yara_scan`에 적용된다 [11][13][6].
+`_run_command`는 명령에 `-r`이 있으면 바로 뒤의 인자를 입력 파일로 보고 결과 캐시 `ResultCache`에서 같은 명령의 결과를 찾는다 [11].
+찾으면 분석 도구를 실행하지 않고 캐시에 둔 표준 출력을 성공 응답으로 돌려준다 [11].
+`tshark`를 부르는 두 도구는 `-r`로 입력을 넘기고 `wireshark_extract_frames`는 `editcap`의 `-r` 선택지 바로 뒤에 입력 파일을 둔다 [13].
+`editcap`에서 `-r`은 고른 프레임만 남기라는 선택지이지만 서버는 이 명령에도 같은 방식으로 캐시를 쓴다 [13][11].
+캐시 키는 입력 파일의 실제 경로, `st_mtime_ns`, `st_size`와 명령 인자 전체로 만든다 [12].
+종료 코드 0으로 끝난 실행의 출력만 캐시에 넣고 넣은 지 300초가 지난 항목은 쓰지 않는다 [11][14].
+그래서 같은 프로세스에서 같은 입력과 같은 인자로 300초 안에 다시 부르면 출력 파일을 다시 만들지 않는다 [15].
+`dest_dir` 없이 부른 `wireshark_yara_scan`은 호출마다 임시 폴더 이름이 달라 명령이 같지 않으므로 캐시 결과를 쓰지 않는다 [6].
+덮어쓸지를 호출 인자로 고르게 하는 도구는 없다.
+
+이 방식이 없는 도구는 목적지에 같은 이름이 있는지 보지 않는다.
+`wireshark_merge_pcaps`, `wireshark_text2pcap_import`, `wireshark_editcap_trim`, `wireshark_editcap_time_shift`, `wireshark_editcap_deduplicate`, `wireshark_editcap_split`, `ring_buffer`를 주지 않은 `wireshark_capture`는 같은 이름의 앞 파일을 알리지 않고 덮어쓴다 [5][16].
+`wireshark_merge_pcaps`의 `output_file`로 캡처가 아닌 기존 파일을 주자 그 파일이 pcapng 파일로 바뀌었고 응답은 빈 `data`의 성공 응답이었다 [16].
+
+**한계.** 캐시는 출력 파일이 남아 있는지나 그 내용이 바뀌었는지 보지 않는다 [11][12].
+출력 파일을 지운 뒤 같은 호출을 다시 하자 `wireshark_export_objects`, `wireshark_filter_save`, `wireshark_extract_frames` 모두 성공 응답을 돌려주었고 파일은 다시 생기지 않았다 [15].
+`wireshark_export_objects`의 두 번째 응답은 첫 호출과 같은 패킷 목록이었다 [15].
+같은 `dest_dir`로 다시 부른 `wireshark_yara_scan`은 내보내기를 하지 않아 빈 폴더를 보고 `nothing to scan` 성공 응답을 돌려주었다 [15].
+다른 도구가 같은 출력 경로에 다른 캡처를 쓴 뒤 `wireshark_extract_frames`를 같은 인자로 다시 부르자 응답은 `Extracted frames 1-3`이었고 파일은 다른 도구가 쓴 내용 그대로였다 [15].
+캐시는 프로세스 메모리에만 있어 넣은 지 300초가 지나거나 서버를 다시 시작하거나 항목이 128개·50MB 상한으로 밀려나면 다시 실행한다 [14].
+이때 `wireshark_filter_save`와 `wireshark_extract_frames`는 같은 이름의 앞 파일을 알리지 않고 덮어쓰고 `wireshark_export_objects`와 `dest_dir`를 준 `wireshark_yara_scan`은 번호를 붙인 새 파일을 쓴다 [5][7].
+출력이 12.5MB를 넘는 실행은 캐시에 넣지 않는다 [14].
+
+### 근거
+
+[1] Wireshark 4.0.17의 `editcap`은 분할할 때 출력 이름을 접두어와 확장자로 나누고 번호와 첫 패킷 시각을 붙인다: [`editcap.c:201-250`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/editcap.c#L201-L250), [`editcap.c:1787-1795`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/editcap.c#L1787-L1795).
+
+[2] Wireshark 4.0.17의 `dumpcap`은 링 버퍼를 쓰면 받은 이름을 접두어와 확장자로 나누고 파일을 열 때의 시각과 번호를 붙인 이름을 `O_TRUNC`로 연다: [`dumpcap.c:3928-3939`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/dumpcap.c#L3928-L3939), [`ringbuffer.c:305-329`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L305-L329), [`ringbuffer.c:237-258`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ringbuffer.c#L237-L258).
+
+[3] (실행 확인) 같은 캡처를 같은 `output_prefix`와 `packets_per_file`로 `wireshark_editcap_split`에 세 번 넘겼다.
+첫 호출은 접두어의 폴더가 없어 종료 코드 2로 끝났고 폴더를 만든 뒤 두 호출은 성공했다.
+두 호출 모두 `part_00000_<시각>.pcap`부터 `part_00002_<시각>.pcap`까지 같은 세 이름을 썼고 뒤 호출 뒤에는 세 파일의 수정 시각이 모두 바뀌었다.
+
+[4] (실행 확인) 네트워크를 끈 컨테이너에서 root 계정으로 서버를 실행하고 같은 `output_file`과 `ring_buffer`로 루프백 인터페이스를 두 번 캡처했다.
+`ring_00001_<시각>.pcapng` 두 파일이 시각만 다르게 남았다.
+
+[5] 다른 도구는 받은 출력 경로를 그대로 쓰고 Wireshark 4.0.17의 쓰기 함수는 그 경로를 쓰기 모드로 다시 연다: [`src/wireshark_mcp/tshark/_suite_ops.py:32-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L32-L250), [`wiretap/file_access.c:2733-2741`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wiretap/file_access.c#L2733-L2741), [`dumpcap.c:3951-3954`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/dumpcap.c#L3951-L3954).
+
+[6] `wireshark_yara_scan`은 `dest_dir`가 없을 때만 임시 폴더를 만들고 그 폴더만 지운다.
+
+```python
+        use_temp = not dest_dir
+        if use_temp:
+            temp_result = client._create_temporary_output_dir("wireshark_yara_")
+            if not temp_result["success"]:
+                return error_response(
+                    temp_result["error"]["message"],
+                    error_type=temp_result["error"]["type"],
+                )
+            export_dir = str(temp_result["path"])
+        else:
+            export_dir = dest_dir
+
+        try:
+            export_result = await client.export_objects(pcap_file, protocol, export_dir)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:99-112`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L99-L112)
+
+```python
+            if use_temp:
+                output.append(f"\nExported files: {export_dir} (temporary)")
+            else:
+                output.append(f"\nExported files saved to: {export_dir}")
+
+            return success_response("\n".join(output))
+
+        finally:
+            if use_temp and os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+```
+
+[`src/wireshark_mcp/tools/yara_scan.py:174-183`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/yara_scan.py#L174-L183)
+
+[7] Wireshark 4.0.17의 `tshark`는 같은 이름이 있으면 번호를 올려 이름을 다시 짓고 번호는 확장자 앞에 붙인다: [`ui/cli/tap-exportobject.c:122-146`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/cli/tap-exportobject.c#L122-L146), [`epan/export_object.c:79-112`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/export_object.c#L79-L112).
+
+[8] (실행 확인) `report.txt`를 미리 둔 폴더를 `dest_dir`로 `wireshark_export_objects`를 불렀다.
+앞 `report.txt`의 내용과 수정 시각은 그대로였고 `report(1).txt`와 `data.bin`이 새로 생겼다.
+
+[9] `export_objects`는 목적지 폴더만 넘기고 실행 결과를 그대로 돌려준다.
+
+```python
+    async def export_objects(self, pcap_file: str, protocol: str, dest_dir: str) -> str:
+        """Export Objects (--export-objects protocol,dest_dir)."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        proto_validation = self._validate_protocol(protocol, self.VALID_EXPORT_PROTOCOLS)
+        if not proto_validation["success"]:
+            return json.dumps(proto_validation)
+
+        output_validation = self._validate_output_path(dest_dir)
+        if not output_validation["success"]:
+            return json.dumps(output_validation)
+
+        os.makedirs(dest_dir, exist_ok=True)
+        cmd = [
+            self.tshark_path,
+            "-r",
+            pcap_file,
+            "--export-objects",
+            f"{protocol},{dest_dir}",
+        ]
+        return await self._run_command(cmd)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:81-103`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L81-L103)
+
+[10] Wireshark 4.0.17의 이름 재시도 상한 `gui_max_export_objects` 기본값은 1000이다: [`epan/prefs.c:4163-4163`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/prefs.c#L4163-L4163).
+
+[11] `-r`이 있는 명령은 캐시를 먼저 찾고 종료 코드 0의 전체 출력만 캐시에 넣는다.
+
+```python
+        """Run command with error handling, validation, timeout, and caching."""
+        pcap_file = None
+        if "-r" in cmd:
+            r_idx = cmd.index("-r")
+            if r_idx + 1 < len(cmd):
+                pcap_file = cmd[r_idx + 1]
+
+        # The cache stores the full, unpaginated stdout keyed by the command only.
+        # Pagination is applied *after* retrieval so different offset/limit values
+        # over the same command never pollute one another.
+        if pcap_file:
+            cached = self._cache.get(pcap_file, cmd)
+            if cached is not None:
+                logger.debug("Cache hit for: %s", self._redact_command(cmd[:4]))
+                text, truncated = self._paginate(cached, limit_lines, offset_lines)
+                return self._ok(text, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:503-518`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L503-L518)
+
+```python
+            # The stdout-only cache cannot retain the short-read warning. Do not
+            # turn a second read of an incomplete capture into an unqualified hit.
+            if pcap_file and raw_to_cache is not None and proc.returncode == 0:
+                self._cache.put(pcap_file, cmd, raw_to_cache)
+```
+
+[`src/wireshark_mcp/tshark/client.py:626-629`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L626-L629)
+
+[12] 캐시 키는 입력 파일의 실제 경로, 수정 시각, 크기와 명령 인자로 만든다.
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)
+
+[13] `wireshark_extract_frames`는 `editcap -r <입력> <출력> <프레임>` 명령을 만든다.
+
+```python
+        editcap_path = self._get_checked_tool_path("editcap")
+        cmd = [editcap_path, "-r", input_file, output_file] + frame_tokens
+        result = await self._run_command(cmd)
+```
+
+[`src/wireshark_mcp/tshark/_suite_ops.py:193-195`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_suite_ops.py#L193-L195)
+
+[14] 캐시의 항목 수, 전체 크기, 유지 시간 상한과 한 항목의 크기 상한이다: [`src/wireshark_mcp/tshark/cache.py:15-17`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L15-L17), [`src/wireshark_mcp/tshark/cache.py:67-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L67-L71), [`src/wireshark_mcp/tshark/cache.py:84-98`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L84-L98).
+
+[15] (실행 확인) 한 서버 세션에서 같은 인자로 `wireshark_export_objects`, `wireshark_filter_save`, `wireshark_extract_frames`, `dest_dir`를 준 `wireshark_yara_scan`을 두 번씩 부르고 그 사이에 출력 파일을 지웠다.
+네 도구의 두 번째 호출은 모두 `success`가 참이었고 출력 파일은 생기지 않았다.
+`wireshark_yara_scan`의 두 번째 응답은 `No files exported from http traffic`이었다.
+`wireshark_filter_save`와 `wireshark_extract_frames`의 두 번째 응답 `data`는 빈 문자열이었다.
+그 뒤 `wireshark_editcap_trim`으로 같은 경로에 다른 캡처를 쓰고 `wireshark_extract_frames`를 같은 인자로 부르자 `Extracted frames 1-3`이 왔고 파일 크기는 2,328바이트 그대로였다.
+
+[16] (실행 확인) 같은 `output_file`로 `wireshark_editcap_trim`을 입력을 바꿔 두 번, `wireshark_text2pcap_import`를 두 번 불렀고 미리 둔 텍스트 파일을 `wireshark_merge_pcaps`의 `output_file`로 주었다.
+뒤 호출의 출력이 앞 파일을 대신했고 응답에는 앞 파일이 있었다는 표시가 없었다.
+텍스트 파일은 pcapng 파일로 바뀌었다.

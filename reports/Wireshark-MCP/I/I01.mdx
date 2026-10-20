@@ -1,0 +1,211 @@
+---
+cell: I01
+details:
+- id: not_applicable
+---
+
+# I01 외부 연동 대상 관리
+
+### 비적용
+
+**판단.** 서버 코드는 스스로 외부에 연결하지 않는다.
+`pyproject.toml`의 필수 의존성은 `mcp`·`click`·`cryptography`·`pyjwt`·`python-multipart`·`pyyaml`·`starlette`·`tomlkit`이다 [1].
+MCP SDK가 의존하는 HTTP 클라이언트 `httpx2`가 함께 설치되지만 서버 코드는 이를 불러 쓰지 않는다 [2][3].
+`src/wireshark_mcp/`에는 HTTP 클라이언트나 소켓 모듈을 불러오는 코드가 없다 [3].
+사용자 CLI `install`·`update`·`uninstall`·`config`·`doctor`·`clients`도 같은 패키지에 속하고 외부에 연결하지 않는다 [3].
+
+SSE와 Streamable HTTP 전송은 클라이언트의 연결을 받기만 한다 [4].
+`serve`는 이 두 전송을 `--host`·`--port`에서 열고 `--host`의 기본값은 `127.0.0.1`이다 [4].
+루프백이 아닌 주소에 열려면 `--allow-insecure-http`를 함께 줘야 하고 주지 않으면 시작하지 않는다 [5].
+`0.0.0.0`에 `--allow-insecure-http` 없이 열자 서버는 오류로 끝났고 그 값을 주자 경고 한 줄을 쓴 뒤 요청을 받기 시작했다 [6].
+`Dockerfile`의 기본 명령은 Streamable HTTP를 `0.0.0.0`의 8080 포트에 `--allow-insecure-http`와 `--profile analysis`로 연다 [7].
+이 명령도 요청을 받는 연결만 연다 [7][6].
+이미지를 만들 때 `pip`이 PyPI에서 패키지를 받는 것은 서버 밖에서 실행하는 설치 명령이다 [7].
+
+`wireshark_geoip_enrich`는 GeoIP 조회에 외부 서비스를 쓰지 않는다 [8].
+이 도구는 `geoip2`의 `Reader`로 로컬 GeoLite2 데이터베이스 파일을 연다 [8].
+파일은 `GEOIP_DB_PATH`, `~/.wireshark-mcp/geoip/`, 시스템 GeoIP 폴더에서 찾는다 [8].
+파일이 없으면 내려받을 주소를 적은 오류 글을 돌려주고 내려받지 않는다 [8].
+`geoip2` 5.3.0의 `Reader`는 `maxminddb.open_database`로 로컬 파일을 연다 [9].
+
+분석 도구가 이름 풀이를 하며 보내는 DNS 조회는 분석 도구가 스스로 하는 통신이고 서버 코드가 여는 연결이 아니다.
+
+### 근거
+
+[1] 필수 의존성과 선택 의존성 목록이다.
+
+```toml
+dependencies = [
+    "mcp>=2.1.1,<3.0.0",
+    "click>=8.3.3",
+    "cryptography>=50.0.0",
+    "pyjwt>=2.13.0",
+    "python-multipart>=0.0.31",
+    "pyyaml>=6.0.3",
+    "starlette>=1.3.1",
+    "tomlkit>=0.13.3",
+]
+
+[project.optional-dependencies]
+geoip = ["geoip2>=4.0"]
+yara = ["yara-python>=4.3"]
+all = ["geoip2>=4.0", "yara-python>=4.3"]
+```
+
+[`pyproject.toml:30-44`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/pyproject.toml#L30-L44)
+
+[2] `uv.lock`의 `mcp` 2.1.1 항목은 의존성으로 `httpx2`를 적는다.
+
+```text
+[[package]]
+name = "mcp"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "jsonschema" },
+    { name = "mcp-types" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-multipart" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "sse-starlette" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+    { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
+]
+```
+
+[`uv.lock:1232-1251`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/uv.lock#L1232-L1251)
+
+[3] (실행 확인) 기준 커밋의 `src/wireshark_mcp/`를 `git grep`으로 찾았다.
+`socket`, `urllib`, `http.client`, `requests`, `httpx`, `aiohttp`를 불러오거나 `urlopen`을 부르는 코드는 없었다.
+URL이 들어간 줄은 전송을 시작할 때 쓰는 로그 두 줄과 GeoIP 오류 글의 내려받기 안내 한 줄이었다.
+
+[4] `--host`의 기본값은 `127.0.0.1`이고 `serve`는 고른 전송을 그 주소와 포트로 연다.
+
+```python
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address for SSE and Streamable HTTP transports",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Bind port for SSE and Streamable HTTP transports",
+    )
+```
+
+[`src/wireshark_mcp/server.py:103-113`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L103-L113)
+
+```python
+    if args.transport == "sse":
+        logger.info("Starting SSE transport on http://%s:%d%s", args.host, args.port, args.mount_path)
+        mount_path = "/" + args.mount_path.strip("/") if args.mount_path.strip("/") else ""
+        mcp.run(
+            transport="sse",
+            host=args.host,
+            port=args.port,
+            sse_path=f"{mount_path}/sse",
+            message_path=f"{mount_path}/messages/",
+        )
+    elif args.transport == "streamable-http":
+        logger.info("Starting Streamable HTTP transport on http://%s:%d", args.host, args.port)
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run()
+```
+
+[`src/wireshark_mcp/server.py:372-386`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L372-L386)
+
+[5] 루프백이 아닌 주소는 `--allow-insecure-http`가 있어야 열고 그때 경고를 쓴다.
+
+```python
+def _is_loopback_host(host: str) -> bool:
+    """Return whether a bind host is unambiguously local-only."""
+    if host.lower().rstrip(".") == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+```
+
+[`src/wireshark_mcp/server.py:143-150`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L143-L150)
+
+```python
+    if args.transport != "stdio" and not _is_loopback_host(args.host):
+        if not args.allow_insecure_http:
+            parser.error(
+                "Refusing to expose an unauthenticated MCP transport beyond loopback. "
+                "Bind to 127.0.0.1/::1 or pass --allow-insecure-http behind a trusted authenticated TLS proxy."
+            )
+        logger.warning(
+            "SECURITY: exposing unauthenticated %s on non-loopback host %s; use a trusted authenticated TLS proxy",
+            args.transport,
+            args.host,
+        )
+```
+
+[`src/wireshark_mcp/server.py:352-362`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L352-L362)
+
+[6] (실행 확인) `--network none` 컨테이너 안에서 `wireshark-mcp serve --transport streamable-http --host 0.0.0.0`을 실행하자 `Refusing to expose an unauthenticated MCP transport beyond loopback` 오류와 종료 코드 2로 끝났다.
+같은 명령에 `--allow-insecure-http`를 더하자 `SECURITY: exposing unauthenticated streamable-http on non-loopback host 0.0.0.0` 경고를 쓴 뒤 uvicorn이 `0.0.0.0`에서 요청을 받기 시작했다.
+`Dockerfile`의 기본 명령과 같은 인자로 실행해도 같은 경고를 쓰고 시작했다.
+
+[7] 이미지는 빌드할 때 `pip`으로 패키지를 설치하고 기본 명령으로 Streamable HTTP를 `0.0.0.0`에 연다.
+
+```dockerfile
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates tshark \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir --upgrade "setuptools>=83" \
+    && python -m pip install --no-cache-dir "wireshark-mcp==${WIRESHARK_MCP_VERSION}" \
+    && groupadd --gid 10001 wireshark-mcp \
+    && useradd --uid 10001 --gid 10001 --create-home wireshark-mcp \
+    && mkdir --parents /captures /results \
+    && chown wireshark-mcp:wireshark-mcp /captures /results
+
+USER wireshark-mcp
+WORKDIR /captures
+
+EXPOSE 8080
+
+ENTRYPOINT ["wireshark-mcp"]
+CMD ["serve", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8080", "--allow-insecure-http", "--profile", "analysis"]
+```
+
+[`Dockerfile:14-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/Dockerfile#L14-L31)
+
+[8] `wireshark_geoip_enrich`는 로컬 데이터베이스 파일을 찾아 `geoip2.database.Reader`로 열고 파일이 없으면 오류 글만 돌려준다.
+
+```python
+    async def wireshark_geoip_enrich(pcap_file: str, limit: int = 50) -> str:
+        """[Enrichment] GeoIP lookup for unique IPs — country, city, ASN. Needs GeoLite2 DB."""
+        if not _GEOIP_AVAILABLE:
+            return error_response(
+                "geoip2 library not installed. Install with: pip install wireshark-mcp[geoip]",
+                error_type="DependencyMissing",
+            )
+
+        reader = _get_reader()
+        if reader is None:
+            return error_response(
+                "GeoLite2 database not found. Place GeoLite2-City.mmdb in "
+                "~/.wireshark-mcp/geoip/ or set GEOIP_DB_PATH environment variable. "
+                "Download from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data",
+                error_type="DatabaseMissing",
+            )
+```
+
+[`src/wireshark_mcp/tools/geoip.py:84-99`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L84-L99)
+
+파일을 찾고 여는 함수: [`src/wireshark_mcp/tools/geoip.py:27-70`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L27-L70).
+
+[9] `geoip2` 5.3.0의 `Reader`는 받은 파일을 `maxminddb.open_database`로 연다: [`src/geoip2/database.py:124-128`](https://github.com/maxmind/GeoIP2-python/blob/93467015f685d979b6b490c920ee55d2d6929997/src/geoip2/database.py#L124-L128).

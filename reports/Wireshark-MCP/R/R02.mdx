@@ -1,0 +1,764 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.03
+- id: R02.05
+- id: R02.06
+- id: R02.07
+- id: R02.09
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 모든 도구 결과에 적용되는 응답 상한과 도구별 줄·항목 상한에 적용된다 [1][2].
+`WiresharkMCP.call_tool`은 도구가 돌려준 글 블록마다 `cap_result_text`를 적용한다 [1].
+상한은 환경변수 `WIRESHARK_MCP_MAX_RESULT_CHARS`로 정하고 없으면 8,000자, 512보다 작으면 512자다 [3].
+`cap_result_text`는 응답 글이 JSON이면 `envelope`의 형태를 남기고 자른다 [2].
+`data`가 목록이면 앞에서부터 상한 안에 들어가는 항목 수를 이분 탐색으로 찾는다 [2].
+`data`가 `dict`이면 `groups`·`records`·`packets`·`findings`·`items`·`results` 차례로, 없으면 처음 나온 비지 않은 목록 키를 같은 방법으로 줄인다 [2].
+`data`가 글이면 앞부분과 뒷부분을 남기고 가운데를 뺀다 [2][4].
+
+도구별 상한도 있다.
+`wireshark_get_packet_list`·`wireshark_extract_fields`·`wireshark_follow_stream`·`wireshark_read_packets`는 모델이 준 `limit`이나 `limit_lines`로 줄 수를 줄인다 [5][6].
+복호화·해석 설정 도구와 Kerberos 분석은 `tshark -c`로 읽을 패킷 수를 정한다 [7].
+엔드포인트·대화·I/O·전문가 정보·서비스 응답 시간 통계는 표를 50줄(전문가 정보는 80줄)까지 싣는다 [8][9].
+`wireshark_quick_analysis`는 절마다 10~15줄, 전체를 4,000자까지 싣는다 [10].
+`wireshark_aggregate`는 `top_k`(1~200)개 묶음만 싣고 묶음 10,000개, 묶음마다 고유 값 5,000개, 고유 값 전체 50,000개를 넘는 값은 세지 않는다 [11][12].
+탐지 도구와 자격 증명 도구는 필드 추출 줄 수를 10~10,000줄로 코드에 정해 둔다 [13][14].
+
+**한계.** 응답 상한은 SDK가 글 블록으로 돌려준 결과에만 적용된다 [1].
+인자 검사 오류처럼 MCP Python SDK 2.1.1이 예외로 만든 오류 결과는 `WiresharkMCP.call_tool`을 거치지 않으므로 상한이 적용되지 않는다 [15].
+
+`cap_result_text`가 고른 목록 밖의 내용은 응답에서 빠진다 [2].
+상한 512자에서 `wireshark_extract_credentials`를 부르자 `findings`가 빈 목록이 되고 `summary` 문자열만 남았다 [16].
+같은 상한에서 `wireshark_detect_dns_tunnel`은 `{"success":true,"data":{},"truncated":true}`를 돌려줬다 [16].
+`findings`가 빈 목록인 모양은 탐지 결과가 없을 때의 응답과 같고 둘을 가르는 값은 `truncated`와 `pagination`이다 [16][13].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 줄 상한을 적용한 클라이언트 결과, `wireshark_aggregate`, 응답 상한이 목록을 줄인 응답, `wireshark_geoip_enrich`, `wireshark_follow_stream`, `wireshark_extract_credentials`의 `summary`에 적용된다 [6][11][2][17][18][19].
+`_paginate`는 잘린 출력 끝에 `[Showing <상한>/<전체 줄 수> lines. Next: offset=<다음 위치>]`를 붙이고 `envelope`에 `truncated`를 참으로 둔다 [6][20].
+`wireshark_aggregate`는 매칭 패킷 수 `matched_packets`, 전체 묶음 수 `groups_total`, 돌려준 묶음 수 `groups_returned`를 싣는다 [11].
+`cap_result_text`는 목록을 줄이면 `pagination`에 `total`·`returned`·`next_offset`·`has_more`를 넣고 `dict` 안에 `<목록>_returned`·`groups_returned`·`returned` 키가 있으면 줄인 수로 고친다 [2].
+`wireshark_geoip_enrich`는 머리 줄에 조회한 수와 공인 주소 전체 수를 적고 `limit`을 넘으면 앞 몇 개만 보였다고 적는다 [17].
+`wireshark_follow_stream`은 보인 줄 수와 남은 줄 수를 적는다 [18].
+`wireshark_extract_credentials`의 `summary`는 첫 줄에 근거 전체 수를 적고 앞 10개만 줄로 적은 뒤 나머지 수를 적는다 [19].
+근거 항목 전체는 `findings`에 남는다 [19].
+
+**한계.** `pagination.total`은 응답 상한이 줄이기 전 목록의 항목 수다 [2].
+`wireshark_aggregate`에 `top_k` 200을 주자 `groups_total`은 300인데 `pagination.total`은 200, `returned`는 177로 실렸다 [21].
+`wireshark_extract_credentials`의 `coverage.scanned`는 읽은 패킷 수가 아니라 만든 근거 항목 수이고 근거가 없으면 0이다 [14].
+`wireshark_geoip_enrich`의 공인 주소 전체 수는 앞 10,000줄 안에서 센 값이다 [17].
+줄 상한에 닿으면 이 수에는 잘림 안내 줄 하나가 공인 주소로 더해진다 [17][22].
+
+### R02.03 페이지·커서 조회
+
+**구현.** 이 방식은 `offset` 인자를 받는 `wireshark_get_packet_list`·`wireshark_extract_fields`·`wireshark_read_packets`와 `offset_lines`를 받는 `wireshark_follow_stream`에 적용된다 [5][23].
+잘린 출력 끝의 안내 줄은 다음에 줄 `offset` 값을 적는다 [6][18].
+`_run_command`는 끝까지 읽은 표준 출력을 파일 경로·수정 시각·크기·명령으로 만든 키로 5분 동안 메모리에 두고 다음 쪽 요청을 그 출력에서 자른다 [20][24].
+3,000패킷 캡처 파일에서 `limit` 5로 부르자 `Next: offset=5`가 붙었고 그 값으로 부르자 이어지는 패킷 줄이 실렸다 [25].
+
+**한계.** `offset`과 `limit`은 머리글 줄을 포함한 줄 수다 [6][5].
+`wireshark_read_packets`는 `tshark -c`에 `limit`과 `offset`의 합을 주고 앞 `offset`개를 버리며 다음 위치를 알리지 않는다 [26].
+다음 위치를 받는 인자가 없는 도구에도 이어 읽으라는 안내가 붙는다.
+`wireshark_analyze_protocol`의 글 결과에는 필드 추출의 `Next: offset=…`이 남지만 이 도구는 `offset` 인자가 없다 [6][27].
+`wireshark_get_packet_context`도 `offset` 인자가 없는데 잘린 출력에 `Next: offset=…`이 붙는다 [5][6][28].
+통계 도구 5개의 50줄 잘림 안내는 `display_filter`나 `offset`을 쓰라고 적지만 이 도구들은 두 인자를 받지 않는다 [8][9].
+응답 상한이 목록을 줄인 응답의 `pagination.next_offset`은 응답 안 목록의 위치이고 `wireshark_aggregate`·`wireshark_extract_credentials`처럼 이 값을 받는 인자가 없는 도구에도 붙는다 [2][21][16].
+응답 상한이 글을 줄일 때 넣는 `use offset for pagination` 안내의 수는 글자 수이고 도구의 `offset`은 줄 수다 [4][25].
+
+### R02.05 상한 초과 시 거부
+
+**구현.** 이 방식은 하위 프로세스 출력 상한과 `wireshark_aggregate`의 전체 스캔 상한에 적용된다 [29][30].
+`_run_command`는 표준 출력이 16 MiB를, 표준 오류가 1 MiB를 넘으면 프로세스를 끝내고 결과를 자르지 않고 `LimitExceeded` 오류를 돌려준다 [29].
+`wireshark_aggregate`는 표시 필터에 맞는 행이 스캔 상한을 넘으면 행을 더 읽지 않고 `LimitExceeded` 오류를 돌려준다 [30][31].
+`wireshark_aggregate`가 쓰는 스트리밍 읽기 `_stream_field_rows`는 표준 출력이 50 MiB를, 표준 오류가 1 MiB를 넘어도 프로세스를 끝내고 `LimitExceeded`를 돌려준다 [29][32].
+스캔 상한은 `WIRESHARK_MCP_AGGREGATE_SCAN_LIMIT`로 1,000~10,000,000 사이에서 정하고 기본값은 1,000,000이다 [33].
+서버 지침은 `wireshark_aggregate`가 필터 전체를 스캔하고 `top_k`는 돌려줄 묶음만 줄인다고 적는다 [34].
+20,000패킷 캡처 파일을 `wireshark_read_packets`에 `limit` 0으로 주자 `LimitExceeded` 오류가 돌아왔다 [35].
+스캔 상한을 1,000으로 두고 3,000패킷 캡처 파일을 `wireshark_aggregate`에 주자 `LimitExceeded`와 `coverage.scanned` 1000이 돌아왔다 [35].
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 응답 상한의 `dict` 처리, 오류 응답 처리, DNS 터널 탐지의 표본 값에 적용된다 [2][13].
+`cap_result_text`는 `data`의 목록을 모두 비워도 상한을 넘거나 줄일 목록이 없으면 `data` 안의 100자 넘는 문자열 값을 각각 100자로 줄인다 [2].
+오류 응답은 `message`를 상한의 절반으로 줄이고 `details`가 상한의 절반을 넘으면 `... [truncated]`로 바꾼다 [2].
+`wireshark_detect_dns_tunnel`은 근거 항목의 표본 질의 이름을 60자에서 자른다 [13].
+
+**한계.** 긴 질의 이름 표본은 원래 길이를 적고 앞 60자 뒤에 늘 `...`를 붙인다 [13].
+그래서 잘리지 않은 51~60자 이름에도 `...`가 붙는다 [13].
+TXT 질의 표본은 표시 없이 60자에서 자른다 [13].
+76자 질의 이름이 있는 캡처 파일에서 TXT 표본은 60자에서 끝나고 잘렸다는 표시가 없었다 [36].
+
+### R02.07 건수 없는 잘림 표시
+
+**구현.** 이 방식은 응답 상한, 통계 표 요약, `wireshark_quick_analysis`, 줄 상한에 닿은 탐지·자격 증명 도구에 적용된다 [2][8][10][13][14].
+`cap_result_text`는 무엇을 자르든 응답에 `truncated`를 참으로 두고 글을 줄일 때 가운데에 뺀 글자 수를 적은 안내를 넣는다 [2][4].
+통계 표 요약과 `wireshark_quick_analysis`는 남은 줄 수만 적는다 [9][10].
+탐지·자격 증명 도구는 줄 상한에 닿으면 `warnings`에 상한 값을 적고 `coverage.status`를 `partial`로 둔다 [13][14].
+이 경고에는 상한 밖에 있는 패킷 수가 없다 [13][14].
+
+**한계.** 이상 탐지 도구 3개, `wireshark_geoip_enrich`, `wireshark_analyze_tcp_health`, `wireshark_detect_arp_spoofing`, `wireshark_scan_file_signatures`, BLE 분석을 뺀 `wireshark_analyze_protocol`은 필드 추출이나 패킷 목록 결과의 `truncated`를 읽지 않는다 [27][17][37].
+그래서 줄 상한에 닿아도 이 도구들의 응답에는 `truncated`도 경고도 없다 [27][37].
+PNG 서명이 들어 있는 패킷 80개가 있는 캡처 파일에서 `wireshark_scan_file_signatures`의 응답에는 `PNG: 50 packet(s)`만 실리고 잘림 표시가 없었다 [38].
+`wireshark_analyze_protocol`의 글 결과에는 필드 추출 결과의 안내 줄만 남는다 [27][6].
+`_maybe_summarize`는 50줄로 줄인 통계 표를 새 `envelope`에 담으므로 클라이언트 결과의 `truncated`와 `stderr`가 빠진다 [8].
+`tshark -c`로 줄인 복호화·해석 설정 도구와 Kerberos 분석의 응답에는 잘림 표시가 없다 [7].
+`tshark` 4.0.17의 `-c`는 표시 필터에 맞지 않는 패킷도 센다 [39].
+그래서 이 도구들은 캡처 파일의 앞 `limit`개 패킷 안에서만 일치를 찾고 그 뒤의 일치는 표시 없이 응답에서 빠진다 [7][39].
+DNS 질의 300개가 있는 캡처 파일에 `display_filter` `frame.number > 150`과 `limit` 100을 주자 `wireshark_set_protocol_prefs`와 `wireshark_decode_as`는 머리글 줄만 돌려줬다 [40].
+
+### R02.09 항목 참조값으로 전체 내용 재조회
+
+**구현.** 이 방식은 패킷 번호를 싣는 목록 도구와 `wireshark_get_packet_details`·`wireshark_get_packet_bytes`에 적용된다 [5][41].
+`wireshark_get_packet_list`는 기본 열 7개 가운데 첫 열로 `frame.number`를 싣는다 [5].
+근거 항목과 BLE 결과도 패킷 번호를 `frame`·`first_frame`·`last_frame`에 싣는다 [13][14][42].
+`wireshark_get_packet_details`에 이 번호를 주면 서버는 캡처 파일을 다시 읽어 그 패킷 하나의 전체 해석을 JSON으로 돌려준다 [41].
+`wireshark_get_packet_bytes`는 같은 번호로 그 패킷의 16진 덤프를 돌려준다 [41].
+서버는 목록 결과를 따로 보관하지 않는다.
+
+**한계.** `custom_columns`를 주면 고른 열만 실리므로 `frame.number`를 고르지 않은 목록에는 참조값이 없다 [5].
+`wireshark_get_packet_details`의 결과도 응답 상한을 거치므로 해석 JSON이 상한을 넘으면 가운데가 빠진다 [1][2].
+
+### 근거
+
+[1] `call_tool`은 도구 결과의 글 블록마다 상한을 적용한다.
+
+```python
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[Any, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        result = await super().call_tool(name, arguments, context)
+        if isinstance(result, CallToolResult):
+            # Check is_error on original content BEFORE capping
+            is_error = bool(getattr(result, "is_error", False))
+            if not is_error and isinstance(result.content, (list, tuple)):
+                for block in result.content:
+                    if isinstance(block, TextContent):
+                        try:
+                            parsed = json.loads(block.text)
+                            if isinstance(parsed, dict) and parsed.get("success") is False:
+                                is_error = True
+                                break
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+
+            capped_content = self._cap_content(result.content, name)
+            return result.model_copy(update={"content": capped_content, "is_error": is_error})
+        return result
+```
+
+[`src/wireshark_mcp/mcp_app.py:394-417`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L394-L417)
+
+[`src/wireshark_mcp/mcp_app.py:419-436`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L419-L436)
+
+[2] `cap_result_text`는 `envelope`의 `data` 모양에 따라 목록을 줄이거나 문자열을 줄이고 `truncated`와 `pagination`을 넣는다: [`src/wireshark_mcp/mcp_app.py:79-319`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L79-L319).
+
+[3] 상한을 환경변수에서 읽는다.
+
+```python
+MAX_RESULT_CHARS_ENV = "WIRESHARK_MCP_MAX_RESULT_CHARS"
+# 2x the smart_truncate default, so output that already bounds itself is untouched.
+DEFAULT_MAX_RESULT_CHARS = 8000
+MIN_MAX_RESULT_CHARS = 512
+
+
+def _resolve_max_result_chars() -> int:
+    """Read the result ceiling from the environment, falling back to the default."""
+    raw = os.environ.get(MAX_RESULT_CHARS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_RESULT_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring non-integer %s=%r", MAX_RESULT_CHARS_ENV, raw)
+        return DEFAULT_MAX_RESULT_CHARS
+    if value < MIN_MAX_RESULT_CHARS:
+        logger.warning("Clamping %s=%r to minimum %d", MAX_RESULT_CHARS_ENV, raw, MIN_MAX_RESULT_CHARS)
+        return MIN_MAX_RESULT_CHARS
+    return value
+```
+
+[`src/wireshark_mcp/mcp_app.py:44-63`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/mcp_app.py#L44-L63)
+
+[4] `smart_truncate`는 뒤쪽 최대 500자와 앞쪽 나머지를 남기고 가운데에 뺀 글자 수를 적는다.
+
+```python
+def smart_truncate(text: str, max_chars: int = 4000) -> str:
+    """Truncate long output preserving head and tail."""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 0:
+        return ""
+
+    # Compute the marker and content budgets together so very small limits never
+    # produce a negative slice (which would retain almost the entire input).
+    marker = f"\n\n[... {len(text)} chars omitted, use offset for pagination ...]\n\n"
+    if len(marker) >= max_chars:
+        return text[:max_chars]
+
+    remaining = max_chars - len(marker)
+    tail_budget = min(500, remaining // 4)
+    head_budget = remaining - tail_budget
+    omitted = len(text) - head_budget - tail_budget
+    marker = f"\n\n[... {omitted} chars omitted, use offset for pagination ...]\n\n"
+
+    # The number of digits in `omitted` can change the marker length.
+    remaining = max_chars - len(marker)
+    tail_budget = min(500, max(0, remaining // 4))
+    head_budget = max(0, remaining - tail_budget)
+    omitted = len(text) - head_budget - tail_budget
+    marker = f"\n\n[... {omitted} chars omitted, use offset for pagination ...]\n\n"
+    head_budget = max(0, max_chars - len(marker) - tail_budget)
+
+    result = f"{text[:head_budget]}{marker}{text[-tail_budget:] if tail_budget else ''}"
+    return result[:max_chars]
+```
+
+[`src/wireshark_mcp/tools/formatting.py:32-60`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/formatting.py#L32-L60)
+
+[5] 패킷 목록·필드·패킷 상세 도구의 인자다: [`src/wireshark_mcp/tools/extract.py:12-56`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L12-L56), [`src/wireshark_mcp/tshark/_packets.py:47-82`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L47-L82).
+
+[6] `_paginate`는 줄 목록에 시작 위치와 상한을 적용하고 안내 줄을 붙인다.
+
+```python
+    @staticmethod
+    def _paginate(output: str, limit_lines: int, offset_lines: int) -> tuple[str, bool]:
+        """Slice full command output to an offset/limit window.
+
+        Returns the windowed text and whether it was truncated. A truncation
+        footer is appended so callers can page forward. Applied *after* caching
+        so the cache always holds the complete output.
+        """
+        lines = output.splitlines()
+        total_lines = len(lines)
+
+        if offset_lines > 0:
+            lines = lines[offset_lines:]
+
+        truncated = False
+        if limit_lines > 0 and len(lines) > limit_lines:
+            lines = lines[:limit_lines]
+            truncated = True
+
+        final_output = "\n".join(lines)
+        if truncated:
+            final_output += (
+                f"\n\n[Showing {limit_lines}/{total_lines} lines. Next: offset={offset_lines + limit_lines}]"
+            )
+        return final_output, truncated
+```
+
+[`src/wireshark_mcp/tshark/client.py:156-180`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L156-L180)
+
+[7] 복호화·해석 설정과 Kerberos 추출은 `-c`로 패킷 수를 정한다: [`src/wireshark_mcp/tshark/_extraction.py:268-273`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L268-L273), [`src/wireshark_mcp/tshark/_extraction.py:322-325`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L322-L325), [`src/wireshark_mcp/tshark/_extraction.py:357-360`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L357-L360), [`src/wireshark_mcp/tshark/_extraction.py:431-434`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L431-L434).
+
+[8] 통계 도구는 `_maybe_summarize`로 표를 줄인다.
+
+```python
+def _maybe_summarize(raw_result: str, max_rows: int = 50) -> str:
+    """Apply tabular summarization to successful string results."""
+    wrapped = parse_tool_result(raw_result)
+    if wrapped["success"] and isinstance(wrapped.get("data"), str):
+        return success_response(summarize_tabular(wrapped["data"], max_rows))
+    return normalize_tool_result(raw_result)
+```
+
+[`src/wireshark_mcp/tools/stats.py:292-297`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L292-L297)
+
+[`src/wireshark_mcp/tools/stats.py:495-521`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L495-L521)
+
+[9] `summarize_tabular`는 남은 줄 수와 `display_filter`·`offset` 안내를 붙인다.
+
+```python
+def summarize_tabular(data: str, max_rows: int = 50) -> str:
+    """Truncate tabular data beyond max_rows with a hint."""
+    lines = data.splitlines()
+    if len(lines) <= max_rows + 1:
+        return data
+    header = lines[0]
+    rows = lines[1 : max_rows + 1]
+    remaining = len(lines) - max_rows - 1
+    return "\n".join([header] + rows + [f"[{remaining} more rows. Use display_filter or offset to narrow.]"])
+```
+
+[`src/wireshark_mcp/tools/formatting.py:63-71`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/formatting.py#L63-L71)
+
+[10] `wireshark_quick_analysis`의 절과 전체 상한이다: [`src/wireshark_mcp/tools/agents.py:15-16`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L15-L16), [`src/wireshark_mcp/tools/agents.py:36-40`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L36-L40), [`src/wireshark_mcp/tools/agents.py:153-154`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/agents.py#L153-L154).
+
+[11] `wireshark_aggregate`는 묶음 전체 수와 돌려준 수를 싣는다.
+
+```python
+        total_groups = len(groups)
+        result: dict[str, Any] = {
+            "display_filter": display_filter,
+            "group_by": group_fields,
+            "distinct": distinct_fields,
+            "numeric_operations": {field: sorted(operations) for field, operations in numeric_operations.items()},
+            "time_bucket_seconds": time_bucket_seconds,
+            "sort_by": resolved_sort,
+            "matched_packets": matched_packets,
+            "groups_total": total_groups,
+            "groups_returned": min(total_groups, top_k),
+            "truncated": total_groups > top_k,
+            "groups": groups[:top_k],
+        }
+        if skipped_invalid_time:
+            result["skipped_invalid_time"] = skipped_invalid_time
+        if time_field_normalized:
+            result["normalized_group_by"] = "frame.time_relative is implicit in time buckets"
+        return envelope_response(
+            result,
+            warnings=agg_warnings if agg_warnings else None,
+            coverage={
+                "status": "complete" if not agg_warnings else "partial",
+                "scanned": matched_packets,
+                "limit": scan_limit,
+            },
+            stderr=streamed.get("stderr"),
+        )
+```
+
+[`src/wireshark_mcp/tools/stats.py:461-488`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L461-L488)
+
+[12] 누적기의 묶음·고유 값 상한이다: [`src/wireshark_mcp/tools/stats.py:71-73`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L71-L73), [`src/wireshark_mcp/tools/stats.py:146-148`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L146-L148), [`src/wireshark_mcp/tools/stats.py:166-175`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L166-L175), [`src/wireshark_mcp/tools/stats.py:346-350`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L346-L350).
+
+[13] 탐지 도구 3개는 줄 상한을 정하고 상한에 닿으면 `warnings`와 `coverage`에 적으며 DNS 표본을 60자로 자른다: [`src/wireshark_mcp/tools/threat.py:25-250`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L25-L250), [`src/wireshark_mcp/tools/threat.py:252-430`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L252-L430), [`src/wireshark_mcp/tools/threat.py:432-802`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/threat.py#L432-L802).
+
+[14] 자격 증명 도구는 50줄 상한, 상한 경고, 근거 항목 수를 `coverage.scanned`로 싣는다: [`src/wireshark_mcp/tools/security.py:14-175`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L14-L175).
+
+[15] MCP Python SDK 2.1.1은 `call_tool`이 낸 예외를 글 하나와 `is_error`로 바꾼다: [`src/mcp/server/mcpserver/server.py:422-441`](https://github.com/modelcontextprotocol/python-sdk/blob/0921d94a74db900dccd2d534842aa7b6160542d2/src/mcp/server/mcpserver/server.py#L422-L441).
+
+[16] (실행 확인) `WIRESHARK_MCP_MAX_RESULT_CHARS`를 512로 두자 `wireshark_extract_credentials`는 `findings`가 빈 목록이고 `pagination`이 `total` 1·`returned` 0·`next_offset` 0인 응답을, `wireshark_detect_dns_tunnel`은 `data`가 빈 `dict`인 응답을 돌려줬다.
+
+[17] `wireshark_geoip_enrich`는 10,000줄까지 읽어 공인 주소를 세고 머리 줄에 수를 적는다.
+
+```python
+        result = await client.extract_fields(pcap_file, ["ip.src", "ip.dst"], display_filter="ip", limit=10000)
+        wrapped = parse_tool_result(result)
+        if not wrapped["success"]:
+            return success_response(wrapped)
+
+        data = wrapped.get("data", "")
+        if not isinstance(data, str) or len(data.strip()) < 10:
+            return success_response("No IP packets found in capture.")
+
+        unique_ips: set[str] = set()
+        for line in data.strip().splitlines()[1:]:
+            parts = line.split("\t")
+            for part in parts:
+                ip = part.strip().strip('"')
+                if ip and not _is_private_ip(ip):
+                    unique_ips.add(ip)
+```
+
+[`src/wireshark_mcp/tools/geoip.py:101-116`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L101-L116)
+
+```python
+        enriched = 0
+        for ip in sorted(unique_ips)[:limit]:
+            country = city = asn = org = "—"
+            try:
+                resp = reader.city(ip)
+                country = resp.country.iso_code or "—"
+                city = resp.city.name or "—"
+                if hasattr(resp, "traits") and resp.traits.autonomous_system_number:
+                    asn = f"AS{resp.traits.autonomous_system_number}"
+                    org = resp.traits.autonomous_system_organization or "—"
+            except geoip2.errors.AddressNotFoundError:
+                logger.debug("No GeoIP record for %s", ip)
+            except Exception as exc:
+                logger.warning("GeoIP lookup failed for %s: %s", ip, exc)
+
+            results.append(f"{ip:<18} {country:<8} {city:<20} {asn:<10} {org}")
+            enriched += 1
+
+        header = f"{INFO} Enriched {enriched}/{len(unique_ips)} public IPs"
+        if len(unique_ips) > limit:
+            header += f" (showing first {limit})"
+        results.insert(0, header + "\n")
+```
+
+[`src/wireshark_mcp/tools/geoip.py:125-146`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/geoip.py#L125-L146)
+
+[18] `wireshark_follow_stream`은 보인 줄 수, 남은 줄 수, 다음 위치를 적는다.
+
+```python
+        lines = output.splitlines()
+
+        if search_content:
+            lines = [line for line in lines if search_content in line]
+            if not lines:
+                return self._ok(f"No occurrences of '{search_content}' found in stream {stream_index}.")
+
+        total_lines = len(lines)
+
+        if offset_lines > 0:
+            lines = lines[offset_lines:]
+
+        truncated = False
+        if limit_lines > 0 and len(lines) > limit_lines:
+            lines = lines[:limit_lines]
+            truncated = True
+
+        final_output = "\n".join(lines)
+
+        if truncated:
+            remaining = total_lines - (offset_lines + limit_lines)
+            final_output += f"\n\n[Displaying {limit_lines} lines. {remaining} more lines available. Use offset={offset_lines + limit_lines} to see more.]"
+
+        return self._ok(final_output)
+```
+
+[`src/wireshark_mcp/tshark/_extraction.py:180-203`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_extraction.py#L180-L203)
+
+[19] `wireshark_extract_credentials`의 `summary`는 전체 수, 앞 10개 줄, 나머지 수를 적는다.
+
+```python
+        summary_lines = [
+            f"{CRIT} Cleartext credentials / authentication signals discovered ({len(evidence_list)} total):"
+        ]
+        for ev in evidence_list[:10]:
+            frame_str = f"Frame {ev['frame']}" if ev.get("frame") else "Frame ?"
+            stream_str = f", Stream {ev['stream']}" if ev.get("stream") is not None else ""
+            summary_lines.append(f"  - [{ev.get('protocol', 'Unknown')}] {frame_str}{stream_str}: {ev.get('value')}")
+        if len(evidence_list) > 10:
+            summary_lines.append(f"  ... +{len(evidence_list) - 10} more (see findings list)")
+```
+
+[`src/wireshark_mcp/tools/security.py:157-165`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/security.py#L157-L165)
+
+[20] `_run_command`는 캐시에 둔 전체 출력에 쪽 나누기를 적용하고 끝까지 읽은 출력만 캐시에 넣는다.
+
+```python
+        # The cache stores the full, unpaginated stdout keyed by the command only.
+        # Pagination is applied *after* retrieval so different offset/limit values
+        # over the same command never pollute one another.
+        if pcap_file:
+            cached = self._cache.get(pcap_file, cmd)
+            if cached is not None:
+                logger.debug("Cache hit for: %s", self._redact_command(cmd[:4]))
+                text, truncated = self._paginate(cached, limit_lines, offset_lines)
+                return self._ok(text, truncated=truncated)
+```
+
+[`src/wireshark_mcp/tshark/client.py:510-518`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L510-L518)
+
+[`src/wireshark_mcp/tshark/client.py:626-632`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L626-L632)
+
+[21] (실행 확인) 원천 주소 300개가 있는 3,000패킷 캡처 파일을 `wireshark_aggregate`에 `group_by` `ip.src`, `top_k` 200으로 주자 8,000자 상한에서 `groups_total` 300, `groups_returned` 177, `pagination` `{"total":200,"returned":177,"next_offset":177,"has_more":true}`가 실렸다.
+
+[22] (실행 확인) GeoIP 데이터베이스가 없어 `wireshark_geoip_enrich` 함수를 같은 프로세스에서 부르고 조회 함수만 모든 주소에 `AddressNotFoundError`를 내는 시험용 함수로 바꾼 뒤 목적지가 `224.0.0.251`·`8.8.8.8`·`192.168.1.1`인 패킷 10,010개를 넣자 머리 줄에 `Enriched 3/3 public IPs`가 실렸고 세 값 가운데 하나는 잘림 안내 줄이었다.
+
+[23] `wireshark_read_packets`와 `wireshark_follow_stream`의 인자다.
+
+```python
+    @mcp.tool()
+    async def wireshark_read_packets(
+        pcap_file: str, limit: int = 100, offset: int = 0, display_filter: str = ""
+    ) -> str:
+        """[DEPRECATED] JSON packet data. Use get_packet_list + get_packet_details instead."""
+        return normalize_tool_result(await client.read_packets_json(pcap_file, limit, display_filter, offset))
+```
+
+[`src/wireshark_mcp/tools/extract.py:41-46`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L41-L46)
+
+```python
+    @mcp.tool()
+    async def wireshark_follow_stream(
+        pcap_file: str,
+        stream_index: int,
+        protocol: str = "tcp",
+        output_mode: str = "ascii",
+        limit_lines: int = 500,
+        offset_lines: int = 0,
+        search_content: str = "",
+    ) -> str:
+        """[Stream] Reassemble stream with pagination. protocol: tcp|udp|tls|http|http2. output_mode: ascii|hex|raw."""
+        return normalize_tool_result(
+            await client.follow_stream(
+                pcap_file,
+                stream_index,
+                protocol,
+                output_mode,
+                limit_lines=limit_lines,
+                offset_lines=offset_lines,
+                search_content=search_content,
+            )
+        )
+```
+
+[`src/wireshark_mcp/tools/extract.py:71-92`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/extract.py#L71-L92)
+
+[24] 캐시 키는 파일의 실제 경로, 수정 시각, 크기와 명령 인자로 만들고 기본 보관 시간은 300초다.
+
+```python
+DEFAULT_MAX_ENTRIES = 128
+DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50 MB total cache size
+DEFAULT_TTL_SECONDS = 300  # 5 minutes
+```
+
+[`src/wireshark_mcp/tshark/cache.py:15-17`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L15-L17)
+
+```python
+    def _make_key(self, pcap_file: str, cmd: list[str]) -> tuple[str, str] | None:
+        """Build a cache key and resolved path from file identity and command args."""
+        try:
+            path = Path(pcap_file).resolve()
+            if not path.exists():
+                return None
+            stat = path.stat()
+            identity = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        except OSError:
+            return None
+
+        cmd_str = "\x00".join(cmd)
+        raw = f"{identity}\x01{cmd_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32], str(path)
+```
+
+[`src/wireshark_mcp/tshark/cache.py:39-52`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/cache.py#L39-L52)
+
+[25] (실행 확인) 3,000패킷 캡처 파일에서 `wireshark_get_packet_list`에 `limit` 5를 주자 `[Showing 5/3001 lines. Next: offset=5]`가, `offset` 5를 주자 `Next: offset=10`이 붙었다.
+같은 파일에 `limit` 50을 주고 상한을 512자로 두자 가운데에 `[... 4655 chars omitted, use offset for pagination ...]`가 들어갔다.
+
+[26] `read_packets_json`은 `limit`과 `offset`의 합으로 `-c`를 주고 앞쪽을 버린다.
+
+```python
+        cmd = [self.tshark_path, "-r", pcap_file, "-T", "json"]
+
+        if display_filter:
+            cmd.extend(["-Y", display_filter])
+
+        if limit > 0:
+            cmd.extend(["-c", str(limit + offset)])
+
+        result = await self._run_command(cmd)
+
+        if offset > 0:
+            ok, text = self._unwrap(result)
+            if ok:
+                try:
+                    packets = json.loads(text)
+                    if isinstance(packets, list):
+                        return self._ok(json.dumps(packets[offset:]))
+                except json.JSONDecodeError:
+                    pass
+
+        return result
+```
+
+[`src/wireshark_mcp/tshark/_packets.py:25-45`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L25-L45)
+
+[27] 프로토콜 분석기와 이상 탐지 도구는 `truncated`를 읽지 않고 `data` 글만 쓴다: [`src/wireshark_mcp/tools/protocol.py:493-516`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L493-L516), [`src/wireshark_mcp/tools/ics.py:15-96`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/ics.py#L15-L96), [`src/wireshark_mcp/tools/anomaly.py:34-56`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/anomaly.py#L34-L56), [`src/wireshark_mcp/tools/protocol.py:41-50`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L41-L50).
+
+[28] (실행 확인) DNS 질의 300개가 있는 캡처 파일을 `wireshark_get_packet_context`에 `frame_number` 10, `count` 5로 주자 5~14번 패킷 줄 뒤에 `[Showing 11/297 lines. Next: offset=11]`이 붙었다.
+
+[29] 하위 프로세스 출력 상한과 초과 시 오류다: [`src/wireshark_mcp/tshark/client.py:48-50`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L48-L50), [`src/wireshark_mcp/tshark/client.py:183-198`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L183-L198), [`src/wireshark_mcp/tshark/client.py:582-596`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L582-L596).
+
+[30] 스트리밍 읽기는 행 수가 상한에 닿으면 프로세스를 끝내고 `LimitExceeded`를 돌려준다.
+
+```python
+                if rows >= max_rows:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    return {
+                        "success": False,
+                        "rows": rows,
+                        "bytes_read": bytes_read,
+                        "error": {
+                            "type": "LimitExceeded",
+                            "message": f"Matching packet rows exceed the {max_rows} row limit",
+                        },
+                    }
+```
+
+[`src/wireshark_mcp/tshark/client.py:404-415`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L404-L415)
+
+[31] `wireshark_aggregate`는 실패한 스트리밍 결과를 오류와 `coverage`로 돌려준다.
+
+```python
+        streamed = await client.stream_fields(
+            pcap_file,
+            extracted_fields,
+            accumulator.add,
+            display_filter,
+            max_rows=scan_limit,
+            timeout=scan_timeout,
+        )
+        matched_packets = streamed.get("rows", 0)
+        if not streamed.get("success", False):
+            stream_error = streamed.get("error", {})
+            error_type = stream_error.get("type", "ExecutionError")
+            message = stream_error.get("message", "tshark field stream failed")
+            details = stream_error.get("details")
+            return error_response(
+                message,
+                error_type,
+                details,
+                coverage={
+                    "status": "partial",
+                    "scanned": matched_packets,
+                    "limit": scan_limit,
+                },
+            )
+```
+
+[`src/wireshark_mcp/tools/stats.py:391-414`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L391-L414)
+
+[32] 스트리밍 읽기는 표준 출력 50 MiB 초과와 표준 오류 상한 초과를 `LimitExceeded`로 돌려준다.
+
+```python
+                bytes_read += len(line_bytes)
+                if bytes_read > self.MAX_STREAM_STDOUT_BYTES:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    return {
+                        "success": False,
+                        "rows": rows,
+                        "bytes_read": bytes_read,
+                        "error": {
+                            "type": "LimitExceeded",
+                            "message": f"Streamed stdout exceeded {self.MAX_STREAM_STDOUT_BYTES} bytes",
+                        },
+                    }
+```
+
+[`src/wireshark_mcp/tshark/client.py:385-397`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L385-L397)
+
+```python
+            if stderr_exceeded:
+                return {
+                    "success": False,
+                    "rows": rows,
+                    "bytes_read": bytes_read,
+                    "error": {"type": "LimitExceeded", "message": "tshark stderr exceeded its safety limit"},
+                }
+```
+
+[`src/wireshark_mcp/tshark/client.py:425-431`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/client.py#L425-L431)
+
+[33] 스캔 상한과 시간 제한의 환경변수와 범위다.
+
+```python
+MAX_AGGREGATE_FIELDS = 12
+MAX_AGGREGATE_TOP_K = 200
+AGGREGATE_SCAN_LIMIT = 1_000_000
+MIN_TIME_BUCKET_SECONDS = 0.000001
+
+# Operators may tune the aggregate scan policy, but only inside these bounds.
+AGGREGATE_SCAN_LIMIT_ENV = "WIRESHARK_MCP_AGGREGATE_SCAN_LIMIT"
+MIN_AGGREGATE_SCAN_LIMIT = 1_000
+MAX_AGGREGATE_SCAN_LIMIT = 10_000_000
+AGGREGATE_TIMEOUT_ENV = "WIRESHARK_MCP_AGGREGATE_TIMEOUT"
+DEFAULT_AGGREGATE_TIMEOUT = 30
+MIN_AGGREGATE_TIMEOUT = 5
+MAX_AGGREGATE_TIMEOUT = 600
+```
+
+[`src/wireshark_mcp/tools/stats.py:19-31`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/stats.py#L19-L31)
+
+[34] 서버 지침이다.
+
+```python
+SERVER_INSTRUCTIONS = (
+    "Analyze packet captures with the advertised Wireshark tools. Start with "
+    "wireshark_open_file for capture context. For full-capture totals, grouped "
+    "distributions, distinct counts, top-k results, or time buckets, prefer "
+    "wireshark_aggregate over shell pipelines or paginated extraction. It scans the "
+    "full filter automatically; top_k limits only returned groups. Use packet-level "
+    "tools afterward to verify the highest-value findings."
+)
+```
+
+[`src/wireshark_mcp/server.py:27-34`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/server.py#L27-L34)
+
+[35] (실행 확인) 20,000패킷 캡처 파일을 `wireshark_read_packets`에 `limit` 0으로 주자 `LimitExceeded`와 표준 출력 16,777,216바이트 상한을 적은 오류가, `WIRESHARK_MCP_AGGREGATE_SCAN_LIMIT`를 1000으로 두고 3,000패킷 캡처 파일을 `wireshark_aggregate`에 주자 `LimitExceeded`와 `coverage` `{"status":"partial","scanned":1000,"limit":1000}`이 돌아왔다.
+
+[36] (실행 확인) 저장소의 DNS 터널 시험 캡처 파일에서 긴 질의 표본은 `Sample [76 chars]: …...`로, TXT 표본은 60자에서 표시 없이 끝났다.
+
+[37] ARP 스푸핑 탐지와 파일 서명 검색은 추출 결과의 `truncated`를 보지 않고 `data` 글만 읽는다.
+
+```python
+        arp_result = await client.extract_fields(
+            pcap_file,
+            ["arp.src.hw_mac", "arp.src.proto_ipv4", "arp.dst.proto_ipv4", "arp.opcode"],
+            display_filter="arp",
+            limit=5000,
+        )
+        wrapped = parse_tool_result(arp_result)
+        if not wrapped["success"]:
+            return normalize_tool_result(wrapped)
+
+        data = wrapped.get("data", "")
+        if not isinstance(data, str) or len(data.strip()) < 20:
+            return success_response("No ARP traffic found in this capture.")
+```
+
+[`src/wireshark_mcp/tools/protocol.py:84-96`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/protocol.py#L84-L96)
+
+```python
+        async def _search(file_type: str, magic_hex: str) -> tuple[str, int]:
+            result = await client.search_packet_contents(pcap_file, magic_hex, search_type="hex", limit=50)
+            wrapped = parse_tool_result(result)
+            if not wrapped["success"]:
+                return file_type, 0
+            data = wrapped.get("data", "")
+            if not isinstance(data, str):
+                return file_type, 0
+            # Packet-list output is a header row plus one row per match; count real matches only.
+            rows = [ln for ln in data.splitlines() if ln.strip()]
+            return file_type, max(0, len(rows) - 1)
+```
+
+[`src/wireshark_mcp/tools/forensics.py:125-135`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/forensics.py#L125-L135)
+
+[38] (실행 확인) PNG 서명이 들어 있는 패킷 80개를 만든 캡처 파일을 `wireshark_scan_file_signatures`에 넣자 응답에 `PNG: 50 packet(s)`만 실렸고 `truncated`와 경고가 없었다.
+
+[39] `tshark` 4.0.17의 `-c`는 캡처 파일을 읽을 때 표시 필터에 맞지 않는 패킷까지 세고 그 수에 닿으면 읽기를 멈춘다: [`doc/tshark.adoc:280-288`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/doc/tshark.adoc#L280-L288), [`tshark.c:3574-3578`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L3574-L3578).
+
+[40] (실행 확인) DNS 질의 300개가 있는 캡처 파일에 `display_filter` `frame.number > 150`을 주자 `wireshark_set_protocol_prefs`와 `wireshark_decode_as`는 `limit` 100에서 머리글 줄만, `limit` 200에서 151번부터의 패킷 줄을 돌려줬다.
+
+[41] 패킷 하나의 상세와 바이트를 번호로 읽는다.
+
+```python
+    async def get_packet_details(
+        self,
+        pcap_file: str,
+        frame_number: int,
+        included_layers: list[str] | None = None,
+    ) -> str:
+        """Get full JSON details for a single packet."""
+        validation = self._validate_file(pcap_file)
+        if not validation["success"]:
+            return json.dumps(validation)
+
+        cmd = [
+            self.tshark_path,
+            "-r",
+            pcap_file,
+            "-Y",
+            f"frame.number == {frame_number}",
+            "-T",
+            "json",
+        ]
+
+        if included_layers:
+            filter_str = " ".join(included_layers)
+            cmd.extend(["-j", filter_str])
+
+        return await self._run_command(cmd)
+```
+
+[`src/wireshark_mcp/tshark/_packets.py:84-109`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L84-L109)
+
+[`src/wireshark_mcp/tshark/_packets.py:111-126`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tshark/_packets.py#L111-L126)
+
+[42] BLE 결과 항목의 패킷 번호 필드다: [`src/wireshark_mcp/tools/bluetooth.py:623-637`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L623-L637), [`src/wireshark_mcp/tools/bluetooth.py:941-955`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L941-L955), [`src/wireshark_mcp/tools/bluetooth.py:1306`](https://github.com/bx33661/Wireshark-MCP/blob/0e1b6595a2dcfe097133deb1c0c3128fb7a110d4/src/wireshark_mcp/tools/bluetooth.py#L1306).
