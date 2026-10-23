@@ -2,8 +2,9 @@ import React, { useRef, useState } from 'react';
 import Layout from '@theme/Layout';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { unzipSync } from 'fflate';
-import { GRAMMARS, extractTree, isSource } from '@site/src/analyzer/core.mjs';
-import ToolExplorer, { type Result } from '@site/src/components/Analyze/ToolExplorer';
+import { GRAMMARS, extractTree, isWanted } from '@site/src/analyzer/core.mjs';
+import ResultView from '@site/src/components/Analyze/ResultView';
+import type { Result } from '@site/src/components/Analyze/parts';
 import styles from '@site/src/components/Analyze/styles.module.css';
 
 // MCP 서버 분석. 소스를 GitHub 링크나 zip으로 받아 브라우저 안에서 등록 도구와 호출 그래프를 만든다.
@@ -20,7 +21,7 @@ function readZip(data: Uint8Array): Source {
   const entries = unzipSync(data, {
     filter: f => {
       if (!f.name.endsWith('/')) names.push(f.name);
-      return isSource(f.name) || isSource(f.name.slice(f.name.indexOf('/') + 1));
+      return isWanted(f.name) || isWanted(f.name.slice(f.name.indexOf('/') + 1));
     },
   });
   const tops = new Set(names.map(n => (n.includes('/') ? n.slice(0, n.indexOf('/')) : '')));
@@ -29,7 +30,7 @@ function readZip(data: Uint8Array): Source {
   const files: [string, string][] = [];
   for (const n of names) {
     const p = n.slice(strip);
-    if (isSource(p) && entries[n]) files.push([p, decoder.decode(entries[n])]);
+    if (isWanted(p) && entries[n]) files.push([p, decoder.decode(entries[n])]);
   }
   return { paths: names.map(n => n.slice(strip)), files };
 }
@@ -53,7 +54,7 @@ async function readGitHub({ owner, repo, ref }: { owner: string; repo: string; r
   const tree = await res.json();
   if (tree.truncated) throw new Error('저장소가 너무 커서 GitHub가 파일 목록을 다 주지 않았습니다. zip을 올리세요.');
   const paths: string[] = tree.tree.filter((e: any) => e.type === 'blob').map((e: any) => e.path);
-  const wanted = paths.filter(isSource);
+  const wanted = paths.filter(isWanted);
   const files: [string, string][] = [];
   let next = 0;
   // 16개씩 동시에 받는다
@@ -147,12 +148,13 @@ function Analyzer() {
       </div>
       {status && <p className={styles.muted}>{status}</p>}
       {error && <pre className={styles.error}>{error}</pre>}
-      {result && !result.r.supported && (
+      {result && (result.r.supported ? (
+        <ResultView file={result.label} blob={result.blob} r={result.r} texts={result.texts} />
+      ) : (
         <p className={styles.notice}>
           {result.r.language ? `${LANG_NAMES[result.r.language] ?? result.r.language} 서버는 지원하지 않습니다.` : '소스 코드 파일을 찾지 못했습니다.'}
         </p>
-      )}
-      {result?.r.supported && <ToolExplorer file={result.label} blob={result.blob} r={result.r} texts={result.texts} />}
+      ))}
     </>
   );
 }

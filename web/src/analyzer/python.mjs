@@ -1,9 +1,11 @@
-// Python MCP 서버 분석: 등록 도구를 찾고, 도구 함수에서 시작해 저장소 안의 함수 호출을 따라간다(core.mjs의 extractTree가 부른다).
+// Python MCP 서버 분석(core.mjs의 extractTree가 부른다):
+//   등록 도구와 명세(설명·인자), 도구 함수에서 시작한 호출 그래프, 도구 밖의 MCP 기능(서버·리소스·프롬프트), SDK 버전과 지원 규격.
 // 호출은 이름과 import로 잇는다. 객체를 알 수 없는 메서드 호출(x.run())과 동적 호출(getattr, 콜백 등록)은 따라가지 않는다.
 // 저장소 밖 호출은 import한 모듈 이름으로 남긴다(subprocess.run, requests.get 등). 서버별 규칙이나 정한 목록은 두지 않는다.
 
 const field = (n, name) => n.childForFieldName(name);
 const line = n => n.startPosition.row + 1;
+const byLoc = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
 // 화면에 보일 등록 코드 한 줄. 길면 자른다
 const snippet = (n, max = 60) => {
   const t = n.text.replace(/\s+/g, ' ');
@@ -21,12 +23,28 @@ function* walk(root) {
 
 // ── 등록 도구 ──
 
-/** x.tool 또는 tool. list_tools·call_tool 같은 저수준 핸들러는 아니다 */
-function isToolAttr(expr) {
+/**
+ * x.tool, 또는 mcp·fastmcp에서 import한 tool. list_tools·call_tool 같은 저수준 핸들러는 아니다.
+ * 그냥 tool은 LangChain 등 다른 라이브러리의 @tool일 수 있어 import한 곳을 본다
+ */
+function isToolAttr(expr, imp) {
   if (!expr) return false;
   if (expr.type === 'attribute') return field(expr, 'attribute')?.text === 'tool';
-  return expr.type === 'identifier' && expr.text === 'tool';
+  return expr.type === 'identifier' && expr.text === 'tool' && fromMcp(expr, imp);
 }
+
+/**
+ * 이름이 어느 모듈에서 왔는가: Tool → mcp.types(from mcp.types import Tool), types.Tool → mcp.types(from mcp import types),
+ * fm.FastMCP → mcp.server.fastmcp(import mcp.server.fastmcp as fm). import하지 않은 이름이면 ''
+ */
+function moduleOf(f, imp) {
+  const parts = f.text.split('.');
+  const from = imp.names.get(parts[0]);
+  if (parts.length === 1) return from?.[0] ?? '';
+  const head = from ? `${from[0]}.${from[1]}` : imp.modules.get(parts[0]);
+  return head ? [head, ...parts.slice(1, -1)].join('.') : '';
+}
+const fromMcp = (f, imp) => /^(mcp|fastmcp)(\.|$)/.test(moduleOf(f, imp));
 
 const ESCAPES = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '\n': '' };
 
@@ -51,10 +69,8 @@ function strConst(n) {
  * 같은 파일의 DESC = "…", from .texts import DESC로 가져온 상수, "a" + DESC 같은 + 연결.
  * f-string, 함수 호출 결과(textwrap.dedent 등), 실행 중에 바뀌는 값은 읽지 않는다
  */
-function stringResolver(trees) {
-  const fileSet = new Set(trees.map(([p]) => p));
+function stringResolver({ trees, imports, fileSet }) {
   const consts = new Map(); // 파일 → (이름 → 값 노드). 같은 이름을 다시 대입하면 마지막 것
-  const imports = new Map();
   for (const [path, tree] of trees) {
     const m = new Map();
     for (const st of tree.rootNode.namedChildren) {
@@ -62,7 +78,6 @@ function stringResolver(trees) {
       if (a?.type === 'assignment' && field(a, 'left')?.type === 'identifier' && field(a, 'right')) m.set(field(a, 'left').text, field(a, 'right'));
     }
     consts.set(path, m);
-    imports.set(path, importsOf(tree.rootNode));
   }
   const value = (n, path, depth = 0) => {
     if (!n || depth > 5) return null;
@@ -88,23 +103,24 @@ function stringResolver(trees) {
 const argNodes = call => (field(call, 'arguments')?.namedChildren ?? []).filter(c => c.type !== 'comment');
 const positional = call => argNodes(call).filter(c => c.type !== 'keyword_argument' && c.type !== 'dictionary_splat');
 
-/** tool(name="x") 또는 tool("x")의 이름. str은 문자열 값을 읽는 함수(stringResolver) */
-function explicitName(call, str, keywordsOnly = false) {
-  for (const a of argNodes(call)) {
-    if (a.type === 'keyword_argument' && field(a, 'name')?.text === 'name') {
-      const v = str(field(a, 'value'));
-      if (v !== null) return v;
-    }
-  }
-  if (keywordsOnly) return null;
-  const first = positional(call)[0];
-  return first ? str(first) : null;
+/** call의 키워드 인자 key=…의 값 노드 */
+function keywordArg(call, key) {
+  const a = argNodes(call).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === key);
+  return a ? field(a, 'value') : null;
 }
 
 /** call의 키워드 인자 key=…가 문자열로 정해지면 그 값 */
 function keywordStr(call, key, str) {
-  const a = argNodes(call).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === key);
-  return a ? str(field(a, 'value')) : null;
+  const v = keywordArg(call, key);
+  return v ? str(v) : null;
+}
+
+/** tool(name="x") 또는 tool("x")의 이름. str은 문자열 값을 읽는 함수(stringResolver) */
+function explicitName(call, str, keywordsOnly = false) {
+  const named = keywordStr(call, 'name', str);
+  if (named !== null || keywordsOnly) return named;
+  const first = positional(call)[0];
+  return first ? str(first) : null;
 }
 
 /**
@@ -112,10 +128,10 @@ function keywordStr(call, key, str) {
  * description_expr에 코드를 남긴다. 이때 FastMCP는 docstring을 쓰지 않으므로 docstring으로 채우지 않는다
  */
 function descriptionOf(call, str) {
-  const a = call && argNodes(call).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === 'description');
-  if (!a) return { description: null };
-  const description = str(field(a, 'value'));
-  return description !== null ? { description } : { description: null, description_expr: snippet(field(a, 'value')) };
+  const v = call ? keywordArg(call, 'description') : null;
+  if (!v) return { description: null };
+  const description = str(v);
+  return description !== null ? { description } : { description: null, description_expr: snippet(v) };
 }
 
 function calleeName(f) {
@@ -125,10 +141,10 @@ function calleeName(f) {
 }
 
 /**
- * 등록 방식: @x.tool 데코레이터, x.add_tool(f), x.tool()(f), 저수준 SDK의 Tool(name=…). reg는 등록한 코드 한 줄이다.
+ * 등록 방식: @x.tool 데코레이터, x.add_tool(f), x.tool()(f), 저수준 SDK의 Tool(name=…)(mcp에서 import한 것만). reg는 등록한 코드 한 줄이다.
  * 코드만 보고 함수를 정할 수 없는 등록(반복문 안의 x.tool()(변수) 등)은 dynamic으로 따로 둔다
  */
-function findTools(trees, value) {
+function findTools({ trees, imports }, value) {
   const defs = new Map(); // 함수 이름 → [[path, line]]. add_tool(f)의 f를 찾는 데 쓴다
   for (const [path, tree] of trees) {
     for (const n of walk(tree.rootNode)) {
@@ -147,13 +163,14 @@ function findTools(trees, value) {
   const dynamic = [];
   for (const [path, tree] of trees) {
     const str = n => value(n, path);
+    const imp = imports.get(path);
     for (const n of walk(tree.rootNode)) {
       if (n.type === 'function_definition') {
         if (n.parent?.type !== 'decorated_definition') continue;
         for (const dec of n.parent.namedChildren.filter(c => c.type === 'decorator')) {
           const expr = dec.namedChildren.find(c => c.type !== 'comment');
           const isCall = expr?.type === 'call';
-          if (isToolAttr(isCall ? field(expr, 'function') : expr)) {
+          if (isToolAttr(isCall ? field(expr, 'function') : expr, imp)) {
             tools.push({
               name: (isCall ? explicitName(expr, str) : null) ?? field(n, 'name').text, path, line: line(n), reg: snippet(dec),
               ...descriptionOf(isCall ? expr : null, str),
@@ -166,9 +183,10 @@ function findTools(trees, value) {
         let fn = null, name = null, desc = null;
         if (f?.type === 'attribute' && field(f, 'attribute')?.text === 'add_tool' && positional(n).length) {
           fn = positional(n)[0]; name = explicitName(n, str, true); desc = descriptionOf(n, str);
-        } else if (f?.type === 'call' && isToolAttr(field(f, 'function')) && positional(n).length) {
+        } else if (f?.type === 'call' && isToolAttr(field(f, 'function'), imp) && positional(n).length) {
           fn = positional(n)[0]; name = explicitName(f, str); desc = descriptionOf(f, str);
-        } else if (calleeName(f) === 'Tool') {
+        } else if (calleeName(f) === 'Tool' && fromMcp(f, imp)) {
+          // 저수준 SDK의 Tool(name=…). LangChain 등 다른 라이브러리의 Tool은 import한 곳으로 거른다
           const toolName = explicitName(n, str);
           if (toolName !== null) tools.push({ name: toolName, path, line: line(n), reg: snippet(n), ...descriptionOf(n, str) });
           continue;
@@ -180,7 +198,6 @@ function findTools(trees, value) {
       }
     }
   }
-  const byLoc = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line);
   return { tools: tools.sort(byLoc), dynamic: dynamic.sort(byLoc) };
 }
 
@@ -271,9 +288,8 @@ function paramsOf(fn, str) {
     }
     // x: int = Field(5, description=…)이면 Field 안의 기본값을 쓴다. Field(...)나 기본값 없는 Field는 필수다
     if (value?.type === 'call' && /Field$/.test(calleeName(field(value, 'function')) ?? '')) {
-      const d = argNodes(value).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === 'default');
       const first = positional(value)[0];
-      value = d ? field(d, 'value') : first && first.type !== 'ellipsis' ? first : null;
+      value = keywordArg(value, 'default') ?? (first && first.type !== 'ellipsis' ? first : null);
     }
     out.push({
       name,
@@ -331,9 +347,8 @@ function bindingsOf(root, imp, path, classFiles, returnTypes, fileSet) {
  * 도구가 호출하는 함수의 호출 그래프.
  * functions[i] = {name, path, line, end, calls: [{line, to?, ext?}]}. to는 저장소 안 함수 번호, ext는 저장소 밖 호출이다
  */
-function buildGraph(trees, tools, value) {
-  const fileSet = new Set(trees.map(([p]) => p));
-  const funcs = new Map(); // "path:line" → {key, name, path, line, end, params, doc, calls}
+function buildGraph({ trees, imports, fileSet }, tools, value) {
+  const funcs = new Map(); // "path:line" → {key, name, path, line, end, node, calls}
   const byName = new Map(); // 이름 → [key]
   const byFileName = new Map(); // path + '\0' + 이름 → [key]
   const classFiles = new Map(); // 클래스 이름 → [파일]
@@ -350,11 +365,9 @@ function buildGraph(trees, tools, value) {
     }
   }
 
-  const importsByFile = new Map(trees.map(([path, tree]) => [path, importsOf(tree.rootNode)]));
   for (const [path, tree] of trees) {
-    const imp = importsByFile.get(path);
+    const imp = imports.get(path);
     const binds = bindingsOf(tree.rootNode, imp, path, classFiles, returnTypes, fileSet);
-    const str = n => value(n, path);
     for (const fn of walk(tree.rootNode)) {
       if (fn.type !== 'function_definition') continue;
       const name = field(fn, 'name').text;
@@ -386,7 +399,7 @@ function buildGraph(trees, tools, value) {
         }
         if (callee) calls.push({ callee, base, module, objFile, line: line(c) });
       }
-      funcs.set(key, { key, name, path, line: line(fn), end: fn.endPosition.row + 1, params: paramsOf(fn, str), doc: docstring(fn), calls });
+      funcs.set(key, { key, name, path, line: line(fn), end: fn.endPosition.row + 1, node: fn, calls });
       push(byName, name, key);
       push(byFileName, path + '\0' + name, key);
     }
@@ -396,7 +409,7 @@ function buildGraph(trees, tools, value) {
   const definedIn = (file, name, depth = 0) => {
     const own = byFileName.get(file + '\0' + name);
     if (own || depth > 3) return own ?? [];
-    const imp = importsByFile.get(file);
+    const imp = imports.get(file);
     const from = imp?.names.get(name);
     const mods = from ? [[from[0], from[1]]] : (imp?.star ?? []).map(m => [m, name]);
     for (const [mod, orig] of mods) {
@@ -428,8 +441,8 @@ function buildGraph(trees, tools, value) {
   const reached = new Set();
   for (const t of tools) {
     const start = funcs.get(`${t.path}:${t.line}`);
-    t.params = start?.params ?? [];
-    if (!t.description_expr) t.description ??= start?.doc ?? null; // FastMCP는 description이 없으면 docstring을 쓴다
+    t.params = start ? paramsOf(start.node, n => value(n, start.path)) : [];
+    if (!t.description_expr) t.description ??= start ? docstring(start.node) : null; // FastMCP는 description이 없으면 docstring을 쓴다
     if (!start) continue; // 저수준 Tool(name=…) 등록은 함수가 없다
     const queue = [start.key];
     reached.add(start.key);
@@ -465,6 +478,231 @@ function buildGraph(trees, tools, value) {
   return { functions };
 }
 
+// ── 도구 밖의 MCP 기능: 서버, 리소스, 프롬프트 ──
+
+// 서버 객체를 만드는 클래스 → 화면 표기. 같은 이름이라도 import한 모듈로 구분한다
+const SERVER_CLASSES = [
+  ['FastMCP', /^fastmcp(\.|$)/, 'FastMCP'],
+  ['FastMCP', /^mcp\.server\.fastmcp/, 'FastMCP (MCP SDK)'],
+  ['MCPServer', /^mcp\./, 'MCPServer (MCP SDK)'],
+  ['Server', /^mcp\.server(\.lowlevel)?(\.|$)/, 'MCP SDK 저수준'],
+];
+// 전송 방식: run(transport=…)가 없으면 stdio. 아래 메서드는 이름으로 방식을 정한다
+const TRANSPORT_METHODS = {
+  run_stdio_async: 'stdio', sse_app: 'sse', run_sse_async: 'sse',
+  streamable_http_app: 'streamable-http', run_streamable_http_async: 'streamable-http', http_app: 'http',
+};
+/**
+ * 도구 밖의 MCP 기능:
+ *   servers    서버 객체 {name, sdk, path, line, instructions}. instructions는 클라이언트 모델이 받는 서버 설명이다
+ *   transports 전송 방식
+ *   resources  @x.resource(uri) {uri, name, description, mime, template, params, path, line, end}
+ *   prompts    @x.prompt() {name, description, params, path, line, end}
+ * 모두 코드에 쓰인 대로 읽는다
+ */
+function mcpFeatures({ trees, imports }, value) {
+  const servers = [], resources = [], prompts = [], transports = new Set();
+  const vars = new Set(); // 서버 객체를 담은 변수 이름
+  for (const [path, tree] of trees) {
+    const imp = imports.get(path);
+    const str = n => value(n, path);
+    for (const n of walk(tree.rootNode)) {
+      if (n.type !== 'call') continue;
+      const f = field(n, 'function');
+      const cls = calleeName(f);
+      const from = f ? moduleOf(f, imp) : '';
+      const kind = SERVER_CLASSES.find(([c, mod]) => c === cls && mod.test(from));
+      if (!kind) continue;
+      const inst = keywordArg(n, 'instructions');
+      const instructions = inst ? str(inst) : null;
+      servers.push({
+        name: explicitName(n, str), sdk: kind[2], path, line: line(n), instructions,
+        ...(inst && instructions === null && { instructions_expr: snippet(inst) }),
+      });
+      const left = n.parent?.type === 'assignment' ? field(n.parent, 'left') : null;
+      if (left?.type === 'identifier') vars.add(left.text);
+    }
+  }
+  for (const [path, tree] of trees) {
+    const str = n => value(n, path);
+    // from app import mcp as mcp_server. 함수 안에서 import하는 경우도 있어 파일 전체에서 별칭을 모은다
+    const alias = new Map();
+    for (const n of walk(tree.rootNode)) if (n.type === 'aliased_import') alias.set(field(n, 'alias').text, field(n, 'name').text.split('.').pop());
+    const isServer = name => vars.has(name) || vars.has(alias.get(name));
+    for (const n of walk(tree.rootNode)) {
+      if (n.type === 'decorated_definition') {
+        const fn = n.namedChildren.find(c => c.type === 'function_definition');
+        for (const dec of n.namedChildren.filter(c => c.type === 'decorator')) {
+          const expr = dec.namedChildren.find(c => c.type !== 'comment');
+          const call = expr?.type === 'call' ? expr : null;
+          const f = call ? field(call, 'function') : expr;
+          const attr = f?.type === 'attribute' ? field(f, 'attribute').text : null;
+          if (!fn || (attr !== 'resource' && attr !== 'prompt')) continue;
+          const desc = descriptionOf(call, str);
+          if (!desc.description_expr) desc.description ??= docstring(fn);
+          const common = { ...desc, params: paramsOf(fn, str), path, line: line(fn), end: fn.endPosition.row + 1 };
+          if (attr === 'prompt') {
+            prompts.push({ name: (call ? explicitName(call, str) : null) ?? field(fn, 'name').text, ...common });
+          } else {
+            const uri = call ? (keywordStr(call, 'uri', str) ?? (positional(call)[0] ? str(positional(call)[0]) : null)) : null;
+            resources.push({
+              uri, name: (call ? keywordStr(call, 'name', str) : null) ?? field(fn, 'name').text,
+              mime: call ? keywordStr(call, 'mime_type', str) : null, template: /\{[^}]+\}/.test(uri ?? ''), ...common,
+            });
+          }
+        }
+      }
+      if (n.type !== 'call') continue;
+      const f = field(n, 'function');
+      if (f?.type !== 'attribute') continue;
+      const callee = field(f, 'attribute').text;
+      const obj = field(f, 'object');
+      if (isServer(obj.text)) {
+        if (callee === 'run' || callee === 'run_async') {
+          const t = keywordArg(n, 'transport');
+          transports.add(t ? str(t) ?? snippet(t, 30) : 'stdio');
+        } else if (TRANSPORT_METHODS[callee]) transports.add(TRANSPORT_METHODS[callee]);
+      }
+    }
+  }
+  return { servers, transports: [...transports].sort(), resources: resources.sort(byLoc), prompts: prompts.sort(byLoc) };
+}
+
+// ── MCP SDK 버전과 규격 ──
+
+// mcp 패키지 버전 → 그 버전이 지원하는 가장 새 MCP 규격. PyPI 배포 파일의 LATEST_PROTOCOL_VERSION(1.x는 mcp,
+// 2.x는 mcp-types 패키지)에서 확인했다. 새 SDK가 새 규격을 지원하면 여기에 더한다
+const OLDEST_PROTOCOL = '2024-11-05'; // 모든 릴리스가 지원하는 가장 오래된 규격(2.x의 OLDEST_SUPPORTED_VERSION)
+const MCP_SDK_PROTOCOLS = [
+  ['0', '2024-11-05'],
+  ['1.9.0', '2025-03-26'],
+  ['1.10.0', '2025-06-18'],
+  ['1.23.1', '2025-11-25'],
+  ['2.0.0', '2026-07-28'],
+];
+// fastmcp 버전 → 요구하는 가장 낮은 mcp 버전(requires_dist). 3.3부터는 fastmcp-slim이 요구한다
+const FASTMCP_MCP = [
+  ['2.0.0', '1.6.0'],
+  ['3.0.0', '1.24.0'],
+  ['4.0.0', '2.0.0'],
+];
+
+/** "1.23.1" → 비교용 숫자 배열. 2.0.0rc1 같은 시험판은 정식판보다 앞으로 친다 */
+function versionKey(v) {
+  const nums = (v.match(/\d+/g) ?? []).slice(0, 3).map(Number);
+  while (nums.length < 3) nums.push(0);
+  return /\d(a|b|rc|dev)\d*$/i.test(v) ? [...nums, -1] : [...nums, 0];
+}
+const versionAtLeast = (v, min) => {
+  const a = versionKey(v), b = versionKey(min);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return true;
+};
+const lookup = (table, v) => table.filter(([min]) => versionAtLeast(v, min)).pop()?.[1] ?? null;
+
+const range = latest => (latest ? { oldest: OLDEST_PROTOCOL, latest } : { oldest: null, latest: null });
+
+/** 버전 조건(">=1.0.0", "==1.27.2", "^1.2", ">=1.28,<2")에서 가장 낮은 버전. "<2"처럼 하한이 없으면 null */
+const lowerBound = spec =>
+  (spec.match(/(?:>=|===|==|~=|\^|~)\s*(\d[\w.]*)/) ?? spec.match(/^\s*(\d[\w.]*)\s*$/))?.[1] ?? null;
+
+// 패키지 이름 뒤에 올 수 있는 것: 끝, 공백, [extras], 버전 조건, 환경 표시(;). mcp-server-git 같은 다른 이름을 거른다
+const SDK_NAME = /^\s*(mcp|fastmcp)(?=$|[\s[<>=~!;(])(?:\[[^\]]*\])?\s*([^;#]*)/;
+
+/**
+ * pyproject.toml의 의존성에서 mcp·fastmcp 조건: [{pkg, spec, main}]. main은 실행용 의존성(dev·optional이 아님).
+ * [project] dependencies, [project.optional-dependencies], [dependency-groups], tool.uv의 dev-dependencies,
+ * poetry의 [tool.poetry.dependencies]·group·dev-dependencies만 본다. keywords 같은 다른 배열은 보지 않는다
+ */
+function pyprojectDeps(text) {
+  const out = [];
+  let table = '', array = null; // array: 지금 읽는 의존성 배열이 실행용이면 true, dev·optional이면 false, 의존성이 아니면 'skip'
+  const take = (str, main) => {
+    const m = str.match(SDK_NAME);
+    if (m) out.push({ pkg: m[1], spec: m[2].trim(), main });
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (array !== null) {
+      if (array !== 'skip') for (const m of line.matchAll(/["']([^"']*)["']/g)) take(m[1], array);
+      if (line.includes(']')) array = null;
+      continue;
+    }
+    const header = line.match(/^\[\[?([^\]]+)\]\]?$/);
+    if (header) { table = header[1].trim(); continue; }
+    const assign = line.match(/^([\w.-]+)\s*=\s*(.*)$/);
+    if (!assign) continue;
+    const [, key, rest] = assign;
+    if (rest.startsWith('[')) {
+      const kind = table === 'project' && key === 'dependencies' ? true
+        : table === 'project.optional-dependencies' || table === 'dependency-groups' || (table === 'tool.uv' && key === 'dev-dependencies') ? false
+        : 'skip';
+      if (kind !== 'skip') for (const m of rest.matchAll(/["']([^"']*)["']/g)) take(m[1], kind);
+      if (!rest.includes(']')) array = kind;
+    } else if (/^tool\.poetry\.(dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/.test(table) && (key === 'mcp' || key === 'fastmcp')) {
+      // mcp = "^1.2" 또는 mcp = { version = "^1.2", extras = [...] }
+      const spec = rest.match(/^["']([^"']*)["']/)?.[1] ?? rest.match(/version\s*=\s*["']([^"']*)["']/)?.[1] ?? '';
+      out.push({ pkg: key, spec, main: table === 'tool.poetry.dependencies' });
+    }
+  }
+  return out;
+}
+
+/**
+ * 의존성 파일에서 MCP SDK(mcp 또는 fastmcp) 버전을 읽고 지원하는 규격을 정한다.
+ * lock 파일(uv.lock, poetry.lock)에 있으면 그 버전(exact), 아니면 pyproject.toml·requirements*.txt의 조건에서
+ * 가장 낮은 버전(atLeast: 설치할 때 더 새 버전이 들어올 수 있다). fastmcp만 적혀 있으면 fastmcp가 요구하는 mcp로 바꿔 본다.
+ * 결과: {package, version, spec, source, exact, atLeast, oldest, latest, via} 또는 null(의존성 파일에 없음).
+ * oldest~latest가 지원하는 규격 범위다. 실제 통신 규격은 이 안에서 클라이언트가 요청한 것으로 정해진다
+ */
+export function readSdk(depFiles) {
+  const files = [...depFiles].sort((a, b) => a[0].split('/').length - b[0].split('/').length || (a[0] < b[0] ? -1 : 1));
+  const locked = {}, declared = {};
+  for (const [path, text] of files) {
+    const base = path.slice(path.lastIndexOf('/') + 1);
+    if (base.endsWith('.lock')) {
+      for (const m of text.matchAll(/\[\[package\]\]\s*\nname\s*=\s*"([^"]+)"\s*\nversion\s*=\s*"([^"]+)"/g)) {
+        if ((m[1] === 'mcp' || m[1] === 'fastmcp') && !locked[m[1]]) locked[m[1]] = { version: m[2], source: path };
+      }
+      continue;
+    }
+    // requirements-dev.txt·requirements-test.txt는 개발용으로 본다
+    const found = base === 'pyproject.toml'
+      ? pyprojectDeps(text)
+      : text.split('\n').flatMap(l => {
+        const m = l.match(SDK_NAME);
+        return m ? [{ pkg: m[1], spec: m[2].trim(), main: !/dev|test/i.test(base) }] : [];
+      });
+    // 실행용 의존성을 개발용보다 먼저 쓴다
+    for (const { pkg, spec, main } of found) {
+      if (!declared[pkg] || (main && !declared[pkg].main)) declared[pkg] = { spec, source: path, main };
+    }
+  }
+  // 실제 규격을 구현하는 것은 mcp 패키지라 mcp를 먼저 본다
+  for (const pkg of ['mcp', 'fastmcp']) {
+    const l = locked[pkg];
+    if (!l) continue;
+    const mcpMin = pkg === 'fastmcp' ? lookup(FASTMCP_MCP, l.version) : l.version;
+    return {
+      package: pkg, version: l.version, spec: null, source: l.source, exact: pkg === 'mcp', atLeast: pkg !== 'mcp',
+      ...range(mcpMin && lookup(MCP_SDK_PROTOCOLS, mcpMin)), ...(pkg === 'fastmcp' && { via: `mcp ${mcpMin} 이상` }),
+    };
+  }
+  // 선언만 있으면 실행용 의존성을 먼저, 그다음 mcp를 본다
+  for (const pkg of ['mcp', 'fastmcp'].filter(p => declared[p]).sort((x, y) => declared[y].main - declared[x].main)) {
+    const d = declared[pkg];
+    const low = d.spec ? lowerBound(d.spec) : null;
+    const mcpMin = low && (pkg === 'fastmcp' ? lookup(FASTMCP_MCP, low) : low);
+    const exact = pkg === 'mcp' && /^==\s*[\d.]+$/.test(d.spec);
+    return {
+      package: pkg, version: exact ? low : null, spec: d.spec, source: d.source, exact, atLeast: !exact,
+      ...range(mcpMin ? lookup(MCP_SDK_PROTOCOLS, mcpMin) : null), ...(pkg === 'fastmcp' && mcpMin && { via: `mcp ${mcpMin} 이상` }),
+    };
+  }
+  return null;
+}
+
 /** files: [경로, 내용] 목록(경로 순). parser: Python 문법을 넣은 web-tree-sitter Parser */
 export function extractPython(files, parser) {
   const trees = [];
@@ -473,9 +711,11 @@ export function extractPython(files, parser) {
       const tree = parser.parse(text);
       if (tree) trees.push([path, tree]);
     }
-    const value = stringResolver(trees);
-    const { tools, dynamic } = findTools(trees, value);
-    return { tools, dynamic, graph: buildGraph(trees, tools, value) };
+    // 파일마다 import와 저장소 파일 목록은 한 번만 만들어 함께 쓴다
+    const src = { trees, imports: new Map(trees.map(([p, t]) => [p, importsOf(t.rootNode)])), fileSet: new Set(trees.map(([p]) => p)) };
+    const value = stringResolver(src);
+    const { tools, dynamic } = findTools(src, value);
+    return { tools, dynamic, graph: buildGraph(src, tools, value), mcp: mcpFeatures(src, value) };
   } finally {
     for (const [, tree] of trees) tree.delete();
   }
