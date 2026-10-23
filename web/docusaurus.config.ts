@@ -138,6 +138,11 @@ const config: Config = {
           label: 'Compare',
           position: 'left',
         },
+        {
+          to: '/analyze',
+          label: 'Analyze',
+          position: 'left',
+        },
 
         {
           href: 'https://github.com/Trace2Bac/dfir-mcp-matrix',
