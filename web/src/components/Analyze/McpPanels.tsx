@@ -6,33 +6,18 @@ import styles from "./styles.module.css";
 
 const MAX_CHIPS = 40;
 
-/** 서버가 지원하는 MCP 규격 범위: 의존성 파일의 SDK 버전에서 정한다(python.mjs의 readSdk) */
+const NONE = <span className={styles.muted}>–</span>;
+
+/** 서버가 지원하는 MCP 규격 범위: 의존성 파일의 SDK 버전에서 정한다(python.mjs의 readSdk). 근거는 마우스를 올리면 보인다 */
 function Protocols({ sdk }: { sdk: Mcp["sdk"] }) {
-  if (!sdk) {
-    return (
-      <>
-        <b>알 수 없음</b>
-        <p className={styles.muted}>의존성 파일(pyproject.toml, requirements.txt, uv.lock)에 mcp·fastmcp가 없습니다</p>
-      </>
-    );
-  }
-  const pkg = `${sdk.package}${sdk.version ? ` ${sdk.version}` : sdk.spec ?? ""}${sdk.via ? ` → ${sdk.via}` : ""}`;
+  if (!sdk?.latest) return NONE;
   // 버전을 고정하지 않았으면(atLeast) 가장 새 규격은 '이상'으로 적는다. 가장 낮은 SDK가 한 규격만 지원하면 시작만 적는다
-  const range = !sdk.latest
-    ? null
-    : sdk.oldest === sdk.latest
+  const range =
+    sdk.oldest === sdk.latest
       ? sdk.atLeast ? `${sdk.oldest}부터` : sdk.latest
       : `${sdk.oldest} ~ ${sdk.latest}${sdk.atLeast ? " 이상" : ""}`;
-  return (
-    <>
-      <b>{range ?? "알 수 없음"}</b>
-      <p className={styles.muted}>
-        근거 {sdk.source} · <code>{pkg}</code>
-        {!range && (sdk.spec ? " · 하한이 없는 조건이라 정할 수 없음" : " · 버전을 적지 않아 설치할 때의 최신 SDK를 씀")}
-        {range && sdk.atLeast && " · 버전을 고정하지 않아 설치 시점에 따라 더 새 규격까지 지원할 수 있음"}
-      </p>
-    </>
-  );
+  const pkg = `${sdk.package}${sdk.version ? ` ${sdk.version}` : sdk.spec ?? ""}${sdk.via ? ` → ${sdk.via}` : ""}`;
+  return <span title={`${sdk.source}의 ${pkg}`}>{range}</span>;
 }
 
 /** 도구 이름 목록. 누르면 도구 탭에서 그 도구를 연다 */
@@ -84,7 +69,7 @@ function ListDetail<T>({
               {side && <small>{side(x)}</small>}
             </button>
           ))}
-          {!shown.length && <p className={styles.muted}>맞는 항목이 없습니다.</p>}
+          {!shown.length && <p className={styles.muted}>검색 결과 없음</p>}
         </div>
       </aside>
       <section className={styles.toolDetail} key={sel}>
@@ -113,12 +98,11 @@ export function SharedPanel({
   onTool: (i: number) => void;
 }) {
   const traced = tools.flatMap((t, i) => (t.fn === undefined ? [] : [i]));
-  if (!shared.length) return <p className={styles.notice}>여러 도구가 함께 거치는 함수가 없습니다.</p>;
+  if (!shared.length) return <p className={styles.notice}>공통 경로 없음</p>;
   return (
     <>
-      <p className={styles.panelLead}>
-        도구 {traced.length}개 가운데 둘 이상이 거치는 함수입니다. 서버가 도구마다 공통으로 하는 처리(사건 확인, 기록, 검증 등)가 여기에 모입니다.
-        거치지 않는 도구는 그 처리가 빠졌는지 확인할 곳입니다. 다만 분석기가 따라가지 못한 호출 때문일 수도 있습니다.
+      <p className={styles.panelLead} title="분석기가 놓친 호출 때문에 거치지 않는 것으로 보일 수도 있음">
+        도구 {traced.length}개 중 둘 이상이 거치는 함수 · 거치지 않는 도구는 공통 처리(기록·검증 등) 누락을 확인할 대상
       </p>
       <ListDetail
         items={shared}
@@ -133,7 +117,7 @@ export function SharedPanel({
             <>
               <h3>{fn.name}</h3>
               <p className={styles.meta}>
-                <Loc path={fn.path} line={fn.line} end={fn.end} blob={blob} /> · 도구 <b>{x.tools.length}</b>/{traced.length}개가 거칩니다
+                <Loc path={fn.path} line={fn.line} end={fn.end} blob={blob} /> · 도구 <b>{x.tools.length}</b>/{traced.length}개가 거침
               </p>
               <div className={styles.bar}>
                 <span style={{ width: `${(x.tools.length / traced.length) * 100}%` }} />
@@ -157,7 +141,7 @@ export function SharedPanel({
 
 // ── 리소스·프롬프트 ──
 
-/** 리소스·프롬프트 하나: 제목, 덧붙일 정보, 설명, 인자, 위치, 함수 코드(호출 그래프 밖이라 호출 표시는 없다) */
+/** 리소스·프롬프트 하나: 제목, 덧붙일 정보, 설명, 파라미터, 위치, 함수 코드(호출 그래프 밖이라 호출 표시는 없다) */
 function EntryDetail({
   title,
   meta,
@@ -189,7 +173,7 @@ function EntryDetail({
 
 export function ResourcesPanel({ resources, texts, blob }: { resources: Resource[]; texts: Map<string, string[]>; blob?: string }) {
   if (!resources.length) {
-    return <p className={styles.notice}>이 서버는 리소스를 제공하지 않습니다. 코드에 @x.resource(…)로 등록한 리소스가 없습니다.</p>;
+    return <p className={styles.notice}>등록된 리소스 없음</p>;
   }
   return (
     <ListDetail
@@ -218,7 +202,7 @@ export function ResourcesPanel({ resources, texts, blob }: { resources: Resource
 
 export function PromptsPanel({ prompts, texts, blob }: { prompts: Prompt[]; texts: Map<string, string[]>; blob?: string }) {
   if (!prompts.length) {
-    return <p className={styles.notice}>이 서버는 프롬프트를 제공하지 않습니다. 코드에 @x.prompt(…)로 등록한 프롬프트가 없습니다.</p>;
+    return <p className={styles.notice}>등록된 프롬프트 없음</p>;
   }
   return (
     <ListDetail
@@ -241,14 +225,14 @@ export function ServerPanel({ mcp, blob }: { mcp: Mcp; blob?: string }) {
       <dd>
         {main ? (
           <>
-            <b>{main.name ?? "(이름 없음)"}</b> · {main.sdk} · <Loc path={main.path} line={main.line} blob={blob} />
+            <b>{main.name ?? "–"}</b> · {main.sdk} · <Loc path={main.path} line={main.line} blob={blob} />
             {others.length > 0 && (
               <details className={styles.others}>
-                <summary>다른 서버 객체 {others.length}개 (하위 서버를 붙이는 구조 등)</summary>
+                <summary>서버 객체 {others.length}개 더</summary>
                 <ul>
                   {others.map((x, i) => (
                     <li key={i}>
-                      {x.name ?? "(이름 없음)"} · <Loc path={x.path} line={x.line} blob={blob} />
+                      {x.name ?? "–"} · <Loc path={x.path} line={x.line} blob={blob} />
                     </li>
                   ))}
                 </ul>
@@ -256,31 +240,27 @@ export function ServerPanel({ mcp, blob }: { mcp: Mcp; blob?: string }) {
             )}
           </>
         ) : (
-          <span className={styles.muted}>FastMCP·MCPServer·Server로 만든 서버 객체가 코드에 없습니다.</span>
+          NONE
         )}
       </dd>
 
-      <dt title="서버의 MCP SDK가 지원하는 규격. 실제 통신 규격은 이 안에서 클라이언트가 요청한 것으로 정해진다">지원 규격</dt>
+      <dt title="서버 SDK가 지원하는 규격. 실제 통신 규격은 이 범위에서 클라이언트 요청에 따라 정해짐">지원 규격</dt>
       <dd>
         <Protocols sdk={mcp.sdk} />
       </dd>
 
-      <dt title="클라이언트가 연결할 때 모델에게 주는 서버 설명(instructions=)">지시문</dt>
+      <dt title="연결 시 클라이언트 모델에 전달되는 서버 설명(instructions=)">지시문</dt>
       <dd>
-        {main ? (
-          <Description text={main.instructions} expr={main.instructions_expr} empty="서버 객체에 instructions=가 없습니다." />
+        {main?.instructions || main?.instructions_expr ? (
+          <Description text={main.instructions} expr={main.instructions_expr} />
         ) : (
-          <span className={styles.muted}>–</span>
+          NONE
         )}
       </dd>
 
       <dt>전송 방식</dt>
       <dd>
-        {mcp.transports.length ? (
-          mcp.transports.join(", ")
-        ) : (
-          <span className={styles.muted}>서버를 실행하는 run(…) 호출이 코드에 없습니다.</span>
-        )}
+        {mcp.transports.length ? mcp.transports.join(", ") : NONE}
       </dd>
     </dl>
   );

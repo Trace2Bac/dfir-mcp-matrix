@@ -32,7 +32,7 @@ function Diagram({ fns, root, sel, onSel }: { fns: Fn[]; root: number; sel: numb
   return (
     <div className={styles.graphWrap}>
       {order.length > MAX_NODES && (
-        <p className={styles.muted}>함수 {order.length}개 가운데 가까운 {MAX_NODES}개만 그립니다.</p>
+        <p className={styles.muted}>함수 {order.length}개 중 가까운 {MAX_NODES}개만 표시</p>
       )}
       <svg width={width} height={height} className={styles.graph} role="img" aria-label="도구 호출 그래프">
         {edges.map(([a, b], i) => {
@@ -117,9 +117,7 @@ export default function ToolExplorer({
 
   if (!tool) {
     return (
-      <p className={styles.notice}>
-        등록된 MCP 도구(@x.tool, x.add_tool(f), Tool(name=…) 등)를 찾지 못했습니다. MCP 서버 소스가 맞는지 확인하세요.
-      </p>
+      <p className={styles.notice}>등록된 MCP 도구가 없습니다.</p>
     );
   }
   return (
@@ -135,12 +133,12 @@ export default function ToolExplorer({
               {ids.map((i) => (
                 <button key={i} className={`${styles.toolItem} ${i === sel ? styles.on : ""}`} onClick={() => onSel(i)}>
                   <span>{tools[i].name}</span>
-                  <small title="이 도구가 호출하는 함수 수(간접 호출 포함)">{tools[i].scope?.functions ?? "–"}</small>
+                  <small title="호출 함수 수(간접 포함)">{tools[i].scope?.functions ?? "–"}</small>
                 </button>
               ))}
             </div>
           ))}
-          {!groups.length && <p className={styles.muted}>맞는 도구가 없습니다.</p>}
+          {!groups.length && <p className={styles.muted}>검색 결과 없음</p>}
         </div>
       </aside>
 
@@ -151,7 +149,7 @@ export default function ToolExplorer({
           <Params params={tool.params} />
         </div>
         <p className={styles.meta}>
-          <Loc path={tool.path} line={tool.line} blob={blob} /> · <code title="등록한 코드">{tool.reg}</code>
+          <Loc path={tool.path} line={tool.line} blob={blob} /> · <code title="등록 코드">{tool.reg}</code>
           {tool.scope && (
             <>
               {" "}
@@ -160,7 +158,7 @@ export default function ToolExplorer({
           )}
         </p>
         {tool.fn === undefined ? (
-          <p className={styles.notice}>함수 없이 등록된 도구라(저수준 SDK의 Tool(name=…)) 따라갈 시작점이 없습니다.</p>
+          <p className={styles.notice}>함수 없이 등록된 도구(Tool(name=…))라 호출 구조가 없습니다.</p>
         ) : (
           <>
             <Diagram fns={fns} root={tool.fn} sel={fnSel} onSel={setFnSel} />

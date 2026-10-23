@@ -35,14 +35,14 @@ export default function ResultView({ file, r, texts, blob }: { file: string; r: 
     <>
       <div className={styles.head}>
         <b>{file}</b>
-        <div className={styles.stats} title="도구 함수에서 직접·간접으로 호출되는 함수와 그 함수가 있는 파일">
+        <div className={styles.stats} title="도구가 직접·간접으로 호출하는 함수와 파일">
           <div><b>{s.tools}</b>도구</div>
           <div><b>{s.functions_reached}</b>호출 함수</div>
           <div><b>{s.files_reached}</b>파일</div>
         </div>
         {r.dynamic.length > 0 && (
-          <span className={styles.muted} title="반복문 안에서 만든 함수처럼 실행해야 정해지는 도구는 목록에 넣지 못합니다">
-            반복문 등으로 등록돼 목록에 없는 도구 {r.dynamic.length}곳: {r.dynamic.map((d) => `${d.path}:${d.line}`).join(", ")}
+          <span className={styles.muted} title="반복문 등 실행해야 정해지는 등록이라 목록에 넣지 못함">
+            목록에서 빠진 동적 등록 {r.dynamic.length}곳: {r.dynamic.map((d) => `${d.path}:${d.line}`).join(", ")}
           </span>
         )}
       </div>

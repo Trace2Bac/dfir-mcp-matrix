@@ -78,14 +78,14 @@ const reflow = (text: string) =>
     .join("\n\n");
 
 /** 클라이언트가 받는 설명. 길면 접어 두고, 코드만으로 못 읽으면 그 코드를 보인다 */
-export function Description({ text, expr, empty = "설명 없음" }: { text: string | null; expr?: string; empty?: string }) {
+export function Description({ text, expr }: { text: string | null; expr?: string }) {
   const [open, setOpen] = useState(false);
   const desc = text ? reflow(text) : null;
   if (!desc) {
     return expr ? (
-      <p className={styles.muted}>실행할 때 정해지는 값: <code>{expr}</code></p>
+      <p className={styles.muted}>실행 시 결정: <code>{expr}</code></p>
     ) : (
-      <p className={styles.muted}>{empty}</p>
+      <p className={styles.muted}>설명 없음</p>
     );
   }
   const long = desc.split("\n").length > DESC_LINES || desc.length > 500;
@@ -101,12 +101,12 @@ export function Description({ text, expr, empty = "설명 없음" }: { text: str
   );
 }
 
-/** 인자 목록: 이름 | 타입, 필수 또는 기본값, Field(description=…) */
+/** 파라미터 목록: 이름 | 타입, 필수 또는 기본값, Field(description=…) */
 export function Params({ params }: { params: Param[] }) {
   if (!params.length) return null;
   return (
     <div className={styles.params}>
-      <span className={styles.paramsHead}>인자</span>
+      <span className={styles.paramsHead}>파라미터</span>
       {params.map((p) => (
         <div key={p.name} className={styles.param}>
           <code>{p.name}</code>
@@ -178,7 +178,7 @@ export function Code({
           );
         })}
       </pre>
-      {body.length > MAX_LINES && <p className={styles.muted}>나머지 {body.length - MAX_LINES}줄은 생략했습니다.</p>}
+      {body.length > MAX_LINES && <p className={styles.muted}>이하 {body.length - MAX_LINES}줄 생략</p>}
     </div>
   );
 }

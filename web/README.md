@@ -36,8 +36,8 @@ MCP 서버 소스의 1차 정적 분석. 등록 도구를 찾고, 도구마다 �
 - 도구 찾기: `@x.tool`, `x.add_tool(f)`, `x.tool()(f)`, 저수준 SDK의 `Tool(name=…)`. 그냥 `@tool`과 `Tool`은 LangChain 등 다른 라이브러리일 수 있어 `mcp`·`fastmcp`에서 import한 것만 센다
 - 요약: 도구 수, 도구가 호출하는 함수·파일 수(직접·간접), 반복문 등으로 등록돼 목록에 없는 도구의 위치
 - 탭
-  - 도구: 도구 목록 → 고른 도구의 명세와 다이어그램 → 칸을 누르면 그 함수의 코드(호출 줄의 `→`로 다음 함수로 간다). 명세는 MCP 클라이언트가 보는 설명(`description=` 또는 docstring)과 인자(타입, 기본값·필수, `Field(description=…)`)다. 문자열은 리터럴, 이어 쓴 문자열, 모듈 수준 상수(같은 파일·import)까지 따라가고, f-string처럼 실행해야 정해지는 값은 코드를 그대로 보여 준다
-  - 리소스·프롬프트: `@x.resource(uri)`·`@x.prompt()`로 등록한 것의 URI·이름·설명·인자와 코드. 없어도 탭은 두고 없다고 적는다
+  - 도구: 도구 목록 → 고른 도구의 명세와 다이어그램 → 칸을 누르면 그 함수의 코드(호출 줄의 `→`로 다음 함수로 간다). 명세는 MCP 클라이언트가 보는 설명(`description=` 또는 docstring)과 파라미터(타입, 기본값·필수, `Field(description=…)`)다. 문자열은 리터럴, 이어 쓴 문자열, 모듈 수준 상수(같은 파일·import)까지 따라가고, f-string처럼 실행해야 정해지는 값은 코드를 그대로 보여 준다
+  - 리소스·프롬프트: `@x.resource(uri)`·`@x.prompt()`로 등록한 것의 URI·이름·설명·파라미터와 코드. 없어도 탭은 두고 없다고 적는다
   - 공통 경로: 둘 이상의 도구가 거치는 함수(거치는 도구가 많은 순). 고르면 거치는 도구와 거치지 않는 도구, 그 함수의 코드. 거치지 않는 도구는 공통 처리(기록, 검증 등)가 빠졌는지 확인할 곳이다
   - 서버: 서버 객체(FastMCP·MCPServer·Server)와 SDK, 지원 규격, 클라이언트 모델이 받는 지시문(`instructions=`), 전송 방식(`run(transport=…)`, 없으면 stdio)
 - 지원 규격: 서버의 MCP SDK가 지원하는 규격 범위. 의존성 파일(`uv.lock`·`poetry.lock`이 있으면 그 정확한 버전, 없으면 `pyproject.toml`·`requirements*.txt` 조건의 가장 낮은 버전)에서 `mcp`·`fastmcp` 버전을 읽는다. `pyproject.toml`은 의존성 표(`dependencies`, optional·dev, poetry)만 보고, 실행용 의존성을 개발용보다 먼저 쓴다. 실제 통신 규격은 이 범위 안에서 클라이언트가 요청한 것으로 정해진다. SDK 버전 → 규격 대응은 `python.mjs`의 `MCP_SDK_PROTOCOLS`·`FASTMCP_MCP`에 있다(PyPI 배포 파일의 `LATEST_PROTOCOL_VERSION`과 `requires_dist`로 확인). 새 SDK가 새 규격을 지원하면 여기에 더한다
@@ -51,7 +51,7 @@ MCP 서버 소스의 1차 정적 분석. 등록 도구를 찾고, 도구마다 �
 | `src/components/Analyze/ResultView.tsx` | 결과 화면의 틀(요약, 탭) |
 | `src/components/Analyze/ToolExplorer.tsx` | 도구 탭(도구 목록, 명세, 다이어그램) |
 | `src/components/Analyze/McpPanels.tsx` | 리소스·프롬프트·공통 경로·서버 탭 |
-| `src/components/Analyze/parts.tsx` | 탭들이 같이 쓰는 자료 형식과 조각(위치 링크, 설명, 인자, 코드) |
+| `src/components/Analyze/parts.tsx` | 탭들이 같이 쓰는 자료 형식과 조각(위치 링크, 설명, 파라미터, 코드) |
 | `static/parser/` | 파서와 문법 wasm. npm 패키지 `web-tree-sitter@0.27.0`, `tree-sitter-python@0.25.0`에서 복사했다(MIT, `LICENSE`). 버전을 올릴 때 새 파일로 바꾼다 |
 
 다른 언어는 `core.mjs`의 `EXTRACTORS`·`GRAMMARS`·`SDK_READERS`에 분석기, 문법, SDK 버전 읽기를 더한다. 분석기는 `python.mjs`와 같은 모양(`tools`, `dynamic`, `graph`, `mcp`)을 돌려주면 화면이 그대로 쓴다.
