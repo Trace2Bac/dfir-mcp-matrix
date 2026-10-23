@@ -265,8 +265,30 @@ function baseType(text) {
   return text;
 }
 
+const isFieldCall = n => n?.type === 'call' && /Field$/.test(calleeName(field(n, 'function')) ?? '');
+
 /**
- * 도구 인자: {name, type, default, required, description}. MCP 클라이언트가 보는 스키마의 바탕이다.
+ * 파라미터·모델 필드 하나의 타입 표시(typeNode)와 기본값(valueNode): {type, default, required, description}.
+ * x: int = Field(5, description=…)이면 Field 안의 기본값과 설명을 쓴다. default_factory도 기본값으로 본다.
+ * Field(...)나 기본값 없는 Field는 필수다
+ */
+function fieldInfo(typeNode, valueNode, str) {
+  let description = null;
+  for (const n of [typeNode, valueNode]) {
+    for (const c of n ? walk(n) : []) if (isFieldCall(c)) description ??= keywordStr(c, 'description', str);
+  }
+  let dflt = valueNode ? snippet(valueNode, 40) : null;
+  if (isFieldCall(valueNode)) {
+    const d = keywordArg(valueNode, 'default');
+    const factory = keywordArg(valueNode, 'default_factory');
+    const first = positional(valueNode)[0];
+    dflt = d ? snippet(d, 40) : factory ? `${snippet(factory, 36)}()` : first && first.type !== 'ellipsis' ? snippet(first, 40) : null;
+  }
+  return { type: typeNode ? baseType(typeNode.text.replace(/\s+/g, ' ')) : null, default: dflt, required: dflt === null, description };
+}
+
+/**
+ * 도구 파라미터: {name, type, default, required, description}. MCP 클라이언트가 보는 스키마의 바탕이다.
  * description은 Field(description="…")에서 읽는다. self·cls·*args·**kwargs와 프레임워크가 넣는 Context 인자는 뺀다
  */
 function paramsOf(fn, str) {
@@ -279,25 +301,7 @@ function paramsOf(fn, str) {
     if (!name || name === 'self' || name === 'cls') continue;
     const type = field(p, 'type');
     if (type && /\bContext\b/.test(type.text)) continue;
-    let value = field(p, 'value');
-    let description = null;
-    for (const n of [type, value]) {
-      for (const c of n ? walk(n) : []) {
-        if (c.type === 'call' && /Field$/.test(calleeName(field(c, 'function')) ?? '')) description ??= keywordStr(c, 'description', str);
-      }
-    }
-    // x: int = Field(5, description=…)이면 Field 안의 기본값을 쓴다. Field(...)나 기본값 없는 Field는 필수다
-    if (value?.type === 'call' && /Field$/.test(calleeName(field(value, 'function')) ?? '')) {
-      const first = positional(value)[0];
-      value = keywordArg(value, 'default') ?? (first && first.type !== 'ellipsis' ? first : null);
-    }
-    out.push({
-      name,
-      type: type ? baseType(type.text.replace(/\s+/g, ' ')) : null,
-      default: value ? snippet(value, 40) : null,
-      required: !value,
-      description,
-    });
+    out.push({ name, ...fieldInfo(type, field(p, 'value'), str) });
   }
   return out;
 }
@@ -352,12 +356,16 @@ function buildGraph({ trees, imports, fileSet }, tools, value) {
   const byName = new Map(); // 이름 → [key]
   const byFileName = new Map(); // path + '\0' + 이름 → [key]
   const classFiles = new Map(); // 클래스 이름 → [파일]
+  const classDefs = new Map(); // 클래스 이름 → [{node, path}]. 반환 모델의 필드를 읽는 데 쓴다
   const returnTypes = new Map(); // 함수 이름 → 반환 형식에 나오는 첫 이름
   const push = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v); };
 
   for (const [path, tree] of trees) {
     for (const n of walk(tree.rootNode)) {
-      if (n.type === 'class_definition') push(classFiles, field(n, 'name').text, path);
+      if (n.type === 'class_definition') {
+        push(classFiles, field(n, 'name').text, path);
+        push(classDefs, field(n, 'name').text, { node: n, path });
+      }
       else if (n.type === 'function_definition') {
         const rt = field(n, 'return_type')?.text.match(/[A-Za-z_]\w*/g)?.find(x => !['Optional', 'None'].includes(x));
         if (rt) returnTypes.set(field(n, 'name').text, rt);
@@ -365,9 +373,38 @@ function buildGraph({ trees, imports, fileSet }, tools, value) {
     }
   }
 
-  for (const [path, tree] of trees) {
+  const bindsByFile = new Map();
+  // call 노드 하나 → {callee, base, module, objFile}. 이름·import·변수에 담은 객체로 어디를 부르는지 정한다
+  const callRecord = (c, path) => {
     const imp = imports.get(path);
-    const binds = bindingsOf(tree.rootNode, imp, path, classFiles, returnTypes, fileSet);
+    const binds = bindsByFile.get(path);
+    const f = field(c, 'function');
+    let base = null, callee = null, module = null, objFile = null;
+    if (f?.type === 'identifier') {
+      callee = f.text;
+      const from = imp.names.get(callee);
+      if (from) { module = from[0]; callee = from[1]; }
+    } else if (f?.type === 'attribute') {
+      callee = field(f, 'attribute').text;
+      const obj = field(f, 'object');
+      base = obj.text;
+      const head = base.split('.')[0];
+      const bound = binds.get(base);
+      if (/^[\w.]+$/.test(base) && imp.modules.has(head)) module = imp.modules.get(head) + base.slice(head.length);
+      else if (bound?.module) module = bound.module;
+      else if (bound?.file) objFile = bound.file;
+      else if (obj.type === 'identifier' && imp.names.has(base)) {
+        // from a import b: b가 하위 모듈이면 그 파일, 아니면 b를 정의한 모듈 파일(모듈 수준 객체)
+        const [mod, orig] = imp.names.get(base);
+        objFile = moduleFile(`${mod}.${orig}`, path, fileSet) ?? moduleFile(mod, path, fileSet);
+        if (!objFile) module = `${mod}.${orig}`;
+      }
+    }
+    return callee ? { callee, base, module, objFile } : null;
+  };
+
+  for (const [path, tree] of trees) {
+    bindsByFile.set(path, bindingsOf(tree.rootNode, imports.get(path), path, classFiles, returnTypes, fileSet));
     for (const fn of walk(tree.rootNode)) {
       if (fn.type !== 'function_definition') continue;
       const name = field(fn, 'name').text;
@@ -375,29 +412,8 @@ function buildGraph({ trees, imports, fileSet }, tools, value) {
       const calls = [];
       for (const c of walk(fn)) {
         if (c.type !== 'call') continue;
-        const f = field(c, 'function');
-        let base = null, callee = null, module = null, objFile = null;
-        if (f?.type === 'identifier') {
-          callee = f.text;
-          const from = imp.names.get(callee);
-          if (from) { module = from[0]; callee = from[1]; }
-        } else if (f?.type === 'attribute') {
-          callee = field(f, 'attribute').text;
-          const obj = field(f, 'object');
-          base = obj.text;
-          const head = base.split('.')[0];
-          const bound = binds.get(base);
-          if (/^[\w.]+$/.test(base) && imp.modules.has(head)) module = imp.modules.get(head) + base.slice(head.length);
-          else if (bound?.module) module = bound.module;
-          else if (bound?.file) objFile = bound.file;
-          else if (obj.type === 'identifier' && imp.names.has(base)) {
-            // from a import b: b가 하위 모듈이면 그 파일, 아니면 b를 정의한 모듈 파일(모듈 수준 객체)
-            const [mod, orig] = imp.names.get(base);
-            objFile = moduleFile(`${mod}.${orig}`, path, fileSet) ?? moduleFile(mod, path, fileSet);
-            if (!objFile) module = `${mod}.${orig}`;
-          }
-        }
-        if (callee) calls.push({ callee, base, module, objFile, line: line(c) });
+        const rec = callRecord(c, path);
+        if (rec) calls.push({ ...rec, line: line(c) });
       }
       funcs.set(key, { key, name, path, line: line(fn), end: fn.endPosition.row + 1, node: fn, calls });
       push(byName, name, key);
@@ -437,11 +453,204 @@ function buildGraph({ trees, imports, fileSet }, tools, value) {
     return all.length === 1 ? all : [];
   };
 
+  // ── 리턴 정보 ──
+
+  // 이름 하나 → 저장소 안 클래스 정의(리턴 모델). 같은 파일, import한 파일, 하나뿐인 정의 순으로 찾는다
+  const classDef = (name, path) => {
+    const defs = classDefs.get(name) ?? [];
+    const from = imports.get(path)?.names.get(name);
+    const file = from && moduleFile(from[0], path, fileSet);
+    return defs.find(d => d.path === path) ?? defs.find(d => d.path === file) ?? (defs.length === 1 ? defs[0] : null);
+  };
+
+  // 모델 클래스의 필드: 클래스 본문의 x: T = 기본값. 저장소 안 부모 클래스의 필드를 앞에 둔다. _로 시작하는 것과 ClassVar는 뺀다
+  const modelFields = ({ node, path }, depth = 0) => {
+    const str = n => value(n, path);
+    const inherited = depth > 3 ? [] : (field(node, 'superclasses')?.namedChildren ?? [])
+      .filter(b => b.type === 'identifier')
+      .flatMap(b => { const d = classDef(b.text, path); return d ? modelFields(d, depth + 1) : []; });
+    const own = [];
+    for (const st of field(node, 'body')?.namedChildren ?? []) {
+      const a = st.type === 'expression_statement' ? st.namedChildren[0] : null;
+      const left = a?.type === 'assignment' ? field(a, 'left') : null;
+      const type = a && field(a, 'type');
+      if (left?.type !== 'identifier' || !type || left.text.startsWith('_') || /\bClassVar\b/.test(type.text)) continue;
+      own.push({ name: left.text, ...fieldInfo(type, field(a, 'right'), str) });
+    }
+    const names = new Set(own.map(f => f.name));
+    return [...inherited.filter(f => !names.has(f.name)), ...own];
+  };
+
+  // 함수 본문의 return 식(안쪽 함수·lambda의 return은 빼고)
+  const returnExprs = fn => {
+    const out = [];
+    const q = [field(fn, 'body')];
+    while (q.length) {
+      const n = q.pop();
+      if (!n || n.type === 'function_definition' || n.type === 'lambda') continue;
+      if (n.type === 'return_statement') out.push(n.namedChildren[0] ?? null);
+      else q.push(...n.namedChildren);
+    }
+    return out;
+  };
+
+  // 값 식 하나로 짐작하는 타입과 리터럴 값: str "success", int, list … 정할 수 없으면 식 코드.
+  // 리터럴 값은 "success"·"error"처럼 짧은 코드 값만 남긴다(긴 안내 문장은 타입만)
+  const LITERAL_TYPES = { integer: 'int', float: 'float', true: 'bool', false: 'bool', none: 'None', list: 'list', list_comprehension: 'list', dictionary: 'dict', dictionary_comprehension: 'dict', tuple: 'tuple', set: 'set' };
+  const CALL_TYPES = { len: 'int', int: 'int', float: 'float', str: 'str', bool: 'bool', list: 'list', sorted: 'list', dict: 'dict', tuple: 'tuple', set: 'set', round: 'float' };
+  const valueHint = (n, fn, path) => {
+    if (!n) return {};
+    if (n.type === 'parenthesized_expression' || n.type === 'await') return valueHint(n.namedChildren.find(c => c.type !== 'comment'), fn, path);
+    if (n.type === 'conditional_expression') {
+      // a if c else b: 두 갈래가 모두 타입이 있으면 합친다
+      const parts = n.namedChildren.filter(c => c.type !== 'comment');
+      const a = valueHint(parts[0], fn, path), b = valueHint(parts[2], fn, path);
+      if (a.type && b.type) return { type: a.type === b.type ? a.type : `${a.type} | ${b.type}` };
+      return { expr: snippet(n, 30) };
+    }
+    if (n.type === 'string' || n.type === 'concatenated_string') {
+      const v = value(n, path);
+      return v !== null && /^[\w.:-]{1,24}$/.test(v) ? { type: 'str', literal: JSON.stringify(v) } : { type: 'str' };
+    }
+    if (n.type === 'identifier') {
+      // 함수 파라미터면 그 타입 표시(def tool_response(tc_id: str, …))
+      const p = (field(fn, 'parameters')?.namedChildren ?? []).find(p =>
+        (p.type === 'typed_parameter' && p.namedChildren.find(c => c.type === 'identifier')?.text === n.text) ||
+        (p.type === 'typed_default_parameter' && field(p, 'name')?.text === n.text));
+      if (p) return { type: baseType(field(p, 'type').text.replace(/\s+/g, ' ')) };
+    }
+    if (LITERAL_TYPES[n.type]) {
+      const type = LITERAL_TYPES[n.type];
+      return /^(int|float|bool|None)$/.test(type) ? { type, literal: n.text } : { type };
+    }
+    if (n.type === 'call' && CALL_TYPES[field(n, 'function')?.text]) return { type: CALL_TYPES[field(n, 'function').text] };
+    if (n.type === 'identifier' && n.text === 'None') return { type: 'None', literal: 'None' };
+    return { expr: snippet(n, 30) };
+  };
+
+  /**
+   * 식 하나가 만드는 딕셔너리의 키: {keys: Map(키 → {types, literals, expr}), partial}. partial은 코드만으로 다 정할 수 없는 부분이 있다는 뜻이다.
+   * 딕셔너리 리터럴, dict(a=…), 변수에 담은 딕셔너리와 그 뒤의 x["k"] = …, 저장소 안 함수(공통 응답 함수 등)의 리턴을 따라간다
+   */
+  const dictKeys = (n, fn, path, depth = 0) => {
+    const keys = new Map();
+    let partial = false;
+    const put = (k, valueNode, vpath = path) => {
+      // 값 식은 지금 읽는 함수(fn) 안에 있다
+      if (!keys.has(k)) keys.set(k, { types: new Set(), literals: new Set(), expr: null });
+      const info = keys.get(k), hint = valueHint(valueNode, fn, vpath);
+      if (hint.type) info.types.add(hint.type);
+      if (hint.literal && info.literals.size < 4) info.literals.add(hint.literal);
+      if (hint.expr && !hint.type) info.expr ??= hint.expr;
+    };
+    const add = r => {
+      for (const [k, v] of r.keys) {
+        if (!keys.has(k)) keys.set(k, { types: new Set(), literals: new Set(), expr: null });
+        const info = keys.get(k);
+        v.types.forEach(t => info.types.add(t));
+        v.literals.forEach(l => info.literals.size < 4 && info.literals.add(l));
+        info.expr ??= v.expr;
+      }
+      partial ||= r.partial;
+    };
+    if (!n || depth > 4) return { keys, partial: true };
+    if (n.type === 'parenthesized_expression' || n.type === 'await') return dictKeys(n.namedChildren.find(c => c.type !== 'comment'), fn, path, depth);
+    if (n.type === 'conditional_expression' || n.type === 'boolean_operator') {
+      const parts = n.namedChildren.filter(c => c.type !== 'comment');
+      for (const part of n.type === 'conditional_expression' ? [parts[0], parts[2]] : parts) add(dictKeys(part, fn, path, depth));
+      return { keys, partial };
+    }
+    if (n.type === 'dictionary') {
+      for (const c of n.namedChildren) {
+        if (c.type === 'pair') {
+          const k = value(field(c, 'key'), path);
+          if (k === null) partial = true; else put(k, field(c, 'value'));
+        } else if (c.type === 'dictionary_splat') {
+          add(dictKeys(c.namedChildren[0], fn, path, depth + 1));
+        } else if (c.type !== 'comment') partial = true;
+      }
+      return { keys, partial };
+    }
+    if (n.type === 'identifier') {
+      // 앞선 마지막 대입 x = …과 그 뒤의 x["k"] = …, x.update({…})
+      let last = null;
+      for (const a of walk(fn)) {
+        if (a.type === 'assignment' && field(a, 'left')?.text === n.text && a.startIndex < n.startIndex && (!last || a.startIndex > last.startIndex)) last = a;
+      }
+      if (!last) return { keys, partial: true };
+      add(dictKeys(field(last, 'right'), fn, path, depth + 1));
+      for (const a of walk(fn)) {
+        if (a.startIndex <= last.startIndex || a.startIndex > n.startIndex) continue;
+        const left = a.type === 'assignment' ? field(a, 'left') : null;
+        if (left?.type === 'subscript' && field(left, 'value')?.text === n.text) {
+          const k = value(field(left, 'subscript'), path);
+          if (k === null) partial = true; else put(k, field(a, 'right'));
+        }
+        if (a.type === 'call' && field(a, 'function')?.text === `${n.text}.update`) add(dictKeys(positional(a)[0], fn, path, depth + 1));
+      }
+      return { keys, partial };
+    }
+    if (n.type === 'call') {
+      const f = field(n, 'function');
+      if (f?.type === 'identifier' && f.text === 'dict') {
+        for (const a of argNodes(n)) {
+          if (a.type === 'keyword_argument') put(field(a, 'name').text, field(a, 'value'));
+          else add(dictKeys(a.type === 'dictionary_splat' ? a.namedChildren[0] : a, fn, path, depth + 1));
+        }
+        return { keys, partial };
+      }
+      const rec = callRecord(n, path);
+      const ks = rec ? targets(rec, path) : [];
+      if (ks.length !== 1) return { keys, partial: true };
+      const def = funcs.get(ks[0]);
+      for (const r of returnExprs(def.node)) add(dictKeys(r, def.node, def.path, depth + 1));
+      return { keys, partial };
+    }
+    return { keys, partial: true };
+  };
+
+  /**
+   * 도구의 리턴: {type, model?, list?, fields?, keys?, partial?}.
+   * type은 리턴 타입 표시, 저장소 안 모델(Pydantic·TypedDict·dataclass 등)이면 그 필드, 딕셔너리를 돌려주면 키를 모은다.
+   * keys[i] = {name, type, values, expr}: type은 값으로 짐작한 타입, values는 리터럴 값(최대 4개), expr은 타입을 모를 때 값 코드
+   */
+  const returnsOf = (fn, path) => {
+    const typeNode = field(fn, 'return_type');
+    const type = typeNode ? baseType(typeNode.text.replace(/\s+/g, ' ')) : null;
+    // 타입에 나오는 저장소 안 클래스(list[Model], Optional[Model]도)
+    const names = type?.match(/[A-Za-z_]\w*/g) ?? [];
+    for (const name of names) {
+      const def = classDef(name, path);
+      if (def) return { type, model: name, list: /^(list|List|Sequence|tuple|Tuple)\b/.test(type), fields: modelFields(def) };
+    }
+    if (type && !/^(dict|Dict|Mapping|MutableMapping|Any|object)\b/.test(type)) return { type };
+    // 리턴 식마다 모은 키를 합친다. 키마다 짐작한 타입(여럿이면 |)과 리터럴 값, 정할 수 없으면 식 코드
+    const merged = new Map();
+    let partial = false;
+    for (const r of returnExprs(fn)) {
+      const got = dictKeys(r, fn, path);
+      partial ||= got.partial;
+      for (const [k, v] of got.keys) {
+        const m = merged.get(k) ?? { types: new Set(), literals: new Set(), expr: null };
+        v.types.forEach(t => m.types.add(t));
+        v.literals.forEach(l => m.literals.size < 4 && m.literals.add(l));
+        m.expr ??= v.expr;
+        merged.set(k, m);
+      }
+    }
+    if (!merged.size) return { type };
+    const keys = [...merged].map(([name, m]) => ({
+      name, type: m.types.size ? [...m.types].join(' | ') : null, values: [...m.literals], expr: m.types.size ? null : m.expr,
+    }));
+    return { type, keys, partial };
+  };
+
   // 도구 함수에서 너비 우선으로 따라가 호출되는 함수만 남긴다
   const reached = new Set();
   for (const t of tools) {
     const start = funcs.get(`${t.path}:${t.line}`);
     t.params = start ? paramsOf(start.node, n => value(n, start.path)) : [];
+    if (start) t.returns = returnsOf(start.node, start.path);
     if (!t.description_expr) t.description ??= start ? docstring(start.node) : null; // FastMCP는 description이 없으면 docstring을 쓴다
     if (!start) continue; // 저수준 Tool(name=…) 등록은 함수가 없다
     const queue = [start.key];

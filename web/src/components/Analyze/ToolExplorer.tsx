@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { extModule, reachOf } from "@site/src/analyzer/core.mjs";
-import { Code, Description, Loc, Params, shortPath, type Fn, type Tool } from "./parts";
+import { Code, Description, Loc, Params, ReturnInfo, shortPath, type Fn, type Tool } from "./parts";
 import styles from "./styles.module.css";
 
 // 도구 탭: 왼쪽에 도구 목록, 오른쪽에 고른 도구의 명세(설명·인자)와 다이어그램, 누른 함수의 코드
@@ -147,6 +147,7 @@ export default function ToolExplorer({
           <h3>{tool.name}</h3>
           <Description text={tool.description} expr={tool.description_expr} />
           <Params params={tool.params} />
+          <ReturnInfo r={tool.returns} />
         </div>
         <p className={styles.meta}>
           <Loc path={tool.path} line={tool.line} blob={blob} /> · <code title="등록 코드">{tool.reg}</code>

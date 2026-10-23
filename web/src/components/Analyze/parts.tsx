@@ -15,8 +15,20 @@ export type Tool = {
   description: string | null;
   description_expr?: string; // 실행할 때 정해지는 설명의 코드(f-string 등)
   params: Param[];
+  returns?: Returns;
   fn?: number;
   scope?: { functions: number; files: number };
+};
+// 도구의 리턴: 타입 표시, 저장소 안 모델이면 그 필드(list면 목록), 딕셔너리면 모은 키(partial: 코드만으로 다 정할 수 없음).
+// 키마다 type은 값으로 짐작한 타입, values는 짧은 리터럴 값, expr은 타입을 모를 때 값 코드
+export type ReturnKey = { name: string; type: string | null; values: string[]; expr: string | null };
+export type Returns = {
+  type: string | null;
+  model?: string;
+  list?: boolean;
+  fields?: Param[];
+  keys?: ReturnKey[];
+  partial?: boolean;
 };
 export type Resource = {
   uri: string | null; name: string; mime: string | null; template: boolean;
@@ -101,12 +113,12 @@ export function Description({ text, expr }: { text: string | null; expr?: string
   );
 }
 
-/** 파라미터 목록: 이름 | 타입, 필수 또는 기본값, Field(description=…) */
-export function Params({ params }: { params: Param[] }) {
+/** 파라미터·필드 목록: 이름 | 타입, 필수 또는 기본값, Field(description=…). title은 목록 머리 */
+export function Params({ params, title = "파라미터" }: { params: Param[]; title?: React.ReactNode }) {
   if (!params.length) return null;
   return (
     <div className={styles.params}>
-      <span className={styles.paramsHead}>파라미터</span>
+      <span className={styles.paramsHead}>{title}</span>
       {params.map((p) => (
         <div key={p.name} className={styles.param}>
           <code>{p.name}</code>
@@ -117,6 +129,33 @@ export function Params({ params }: { params: Param[] }) {
           {p.description && <p className={styles.pdesc}>{p.description}</p>}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** 도구의 리턴. 모델이면 필드 목록, 딕셔너리면 키 목록, 아니면 타입만 */
+export function ReturnInfo({ r }: { r?: Returns }) {
+  if (!r || (!r.type && !r.keys)) return null;
+  const head = (
+    <>
+      리턴 {r.type && <code className={styles.retType}>{r.type}</code>}
+    </>
+  );
+  if (r.fields?.length) return <Params params={r.fields} title={head} />;
+  // 딕셔너리 키: 파라미터와 같은 줄. 이름 | 타입과 리터럴 값(모르면 값 코드)
+  return (
+    <div className={styles.params}>
+      <span className={styles.paramsHead}>{head}</span>
+      {r.keys?.map((k) => (
+        <div key={k.name} className={styles.param}>
+          <code>{k.name}</code>
+          <span className={styles.ptype}>
+            {k.type ?? k.expr}
+            {k.values.length > 0 && <span className={styles.kvals}>{k.values.join(" | ")}</span>}
+          </span>
+        </div>
+      ))}
+      {r.partial && <p className={styles.pdesc} title="코드만으로 정할 수 없는 키가 더 있을 수 있음">외 일부</p>}
     </div>
   );
 }

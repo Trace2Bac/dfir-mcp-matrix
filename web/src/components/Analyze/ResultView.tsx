@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import ToolExplorer from "./ToolExplorer";
 import { PromptsPanel, ResourcesPanel, ServerPanel, SharedPanel } from "./McpPanels";
-import type { Analysis } from "./parts";
+import { Loc, type Analysis } from "./parts";
 import styles from "./styles.module.css";
 
 // 분석 결과 화면: 위에 요약, 아래에 탭(도구, 리소스, 프롬프트, 공통 경로, 서버).
@@ -41,8 +41,14 @@ export default function ResultView({ file, r, texts, blob }: { file: string; r: 
           <div><b>{s.files_reached}</b>파일</div>
         </div>
         {r.dynamic.length > 0 && (
-          <span className={styles.muted} title="반복문 등 실행해야 정해지는 등록이라 목록에 넣지 못함">
-            목록에서 빠진 동적 등록 {r.dynamic.length}곳: {r.dynamic.map((d) => `${d.path}:${d.line}`).join(", ")}
+          <span className={styles.dynamic} title="반복문 등으로 등록해서 도구 목록에는 없음">
+            동적 등록{" "}
+            {r.dynamic.map((d, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && ", "}
+                <Loc path={d.path} line={d.line} blob={blob} />
+              </React.Fragment>
+            ))}
           </span>
         )}
       </div>
