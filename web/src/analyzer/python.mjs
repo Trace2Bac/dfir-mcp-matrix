@@ -4,6 +4,11 @@
 
 const field = (n, name) => n.childForFieldName(name);
 const line = n => n.startPosition.row + 1;
+// 화면에 보일 등록 코드 한 줄. 길면 자른다
+const snippet = (n, max = 60) => {
+  const t = n.text.replace(/\s+/g, ' ');
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+};
 
 function* walk(root) {
   // 너비 우선. 같은 파일에 같은 이름의 함수가 여럿이면 앞에 나온 것을 고른다
@@ -23,30 +28,94 @@ function isToolAttr(expr) {
   return expr.type === 'identifier' && expr.text === 'tool';
 }
 
-/** 따옴표 안이 고정된 str 리터럴이면 그 값. f-string·bytes는 아니다 */
+const ESCAPES = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '\n': '' };
+
+/** 고정된 str 리터럴의 값. "a" "b"처럼 이어 쓴 것과 괄호로 감싼 것도 읽는다. f-string·bytes는 아니다 */
 function strConst(n) {
+  if (n?.type === 'parenthesized_expression') return strConst(n.namedChildren.find(c => c.type !== 'comment'));
+  if (n?.type === 'concatenated_string') {
+    const parts = n.namedChildren.filter(c => c.type !== 'comment').map(strConst);
+    return parts.every(x => x !== null) ? parts.join('') : null;
+  }
   if (!n || n.type !== 'string') return null;
   if (n.namedChildren.some(c => c.type === 'interpolation')) return null;
   const start = n.namedChildren.find(c => c.type === 'string_start');
   const end = n.namedChildren.find(c => c.type === 'string_end');
   if (!start || !end || /b/i.test(start.text)) return null;
-  return n.text.slice(start.endIndex - n.startIndex, end.startIndex - n.startIndex);
+  const raw = n.text.slice(start.endIndex - n.startIndex, end.startIndex - n.startIndex);
+  return /r/i.test(start.text) ? raw : raw.replace(/\\(n|t|r|\\|'|"|\n)/g, (_, c) => ESCAPES[c]);
+}
+
+/**
+ * 문자열 값을 읽는 함수를 만든다. 리터럴에 더해, 이름이면 모듈 수준 상수를 따라간다:
+ * 같은 파일의 DESC = "…", from .texts import DESC로 가져온 상수, "a" + DESC 같은 + 연결.
+ * f-string, 함수 호출 결과(textwrap.dedent 등), 실행 중에 바뀌는 값은 읽지 않는다
+ */
+function stringResolver(trees) {
+  const fileSet = new Set(trees.map(([p]) => p));
+  const consts = new Map(); // 파일 → (이름 → 값 노드). 같은 이름을 다시 대입하면 마지막 것
+  const imports = new Map();
+  for (const [path, tree] of trees) {
+    const m = new Map();
+    for (const st of tree.rootNode.namedChildren) {
+      const a = st.type === 'expression_statement' ? st.namedChildren[0] : null;
+      if (a?.type === 'assignment' && field(a, 'left')?.type === 'identifier' && field(a, 'right')) m.set(field(a, 'left').text, field(a, 'right'));
+    }
+    consts.set(path, m);
+    imports.set(path, importsOf(tree.rootNode));
+  }
+  const value = (n, path, depth = 0) => {
+    if (!n || depth > 5) return null;
+    if (n.type === 'identifier') {
+      const own = consts.get(path).get(n.text);
+      if (own) return value(own, path, depth + 1);
+      const from = imports.get(path).names.get(n.text);
+      const file = from && moduleFile(from[0], path, fileSet);
+      const node = file && consts.get(file).get(from[1]);
+      return node ? value(node, file, depth + 1) : null;
+    }
+    if (n.type === 'binary_operator' && n.childForFieldName('operator')?.text === '+') {
+      const l = value(field(n, 'left'), path, depth + 1);
+      const r = l === null ? null : value(field(n, 'right'), path, depth + 1);
+      return r === null ? null : l + r;
+    }
+    if (n.type === 'parenthesized_expression') return value(n.namedChildren.find(c => c.type !== 'comment'), path, depth);
+    return strConst(n);
+  };
+  return value;
 }
 
 const argNodes = call => (field(call, 'arguments')?.namedChildren ?? []).filter(c => c.type !== 'comment');
 const positional = call => argNodes(call).filter(c => c.type !== 'keyword_argument' && c.type !== 'dictionary_splat');
 
-/** tool(name="x") 또는 tool("x")의 이름 */
-function explicitName(call, keywordsOnly = false) {
+/** tool(name="x") 또는 tool("x")의 이름. str은 문자열 값을 읽는 함수(stringResolver) */
+function explicitName(call, str, keywordsOnly = false) {
   for (const a of argNodes(call)) {
     if (a.type === 'keyword_argument' && field(a, 'name')?.text === 'name') {
-      const v = strConst(field(a, 'value'));
+      const v = str(field(a, 'value'));
       if (v !== null) return v;
     }
   }
   if (keywordsOnly) return null;
   const first = positional(call)[0];
-  return first ? strConst(first) : null;
+  return first ? str(first) : null;
+}
+
+/** call의 키워드 인자 key=…가 문자열로 정해지면 그 값 */
+function keywordStr(call, key, str) {
+  const a = argNodes(call).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === key);
+  return a ? str(field(a, 'value')) : null;
+}
+
+/**
+ * 도구 설명 description=…: {description, description_expr}. 값을 읽지 못하면(f-string 등) description은 null,
+ * description_expr에 코드를 남긴다. 이때 FastMCP는 docstring을 쓰지 않으므로 docstring으로 채우지 않는다
+ */
+function descriptionOf(call, str) {
+  const a = call && argNodes(call).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === 'description');
+  if (!a) return { description: null };
+  const description = str(field(a, 'value'));
+  return description !== null ? { description } : { description: null, description_expr: snippet(field(a, 'value')) };
 }
 
 function calleeName(f) {
@@ -56,10 +125,10 @@ function calleeName(f) {
 }
 
 /**
- * 등록 방식(how): decorator(@x.tool), add_tool(x.add_tool(f)), call(x.tool()(f)), Tool(저수준 SDK의 Tool(name=…)).
+ * 등록 방식: @x.tool 데코레이터, x.add_tool(f), x.tool()(f), 저수준 SDK의 Tool(name=…). reg는 등록한 코드 한 줄이다.
  * 코드만 보고 함수를 정할 수 없는 등록(반복문 안의 x.tool()(변수) 등)은 dynamic으로 따로 둔다
  */
-function findTools(trees) {
+function findTools(trees, value) {
   const defs = new Map(); // 함수 이름 → [[path, line]]. add_tool(f)의 f를 찾는 데 쓴다
   for (const [path, tree] of trees) {
     for (const n of walk(tree.rootNode)) {
@@ -77,6 +146,7 @@ function findTools(trees) {
   const tools = [];
   const dynamic = [];
   for (const [path, tree] of trees) {
+    const str = n => value(n, path);
     for (const n of walk(tree.rootNode)) {
       if (n.type === 'function_definition') {
         if (n.parent?.type !== 'decorated_definition') continue;
@@ -84,25 +154,28 @@ function findTools(trees) {
           const expr = dec.namedChildren.find(c => c.type !== 'comment');
           const isCall = expr?.type === 'call';
           if (isToolAttr(isCall ? field(expr, 'function') : expr)) {
-            tools.push({ name: (isCall ? explicitName(expr) : null) ?? field(n, 'name').text, path, line: line(n), how: 'decorator' });
+            tools.push({
+              name: (isCall ? explicitName(expr, str) : null) ?? field(n, 'name').text, path, line: line(n), reg: snippet(dec),
+              ...descriptionOf(isCall ? expr : null, str),
+            });
             break;
           }
         }
       } else if (n.type === 'call') {
         const f = field(n, 'function');
-        let how = null, fn = null, name = null;
+        let fn = null, name = null, desc = null;
         if (f?.type === 'attribute' && field(f, 'attribute')?.text === 'add_tool' && positional(n).length) {
-          how = 'add_tool'; fn = positional(n)[0]; name = explicitName(n, true);
+          fn = positional(n)[0]; name = explicitName(n, str, true); desc = descriptionOf(n, str);
         } else if (f?.type === 'call' && isToolAttr(field(f, 'function')) && positional(n).length) {
-          how = 'call'; fn = positional(n)[0]; name = explicitName(f);
+          fn = positional(n)[0]; name = explicitName(f, str); desc = descriptionOf(f, str);
         } else if (calleeName(f) === 'Tool') {
-          const toolName = explicitName(n);
-          if (toolName !== null) tools.push({ name: toolName, path, line: line(n), how: 'Tool' });
+          const toolName = explicitName(n, str);
+          if (toolName !== null) tools.push({ name: toolName, path, line: line(n), reg: snippet(n), ...descriptionOf(n, str) });
           continue;
         }
         if (!fn) continue;
         const loc = fn.type === 'identifier' ? resolve(fn.text, path) : null;
-        if (loc) tools.push({ name: name ?? fn.text, path: loc[0], line: loc[1], how });
+        if (loc) tools.push({ name: name ?? fn.text, path: loc[0], line: loc[1], reg: snippet(n), ...desc });
         else dynamic.push({ path, line: line(n) });
       }
     }
@@ -161,16 +234,66 @@ function moduleFile(mod, fromPath, fileSet) {
   return null;
 }
 
-function paramNames(fn) {
+/** Annotated[X, …]의 X. 아니면 그대로 */
+function baseType(text) {
+  const m = text.match(/^(?:typing\.)?Annotated\[/);
+  if (!m) return text;
+  let depth = 0;
+  for (let i = m[0].length; i < text.length; i++) {
+    const ch = text[i];
+    if ('[('.includes(ch)) depth++;
+    else if ('])'.includes(ch)) depth--;
+    else if (ch === ',' && depth === 0) return text.slice(m[0].length, i).trim();
+  }
+  return text;
+}
+
+/**
+ * 도구 인자: {name, type, default, required, description}. MCP 클라이언트가 보는 스키마의 바탕이다.
+ * description은 Field(description="…")에서 읽는다. self·cls·*args·**kwargs와 프레임워크가 넣는 Context 인자는 뺀다
+ */
+function paramsOf(fn, str) {
   const out = [];
   for (const p of field(fn, 'parameters')?.namedChildren ?? []) {
     let name = null;
     if (p.type === 'identifier') name = p.text;
     else if (p.type === 'typed_parameter') name = p.namedChildren.find(c => c.type === 'identifier')?.text;
     else if (p.type === 'default_parameter' || p.type === 'typed_default_parameter') name = field(p, 'name')?.text;
-    if (name && name !== 'self' && name !== 'cls') out.push(name);
+    if (!name || name === 'self' || name === 'cls') continue;
+    const type = field(p, 'type');
+    if (type && /\bContext\b/.test(type.text)) continue;
+    let value = field(p, 'value');
+    let description = null;
+    for (const n of [type, value]) {
+      for (const c of n ? walk(n) : []) {
+        if (c.type === 'call' && /Field$/.test(calleeName(field(c, 'function')) ?? '')) description ??= keywordStr(c, 'description', str);
+      }
+    }
+    // x: int = Field(5, description=…)이면 Field 안의 기본값을 쓴다. Field(...)나 기본값 없는 Field는 필수다
+    if (value?.type === 'call' && /Field$/.test(calleeName(field(value, 'function')) ?? '')) {
+      const d = argNodes(value).find(a => a.type === 'keyword_argument' && field(a, 'name')?.text === 'default');
+      const first = positional(value)[0];
+      value = d ? field(d, 'value') : first && first.type !== 'ellipsis' ? first : null;
+    }
+    out.push({
+      name,
+      type: type ? baseType(type.text.replace(/\s+/g, ' ')) : null,
+      default: value ? snippet(value, 40) : null,
+      required: !value,
+      description,
+    });
   }
   return out;
+}
+
+/** 함수 docstring. 들여쓰기를 걷어 낸다 */
+function docstring(fn) {
+  const first = field(fn, 'body')?.namedChildren.find(c => c.type !== 'comment');
+  const s = first?.type === 'expression_statement' ? strConst(first.namedChildren[0]) : null;
+  if (!s) return null;
+  const lines = s.split('\n');
+  const indent = Math.min(...lines.slice(1).filter(l => l.trim()).map(l => l.match(/^\s*/)[0].length));
+  return lines.map((l, i) => (i && Number.isFinite(indent) ? l.slice(indent) : l)).join('\n').trim() || null;
 }
 
 /**
@@ -205,12 +328,12 @@ function bindingsOf(root, imp, path, classFiles, returnTypes, fileSet) {
 }
 
 /**
- * 도구에서 닿는 함수의 호출 그래프.
+ * 도구가 호출하는 함수의 호출 그래프.
  * functions[i] = {name, path, line, end, calls: [{line, to?, ext?}]}. to는 저장소 안 함수 번호, ext는 저장소 밖 호출이다
  */
-function buildGraph(trees, tools) {
+function buildGraph(trees, tools, value) {
   const fileSet = new Set(trees.map(([p]) => p));
-  const funcs = new Map(); // "path:line" → {key, name, path, line, end, params, calls}
+  const funcs = new Map(); // "path:line" → {key, name, path, line, end, params, doc, calls}
   const byName = new Map(); // 이름 → [key]
   const byFileName = new Map(); // path + '\0' + 이름 → [key]
   const classFiles = new Map(); // 클래스 이름 → [파일]
@@ -231,6 +354,7 @@ function buildGraph(trees, tools) {
   for (const [path, tree] of trees) {
     const imp = importsByFile.get(path);
     const binds = bindingsOf(tree.rootNode, imp, path, classFiles, returnTypes, fileSet);
+    const str = n => value(n, path);
     for (const fn of walk(tree.rootNode)) {
       if (fn.type !== 'function_definition') continue;
       const name = field(fn, 'name').text;
@@ -262,7 +386,7 @@ function buildGraph(trees, tools) {
         }
         if (callee) calls.push({ callee, base, module, objFile, line: line(c) });
       }
-      funcs.set(key, { key, name, path, line: line(fn), end: fn.endPosition.row + 1, params: paramNames(fn), calls });
+      funcs.set(key, { key, name, path, line: line(fn), end: fn.endPosition.row + 1, params: paramsOf(fn, str), doc: docstring(fn), calls });
       push(byName, name, key);
       push(byFileName, path + '\0' + name, key);
     }
@@ -300,11 +424,12 @@ function buildGraph(trees, tools) {
     return all.length === 1 ? all : [];
   };
 
-  // 도구 함수에서 너비 우선으로 닿는 함수만 남긴다
+  // 도구 함수에서 너비 우선으로 따라가 호출되는 함수만 남긴다
   const reached = new Set();
   for (const t of tools) {
     const start = funcs.get(`${t.path}:${t.line}`);
     t.params = start?.params ?? [];
+    if (!t.description_expr) t.description ??= start?.doc ?? null; // FastMCP는 description이 없으면 docstring을 쓴다
     if (!start) continue; // 저수준 Tool(name=…) 등록은 함수가 없다
     const queue = [start.key];
     reached.add(start.key);
@@ -337,7 +462,7 @@ function buildGraph(trees, tools) {
     const id = idOf.get(`${t.path}:${t.line}`);
     if (id !== undefined) t.fn = id;
   }
-  return { functions, total_functions: funcs.size, total_files: fileSet.size };
+  return { functions };
 }
 
 /** files: [경로, 내용] 목록(경로 순). parser: Python 문법을 넣은 web-tree-sitter Parser */
@@ -348,8 +473,9 @@ export function extractPython(files, parser) {
       const tree = parser.parse(text);
       if (tree) trees.push([path, tree]);
     }
-    const { tools, dynamic } = findTools(trees);
-    return { tools, dynamic, graph: buildGraph(trees, tools) };
+    const value = stringResolver(trees);
+    const { tools, dynamic } = findTools(trees, value);
+    return { tools, dynamic, graph: buildGraph(trees, tools, value) };
   } finally {
     for (const [, tree] of trees) tree.delete();
   }

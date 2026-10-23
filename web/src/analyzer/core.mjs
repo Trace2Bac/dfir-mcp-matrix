@@ -1,14 +1,15 @@
 // MCP 서버 정적 분석의 입구. 분석 화면(src/pages/analyze.tsx)이 쓴다.
-//   core.mjs    언어 판별, 읽을 파일 고르기, 요약(도구별 범위, 커버리지)
+//   core.mjs    언어 판별, 읽을 파일 고르기, 요약(도구별 범위)
 //   python.mjs  Python 서버: 등록 도구, 호출 그래프
 // 파서(web-tree-sitter)는 부르는 쪽이 만들어 넘긴다. wasm 위치는 화면이 안다.
 //
 // 출력(extractTree):
-//   tools     등록 도구. name·path·line·how·params, fn(graph.functions의 시작 함수 번호), scope(닿는 함수·파일 수, 깊이, 외부 모듈)
-//             line은 함수 정의(def) 줄이다. how는 등록 방식이다(python.mjs의 findTools).
+//   tools     등록 도구. name·path·line·reg, description(MCP 클라이언트가 보는 설명. 코드만으로 못 읽으면 description_expr), params(인자),
+//             fn(graph.functions의 시작 함수 번호), scope(호출하는 함수·파일 수)
+//             line은 함수 정의(def) 줄이다. reg는 등록한 코드 한 줄이다(python.mjs의 findTools).
 //   dynamic   코드만 보고 함수를 정할 수 없는 등록(반복문 안의 x.tool()(변수) 등)
-//   graph     도구에서 닿는 함수와 호출(python.mjs의 buildGraph)
-//   summary   도구 수와 커버리지
+//   graph     도구가 호출하는 함수와 호출(python.mjs의 buildGraph)
+//   summary   도구 수, 도구가 호출하는 함수·파일 수
 // 다른 언어는 EXTRACTORS와 GRAMMARS에 더한다.
 
 import { extractPython } from './python.mjs';
@@ -50,7 +51,7 @@ function detectLanguage(paths) {
   return best;
 }
 
-/** 도구 하나에서 닿는 함수(번호 → 깊이). 너비 우선이라 Map 순서가 가까운 순서다. 화면의 다이어그램도 쓴다 */
+/** 도구 하나가 직접·간접으로 호출하는 함수(번호 → 깊이). 너비 우선이라 Map 순서가 가까운 순서다. 화면의 다이어그램도 쓴다 */
 export function reachOf(functions, root) {
   const depth = new Map([[root, 0]]);
   const queue = [root];
@@ -62,26 +63,19 @@ export function reachOf(functions, root) {
   return depth;
 }
 
-// 외부 호출을 묶는 이름은 최상위 패키지다: subprocess.run → subprocess, os.path.join → os
+// 외부 호출을 묶는 이름은 최상위 패키지다: subprocess.run → subprocess, os.path.join → os. 화면의 다이어그램이 쓴다
 export const extModule = e => e.split('.')[0];
 
 function summarize(tools, graph) {
-  const externals = {};
   for (const t of tools) {
     if (t.fn === undefined) continue;
-    const depth = reachOf(graph.functions, t.fn);
-    const fns = [...depth.keys()].map(i => graph.functions[i]);
-    const mods = new Set(fns.flatMap(f => f.calls.filter(c => c.ext).map(c => extModule(c.ext))));
-    t.scope = { functions: fns.length, files: new Set(fns.map(f => f.path)).size, depth: Math.max(...depth.values()), ext: [...mods].sort() };
-    for (const m of mods) externals[m] = (externals[m] ?? 0) + 1;
+    const fns = [...reachOf(graph.functions, t.fn).keys()].map(i => graph.functions[i]);
+    t.scope = { functions: fns.length, files: new Set(fns.map(f => f.path)).size };
   }
   return {
     tools: tools.length,
     functions_reached: graph.functions.length,
-    functions_total: graph.total_functions,
     files_reached: new Set(graph.functions.map(f => f.path)).size,
-    files_total: graph.total_files,
-    externals: Object.fromEntries(Object.entries(externals).sort((a, b) => b[1] - a[1])),
   };
 }
 

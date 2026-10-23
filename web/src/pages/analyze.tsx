@@ -11,6 +11,9 @@ import styles from '@site/src/components/Analyze/styles.module.css';
 
 type Source = { paths: string[]; files: [string, string][] };
 
+// core.mjs가 판별하는 언어 이름 → 화면 표기
+const LANG_NAMES: Record<string, string> = { java: 'Java', typescript: 'TypeScript', javascript: 'JavaScript', csharp: 'C#', go: 'Go' };
+
 // zip의 파일 경로와 소스 내용. GitHub zip처럼 최상위 폴더가 하나뿐이면 그 안을 소스 루트로 본다
 function readZip(data: Uint8Array): Source {
   const names: string[] = [];
@@ -85,11 +88,11 @@ function Analyzer() {
   const [url, setUrl] = useState('');
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
-  const [result, setResult] = useState<{ label: string; r: Result; texts: Map<string, string[]> } | null>(null);
+  const [result, setResult] = useState<{ label: string; blob?: string; r: Result; texts: Map<string, string[]> } | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
-  // label: 결과 위에 보일 이름. load: 소스를 가져온다
-  const run = async (label: string, load: () => Promise<Source>) => {
+  // label: 결과 위에 보일 이름. load: 소스를 가져온다. blob: GitHub 원본 파일 주소의 앞부분
+  const run = async (label: string, load: () => Promise<Source>, blob?: string) => {
     setError('');
     setResult(null);
     try {
@@ -101,7 +104,7 @@ function Analyzer() {
         p.setLanguage(await Language.load(grammarBase + (GRAMMARS as Record<string, string>)[lang]));
         return p;
       });
-      setResult({ label, r, texts: new Map(files.map(([p, t]) => [p, t.split('\n')])) });
+      setResult({ label, blob, r, texts: new Map(files.map(([p, t]) => [p, t.split('\n')])) });
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -117,7 +120,7 @@ function Analyzer() {
     const ref = /^[0-9a-f]{40}$/.test(gh.ref) ? gh.ref.slice(0, 7) : gh.ref;
     const label = `${gh.owner}/${gh.repo}${gh.ref === 'HEAD' ? '' : `@${ref}`}`;
     setStatus(`${label}의 파일 목록을 받는 중입니다...`);
-    run(label, () => readGitHub(gh, setStatus));
+    run(label, () => readGitHub(gh, setStatus), `https://github.com/${gh.owner}/${gh.repo}/blob/${encodeURIComponent(gh.ref)}/`);
   };
 
   const onFile = (file: File | undefined) => {
@@ -129,27 +132,27 @@ function Analyzer() {
   return (
     <>
       <div className={styles.sources}>
-        <form className={styles.source} onSubmit={onUrl}>
-          <h2>GitHub 링크</h2>
-          <div className={styles.urlRow}>
-            <input type="text" inputMode="url" placeholder="https://github.com/소유자/저장소" value={url}
-                   disabled={!!status} onChange={e => setUrl(e.target.value)} aria-label="GitHub 저장소 링크" />
-            <button type="submit" disabled={!!status || !url.trim()}>분석</button>
-          </div>
-          <small>공개 저장소만 됩니다. 브랜치나 커밋은 …/tree/&lt;이름&gt; 링크로 고릅니다. 소스는 GitHub에서 이 브라우저로 바로 받습니다.</small>
+        <form className={styles.urlForm} onSubmit={onUrl}>
+          <input type="text" inputMode="url" placeholder="github.com/소유자/저장소" value={url} aria-label="GitHub 저장소 링크"
+                 title="공개 저장소. 브랜치나 커밋은 …/tree/<이름> 링크로 고릅니다"
+                 disabled={!!status} onChange={e => setUrl(e.target.value)} />
+          <button type="submit" disabled={!!status || !url.trim()}>분석</button>
         </form>
-        <div className={styles.source}>
-          <h2>zip 파일</h2>
-          <input ref={input} type="file" accept=".zip" aria-label="소스 zip 파일" disabled={!!status} onChange={e => onFile(e.target.files?.[0])} />
-          <small>비공개 저장소나 내 컴퓨터의 소스. 파일은 이 브라우저 밖으로 나가지 않습니다.</small>
-        </div>
+        <span className={styles.or}>또는</span>
+        <label className={`${styles.zip} ${status ? styles.off : ''}`} title="비공개 저장소나 내 컴퓨터의 소스">
+          <input ref={input} type="file" accept=".zip" disabled={!!status} onChange={e => onFile(e.target.files?.[0])} />
+          zip 올리기
+        </label>
+        <p className={styles.langs}>지원 언어 <b>Python</b></p>
       </div>
       {status && <p className={styles.muted}>{status}</p>}
       {error && <pre className={styles.error}>{error}</pre>}
       {result && !result.r.supported && (
-        <p className={styles.notice}>주 언어가 {result.r.language ?? '알 수 없음'}입니다. 지금은 Python 서버만 분석합니다.</p>
+        <p className={styles.notice}>
+          {result.r.language ? `${LANG_NAMES[result.r.language] ?? result.r.language} 서버는 지원하지 않습니다.` : '소스 코드 파일을 찾지 못했습니다.'}
+        </p>
       )}
-      {result?.r.supported && <ToolExplorer file={result.label} r={result.r} texts={result.texts} />}
+      {result?.r.supported && <ToolExplorer file={result.label} blob={result.blob} r={result.r} texts={result.texts} />}
     </>
   );
 }
@@ -159,10 +162,7 @@ export default function Analyze() {
     <Layout title="MCP 서버 분석" description="MCP 서버 소스에서 등록 도구를 찾고 도구마다 코드를 따라가 다이어그램으로 보여 줍니다.">
       <main className={styles.page}>
         <h1>MCP 서버 분석</h1>
-        <p className={styles.lead}>
-          MCP 서버 소스를 GitHub 링크나 zip으로 넣으면 등록 도구를 찾고, 도구마다 실제 코드를 따라가 다이어그램으로 보여 줍니다.
-          칸을 누르면 그 함수의 코드가 나오고, 외부 모듈을 누르면 그 모듈에 닿는 도구만 남습니다. 지금은 Python 서버만 지원합니다.
-        </p>
+        <p className={styles.lead}>도구별 호출 구조와 코드</p>
         <Analyzer />
       </main>
     </Layout>
