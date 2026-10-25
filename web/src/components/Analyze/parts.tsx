@@ -14,6 +14,14 @@ export type Tool = {
   reg: string;
   description: string | null;
   description_expr?: string; // 실행할 때 정해지는 설명의 코드(f-string 등)
+  title?: string;
+  annotations?: Record<string, unknown>; // ToolAnnotations(readOnlyHint 등)를 JSON으로
+  annotations_expr?: string; // 코드만으로 못 읽은 annotations=…의 코드
+  input_schema?: unknown; // 저수준 Tool(inputSchema=…)에 직접 쓴 스키마
+  input_schema_expr?: string; // 코드만으로 못 읽은 inputSchema=…의 코드
+  output_schema?: unknown; // 저수준 Tool(outputSchema=…)·fastmcp output_schema=…에 직접 쓴 스키마(None이면 null)
+  output_schema_expr?: string;
+  structured_output?: string; // MCP SDK의 structured_output=… 코드
   params: Param[];
   returns?: Returns;
   fn?: number;
@@ -46,6 +54,7 @@ export type Mcp = {
   sdk: {
     package: string; version: string | null; spec: string | null; source: string;
     exact: boolean; atLeast: boolean; oldest: string | null; latest: string | null; via?: string;
+    pinned: { mcp?: string; fastmcp?: string }; // 패키지마다 정확히 아는 버전(lock 파일, == 조건)
   } | null;
 };
 // 분석한 결과. 지원하지 않는 언어면 language만 있다
@@ -156,6 +165,25 @@ export function ReturnInfo({ r }: { r?: Returns }) {
         </div>
       ))}
       {r.partial && <p className={styles.pdesc} title="코드만으로 정할 수 없는 키가 더 있을 수 있음">외 일부</p>}
+    </div>
+  );
+}
+
+/** 등록 코드의 제목과 힌트(ToolAnnotations). 클라이언트가 도구를 고르거나 확인을 받을 때 쓴다 */
+export function Hints({ tool }: { tool: Tool }) {
+  // 제목은 title=…, 없으면 ToolAnnotations(title=…)
+  const { title: annTitle, ...hints } = tool.annotations ?? {};
+  const title = tool.title ?? (typeof annTitle === "string" ? annTitle : null);
+  if (!title && !Object.keys(hints).length && !tool.annotations_expr) return null;
+  return (
+    <div className={styles.hints}>
+      {title && <span title="title">{title}</span>}
+      {Object.entries(hints).map(([k, v]) => (
+        <code key={k} className={v === true ? styles.hintOn : undefined}>
+          {k}={v === true ? "True" : v === false ? "False" : JSON.stringify(v)}
+        </code>
+      ))}
+      {tool.annotations_expr && <code title="실행 시 결정">annotations={tool.annotations_expr}</code>}
     </div>
   );
 }

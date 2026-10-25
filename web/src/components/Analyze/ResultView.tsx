@@ -1,7 +1,8 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ToolExplorer from "./ToolExplorer";
 import { PromptsPanel, ResourcesPanel, ServerPanel, SharedPanel } from "./McpPanels";
 import { Loc, type Analysis } from "./parts";
+import { sdkOf, toolsListEntry } from "@site/src/analyzer/toolslist.mjs";
 import styles from "./styles.module.css";
 
 // 분석 결과 화면: 위에 요약, 아래에 탭(도구, 리소스, 프롬프트, 공통 경로, 서버).
@@ -9,13 +10,40 @@ import styles from "./styles.module.css";
 
 type Tab = "tools" | "resources" | "prompts" | "shared" | "server";
 
-// blob: GitHub에서 받았을 때 원본 파일 주소의 앞부분(https://github.com/o/r/blob/<ref>/)
-export default function ResultView({ file, r, texts, blob }: { file: string; r: Analysis; texts: Map<string, string[]>; blob?: string }) {
+/** data를 JSON 파일로 내려받게 한다 */
+function download(name: string, data: unknown) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000); // 바로 풀면 내려받기가 끊기는 브라우저가 있다
+}
+
+// blob: GitHub에서 받았을 때 원본 파일 주소의 앞부분(https://github.com/o/r/blob/<ref>/).
+// initialTool: 처음 열 도구 이름(공유 링크의 tool=). onTool: 고른 도구가 바뀔 때 이름을 알린다. 있으면 링크 복사를 보인다
+export default function ResultView({ file, r, texts, blob, initialTool, onTool }: {
+  file: string; r: Analysis; texts: Map<string, string[]>; blob?: string; initialTool?: string; onTool?: (name: string) => void;
+}) {
   const { summary: s, tools, mcp } = r;
   const fns = r.graph.functions;
+  const sdk = useMemo(() => sdkOf(mcp), [mcp]);
   const [tab, setTab] = useState<Tab>("tools");
-  const [sel, setSel] = useState(0);
+  const [sel, setSel] = useState(() => Math.max(0, tools.findIndex((t) => t.name === initialTool)));
+  const [copied, setCopied] = useState(false);
   const tabsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (tools[sel]) onTool?.(tools[sel].name);
+  }, [sel]);
+  const base = file.replace(/[^\w.-]+/g, "_");
+  // 클립보드를 쓸 수 없으면(권한 거부 등) 주소를 직접 복사하도록 보여 준다
+  const copyLink = () => navigator.clipboard.writeText(window.location.href).then(
+    () => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    },
+    () => window.prompt("링크", window.location.href),
+  );
 
   // 다른 탭에서 도구를 누르면 도구 탭에서 그 도구를 연다
   const openTool = (i: number) => {
@@ -51,6 +79,17 @@ export default function ResultView({ file, r, texts, blob }: { file: string; r: 
             ))}
           </span>
         )}
+        <div className={styles.actions}>
+          <button onClick={() => download(`${base}.analysis.json`, { source: file, ...r })} title="도구, 호출 그래프, MCP 기능, 요약 전체">
+            분석 결과 JSON
+          </button>
+          <button onClick={() => download(`${base}.tools.json`, { tools: tools.map((t) => toolsListEntry(t, sdk).entry) })} title="코드에서 읽은 값으로 만든 tools/list 결과 추정">
+            tools/list JSON(추정)
+          </button>
+          {onTool && (
+            <button onClick={copyLink} title="저장소와 고른 도구를 담은 링크">{copied ? "복사했습니다" : "링크 복사"}</button>
+          )}
+        </div>
       </div>
 
       <div className={styles.tabs} role="tablist" ref={tabsRef}>
@@ -62,7 +101,7 @@ export default function ResultView({ file, r, texts, blob }: { file: string; r: 
         ))}
       </div>
 
-      {tab === "tools" && <ToolExplorer tools={tools} fns={fns} texts={texts} blob={blob} sel={sel} onSel={setSel} />}
+      {tab === "tools" && <ToolExplorer tools={tools} fns={fns} texts={texts} blob={blob} sel={sel} onSel={setSel} sdk={sdk} />}
       {tab === "resources" && <ResourcesPanel resources={mcp.resources} texts={texts} blob={blob} />}
       {tab === "prompts" && <PromptsPanel prompts={mcp.prompts} texts={texts} blob={blob} />}
       {tab === "shared" && <SharedPanel shared={s.shared} tools={tools} fns={fns} texts={texts} blob={blob} onTool={openTool} />}

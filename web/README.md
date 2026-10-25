@@ -35,17 +35,25 @@ MCP 서버 소스의 1차 정적 분석. 등록 도구를 찾고, 도구마다 �
   - zip 파일: 비공개 저장소나 내 컴퓨터의 소스. 파일은 브라우저 밖으로 나가지 않는다
 - 도구 찾기: `@x.tool`, `x.add_tool(f)`, `x.tool()(f)`, 저수준 SDK의 `Tool(name=…)`. 그냥 `@tool`과 `Tool`은 LangChain 등 다른 라이브러리일 수 있어 `mcp`·`fastmcp`에서 import한 것만 센다
 - 요약: 도구 수, 도구가 호출하는 함수·파일 수(직접·간접), 동적 등록(반복문 등으로 등록해 도구 목록에 없는 곳)의 위치. GitHub 링크로 불러오면 원본으로 가는 링크
+- 내려받기: 분석 결과 전체 JSON, 도구 명세로 만든 `tools/list` 결과 추정 JSON(`{"tools": […]}`)
+- 공유 링크: GitHub 링크로 불러오면 주소에 `?repo=소유자/저장소&ref=브랜치·커밋&tool=도구`를 남기고, 이 주소로 열면 바로 분석한다. 브랜치는 열 때의 최신 커밋을 받으므로, 결과를 고정하려면 `…/commit/<커밋>` 링크로 분석한다. zip은 링크로 다시 열 수 없다
 - 탭
-  - 도구: 도구 목록 → 고른 도구의 명세와 다이어그램 → 칸을 누르면 그 함수의 코드(호출 줄의 `→`로 다음 함수로 간다). 명세는 MCP 클라이언트가 보는 설명(`description=` 또는 docstring)과 파라미터(타입, 기본값·필수, `Field(description=…)`)다. 문자열은 리터럴, 이어 쓴 문자열, 모듈 수준 상수(같은 파일·import)까지 따라가고, f-string처럼 실행해야 정해지는 값은 코드를 그대로 보여 준다. 리턴은 리턴 타입 표시와, 저장소 안 모델(Pydantic·TypedDict·dataclass 등)이면 그 필드(부모 클래스 포함), 딕셔너리면 모은 키다. 키는 딕셔너리 리터럴, `dict(…)`, 변수에 담은 딕셔너리와 그 뒤의 `x["k"] = …`·`x.update(…)`, 공통 응답 함수 같은 저장소 안 함수의 리턴까지 따라가고, 성공·실패 응답의 키를 합쳐 파라미터처럼 한 줄씩 보인다. 키마다 값으로 짐작한 타입(리터럴, `len(…)` 같은 내장 함수, 함수 파라미터의 타입 표시)과 `"success" | "error"` 같은 짧은 리터럴 값을, 타입을 모르면 값 코드를 적는다. 코드만으로 다 정할 수 없으면 "외 일부"를 붙인다
+  - 도구: 도구 목록 → 고른 도구의 명세와 다이어그램 → 칸을 누르면 그 함수의 코드(호출 줄의 `→`로 다음 함수로 간다). 명세는 MCP 클라이언트가 보는 설명(`description=` 또는 docstring), 제목(`title=`), 힌트(`annotations=ToolAnnotations(readOnlyHint=…)` 또는 딕셔너리, 같은 파일의 모듈 수준 변수까지)와 파라미터(타입, 기본값·필수, `Field(description=…)`)다. 명세 아래에는 이 값으로 만든 `tools/list` 항목 추정(`inputSchema`·`outputSchema`)을 JSON으로 보인다(아래 「tools/list 추정」). 문자열은 리터럴, 이어 쓴 문자열, 모듈 수준 상수(같은 파일·import)까지 따라가고, f-string처럼 실행해야 정해지는 값은 코드를 그대로 보여 준다. 리턴은 리턴 타입 표시와, 저장소 안 모델(Pydantic·TypedDict·dataclass 등)이면 그 필드(부모 클래스 포함), 딕셔너리면 모은 키다. 키는 딕셔너리 리터럴, `dict(…)`, 변수에 담은 딕셔너리와 그 뒤의 `x["k"] = …`·`x.update(…)`, 공통 응답 함수 같은 저장소 안 함수의 리턴까지 따라가고, 성공·실패 응답의 키를 합쳐 파라미터처럼 한 줄씩 보인다. 키마다 값으로 짐작한 타입(리터럴, `len(…)` 같은 내장 함수, 함수 파라미터의 타입 표시)과 `"success" | "error"` 같은 짧은 리터럴 값을, 타입을 모르면 값 코드를 적는다. 코드만으로 다 정할 수 없으면 "외 일부"를 붙인다
   - 리소스·프롬프트: `@x.resource(uri)`·`@x.prompt()`로 등록한 것의 URI·이름·설명·파라미터와 코드. 없어도 탭은 두고 없다고 적는다
   - 공통 경로: 둘 이상의 도구가 거치는 함수(거치는 도구가 많은 순). 고르면 거치는 도구와 거치지 않는 도구, 그 함수의 코드. 거치지 않는 도구는 공통 처리(기록, 검증 등)가 빠졌는지 확인할 곳이다
   - 서버: 서버 객체(FastMCP·MCPServer·Server)와 SDK, 지원 규격, 클라이언트 모델이 받는 지시문(`instructions=`), 전송 방식(`run(transport=…)`, 없으면 stdio)
+- tools/list 추정(`toolsListEntry`): SDK가 함수에서 스키마를 만드는 규칙을 따라 만든다
+  - `inputSchema`: 인자로 만든다. 타입은 Pydantic처럼 JSON Schema로 옮기고(`X | None`·`Optional`은 `anyOf`에 `null`, `Literal`은 `enum`, `Annotated`는 벗긴다) 모르는 타입은 빈 스키마로 둔다. 저수준 SDK의 `Tool(inputSchema=…)`처럼 코드에 직접 쓴 스키마(같은 파일의 모듈 수준 변수 포함)는 그대로 쓴다
+  - `outputSchema`: 리턴 타입으로 만든다. 모델(Pydantic·TypedDict·dataclass·필드 타입 표시가 있는 클래스)은 그 필드로, 객체가 아닌 타입은 `{"result": …}`로 감싼다. 리턴 타입 표시가 없거나 `structured_output=False`·`output_schema=None`이면 없다. `Tool(outputSchema=…)`·`output_schema=…`에 직접 쓴 스키마는 그대로 쓴다. MCP 콘텐츠·`CallToolResult` 리턴, 저장소 밖 타입처럼 SDK 버전이나 코드 밖에 따라 갈리는 것은 스키마 대신 "모름"과 이유를 보인다
+  - 규칙은 SDK 버전마다 다르다(MCP SDK는 1.10, fastmcp는 2.10부터 `outputSchema`를 만들고, fastmcp는 3·4에서 세부가 바뀌었다). lock 파일이나 `==` 조건으로 버전을 알면 그 판의 규칙을, 모르면 최신 판의 규칙을 쓴다(`toolslist.mjs` 머리 주석)
+  - mcp 1.12.4·2.3.0, fastmcp 2.12.4·3.0.0·3.2.0·4.1.3이 실제로 만든 `tools/list`와 맞춰 보았다. 다른 것은 `title`과 `$defs`(모델을 따로 두고 `$ref`로 가리킴)뿐이다. 새 SDK가 규칙을 바꾸면 `toolslist.mjs`를 고친다
 - 지원 규격: 서버의 MCP SDK가 지원하는 규격 범위. 의존성 파일(`uv.lock`·`poetry.lock`이 있으면 그 정확한 버전, 없으면 `pyproject.toml`·`requirements*.txt` 조건의 가장 낮은 버전)에서 `mcp`·`fastmcp` 버전을 읽는다. `pyproject.toml`은 의존성 표(`dependencies`, optional·dev, poetry)만 보고, 실행용 의존성을 개발용보다 먼저 쓴다. 실제 통신 규격은 이 범위 안에서 클라이언트가 요청한 것으로 정해진다. SDK 버전 → 규격 대응은 `python.mjs`의 `MCP_SDK_PROTOCOLS`·`FASTMCP_MCP`에 있다(PyPI 배포 파일의 `LATEST_PROTOCOL_VERSION`과 `requires_dist`로 확인). 새 SDK가 새 규격을 지원하면 여기에 더한다
 - 한계: 호출은 이름과 import로 잇는다. 객체를 알 수 없는 메서드 호출(`x.run()`, `ctx.db.x()`)과 동적 호출(`getattr`, 콜백 등록)은 따라가지 않는다. 실행 중에 정해지는 것(반복문 등록, 하위 서버를 붙일 때 바뀌는 이름, 실행 중에 바뀌는 설명)도 코드에 쓰인 대로만 보인다
 
 | 파일 | 내용 |
 |---|---|
 | `src/analyzer/core.mjs` | 언어 판별, 읽을 파일 고르기, 요약(도구별 범위, 공통 경로) |
+| `src/analyzer/toolslist.mjs` | `tools/list` 추정: `inputSchema`·`outputSchema`를 SDK 규칙대로 만든다 |
 | `src/analyzer/python.mjs` | Python 서버: 등록 도구, 호출 그래프, 도구 밖의 MCP 기능(서버, 리소스, 프롬프트), MCP SDK 버전과 지원 규격 |
 | `src/pages/analyze.tsx` | 화면 입구(GitHub 링크·zip 읽기, 파서 불러오기) |
 | `src/components/Analyze/ResultView.tsx` | 결과 화면의 틀(요약, 탭) |

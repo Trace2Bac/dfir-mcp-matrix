@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Layout from '@theme/Layout';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { unzipSync } from 'fflate';
@@ -71,6 +71,15 @@ async function readGitHub({ owner, repo, ref }: { owner: string; repo: string; r
   return { paths, files };
 }
 
+// 공유 링크: ?repo=소유자/저장소&ref=브랜치·커밋&tool=도구. GitHub에서 받은 결과만 링크로 다시 열 수 있다.
+// ref가 브랜치면 그 시점의 최신 커밋을 다시 받으므로, 결과를 고정하려면 …/commit/<커밋> 링크로 분석한다
+function setQuery(params: Record<string, string | undefined>) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+  const qs = q.toString();
+  window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`);
+}
+
 let parserModule: Promise<any> | null = null;
 
 // 번들러가 손대지 않게 static/parser/의 파서를 실행할 때 불러온다. 파서는 자기 옆의 web-tree-sitter.wasm을 찾는다
@@ -89,11 +98,12 @@ function Analyzer() {
   const [url, setUrl] = useState('');
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
-  const [result, setResult] = useState<{ label: string; blob?: string; r: Result; texts: Map<string, string[]> } | null>(null);
+  // tool: 처음 열 도구(공유 링크의 tool=). blob이 있으면(GitHub에서 받음) 링크로 다시 열 수 있다
+  const [result, setResult] = useState<{ label: string; blob?: string; r: Result; texts: Map<string, string[]>; tool?: string } | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
-  // label: 결과 위에 보일 이름. load: 소스를 가져온다. blob: GitHub 원본 파일 주소의 앞부분
-  const run = async (label: string, load: () => Promise<Source>, blob?: string) => {
+  // label: 결과 위에 보일 이름. load: 소스를 가져온다. blob: GitHub 원본 파일 주소의 앞부분. tool: 처음 열 도구
+  const run = async (label: string, load: () => Promise<Source>, blob?: string, tool?: string) => {
     setError('');
     setResult(null);
     try {
@@ -105,7 +115,7 @@ function Analyzer() {
         p.setLanguage(await Language.load(grammarBase + (GRAMMARS as Record<string, string>)[lang]));
         return p;
       });
-      setResult({ label, blob, r, texts: new Map(files.map(([p, t]) => [p, t.split('\n')])) });
+      setResult({ label, blob, r, texts: new Map(files.map(([p, t]) => [p, t.split('\n')])), tool });
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -114,18 +124,40 @@ function Analyzer() {
     }
   };
 
-  const onUrl = (e: { preventDefault(): void }) => {
-    e.preventDefault();
-    const gh = parseGitHub(url);
+  const analyzeUrl = (text: string, tool?: string) => {
+    const gh = parseGitHub(text);
     if (!gh) return setError('링크 형식이 맞지 않습니다. 예: github.com/소유자/저장소');
     const ref = /^[0-9a-f]{40}$/.test(gh.ref) ? gh.ref.slice(0, 7) : gh.ref;
     const label = `${gh.owner}/${gh.repo}${gh.ref === 'HEAD' ? '' : `@${ref}`}`;
+    setQuery({ repo: `${gh.owner}/${gh.repo}`, ref: gh.ref === 'HEAD' ? undefined : gh.ref, tool });
     setStatus(`${label} 파일 목록 받는 중…`);
-    run(label, () => readGitHub(gh, setStatus), `https://github.com/${gh.owner}/${gh.repo}/blob/${encodeURIComponent(gh.ref)}/`);
+    run(label, () => readGitHub(gh, setStatus), `https://github.com/${gh.owner}/${gh.repo}/blob/${encodeURIComponent(gh.ref)}/`, tool);
+  };
+
+  const onUrl = (e: { preventDefault(): void }) => {
+    e.preventDefault();
+    analyzeUrl(url);
+  };
+
+  // 공유 링크로 열면 그 저장소를 바로 분석한다
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const repo = q.get('repo');
+    if (!repo) return;
+    const text = `github.com/${repo}${q.get('ref') ? `/tree/${q.get('ref')}` : ''}`;
+    setUrl(text);
+    analyzeUrl(text, q.get('tool') ?? undefined);
+  }, []);
+
+  // 고른 도구를 링크에 남긴다
+  const onTool = (name: string) => {
+    const q = new URLSearchParams(window.location.search);
+    setQuery({ repo: q.get('repo') ?? undefined, ref: q.get('ref') ?? undefined, tool: name });
   };
 
   const onFile = (file: File | undefined) => {
     if (!file) return;
+    setQuery({});
     setStatus(`${file.name} 읽는 중…`);
     run(file.name, async () => readZip(new Uint8Array(await file.arrayBuffer())));
   };
@@ -149,7 +181,8 @@ function Analyzer() {
       {status && <p className={styles.muted}>{status}</p>}
       {error && <pre className={styles.error}>{error}</pre>}
       {result && (result.r.supported ? (
-        <ResultView file={result.label} blob={result.blob} r={result.r} texts={result.texts} />
+        <ResultView file={result.label} blob={result.blob} r={result.r} texts={result.texts}
+                    initialTool={result.tool} onTool={result.blob ? onTool : undefined} />
       ) : (
         <p className={styles.notice}>
           {result.r.language ? `${LANG_NAMES[result.r.language] ?? result.r.language} 서버는 지원하지 않습니다.` : '분석할 소스 파일이 없습니다.'}
