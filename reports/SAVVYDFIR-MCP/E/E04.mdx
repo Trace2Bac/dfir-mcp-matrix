@@ -1,0 +1,477 @@
+---
+cell: E04
+details:
+- id: E04.01
+- id: E04.02
+- id: E04.03
+- id: E04.04
+- id: E04.05
+- id: E04.06
+- id: E04.07
+---
+
+# E04 분석 입력 준비
+
+### E04.01 작업 사본 생성
+
+**구현.** 이 방식은 `load_memory`에 적용된다 [1].
+`load_memory`는 받은 덤프가 ZIP으로 판별되면 `7z x`로 보관 파일 전체를 `output_dir`에 푼다 [1].
+푼 폴더에서 메모리 덤프로 고른 파일의 경로를 `raw_dump_path`로 돌려주고 모델은 이 경로를 메모리 도구에 넘긴다 [1][2].
+ZIP이 아니면 사본을 만들지 않고 받은 경로를 그대로 돌려준다 [1].
+
+**한계.** 덤프는 이번에 푼 파일이 아니라 `output_dir` 전체에서 확장자로 찾는다 [1].
+`output_dir`의 기본값은 호출마다 같은 `/evidence/memory`이므로 앞서 다른 ZIP에서 푼 덤프가 그 폴더에 남아 있으면 그 파일을 고를 수 있다 [3][1].
+`7z` 실행 파일 경로는 `/usr/bin/7z`로 고정되어 있다 [1].
+`7z`가 없는 실행 환경에서 ZIP 파일을 넘기자 `[Errno 2] No such file or directory: '/usr/bin/7z'` 오류가 돌아와 푸는 단계는 실행하지 못했다 [4].
+
+### E04.02 선택 추출
+
+**구현.** 이 방식은 `extract_windows_artifacts`, `summarize_evtx`, `extract_browser_history`, 하이브를 읽는 레지스트리 도구에 적용된다 [5][6][7][8].
+`extract_windows_artifacts`는 `fls -r -p`로 이미지의 파일 목록을 받는다 [5].
+경로가 `windows/system32/winevt/logs/` 아래 `.evtx`, `windows/system32/config/`의 하이브, 사용자 폴더의 `ntuser.dat`, `Windows/Prefetch`의 `.pf`, `$MFT`, `SRUDB.dat`, `$J`처럼 정해 둔 형태이면 종류를 정한다 [9].
+종류가 정해진 파일만 `icat`으로 메타데이터 주소를 지정해 `OUTPUT_BASE/<case_id>/artifacts/raw/<종류>/`에 꺼낸다 [5].
+`families` 인자로 꺼낼 종류를 고를 수 있다 [10].
+ext4 이미지에서 `SYSTEM`·`SOFTWARE`·`SYSTEM.LOG1`·`alice_NTUSER.DAT`·`alice_NTUSER.DAT.LOG1`·`Security.evtx`·`.pf` 하나가 꺼내졌고 같은 이미지의 `Documents/notes.txt`는 꺼내지지 않았다 [4].
+꺼낸 파일은 디스크 도구가 입력 인자 없이 불릴 때 받은 경로보다 먼저 입력으로 쓰인다 [11].
+
+`summarize_evtx`는 파일 이름으로 기준 채널 4개와 고가치 채널 10개를 정해 두고 기록이 있는 그 채널 파일만 임시 폴더에 복사해 EvtxECmd에 넘긴다 [6].
+`extract_browser_history`는 사용자 폴더 아래 Chrome·Edge의 `History`와 Firefox의 `places.sqlite`를 경로로 찾아 DB마다 임시 폴더에 복사한다 [7].
+레지스트리 도구는 읽을 하이브를 하나씩 임시 폴더에 복사해 외부 도구에 넘긴다 [8].
+
+**한계.** `extract_windows_artifacts`는 꺼낼 위치의 파일 이름이 같은 파일이 둘 이상이면 처음 것만 꺼낸다 [12].
+`summarize_evtx`는 `channel` 인자를 받았거나 고를 채널이 없으면 고르지 않고 원래 폴더 전체를 EvtxECmd에 넘긴다 [6].
+
+### E04.03 전체·부분 마운트
+
+**구현.** 이 방식은 `analyze_vss`에 적용된다 [13].
+`analyze_vss`는 `partition_offset_sectors`가 없으면 `mmls` 출력에서 파티션 하나를 골라 그 시작 위치를 바이트로 바꿔 `vshadowinfo`와 `vshadowmount`의 `-o`에 넘긴다 [13][14].
+EWF 이미지는 `ewfmount`로 임시 폴더에 원시 장치로 드러내 `vshadowinfo`에만 넘기고 `vshadowmount`에는 원래 이미지 경로를 넘긴다 [15][16][14][17].
+`vshadowmount`가 끝나면 서버는 마운트 폴더의 `vss<N>` 아래에 정해 둔 상대 경로가 있는지 보고 해제한다 [18].
+`extract_windows_artifacts`와 `list_deleted_files`는 파티션 시작 위치를 모델이 준 `partition_offset_sectors`로만 받고 서버가 고르지 않는다 [5][19].
+이미지를 파일시스템으로 마운트하는 `mount_image` 함수는 도구로 등록되어 있지 않다 [20][4].
+
+**한계.** 파티션을 고를 때 파일시스템 종류를 보지 않고 시작 섹터가 0보다 큰 `mmls` 줄 가운데 넷째 칸인 끝 섹터가 가장 큰 줄을 고르므로 미할당 영역의 시작 위치를 넘길 수 있다 [13][21].
+두 파티션 뒤에 미할당 영역을 둔 MBR 이미지에서 `vshadowinfo`에 미할당 영역의 시작 위치가 넘어갔다 [22].
+EWF 이미지이면 `/proc/mounts`에서 `ewf`가 들어간 마운트 지점이나 `/mnt/ewf`·`/mnt/disk-ewf`의 장치를 먼저 찾아 쓰고 그 장치가 받은 이미지에서 나온 것인지는 대조하지 않는다 [23].
+도구 설명은 `vshadowmount`가 드러낸 `vss<N>`을 다시 마운트해 파일을 읽으라고 적지만 서버는 `vss<N>` 아래의 상대 경로를 바로 찾는다 [24][18].
+시험용 `vshadowmount`가 마운트 폴더에 `vss1` 파일을 만들게 하자 정해 둔 8개 경로가 모두 `artifacts_missing`에 들어갔다 [17].
+`vss<N>`이 볼륨 파일로 드러나는지는 libvshadow 소스로 확인하지 못했다 [24].
+`vshadowmount`가 0이 아닌 코드로 끝나면 복사본마다 찾은 파일과 못 찾은 파일 목록이 모두 빈 값으로 남고 사유도 싣지 않는다 [25][18].
+libvshadow 도구와 `ewfmount`는 받은 인자를 기록하는 시험용 실행 파일로 바꿔 서버 쪽 처리만 확인했다 [17].
+
+### E04.04 추출·생략 범위 기록
+
+**구현.** 이 방식은 `extract_windows_artifacts`, `summarize_evtx`, `load_memory`에 적용된다 [26][27][1].
+`extract_windows_artifacts`의 응답은 종류별로 꺼낸 파일 경로 `extracted`, 꺼낸 파일 수 `total_artifacts_staged`, 파일이 없는 종류 `families_empty`, 실패한 파일 `failures`와 `critical_failures`를 싣는다 [26].
+꺼낸 파일이 없는 종류와 중요한 파일의 실패는 `data_gaps`에 사유와 함께 싣는다 [26][28].
+앞서 꺼낸 파일을 다시 쓴 종류는 `reused_families`, 새로 꺼낸 종류는 `extracted_families`로 나눈다 [26].
+호출 기록 요약에도 꺼낸 파일 수, 파일이 있는 종류 수, 실패 수가 남는다 [26].
+ext4 이미지의 응답에서 7개 종류 가운데 `amcache`·`mft`·`srum`·`usn`이 `families_empty`와 `data_gaps`에 실렸다 [4].
+`summarize_evtx`는 복사한 채널 이름 `extracted_channels`와 고른 방식 `channel_selection_mode`를 응답에 싣는다 [27].
+`load_memory`는 푼 경우 `was_extracted`와 고른 덤프 경로를, 덤프를 찾지 못하면 푼 파일 목록 `extracted_files`를 싣는다 [1].
+
+**한계.** 중요한 파일의 실패를 `data_gaps`에 따로 싣는 것은 25건까지이고 그 뒤는 건수 한 줄로 묶는다 [28].
+`load_memory`의 `extracted_files`도 이번에 푼 파일이 아니라 `output_dir` 바로 아래의 목록이다 [1].
+
+### E04.05 부속 자료 탐색
+
+**구현.** 이 방식은 `extract_windows_artifacts`, 하이브 로그 재생 함수 `replay_hive_with_rla`, `extract_browser_history`에 적용된다 [9][29][7].
+`extract_windows_artifacts`는 `SYSTEM`·`SOFTWARE`·`SECURITY`·`SAM`·`DEFAULT` 하이브와 `ntuser.dat`의 `.LOG`·`.LOG1`·`.LOG2`, `Amcache.hve`의 `.LOG1`·`.LOG2`를 하이브와 같은 종류로 정해 함께 꺼낸다 [9].
+사용자 하이브의 로그 파일은 하이브와 같은 사용자 이름 접두어를 붙여 꺼내 로그가 하이브 옆에 같은 이름으로 놓이게 한다 [30].
+`SYSTEM.LOG1`은 `SYSTEM` 옆에, `NTUSER.DAT.LOG1`은 `alice_NTUSER.DAT.LOG1`로 `alice_NTUSER.DAT` 옆에 꺼내졌다 [4].
+`replay_hive_with_rla`는 하이브 폴더에서 `<하이브>.LOG1`·`.LOG2`를 대소문자 구별 없이 찾아 하이브 사본과 같은 임시 폴더에 하이브 이름에 맞춰 복사한다 [29].
+`extract_browser_history`는 DB 옆의 `-wal`·`-shm`을 DB 사본과 같은 임시 폴더에 복사한다 [7].
+
+**한계.** `replay_hive_with_rla`는 `.LOG` 파일을 찾지 않는다 [29].
+`extract_browser_history`는 `-journal` 파일을 복사하지 않는다 [7].
+
+### E04.06 부속 자료 누락·로그 미반영 표시
+
+**구현.** 이 방식은 `extract_shellbags`와 `extract_registry_fileaccess`에 적용된다 [31][32].
+두 도구는 `rla` 재생이 0이 아닌 종료 코드로 끝나거나 예외로 끝나면 그 하이브를 `parser_failures`에 `replay_error`와 사유로 싣는다 [31][32].
+그 하이브에서 읽은 행에는 `parser_status`로 `replay_error`를 적는다 [31].
+`replay_hive_with_rla`는 하이브 폴더를 읽지 못해 로그를 찾지 못한 경우도 재생 실패로 돌려준다 [29].
+`extract_shimcache`는 AppCompatCacheParser가 CSV를 만들지 않으면 하이브에 로그가 반영되지 않았을 수 있다는 사유를 부재 기록에 적는다 [33].
+`extract_registry_run_keys`는 재생 결과를 응답에 표시하지 않는다 [8].
+
+**한계.** `replay_hive_with_rla`는 하이브 폴더에 `.LOG1`·`.LOG2`가 없어도 `rla`가 0으로 끝나면 재생 성공으로 돌려주므로 두 도구는 로그가 없는 하이브에 표시를 싣지 않는다 [29].
+
+### E04.07 로그 재생·복원
+
+**구현.** 이 방식은 하이브를 읽는 레지스트리 도구와 `extract_browser_history`에 적용된다 [8][31][32][33][7].
+레지스트리 도구는 하이브와 로그 사본을 `dotnet /opt/zimmermantools/rla.dll -d <입력> --out <출력>`으로 실행해 로그를 적용한 하이브를 만든다 [29].
+`rla`가 만든 파일이 있으면 그 파일을, 없으면 하이브 사본을 외부 파서에 넘긴다 [29].
+`extract_registry_run_keys`는 `rla`가 예외로 끝나면 원래 하이브와 `.LOG1`·`.LOG2`를 함께 RECmd 입력 폴더에 복사해 RECmd가 로그를 적용할 수 있게 한다 [8].
+`extract_browser_history`는 DB 사본과 `-wal`을 같은 폴더에 두고 SQLite로 열어 WAL에만 있는 행도 읽게 한다 [7].
+WAL에만 행 하나가 있는 Chromium 형식 DB에서 본 DB의 행과 WAL의 행이 모두 CSV에 실렸다 [4].
+
+**한계.** `extract_registry_run_keys`와 `extract_shimcache`는 `rla`의 종료 코드를 받지 않는다 [8][33][29].
+`rla`가 0이 아닌 코드로 끝나 출력이 없으면 로그를 적용하지 않은 하이브 사본을 넘기고 이때 RECmd 입력 폴더에는 로그가 복사되지 않는다 [8][29].
+실행 환경에 레지스트리 로그 재생 도구가 없어 하이브 재생 경로는 실행하지 못했다.
+
+### 근거
+
+[1] `load_memory`는 ZIP을 `7z`로 풀고 덤프를 골라 돌려준다: [`sift_mcp/server.py:10813-10864`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10813-L10864).
+
+[2] 메모리 도구는 받은 덤프 경로를 Volatility 3에 넘긴다.
+
+```python
+        # If VOL_PATH is a binary (not a .py script), invoke directly
+        # vol3/vol on SIFT is a standalone binary, not a Python script
+        if self.VOL_PATH.endswith(".py"):
+            cmd: List[str] = ["python3", self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        else:
+            cmd: List[str] = [self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+```
+
+[`sift_mcp/runners/volatility.py:153-158`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L153-L158)
+
+[3] `load_memory`의 `output_dir` 기본값은 `/evidence/memory`다.
+
+```python
+@mcp.tool()
+def load_memory(
+    dump_path: str,
+    output_dir: str = "/evidence/memory",
+) -> dict[str, Any]:
+```
+
+[`sift_mcp/server.py:10763-10767`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10763-L10767)
+
+[4] (실행 확인) 컨테이너 안에서 `mkfs.ext4 -d`로 만든 이미지, `-wal`에 행을 남긴 Chromium 형식 DB, ZIP 파일로 `extract_windows_artifacts`, `extract_browser_history`, `load_memory`를 불러 꺼낸 파일, CSV 내용, 오류를 확인했고 도구 목록에 `mount_image`가 없음을 확인했다.
+
+[5] `fls` 목록에서 종류를 정한 파일만 `icat`으로 꺼낸다: [`sift_mcp/server.py:7846-7965`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7846-L7965).
+
+[6] `summarize_evtx`는 이름으로 정한 채널 파일만 복사해 넘긴다: [`sift_mcp/tools/disk.py:4182-4280`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4182-L4280), [`sift_mcp/tools/disk.py:4679-4697`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4679-L4697).
+
+```python
+    with tempfile.TemporaryDirectory(prefix="savvydfir_evtx_") as tmp_dir:
+        csv_filename = "evtx_timeline.csv"
+        csv_path = os.path.join(tmp_dir, csv_filename)
+
+        # Run7 Stage 2: stage only baseline + present high-value channels into a
+        # bounded temp dir. EvtxECmd then processes ONLY those files, matching the
+        # plan's promised channel selectivity instead of running against the full
+        # evtx_dir.  If the user explicitly passed a `channel` filter, defer to
+        # them and pass the original dir through (legacy behaviour).
+        staged_evtx_dir = resolved_evtx_dir
+        extracted_channels: list[str] = []
+        if channel is None:
+            try:
+                staged_evtx_dir, extracted_channels = _stage_evtx_for_extraction(
+                    evtx_inventory, tmp_dir, fallback_dir=resolved_evtx_dir,
+                )
+            except Exception:
+                staged_evtx_dir = resolved_evtx_dir
+                extracted_channels = []
+```
+
+[`sift_mcp/tools/disk.py:4679-4697`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4679-L4697)
+
+[7] 브라우저 DB와 `-wal`·`-shm`을 복사해 사본을 연다.
+
+```python
+def _copy_sqlite_db(db_path: Path, dest_dir: Path) -> Path:
+    """Copy a sqlite DB + its -wal/-shm sidecars into ``dest_dir`` (locks)."""
+    dest = dest_dir / db_path.name
+    shutil.copy2(str(db_path), str(dest))
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.parent / (db_path.name + suffix)
+        if _path_exists(sidecar) and _path_is_file(sidecar):
+            try:
+                shutil.copy2(str(sidecar), str(dest_dir / sidecar.name))
+            except OSError:
+                pass
+    return dest
+
+```
+
+[`sift_mcp/tools/disk.py:6813-6825`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6813-L6825)
+
+```python
+        tmp_dir = Path(tempfile.mkdtemp(prefix="savvydfir_browser_"))
+        try:
+            db_copy = _copy_sqlite_db(db_path, tmp_dir)
+            if browser.startswith("firefox"):
+                rows, query_errors = _query_firefox_history(db_copy)
+            else:
+```
+
+[`sift_mcp/tools/disk.py:7079-7084`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7079-L7084)
+
+[8] `extract_registry_run_keys`의 하이브 사본과 `rla` 예외 때의 처리: [`sift_mcp/tools/disk.py:5235-5306`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5235-L5306).
+
+[9] 경로 형태로 꺼낼 종류를 정하고 하이브 로그도 같은 종류로 정한다: [`sift_mcp/server.py:7649-7689`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7649-L7689).
+
+[10] `families` 인자는 정해 둔 7개 종류만 받는다.
+
+```python
+_RAW_ARTIFACT_FAMILIES = {"evtx", "registry", "amcache", "prefetch", "mft", "srum", "usn"}
+
+
+def _normalize_artifact_families(families: Optional[Any]) -> set[str]:
+    """Normalize MCP list/string family input for raw Windows extraction."""
+    if families is None:
+        return set(_RAW_ARTIFACT_FAMILIES)
+    if isinstance(families, str):
+        values = [part.strip().lower() for part in families.split(",")]
+    else:
+        values = [str(part).strip().lower() for part in families]
+    normalized = {value for value in values if value}
+    if not normalized:
+        raise ValueError("families must be omitted/null or a non-empty allow-list.")
+    unknown = normalized - _RAW_ARTIFACT_FAMILIES
+    if unknown:
+        raise ValueError(
+            f"Unknown artifact families: {sorted(unknown)}. "
+            f"Valid families: {sorted(_RAW_ARTIFACT_FAMILIES)}"
+        )
+    return normalized
+```
+
+[`sift_mcp/server.py:7567-7587`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7567-L7587)
+
+[11] 디스크 도구는 꺼낸 파일 폴더를 먼저 입력으로 쓴다: [`sift_mcp/tools/disk.py:802-899`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L802-L899).
+
+[12] 같은 꺼낼 위치는 처음 것만 꺼낸다.
+
+```python
+            target = _raw_artifact_target(raw_base=raw_base, family=family, source_path=source_path)
+            if str(target) in seen_targets:
+                continue
+            seen_targets.add(str(target))
+            target.parent.mkdir(parents=True, exist_ok=True)
+```
+
+[`sift_mcp/server.py:7911-7915`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7911-L7915)
+
+[13] `analyze_vss`는 `mmls`로 파티션을 골라 시작 위치를 넘긴다.
+
+```python
+    offset_sectors: Optional[int] = partition_offset_sectors
+    if offset_sectors is None:
+        try:
+            mmls = subprocess.run(
+                ["mmls", str(image_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if mmls.returncode == 0:
+                # Parse mmls output - find the largest NTFS partition
+                # (offset, size, index)
+                ntfs_partitions: list[tuple[int, int, int]] = []
+                for line in mmls.stdout.splitlines():
+                    # Format: 000:  Meta  0000000000  0000000000  0000000001  ...
+                    # NTFS lines contain "NTFS" or have large sizes
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        try:
+                            idx = int(parts[0].rstrip(":"))
+                            start = int(parts[2])
+                            size = int(parts[3])
+                            if start > 0 and size > 100000:  # Skip tiny partitions
+                                ntfs_partitions.append((start, size, idx))
+                        except (ValueError, IndexError):
+                            continue
+                if ntfs_partitions:
+                    # Pick the largest partition (most likely to be Windows C:)
+                    ntfs_partitions.sort(key=lambda x: x[1], reverse=True)
+                    offset_sectors = ntfs_partitions[0][0]
+        except FileNotFoundError:
+            pass  # mmls not available - try without offset
+```
+
+[`sift_mcp/server.py:5720-5749`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5720-L5749)
+
+```python
+    vshadow_cmd = [vshadowinfo_bin]
+    if offset_sectors is not None:
+        # vshadowinfo takes byte offset
+        vshadow_cmd += ["-o", str(offset_sectors * 512)]
+    vshadow_cmd.append(str(target_path))
+```
+
+[`sift_mcp/server.py:5810-5814`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5810-L5814)
+
+[14] `vshadowmount`에도 같은 시작 위치를 넘긴다.
+
+```python
+            mount_cmd = [vshadowmount_bin]
+            if offset_sectors is not None:
+                mount_cmd += ["-o", str(offset_sectors * 512)]
+            mount_cmd += [str(image_path), str(mount_point)]
+
+            mount_proc = subprocess.run(
+                mount_cmd,
+                capture_output=True, text=True, timeout=60
+            )
+```
+
+[`sift_mcp/server.py:5921-5929`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5921-L5929)
+
+[15] EWF 이미지는 임시 폴더에 `ewfmount`로 드러낸다.
+
+```python
+        # If still pointing to E01, try ewfmounting to a temp dir
+        if target_path == image_path:
+            ewf_mount_point = Path(tempfile.mkdtemp(prefix="savvy_ewf_"))
+            ewf_proc = subprocess.run(
+                ["ewfmount", str(image_path), str(ewf_mount_point)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if ewf_proc.returncode == 0:
+                # Find the ewf raw device
+                for f in ewf_mount_point.glob("ewf*"):
+                    target_path = f
+                    break
+            else:
+                # Fall back: look for /dev/loopX already backing the E01
+                lsblk_out = subprocess.run(
+                    ["losetup", "-j", str(image_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                m = re.search(r"(/dev/loop\d+)", lsblk_out.stdout)
+                if m:
+                    target_path = Path(m.group(1))
+                    if ewf_mount_point and ewf_mount_point.exists():
+                        import shutil
+                        shutil.rmtree(str(ewf_mount_point), ignore_errors=True)
+                        ewf_mount_point = None
+```
+
+[`sift_mcp/server.py:5784-5808`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5784-L5808)
+
+[16] `ewfmount`로 드러낸 장치는 `vshadowinfo`에만 넘기고 `vshadowinfo`가 끝나면 해제한다.
+
+```python
+    vshadow_cmd = [vshadowinfo_bin]
+    if offset_sectors is not None:
+        # vshadowinfo takes byte offset
+        vshadow_cmd += ["-o", str(offset_sectors * 512)]
+    vshadow_cmd.append(str(target_path))
+```
+
+[`sift_mcp/server.py:5810-5814`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5810-L5814)
+
+```python
+    if ewf_mount_point is not None and ewf_mount_point.exists():
+        try:
+            subprocess.run(["fusermount", "-u", str(ewf_mount_point)],
+                           capture_output=True, timeout=10)
+            import shutil as _shutil
+            _shutil.rmtree(str(ewf_mount_point), ignore_errors=True)
+        except Exception:
+            pass
+```
+
+[`sift_mcp/server.py:5833-5840`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5833-L5840)
+
+[17] (실행 확인) `ewfmount`·`vshadowinfo`·`vshadowmount`·`fusermount`를 받은 인자를 기록하는 시험용 실행 파일로 바꾸고 `.E01` 이름의 이미지로 `analyze_vss`를 부르자 `vshadowmount`는 원래 이미지 경로를 받았고 마운트 폴더의 `vss1` 파일에서는 정해 둔 경로를 하나도 찾지 못했다.
+
+[18] 섀도 복사본마다 정해 둔 파일이 있는지 확인하고 해제한다: [`sift_mcp/server.py:5931-5974`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5931-L5974).
+
+[19] `list_deleted_files`는 받은 `offset`을 `fls -o`로 넘긴다: [`sift_mcp/tools/disk.py:3970-4020`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3970-L4020).
+
+[20] `mount_image` 함수에는 도구 표시가 없다: [`sift_mcp/server.py:10234-10272`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10234-L10272).
+
+[21] Sleuth Kit 4.11.1 `mmls`는 줄마다 슬롯 다음에 시작, 끝, 길이를 차례로 출력하고 미할당 영역도 같은 형식으로 출력한다: [`tools/vstools/mmls.cpp:59-78`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L59-L78), [`tools/vstools/mmls.cpp:112-116`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L112-L116), 머리줄은 [`tools/vstools/mmls.cpp:140-141`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L140-L141)에 있다.
+
+[22] (실행 확인) 2048부터 30만 섹터 파티션, 그 뒤 12만 섹터 파티션, 끝에 미할당 영역을 둔 MBR 이미지로 `analyze_vss`를 부르자 `vshadowinfo`가 미할당 영역의 시작 422048섹터에 해당하는 `-o 216088576`을 받았다.
+
+[23] EWF 이미지는 `/proc/mounts`에서 찾은 장치를 먼저 쓴다.
+
+```python
+        try:
+            proc_mounts = Path("/proc/mounts").read_text()
+            for mline in proc_mounts.splitlines():
+                parts = mline.split()
+                # Loop through to find the raw ewf device mounted from this image
+                if len(parts) >= 2 and "ewf" in parts[1].lower():
+                    raw_dev = parts[0]
+                    if Path(raw_dev).exists():
+                        target_path = Path(raw_dev)
+                        break
+            # Also check common mount points
+            if target_path == image_path:
+                for mline in Path("/proc/mounts").read_text().splitlines():
+                    parts = mline.split()
+                    if len(parts) >= 2 and parts[1] in ("/mnt/disk-ewf", "/mnt/ewf"):
+                        ewf_dir = Path(parts[1])
+                        for ewf_file in ewf_dir.glob("ewf*"):
+                            target_path = ewf_file
+                            break
+        except Exception:
+            pass
+```
+
+[`sift_mcp/server.py:5762-5782`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5762-L5782)
+
+[24] 도구 설명은 `vss<N>`을 다시 마운트하라고 적는다.
+
+```python
+        2. For a shadow copy containing Security.evtx, mount it manually:
+           ``vshadowmount -o <offset> <image> /mnt/vss``
+           ``sudo mount -o ro /mnt/vss/vss<N> /mnt/shadow_<N>``
+```
+
+[`sift_mcp/server.py:5649-5651`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5649-L5651)
+
+[25] 섀도 복사본 항목은 찾은 파일과 못 찾은 파일 목록을 빈 값으로 시작한다.
+
+```python
+            if current_shadow:
+                shadow_copies.append(current_shadow)
+            current_shadow = {
+                "shadow_index": int(m_id.group(1)),
+                "guid": "",
+                "creation_time": "",
+                "volume": "",
+                "device_path": "",
+                "artifacts_found": {},
+                "artifacts_missing": [],
+            }
+```
+
+[`sift_mcp/server.py:5858-5868`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5858-L5868)
+
+[26] `extract_windows_artifacts`의 응답과 호출 기록 요약: [`sift_mcp/server.py:8073-8130`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8073-L8130).
+
+[27] `summarize_evtx`는 복사한 채널과 고른 방식을 싣는다.
+
+```python
+        "evtx_inventory": evtx_inventory_summary,
+        "extracted_channels": extracted_channels,
+        "channel_selection_mode": "tier_selected" if extracted_channels else "directory_passthrough",
+```
+
+[`sift_mcp/tools/disk.py:4795-4797`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4795-L4797)
+
+[28] 꺼내지 못한 종류와 중요한 파일의 실패를 `data_gaps`에 싣는다: [`sift_mcp/server.py:7967-8071`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7967-L8071).
+
+[29] `replay_hive_with_rla`는 로그를 찾아 복사하고 `rla`를 실행한다: [`sift_mcp/tools/_hive_replay.py:71-140`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_hive_replay.py#L71-L140).
+
+[30] 사용자 하이브의 로그에도 사용자 이름 접두어를 붙인다.
+
+```python
+    if family == "registry" and safe_name.upper() in _NTUSER_VARIANTS:
+        parts = [part for part in normalized.split("/") if part]
+        users_idx = None
+        for i, p in enumerate(parts):
+            if p.lower() in ("users", "documents and settings"):
+                users_idx = i
+                break
+        if users_idx is not None and users_idx + 1 < len(parts):
+            user = parts[users_idx + 1]
+            user_slug = re.sub(r'[^A-Za-z0-9._-]+', '_', user)
+            safe_name = f"{user_slug}_{safe_name}"
+    if family == "mft":
+        safe_name = "$MFT"
+    return raw_base / family / safe_name
+```
+
+[`sift_mcp/server.py:7633-7646`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7633-L7646)
+
+[31] `extract_shellbags`는 재생 실패를 `replay_error`로 싣는다: [`sift_mcp/tools/disk.py:6374-6464`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6374-L6464).
+
+[32] `extract_registry_fileaccess`의 재생 실패 기록: [`sift_mcp/tools/disk.py:7318-7390`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7318-L7390).
+
+[33] `extract_shimcache`의 `rla` 실행과 CSV가 없을 때의 사유: [`sift_mcp/server.py:6649-6700`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6649-L6700).

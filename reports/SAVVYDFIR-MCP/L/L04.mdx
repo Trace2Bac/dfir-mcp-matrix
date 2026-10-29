@@ -1,0 +1,221 @@
+---
+cell: L04
+details:
+- id: L04.01
+---
+
+# L04 기록 위변조 방지
+
+### L04.01 해시 체인
+
+**구현.** 이 방식은 서버가 `AuditLogger`로 `audit.jsonl`에 쓰는 모든 항목에 적용된다 [1].
+`_seal_entry`는 항목마다 `schema_version`과 바로 앞 항목의 해시 `prev_entry_hash`를 넣고 그 항목의 해시 `entry_hash`를 계산해 붙인다 [1].
+`entry_hash`는 `entry_hash`를 뺀 모든 필드를 키 차례로 정렬한 JSON 글의 SHA-256이다 [1].
+서버를 시작한 뒤 첫 항목이면 `prev_entry_hash`는 파일에서 JSON으로 읽을 수 있는 마지막 줄의 `entry_hash`이고 파일이 없으면 `null`이다 [2].
+`_write_entry`는 파일을 덧붙이기 모드로 열어 한 줄을 쓰고 `fsync`한 뒤에 메모리의 마지막 해시를 바꾼다 [3].
+도구 호출 여러 번으로 쌓인 항목을 같은 방법으로 다시 계산하자 모든 `entry_hash`와 `prev_entry_hash`가 맞았다 [4].
+
+체인 밖에 남는 값은 상태 파일 `state.json`의 실행 행에 담는 그 실행의 `started`·`completed`·`linked` 항목 해시다 [5].
+`context_bundle`·`correction` 항목의 해시와 체인의 끝 값, 항목 수는 기록 밖에 따로 남지 않는다 [5].
+상태 파일은 같은 분석 폴더에 같은 서버가 쓰는 파일이다 [6].
+항목에는 항목마다 늘어나는 번호가 없고 `execution_id`는 한 실행의 여러 항목이 함께 쓴다 [7].
+
+체인을 다시 계산해 대조하는 코드는 서버, 사용자 CLI, 훅 어디에서도 찾지 못했다 [8].
+`get_provenance`는 발견사항의 항목을 돌려주며 `entry_hash`가 없는 항목이 있는지만 `legacy_unsealed`로 알린다 [8].
+보고서 단계의 성공 판정도 실행 행에 `audit_completed_entry_hash` 값이 있는지만 본다 [8].
+README는 이 기록을 hash-chained audit log로 소개한다 [9].
+
+**한계.** 키를 쓰지 않으므로 파일 전체를 처음부터 다시 계산해 쓴 기록은 체인 계산을 통과한다 [1].
+마지막 항목들을 지운 기록도 체인이 끊기지 않는다 [2].
+서버는 다시 시작할 때 파일의 줄을 차례로 읽어 마지막 줄의 해시만 이어 받고 앞 항목의 해시를 다시 계산하지 않는다 [2].
+첫 항목의 `command_line`을 고치고 마지막 줄을 지운 뒤 서버를 다시 시작하자 새 항목은 남은 마지막 줄의 해시를 이어 받았다 [4].
+`get_provenance`는 고친 `command_line`을 그대로 돌려주고 `legacy_unsealed`를 거짓으로 알렸다 [4].
+
+같은 파일에 해시 필드 없는 줄이 섞인다 [10].
+Claude Code의 Stop 훅 `stop.py`는 waiver를 쓸 때 `audit.jsonl`에 해시 필드 없는 줄을 덧붙인다 [10].
+실행 중인 서버는 메모리에 둔 자기 마지막 해시를 이어 쓰므로 다음 항목이 훅의 줄을 건너뛰어 앞 서버 항목을 가리킨다 [3].
+훅의 줄이 마지막 줄일 때 서버를 다시 시작하면 `_sync_counter_from_file`이 마지막 해시를 `None`으로 두어 다음 항목의 `prev_entry_hash`가 `null`이 된다 [2].
+시험 입력으로 훅을 실행하자 두 경우가 모두 그대로 나타났다 [4].
+
+`audit.py` 설명은 이 기록 객체를 여러 프로세스가 함께 쓰는 용도로 만들지 않았다고 적는다 [11].
+같은 분석 폴더로 서버 프로세스 둘이 실행되면 각 프로세스가 자기 마지막 해시를 이어 체인이 갈라진다 [3][11].
+이 경우는 실행해 확인하지 않았다.
+
+모델이 부르는 도구가 기록 파일 자체를 바꿀 수 있다 [12].
+`generate_graph`는 `output_path`를 검사하지 않고 그래프 스크립트의 출력 경로로 넘긴다 [12].
+출력 경로로 기록 파일을 가리키자 호출이 성공했고 기록 파일의 내용이 그래프 HTML로 바뀌었다 [4].
+
+### 근거
+
+[1] 항목에 앞 항목 해시를 넣고 자기 해시를 계산한다.
+
+```python
+    def _seal_entry(self, entry: AuditEntry) -> AuditEntry:
+        """Attach forward-only hash-chain metadata to a newly written entry."""
+        sealed = dict(entry)
+        sealed["schema_version"] = _SCHEMA_VERSION
+        sealed["prev_entry_hash"] = self._last_entry_hash
+        sealed["entry_hash"] = self._compute_entry_hash(sealed)
+        return sealed
+
+    def _compute_entry_hash(self, entry: AuditEntry) -> str:
+        """Return the canonical SHA-256 hash for an audit entry."""
+        payload = {key: value for key, value in entry.items() if key != "entry_hash"}
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+```
+
+[`sift_mcp/audit.py:597-614`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L597-L614)
+
+[2] 시작할 때 파일의 줄을 차례로 읽어 JSON으로 읽을 수 있는 마지막 줄의 해시를 이어 받고 그 줄에 해시가 없으면 `None`으로 둔다.
+
+```python
+        max_id = 0
+        last_entry_hash: Optional[str] = None
+        try:
+            with self.output_path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        entry: AuditEntry = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue  # Skip corrupt lines during recovery
+
+                    eid: str = entry.get("execution_id", "")
+                    if eid.startswith("E-"):
+                        try:
+                            numeric = int(eid[2:])
+                            if numeric > max_id:
+                                max_id = numeric
+                        except ValueError:
+                            pass
+                    if entry.get("entry_hash"):
+                        last_entry_hash = str(entry["entry_hash"])
+                    else:
+                        last_entry_hash = None
+        except OSError:
+            pass  # Best-effort; counter stays at 0
+
+        self._execution_counter = max_id
+        self._last_entry_hash = last_entry_hash
+```
+
+[`sift_mcp/audit.py:629-658`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L629-L658)
+
+[3] 덧붙이기 모드로 쓰고 메모리의 마지막 해시를 바꾼다.
+
+```python
+        with self._lock:
+            # Ensure parent directory exists on first write.
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            sealed = self._seal_entry(entry)
+            line = json.dumps(sealed, ensure_ascii=False, default=str) + "\n"
+
+            # Open in append mode so we never truncate existing entries.
+            with self.output_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                # Force kernel buffer to disk so a crash cannot lose the entry.
+                import os as _os
+                _os.fsync(fh.fileno())
+            self._last_entry_hash = sealed["entry_hash"]
+            return sealed
+```
+
+[`sift_mcp/audit.py:580-595`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L580-L595)
+
+[4] (실행 확인) 컨테이너에서 서버 프로세스를 세 번 차례로 실행하며 도구 호출, 시험 입력을 준 Stop 훅 실행, 첫 항목 고치기와 마지막 줄 지우기, 서버 재시작, `get_provenance`, 출력 경로를 기록 파일로 준 `generate_graph`를 실행하고 매 단계 같은 방법으로 체인을 다시 계산했다.
+
+[5] 상태 파일의 실행 행이 그 실행의 항목 해시를 담는다: [`sift_mcp/server.py:983-1011`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L983-L1011), [`sift_mcp/runners/base.py:540-557`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L540-L557), [`sift_mcp/server.py:1509-1517`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1509-L1517).
+
+[6] 기록 파일과 상태 파일을 같은 분석 폴더에 둔다.
+
+```python
+_ANALYSIS_DIR = Path(os.environ.get(
+    "SAVVYDFIR_ANALYSIS_DIR", "./analysis")).resolve()
+_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_audit_logger = AuditLogger(output_path=str(_ANALYSIS_DIR / "audit.jsonl"))
+_state_manager = CaseStateManager(state_path=str(_ANALYSIS_DIR / "state.json"))
+```
+
+[`sift_mcp/server.py:171-177`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L171-L177)
+
+[7] 실행 ID는 실행마다 하나를 주고 그 실행의 항목들이 함께 쓴다: [`sift_mcp/audit.py:111-123`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L111-L123), [`sift_mcp/runners/base.py:473-538`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L473-L538), [`sift_mcp/server.py:1503-1507`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1503-L1507).
+
+[8] `sift_mcp/`, `scripts/`, `.claude/`에서 `prev_entry_hash`는 기록 함수만 쓰고 `entry_hash`를 읽는 곳은 값이 있는지 확인하거나 상태 파일로 옮기는 곳뿐이다: [`sift_mcp/tools/evidence.py:458-471`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L458-L471), [`sift_mcp/reporting.py:1571-1579`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L1571-L1579), [`scripts/validate_run.py:65-72`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/validate_run.py#L65-L72).
+
+[9] README의 설명이다: [`README.md:17`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/README.md#L17).
+
+[10] Stop 훅은 해시 필드 없이 JSON 한 줄을 `audit.jsonl`에 덧붙인다.
+
+```python
+def _audit_append(record: dict, audit_path: Path) -> tuple[bool, str]:
+    """Append a JSONL record to audit.jsonl, fsync, and return (ok, error_text).
+
+    fsync is required because crash durability matters when a record is the
+    only artifact of an audited waiver consumption.
+    """
+    try:
+        with open(audit_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError as exc:
+                # fsync may legitimately fail on non-disk fs (procfs, tmpfs
+                # variants). Treat as soft warning, not fatal — the data is
+                # in the page cache and will be visible to the next reader.
+                return (True, f"fsync_warning:{exc}")
+        return (True, "")
+    except OSError as exc:
+        return (False, f"audit_append_failed:{exc}")
+
+```
+
+[`.claude/hooks/stop.py:156-176`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/stop.py#L156-L176)
+
+[11] `audit.py` 설명이다.
+
+```python
+Concurrent access
+-----------------
+The logger is *not* designed for concurrent multi-process access.  Within a
+single SAVVYDFIR-MCP process it is used synchronously, and writes are flushed
+after every entry.
+```
+
+[`sift_mcp/audit.py:27-31`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L27-L31)
+
+[12] `generate_graph`는 `output_path`를 실제 경로로 바꾸기만 하고 스크립트의 `--output`으로 넘긴다.
+
+```python
+    safe_case = case_id.replace("/", "_").replace("\\", "_")
+    resolved_output = (
+        Path(output_path).resolve() if output_path
+        else reports_dir / safe_case / "graph.html"
+    )
+```
+
+[`sift_mcp/server.py:3371-3375`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3371-L3375)
+
+```python
+            cmd = [
+                sys.executable,
+                str(graph_script),
+                "--state", str(resolved_state),
+                "--audit", str(resolved_audit),
+                "--output", str(resolved_output),
+            ]
+```
+
+[`sift_mcp/server.py:3401-3407`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3401-L3407)

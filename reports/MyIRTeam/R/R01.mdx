@@ -6,6 +6,7 @@ details:
 - id: R01.03
 - id: R01.04
 - id: R01.06
+- id: R01.07
 ---
 
 # R01 결과 가공
@@ -104,11 +105,20 @@ Hayabusa 도구는 `min_level`을 `-m`으로 넘기고 기본값은 `medium`이�
 그래서 인자를 주지 않으면 `informational`·`low` 등급 규칙의 일치는 응답에 없다 [38].
 `parse_windows_artifact_with_eztools`와 `parse_archive_member_with_eztools`는 레지스트리 하이브를 서버가 SHA-256으로 고정한 RECmd 배치 파일 5개 가운데 하나로 읽고 기본값은 `dfir`이다 [39].
 배치 파일에 적힌 키만 결과에 실린다 [39][40].
-`inventory_evidence_path`는 심볼릭 링크와 증거 루트 밖으로 이어지는 항목을 빼고 뺀 수를 경고 문구에 적는다 [26].
+`inventory_evidence_path`는 심볼릭 링크와 실제 경로가 증거 루트 밖인 항목을 뺀다 [26].
 
-**한계.** `collect_ir_event_bundle`과 `_nonzero`가 뺀 항목의 수는 응답에 없다 [36][12].
-RECmd 배치 파일은 저장소에 없고 서버는 SHA-256만 대조하므로 어떤 키를 고르는지는 배포된 파일에 달려 있다 [39].
+**한계.** RECmd 배치 파일은 저장소에 없고 서버는 SHA-256만 대조하므로 어떤 키를 고르는지는 배포된 파일에 달려 있다 [39].
 RECmd 저장소 `bcd0ac3`의 `DFIRBatch.reb`와 배포된 파일이 같은지는 확인하지 못했다 [40].
+
+### R01.07 응답 선별 사실·건수 표시
+
+**구현.** 이 방식은 `artifact-forensic`의 `inventory_evidence_path`에 적용된다 [41].
+이 도구는 건너뛴 심볼릭 링크의 수와 실제 경로가 증거 루트 밖이라 건너뛴 항목의 수를 따로 센다 [41].
+뺀 항목이 있으면 `Skipped <수> symbolic-link entries.`와 `Skipped <수> entries resolving outside evidence roots.`를 `warnings`와 `note`에 싣고 상태를 `DEGRADED`로 둔다 [42].
+`collect_ir_event_bundle`의 응답은 채널마다 채널 이름, 건수, 사건만 싣고 고른 사건 ID 목록과 뺀 사건의 수는 싣지 않는다 [36][43].
+`_nonzero`가 뺀 항목의 수도 응답에 없다 [37][12].
+
+**한계.** `inventory_evidence_path`는 항목을 읽다가 `OSError`가 나면 세지 않고 건너뛰므로 그 항목은 경고 문구의 수에 들어가지 않는다 [41].
 
 ### 근거
 
@@ -637,3 +647,85 @@ RECMD_PROFILES = {
 [`artifact-forensic-mcp/server.py:1662-1673`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1662-L1673)
 
 [40] RECmd 저장소의 배치 파일은 읽을 키 경로를 항목마다 적는다: [`BatchExamples/DFIRBatch.reb`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/BatchExamples/DFIRBatch.reb).
+
+[41] 건너뛴 링크와 루트 밖 항목을 따로 세고 `OSError`가 난 항목은 세지 않고 건너뛴다.
+
+```python
+    candidates: list[Path] = []
+    skipped_links = 0
+    skipped_outside = 0
+    if source.is_file():
+        candidates = [source]
+    elif not recursive:
+        for item in source.iterdir():
+            try:
+                is_junction = getattr(item, "is_junction", lambda: False)()
+                if item.is_symlink() or is_junction:
+                    skipped_links += 1
+                    continue
+                if not item.is_file():
+                    continue
+                resolved = item.resolve()
+                if not is_under_roots(resolved, cfg.evidence_roots):
+                    skipped_outside += 1
+                    continue
+                candidates.append(resolved)
+            except OSError:
+                continue
+```
+
+[`artifact-forensic-mcp/server.py:1239-1259`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1239-L1259)
+
+```python
+            for name in file_names:
+                item = current_path / name
+                try:
+                    if item.is_symlink():
+                        skipped_links += 1
+                        continue
+                    resolved = item.resolve()
+                    if not is_under_roots(resolved, cfg.evidence_roots):
+                        skipped_outside += 1
+                        continue
+                    if resolved.is_file():
+                        candidates.append(resolved)
+                except OSError:
+                    continue
+```
+
+[`artifact-forensic-mcp/server.py:1282-1295`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1282-L1295)
+
+[42] 건너뛴 수를 경고 문구로 싣고 상태를 `DEGRADED`로 둔다.
+
+```python
+    warnings: list[str] = []
+    if len(candidates) > file_limit:
+        warnings.append(f"File inventory was truncated at max_files={file_limit}.")
+    if hash_budget_exhausted:
+        warnings.append(
+            f"SHA-256 hashing stopped at the {MAX_INVENTORY_HASH_BYTES}-byte safety budget."
+        )
+    if skipped_links:
+        warnings.append(f"Skipped {skipped_links} symbolic-link entries.")
+    if skipped_outside:
+        warnings.append(f"Skipped {skipped_outside} entries resolving outside evidence roots.")
+    return {
+        "schema_version": "1.0",
+        "status": "DEGRADED" if warnings else "SUCCESS",
+        "collected_at_utc": utc_now(),
+```
+
+[`artifact-forensic-mcp/server.py:1332-1346`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/artifact-forensic-mcp/server.py#L1332-L1346)
+
+[43] 채널마다 돌려주는 결과에는 채널, 건수, 사건만 있다.
+
+```python
+    [PSCustomObject]@{
+        status = "SUCCESS"
+        channel = $channel
+        count = $rows.Count
+        events = @($rows)
+    } | ConvertTo-Json -Compress -Depth 7
+```
+
+[`mcp-server/autoruns_mcp.py:346-351`](https://github.com/9-Security/MyIRTeam/blob/5fcaf7b80e2ade67b9eabacd93d64c0cdeba829c/mcp-server/autoruns_mcp.py#L346-L351)

@@ -1,0 +1,383 @@
+---
+cell: L03
+details:
+- id: L03.01
+- id: L03.02
+- id: L03.03
+- id: L03.05
+---
+
+# L03 기록 실패 처리
+
+### L03.01 실행 후 응답 차단
+
+**구현.** 이 방식은 실행기 `SafeRunner.run`의 `completed` 항목 쓰기와 본문이 처리를 마친 뒤 쓰는 `completed` 항목에 적용된다 [1][2].
+모든 기록 함수는 `_write_entry` 하나로 쓰고 쓰기 예외를 호출한 쪽으로 그대로 올린다 [3].
+`run`은 명령이 끝난 뒤 `log_result`를 감싸지 않고 부른다 [1].
+그래서 이 쓰기가 실패하면 실행 결과를 돌려주지 않고 예외가 도구 함수로 올라간다 [1].
+도구 함수는 예외를 처리해 `status`가 `error`인 응답을 돌려준다 [4].
+`completed` 쓰기를 실패하게 하자 `verify_integrity`는 `ewfverify`를 실행한 뒤 실행기 오류 응답을 돌려줬고 결과는 응답에 없었다 [5].
+
+본문이 항목을 쓰는 도구도 처리를 마친 뒤 쓰는 `log_result`가 실패하면 결과 대신 오류를 돌려준다 [2].
+`compare_disk_and_memory`는 이 예외를 처리하는 `except`에서 `exit_code` 1과 쓰기 오류 문구를 담은 `completed` 항목을 다시 쓴다 [2].
+그 쓰기가 성공하면 비교를 마친 호출이 기록에는 실패로 남는다 [2].
+`compare_disk_and_memory`의 첫 `completed` 쓰기만 실패하게 하자 응답은 오류였고 기록에는 `started` 항목과 `exit_code` 1의 `completed` 항목이 남았다 [5].
+`record_analysis_lane`은 lane 상태를 바꾼 뒤 `completed` 항목을 쓰므로 그 쓰기가 실패하면 상태 변경은 남고 응답은 오류가 된다 [6].
+
+### L03.02 경고 후 계속
+
+**구현.** 이 방식은 `linked` 항목, 사건 지식 발췌의 `context_bundle` 항목, `submit_finding`의 항목에 적용된다 [7][8][9].
+`_finalize_tool_response`는 `linked` 항목 쓰기가 실패하면 예외 문구를 응답의 `phase7_link_warning`에 넣고 결과를 그대로 돌려준다 [7].
+`linked` 쓰기만 실패하게 하자 `verify_integrity`는 결과와 `phase7_link_warning`을 함께 돌려줬다 [5].
+`phase7_link_warning`에는 사건이 열려 있지 않아 상태 파일에서 실행을 찾지 못한 경우의 예외 문구도 들어간다 [10][7].
+`_attach_heuristic_slice`는 `context_bundle` 쓰기가 실패하면 응답의 `audit_write_warning`에 문구를 넣는다 [8].
+`submit_finding`은 발견사항을 저장한 뒤 항목을 쓰고 그 쓰기가 실패하면 응답의 `audit_warning`에 문구를 넣는다 [9].
+어느 경우에도 쓰지 못한 항목을 다시 쓰거나 다른 곳에 남기지 않는다 [7][8][9].
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 `get_heuristic`·`prepare_hypothesis_context`의 `context_bundle` 항목, `compare_disk_and_memory`의 `correction` 항목, `sigma_hunt`의 Chainsaw 실패 경로에 적용된다 [11][12][13].
+`_emit_context_bundle_for_slice`는 `log_context_bundle`의 예외를 처리해 아무것도 하지 않고 지식 발췌를 돌려준다 [11].
+모든 쓰기를 실패하게 하자 `get_heuristic`은 경고 없이 `status`가 `ok`인 응답을 돌려줬고 항목은 남지 않았다 [5].
+`_add_contradiction`은 `log_correction`의 예외를 처리해 아무것도 하지 않는다 [12].
+`sigma_hunt`는 Chainsaw가 실패했을 때 쓰는 `completed` 항목의 예외를 처리해 아무것도 남기지 않고 실패 응답을 돌려준다 [13].
+이 세 경로는 응답에도 서버 로그에도 쓰기 실패를 남기지 않는다 [11][12][13].
+
+### L03.05 실행 전 중단
+
+**구현.** 이 방식은 실행기 `SafeRunner.run`과 처리 전에 `started` 항목을 쓰는 본문에 적용된다 [14][15].
+`run`은 명령을 실행하기 전에 `started` 항목을 쓰고 그 쓰기가 실패하면 명령을 실행하지 않고 예외를 올린다 [14].
+도구 함수는 이 예외를 처리해 `status`가 `error`인 응답을 돌려준다 [4].
+`started` 쓰기를 실패하게 하자 `verify_integrity`는 `ewfverify`를 실행하지 않고 실행기 오류 응답을 돌려줬다 [5].
+
+`compare_disk_and_memory`, `generate_report` 등은 `try` 밖에서 `started` 항목을 쓴다 [15].
+그래서 쓰기가 실패하면 예외가 도구 함수 밖으로 나가고 FastMCP가 `isError` 결과로 오류 문구를 돌려준다 [5].
+`extract_windows_artifacts`는 `try` 안에서 `started` 항목을 쓰고 실패하면 `fls`를 실행하지 않고 오류 응답을 돌려준다 [16].
+이때 `except`가 `completed` 항목을 쓰므로 기록에는 `started` 없는 `completed` 항목이 남는다 [16][5].
+
+`_record_tool_success_audit`과 `_record_artifact_absent_audit`은 판정이나 작업을 마친 뒤 두 항목을 함께 쓰므로 이 방식이 적용되지 않는다 [17].
+이 경로에서 쓰기가 실패하면 실행 뒤 오류 응답이 된다 [17][4].
+
+### 근거
+
+[1] `run`은 명령이 끝난 뒤 `log_result`를 감싸지 않고 부른다.
+
+```python
+        # ------------------------------------------------------------------
+        # 5. Log post-execution result
+        # ------------------------------------------------------------------
+        outputs_summary = self._build_outputs_summary(stdout, stderr, exit_code, timed_out)
+
+        completed_entry = self._audit.log_result(
+            execution_id=execution_id,
+            exit_code=exit_code,
+            duration=duration,
+            outputs_summary=outputs_summary,
+            finding_ids=[],  # Populated later by the tool layer
+            correction_event=None,
+            tool_name=effective_tool,
+            command_line=command_line,
+            parameters=parameters,
+            agent_turn=agent_turn,
+        )
+```
+
+[`sift_mcp/runners/base.py:522-538`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L522-L538)
+
+[2] `compare_disk_and_memory`는 `log_result`가 실패하면 `except`에서 실패 항목을 다시 쓰고 오류를 돌려준다: [`sift_mcp/server.py:2791-2846`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2791-L2846).
+
+[3] 기록 쓰기는 덧붙이기 모드로 파일을 열고 예외를 처리하지 않는다.
+
+```python
+        with self._lock:
+            # Ensure parent directory exists on first write.
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            sealed = self._seal_entry(entry)
+            line = json.dumps(sealed, ensure_ascii=False, default=str) + "\n"
+
+            # Open in append mode so we never truncate existing entries.
+            with self.output_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                # Force kernel buffer to disk so a crash cannot lose the entry.
+                import os as _os
+                _os.fsync(fh.fileno())
+            self._last_entry_hash = sealed["entry_hash"]
+            return sealed
+```
+
+[`sift_mcp/audit.py:580-595`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L580-L595)
+
+[4] 도구 함수는 예외를 처리해 오류 응답을 돌려준다.
+
+```python
+    try:
+        return _finalize_tool_response(
+            "evidence.verify_integrity",
+            _verify_integrity(image_path=image_path),
+        )
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "tool": "verify_integrity"}
+```
+
+[`sift_mcp/server.py:1564-1570`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1564-L1570)
+
+```python
+    try:
+        result = _runner.ewfverify(image_path=image_path, tool_name=tool)
+    except Exception as exc:
+        return {
+            "tool_name": tool,
+            "status": "error",
+            "error_message": f"Runner error: {exc}",
+            "data": [],
+            "findings_created": [],
+            "execution_id": None,
+            "raw_command": str(exc),
+```
+
+[`sift_mcp/tools/evidence.py:278-288`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L278-L288)
+
+[5] (실행 확인) 컨테이너에서 기록 함수 `_write_entry`가 한 호출 안의 정해 둔 차례(첫 번째, 두 번째, 세 번째, 모두)에 `OSError`를 내도록 바꾸고 `verify_integrity`, `compare_disk_and_memory`, `get_heuristic`, `generate_report`, `extract_windows_artifacts`를 불러 응답, 늘어난 항목, `ewfverify` 실행 여부를 확인했다.
+
+[6] `record_analysis_lane`은 lane 상태를 바꾼 뒤 `completed` 항목을 쓰고 예외는 오류 응답이 된다: [`sift_mcp/server.py:8998-9012`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8998-L9012), [`sift_mcp/server.py:9027-9043`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9027-L9043), [`sift_mcp/server.py:9089-9090`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9089-L9090).
+
+[7] `linked` 쓰기 예외를 응답의 `phase7_link_warning`에 넣는다.
+
+```python
+        linked_entry = _audit_logger.log_link(
+            execution_id=execution_id,
+            tool_name=tool_name,
+            finding_ids=finding_ids,
+            artifact_refs=[ref["path"] for ref in raw_evidence_refs],
+```
+
+[`sift_mcp/server.py:1503-1507`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1503-L1507)
+
+```python
+    except Exception as exc:
+        response.setdefault("phase7_link_warning", str(exc))
+        return response
+```
+
+[`sift_mcp/server.py:1532-1534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1532-L1534)
+
+[8] `context_bundle` 쓰기 예외를 응답의 `audit_write_warning`에 넣는다.
+
+```python
+    try:
+        resolved_audit.log_context_bundle(
+            case_id=case_id,
+            artifact=artifact,
+            heuristic_source_path=slice_data.get("source_path") or "",
+            heuristic_source_hash=slice_data.get("source_hash") or "",
+            heuristic_section=section_label,
+            heuristic_excerpt_hash=excerpt_hash,
+            excerpt_token_count=int(slice_data.get("token_count") or 0),
+            triggered_by=tool_name,
+            execution_id=execution_id,
+            context_id=ctx_id,
+        )
+    except Exception as exc:
+        response.setdefault("audit_write_warning", f"context_bundle: {exc}")
+```
+
+[`sift_mcp/tools/_contracts.py:329-343`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_contracts.py#L329-L343)
+
+[9] `submit_finding`은 항목 쓰기 예외를 응답의 `audit_warning`에 넣는다.
+
+```python
+        audit_failure: Optional[str] = None
+        try:
+            audit_eid = _audit_logger.next_execution_id()
+            _audit_logger.log_execution(
+                execution_id=audit_eid,
+                tool_name="state.submit_finding",
+                parameters=audit_parameters,
+                command_line=audit_command,
+            )
+            _audit_logger.log_result(
+                execution_id=audit_eid,
+                exit_code=0,
+                duration=0.0,
+                outputs_summary=(
+                    f"finding_id={finding_id} status={stored.get('finding_status')} "
+                    f"assigned_agent={normalized_agent}"
+                ),
+                finding_ids=[finding_id],
+                tool_name="state.submit_finding",
+                command_line=audit_command,
+                parameters=audit_parameters,
+            )
+        except Exception as audit_exc:
+            # required: do NOT silently swallow this - Phase 5 gate
+            # depends on it. Surface in the tool response.
+            audit_failure = f"audit_write_failed: {type(audit_exc).__name__}: {audit_exc}"
+```
+
+[`sift_mcp/server.py:9514-9539`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9514-L9539)
+
+```python
+        if audit_failure:
+            response["audit_warning"] = audit_failure
+        return response
+```
+
+[`sift_mcp/server.py:9606-9608`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9606-L9608)
+
+[10] `linked` 항목을 쓰기 전에 상태 파일에서 실행을 찾는다.
+
+```python
+    try:
+        execution = _state_manager.get_execution(execution_id)
+        if execution and execution.get("audit_linked_entry_hash"):
+            return response
+```
+
+[`sift_mcp/server.py:1487-1490`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1487-L1490)
+
+[11] `_emit_context_bundle_for_slice`는 쓰기 예외를 처리해 아무것도 하지 않는다.
+
+```python
+    try:
+        _audit_logger.log_context_bundle(
+            case_id=case_id,
+            artifact=artifact,
+            heuristic_source_path=slice_data.get("source_path") or "",
+            heuristic_source_hash=slice_data.get("source_hash") or "",
+            heuristic_section=section_label,
+            heuristic_excerpt_hash=excerpt_hash,
+            excerpt_token_count=int(slice_data.get("token_count") or 0),
+            triggered_by=triggered_by,
+            execution_id=execution_id,
+            context_id=ctx_id,
+        )
+    except Exception:
+```
+
+[`sift_mcp/server.py:9679-9692`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9679-L9692)
+
+[12] `_add_contradiction`은 `log_correction`을 포함한 처리 전체의 예외를 처리해 아무것도 하지 않는다.
+
+```python
+        _audit.log_correction(
+            execution_id=exec_id_for_audit,
+            tool_name="correlation.compare_disk_and_memory",
+            correction_type=correction_type,
+            original_finding_id=finding_id,
+            original_claim=original_claim or f"Finding {finding_id}",
+            original_confidence=prior_conf_str,
+            contradiction_summary=contradiction_summary,
+            revised_confidence=revised_conf_str,
+            contradiction_source_execution_id=exec_id_for_audit,
+            # We don't have a new finding ID - this is a demotion, not a replacement
+            revised_claim=None,
+            revised_finding_id=None,
+        )
+    except Exception:
+        pass  # Best-effort; never let contradictions block the report
+```
+
+[`sift_mcp/tools/correlation.py:1570-1585`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L1570-L1585)
+
+[13] `sigma_hunt`는 Chainsaw 실패 경로의 `log_result` 예외를 처리해 `None`으로 두고 계속한다.
+
+```python
+        _failed_completed = None
+        try:
+            _failed_completed = _audit_logger.log_result(
+                execution_id=_eid,
+                exit_code=proc.returncode,
+                duration=_time.monotonic() - _t0,
+                outputs_summary=_failed_summary,
+                finding_ids=[],
+                tool_name="detection.sigma_hunt",
+                command_line=command_repr,
+                parameters=_fail_params,
+            )
+        except Exception:
+            _failed_completed = None
+        # round-6 P2: _record_execution_parity dereferences
+        # completed_entry.get("entry_hash") and will raise on None.
+        # Only call it when we have a real completed entry.
+        if isinstance(_failed_completed, dict):
+```
+
+[`sift_mcp/server.py:4529-4546`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4529-L4546)
+
+[14] `run`은 명령 실행 전에 `started` 항목을 쓴다.
+
+```python
+        execution_id = self._audit.next_execution_id()
+        command_line = " ".join(cmd_parts)
+        effective_tool = tool_name or self._tool_name
+
+        # Fail-closed: if this write raises, we do NOT run the command.
+        started_entry = self._audit.log_execution(
+            execution_id=execution_id,
+            tool_name=effective_tool,
+            parameters=parameters,
+            command_line=command_line,
+            agent_turn=agent_turn,
+        )
+```
+
+[`sift_mcp/runners/base.py:473-484`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L473-L484)
+
+[15] `try` 밖에서 `started` 항목을 쓰는 도구다: [`sift_mcp/server.py:2784-2792`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2784-L2792), [`sift_mcp/server.py:2890-2898`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2890-L2898), [`sift_mcp/server.py:10085-10095`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10085-L10095), [`sift_mcp/server.py:11273-11281`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11273-L11281).
+
+[16] `extract_windows_artifacts`는 `try` 안에서 `started` 항목을 쓰고 `except`에서 `completed` 항목을 쓴다.
+
+```python
+    try:
+        started_at = time.monotonic()
+        _audit_logger.log_execution(
+            execution_id=execution_id,
+            tool_name=tool,
+            parameters={
+                "case_id": case_id,
+                "image_path": image_path,
+                "families": sorted(selected),
+                "tsk_device_path": tsk_device_path,
+                "partition_offset_sectors": partition_offset_sectors,
+            },
+            command_line=command_line,
+        )
+```
+
+[`sift_mcp/server.py:7762-7775`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7762-L7775)
+
+```python
+    except Exception as exc:
+        duration = 0.0
+        if started_at is not None:
+            duration = time.monotonic() - float(started_at)
+        _audit_logger.log_result(
+            execution_id=execution_id,
+            exit_code=1,
+            duration=duration,
+            outputs_summary=f"error: {exc}",
+            finding_ids=[],
+            tool_name=tool,
+            command_line=command_line,
+            parameters={
+                "case_id": case_id,
+                "image_path": image_path,
+                "families": sorted(selected) if "selected" in locals() else families,
+                "tsk_device_path": tsk_device_path,
+                "partition_offset_sectors": partition_offset_sectors,
+            },
+        )
+        return {
+            "status": "error",
+            "tool": tool,
+            "execution_id": execution_id,
+            "error": str(exc),
+            "raw_command": command_line,
+        }
+```
+
+[`sift_mcp/server.py:8132-8158`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8132-L8158)
+
+[17] 두 도우미는 작업이나 판정 뒤에 불리고 두 항목을 잇달아 쓴다: [`sift_mcp/server.py:1032-1142`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1032-L1142), [`sift_mcp/server.py:1263-1345`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1263-L1345).

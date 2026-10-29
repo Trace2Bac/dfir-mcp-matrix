@@ -1,0 +1,697 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+- id: R01.07
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `sigma_hunt`의 `detailed` 응답과 `analyze_vss`에 적용된다 [1][2].
+`sigma_hunt`는 `response_format`이 `detailed`이면 Chainsaw JSON에서 읽은 hit 객체 가운데 기준 등급 이상인 것을 바꾸지 않고 `hits`에 싣는다 [1].
+`analyze_vss`는 `vshadowinfo`의 표준 출력 끝부분을 바꾸지 않고 `vshadowinfo_output`에 싣는다 [2].
+그 밖의 외부 도구 출력은 아래처럼 서버가 파싱한 필드로 응답에 실린다.
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 외부 도구 출력을 읽는 디스크·메모리·탐지 도구에 적용된다.
+EZ 도구 CSV를 읽는 도구는 행을 `MftEntry`·`EventRecord` 같은 pydantic 모델로 바꾼다 [3].
+공통 응답 함수 `build_contract_response`를 거치는 도구는 앞 20개 레코드에서 도구마다 고른 필드만 `normalized_observations`에 싣는다 [4].
+이 함수를 거치는 도구는 Prefetch·Amcache·MFT·EVTX·레지스트리 추출 도구와 `detect_injection`, `build_timeline`, `query_timeline`이다 [4].
+`extract_mft_timeline`의 `normalized_observations`는 항목 번호, 이름, `$SI`·`$FN` 생성 시각, 삭제 여부만 싣는다 [4].
+`summarize_evtx`는 이벤트 ID, 채널, 시각, 컴퓨터, provider만 싣는다 [4].
+`summarize_evtx`는 EvtxECmd 행의 `PayloadData1`이나 `MapDescription`을 500자까지 `message_summary`에 두고 나머지 열을 `extra_fields`에 둔다 [5].
+응답에 싣는 표본에서는 `ScriptBlockText`와 `PayloadData2`~`PayloadData6` 열을 빼고 1,024자를 넘는 값을 자른다 [5][6].
+`sigma_hunt`와 `query_sigma_results`의 `actionable_hits`는 Chainsaw hit에서 규칙 이름, 등급, 이벤트 ID, 시각, 기법, 채널, 컴퓨터, 사용자, tactic을 골라 만든 값이다 [7].
+`extract_shimcache`는 AppCompatCacheParser CSV에서 `CacheEntryPosition`·`Path`·`LastModifiedTimeUTC`·`Executed` 열만 읽어 항목을 만든다 [8].
+`get_findings`는 `summary` 형식에서 발견사항마다 정한 필드만 남기고 `detailed` 형식에서도 `include_raw_hit`가 거짓이면 `raw_hit`을 뺀다 [9].
+
+**한계.** `_mft_entry_from_row`는 `FileName` 열이 있으면 그 값을 `file_path`로 쓴다 [10].
+MFTECmd 2026-05-10 커밋의 CSV는 부모 폴더 경로 `ParentPath`와 이름 `FileName`을 다른 열로 쓴다 [11].
+그래서 MFT 결과의 `file_path`에는 부모 폴더 경로 없이 파일 이름만 들어간다 [10][11].
+
+`_compact_sigma_hit`는 이벤트 ID, 채널, 컴퓨터, 사용자, tactic을 hit 최상위 키에서 읽고 키가 없으면 `?`를 넣는다 [7].
+Chainsaw v2.16.5의 JSON 항목은 사건 내용을 `document.data` 아래에 두고 최상위에는 규칙 이름, 등급, 시각, 태그 같은 규칙 정보만 둔다 [12].
+그래서 `actionable_hits` 항목의 이벤트 ID, 채널, 컴퓨터, 사용자, tactic은 늘 `?`가 된다 [7][12].
+(실행 확인) Chainsaw v2.16.5 JSON 구조로 만든 hit을 `query_sigma_results`로 읽자 다섯 필드가 모두 `?`였고 규칙 이름, 등급, 시각, 기법만 값이 있었다 [13].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 탐지 도구, EVTX와 레지스트리 추출, 메모리 도구의 `summary` 형식, `run_analysis`에 적용된다 [14][15][16][17][18][19].
+`sigma_hunt`와 `query_sigma_results`는 hit을 등급별·기법별로 세어 `severity_breakdown`·`technique_breakdown`에 싣는다 [14].
+`sigma_hunt`는 기준 등급 아래 hit을 규칙별로 묶어 건수, 처음·마지막 시각, 표본 위치 3개를 싣고 건수가 1,000을 넘는 규칙을 `noise_rules`로 따로 싣는다 [15].
+`summarize_evtx`는 CSV 전체를 한 번 읽으며 채널별 건수를 세고 응답의 `preview`를 건수가 많은 채널 5개로 채운다 [16].
+`extract_registry_run_keys`는 지속성 유형별 건수 `persistence_type_counts`와 묶음 요약 `suppression_summary`를 싣는다 [17].
+`scan_network`·`detect_injection`·`list_dlls`는 `summary` 형식에서 `data`를 빼고 그 길이를 `connection_count`·`injection_count`·`dll_count`로 싣는다 [18].
+`run_analysis`는 질의 결과를 `output_format`에 따라 pipe 표, JSON, CSV 글로 바꾸고 숫자 열마다 최솟값, 최댓값, 평균을 `insights`에 싣는다 [19].
+`run_analysis`의 질의 식은 모델이 보내고 그 결과를 응답 글로 바꾸는 일은 서버가 한다 [19][20].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 `build_contract_response`를 거치는 도구와 사용자 활동 도구, `run_analysis`에 적용된다 [21][22][19].
+`build_contract_response`는 응답에 서버가 쓴 요약 `summary`와 출처 정보 `provenance`를 더한다 [21].
+`summary`는 처리한 입력 경로와 건수를 적는다 [21].
+예를 들어 `extract_mft_timeline`은 "MFT timeline returned N rows from <`$MFT` 경로>" 문장을 싣는다 [4].
+`provenance`에는 도구 이름 `tool_name`, 실행 ID, 실행한 명령 `raw_command`, 결과 CSV 경로 `csv_path`, 입력 경로 `artifact_paths`가 들어간다 [23].
+사용자 활동 도구(`extract_shellbags`·`extract_powershell_history` 등)는 행마다 원래 파일 경로, 파서 이름 `parser_command`, 파싱 상태 `parser_status`를 붙인다 [22].
+`run_analysis`는 실행한 질의 `query`와 읽은 파일 `data_source`를 결과에 싣는다 [19].
+공통 응답 함수를 거치지 않는 `sigma_hunt`·`extract_shimcache`·`extract_pca`는 `provenance` 없이 `raw_command`나 결과 파일 경로만 싣는다 [24].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `sigma_hunt`와 `summarize_evtx`에 적용된다 [25][26].
+`sigma_hunt`는 hit을 등급으로 나눠 기준 등급 이상만 `actionable_hits`에 하나씩 싣고 그 아래 등급은 항목으로 싣지 않는다 [25].
+기준 등급의 기본값은 `medium`이고 사용자가 환경변수 `SAVVYDFIR_SIGMA_INLINE_LEVEL`로 바꾼다 [27].
+`summarize_evtx`는 모델이 `event_ids`를 주지 않으면 서버가 정한 이벤트 ID 목록을 EvtxECmd에 넘겨 결과를 거른다 [26].
+사건에 발견사항이 없으면 26개 ID 목록 `DFIR_ESSENTIAL_EIDS`를 쓰고 발견사항이 있으면 발견사항의 ATT&CK 기법에 따라 ID를 더한 목록을 쓴다 [26][28].
+
+**한계.** 서버가 고른 ID 목록은 결과 CSV를 다시 쓰는 캐시 키에 들어가지 않는다 [29].
+같은 폴더·채널·기간으로 다시 부르면 발견사항이 늘어 목록이 바뀌어도 앞서 만든 CSV를 다시 읽는다 [29].
+
+### R01.07 응답 선별 사실·건수 표시
+
+**구현.** 이 방식은 `sigma_hunt`의 기준 아래 hit과 `summarize_evtx`의 이벤트 ID 목록에 적용된다 [30][31].
+`sigma_hunt`는 항목으로 싣지 않은 기준 아래 hit의 수를 `below_threshold_total`에, 기준 등급을 `actionable_threshold`에 싣는다 [30].
+기준 아래 hit은 규칙별 건수 요약 `below_threshold_summary`로 응답에 들어간다 [15][30].
+`detection_gap_invariant`는 기준 이상 hit 수, 기준 등급, 기준 아래 hit 수, 원래 hit 전체를 둔 파일 경로를 한 문장으로 적는다 [32].
+`summarize_evtx`는 모델이 `event_ids`를 주지 않았을 때 서버가 고른 이벤트 ID 목록을 `event_id_filter`에, 그 목록을 고른 방식(`default`·`adaptive`)을 `event_id_strategy`에 싣는다 [26][31].
+
+**한계.** 모델이 `event_ids`를 주면 `event_id_strategy`는 `explicit`이 되고 `event_id_filter`에는 모델이 준 목록이 그대로 실린다 [26][31].
+캐시한 CSV를 다시 읽으면 `event_id_filter`와 `event_id_strategy`에는 그 CSV를 만들 때의 목록과 방식이 실리고 이번 호출에서 고른 목록은 실리지 않는다 [29][33].
+`sigma_hunt`의 `detection_gap_invariant` 문구는 기준 아래 hit을 늘 `low`·`informational`로 적는다 [32].
+그래서 사용자가 기준 등급을 `medium`이 아닌 값으로 바꾸면 문구의 등급과 실제로 항목에서 뺀 등급이 다르다 [25][27][32].
+
+### 근거
+
+[1] `sigma_hunt`는 `detailed` 형식에서 기준 등급 이상의 Chainsaw hit 원래 객체를 `hits`에 싣는다.
+
+```python
+    if normalized_format == "detailed":
+        # detailed mode: include raw actionable hits (NOT all 31k - only the
+        # already-bounded actionable set). Below-threshold stays summarized.
+        response_payload["hits"] = actionable_hits_raw
+```
+
+[`sift_mcp/server.py:5027-5030`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5027-L5030)
+
+[2] `analyze_vss`는 `vshadowinfo` 표준 출력의 끝 3,000자를 응답에 싣는다.
+
+```python
+        "vshadowinfo_output": vsi_result.stdout[-3000:] if hasattr(vsi_result, 'stdout') else "",
+```
+
+[`sift_mcp/server.py:6133-6133`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6133-L6133)
+
+[3] MFTECmd·EvtxECmd CSV 행을 `MftEntry`·`EventRecord`로 바꾸는 함수다: [`sift_mcp/tools/disk.py:1599-1670`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1599-L1670), [`sift_mcp/tools/disk.py:1945-2016`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1945-L2016).
+
+[4] 공통 응답 함수를 부르는 곳과 MFT·EVTX 응답의 `normalized_observations`·`summary`다.
+`build_contract_response`는 `disk.py`의 Prefetch·Amcache·MFT·EVTX·레지스트리 함수, `memory.py`의 `detect_injection`, `timeline.py`의 두 함수에서 불린다: [`sift_mcp/tools/disk.py:1123`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1123), [`sift_mcp/tools/memory.py:282`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L282), [`sift_mcp/tools/timeline.py:113`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L113), [`sift_mcp/tools/timeline.py:184`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L184).
+
+```python
+    if normalized is None:
+        normalized = [
+            {
+                "entry_number": record.entry_number,
+                "file_path": record.file_path,
+                "si_created": _dt_to_iso(record.si_created),
+                "fn_created": _dt_to_iso(record.fn_created),
+                "is_deleted": record.is_deleted,
+            }
+            for record in records[:20]
+        ]
+    summary = (
+        f"MFT timeline returned {response.get('total_records', response.get('records_count', len(records)))} rows "
+        f"from {mft_path} with {response.get('timestomping_candidates', 0)} timestomping candidates."
+    )
+```
+
+[`sift_mcp/tools/disk.py:1266-1280`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1266-L1280)
+
+```python
+            {
+                "event_id": record.event_id,
+                "channel": record.channel,
+                "timestamp": _dt_to_iso(record.timestamp),
+                "computer": record.computer,
+                "provider": record.provider,
+            }
+            for record in records[:20]
+        ]
+```
+
+[`sift_mcp/tools/disk.py:1370-1378`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1370-L1378)
+
+[5] EVTX 행에서 `message_summary`를 500자로 두고 표본에서는 넓은 열을 빼거나 1,024자에서 자른다.
+
+```python
+        message = (
+            row.get("PayloadData1")
+            or row.get("MapDescription")
+            or row.get("UserData")
+            or row.get("Message")
+            or f"Event ID {event_id}"
+        ).strip()[:500]
+
+        extra: dict[str, Any] = {}
+        for k, v in row.items():
+            if k in _EVTX_SKIP_COLS or not v or not v.strip():
+                continue
+            if truncate_wide:
+                kn = k.lower().replace(" ", "").replace("_", "")
+                if kn in _EVTX_WIDE_FIELD_DROP:
+                    continue
+                if len(v) > _EVTX_WIDE_FIELD_MAX_CHARS:
+                    v = v[:_EVTX_WIDE_FIELD_MAX_CHARS] + "...[truncated]"
+            extra[k] = v
+```
+
+[`sift_mcp/tools/disk.py:1981-1999`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1981-L1999)
+
+[6] 응답 표본은 `truncate_wide=True`로 만든 레코드다.
+
+```python
+                if len(sample) < _EVTX_SAMPLE_CAP:
+                    srec = _evtx_record_from_row(row, channel, truncate_wide=True)
+                    if srec is not None:
+                        sample.append(srec)
+```
+
+[`sift_mcp/tools/disk.py:2139-2142`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2139-L2142)
+
+[7] Chainsaw hit에서 필드를 골라 줄인 값을 만든다.
+
+```python
+def _compact_sigma_hit(hit: dict[str, Any], *, index: int = -1) -> dict[str, Any]:
+    """Compact projection of a Chainsaw hit - preserves the fields the agent
+    needs to triage (rule, severity, technique, who/when/where) without the
+    full event document body that bloats response size (Run-4 evidence: 50 raw
+    hits = 89k chars; compact = ~300 chars each).
+
+    The full raw event remains in the persisted CSV/JSON at csv_path; use
+    query_sigma_results(case_id=..., rule_name=...) for deep drill-down.
+    """
+    return {
+        "rule_name": str(hit.get("name", hit.get("rule", f"hit_{index}")))[:140],
+        "level": _normalize_sigma_level(hit.get("level")),
+        "event_id": str(hit.get("event_id", hit.get("EventID", "?")))[:16],
+        "timestamp": str(hit.get("system_time", hit.get("timestamp", "unknown")))[:32],
+        "techniques": _extract_sigma_techniques(hit),
+        "channel": str(hit.get("channel", hit.get("Channel", "?")))[:64],
+        "computer": str(hit.get("computer", hit.get("Computer", "?")))[:64],
+        "user": str(hit.get("user", hit.get("User", "?")))[:64],
+        "tactic": str(hit.get("tactic", "?"))[:64],
+        "hit_index": index,  # for back-reference into csv_path via query_sigma_results
+    }
+
+```
+
+[`sift_mcp/server.py:3863-3884`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3863-L3884)
+
+[8] `extract_shimcache`는 CSV 행에서 네 열만 읽는다.
+
+```python
+        suspicious = []
+        with open(csv_path, encoding="utf-8-sig", errors="replace") as fh:
+            reader = _csv.DictReader(fh)
+            for i, row in enumerate(reader):
+                if i >= max_entries:
+                    break
+                path_lc = row.get("Path", "").lower().replace("/", "\\")
+                is_suspicious = not any(d in path_lc for d in SYSTEM_DIRS)
+                entry = {
+                    "position":  row.get("CacheEntryPosition", ""),
+                    "path":      row.get("Path", ""),
+                    "last_mod":  row.get("LastModifiedTimeUTC", ""),
+                    "executed":  row.get("Executed", ""),
+                    "suspicious": is_suspicious,
+                }
+                entries.append(entry)
+```
+
+[`sift_mcp/server.py:6716-6731`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6716-L6731)
+
+[9] `get_findings`의 두 형식은 발견사항 필드를 줄이거나 `raw_hit`을 뺀다.
+
+```python
+def _strip_heavy_finding_fields(
+    finding: dict[str, Any],
+    *,
+    include_raw_hit: bool,
+) -> dict[str, Any]:
+    trimmed = dict(finding)
+    if not include_raw_hit:
+        trimmed.pop("raw_hit", None)
+    return trimmed
+
+
+def _summarize_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "finding_id": finding.get("finding_id"),
+        "finding_type": finding.get("finding_type"),
+        "artifact_type": finding.get("artifact_type"),
+        "tool_name": finding.get("tool_name"),
+        "evidence_kind": finding.get("evidence_kind"),
+        "finding_status": finding.get("finding_status"),
+        "confidence": finding.get("confidence"),
+        "mitre_tactic": finding.get("mitre_tactic"),
+        "mitre_technique": finding.get("mitre_technique"),
+        "description": _truncate_text(finding.get("description")),
+    }
+    for key in ("group_key", "support_count", "promotion_reason"):
+        value = finding.get(key)
+        if value not in (None, "", [], {}):
+            summary[key] = value
+    return summary
+```
+
+[`sift_mcp/server.py:905-933`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L905-L933)
+
+[10] `_mft_entry_from_row`는 `FileName`을 먼저 `file_path`로 쓴다.
+
+```python
+        file_path_val = (
+            row.get("FileName") or row.get("FilePath") or row.get("ParentPath") or ""
+        ).strip()
+```
+
+[`sift_mcp/tools/disk.py:1617-1619`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1617-L1619)
+
+[11] MFTECmd(`EricZimmerman/MFTECmd`, 기준 시각 전 마지막 커밋 `6aadd87`)의 `$MFT` 레코드는 `ParentPath`와 `FileName`을 따로 두고 둘을 이어야 전체 경로가 된다: [`MFTECmd/MFTRecordOut.cs:15-16`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/MFTRecordOut.cs#L15-L16), [`MFTECmd/MFTRecordOut.cs:68`](https://github.com/EricZimmerman/MFTECmd/blob/6aadd87ae0526efca95dd5a59e62e186806cd4c8/MFTECmd/MFTRecordOut.cs#L68).
+
+[12] Chainsaw v2.16.5(`WithSecureLabs/chainsaw` 태그 커밋 `82fabe2`)의 JSON 항목은 최상위에 규칙 이름, 등급, 시각, 작성자, 상태, Sigma 규칙 정보(`id`·`logsource`·`tags` 등)를 두고 사건 내용은 `document`(묶음 탐지는 `documents`)의 `data`에, 사건이 나온 파일 경로는 `path`에 둔다: [`src/cli.rs:980-1008`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/cli.rs#L980-L1008), [`src/hunt.rs:83-106`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/hunt.rs#L83-L106), [`src/hunt.rs:118-132`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/hunt.rs#L118-L132).
+
+[13] (실행 확인) 컨테이너에서 Chainsaw v2.16.5 JSON 항목 구조로 만든 Sigma hit 하나를 파일로 두고 `query_sigma_results`에 `detailed` 형식으로 주자 `actionable_hits`와 `hits`의 `event_id`·`channel`·`computer`·`user`·`tactic`은 모두 `?`였고 `rule_name`·`level`·`timestamp`·`techniques`만 값이 있었다.
+
+[14] 등급별·기법별 건수를 센다.
+
+```python
+def _sigma_breakdowns(
+    hits: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, int], set[str]]:
+    severity_counts: dict[str, int] = {}
+    technique_counts: dict[str, int] = {}
+    technique_set: set[str] = set()
+    for hit in hits:
+        # Use normalized level so "info" and "informational" don't double-count
+        sev = _normalize_sigma_level(hit.get("level"))
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        for technique_id in _extract_sigma_techniques(hit):
+            if technique_id == "—":
+                continue
+            technique_set.add(technique_id)
+            technique_counts[technique_id] = technique_counts.get(technique_id, 0) + 1
+    return severity_counts, dict(sorted(technique_counts.items())), technique_set
+```
+
+[`sift_mcp/server.py:3990-4005`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3990-L4005)
+
+[15] 기준 아래 hit을 규칙별로 묶어 건수와 시각 범위, 표본 위치를 만든다: [`sift_mcp/server.py:3886-3937`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3886-L3937).
+
+[16] EVTX 응답의 `preview`를 채널별 건수 상위 5개로 채운다.
+
+```python
+        preview=[
+            {"channel": channel, "count": count}
+            for channel, count in sorted(channel_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ],
+```
+
+[`sift_mcp/tools/disk.py:1432-1435`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1432-L1435)
+
+[17] 레지스트리 응답에 유형별 건수와 묶음 요약을 싣는다: [`sift_mcp/tools/disk.py:2603-2622`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2603-L2622), [`sift_mcp/tools/disk.py:5384-5390`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5384-L5390), [`sift_mcp/tools/disk.py:5444`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5444).
+
+[18] `summary` 형식에서 `data`를 빼고 개수와 앞 3개를 싣는다.
+
+```python
+def _strip_data_for_summary(response: Any, response_format: str = "summary",
+                            count_key: str = "count") -> Any:
+    """Context-budget discipline: when caller asks for summary format,
+    strip the heavy ``data`` array but keep counts + handles. Mirrors the
+    pattern used by disk tools via _apply_response_format.
+
+    This applies to memory tools (scan_network, detect_injection, list_dlls)
+    which previously returned full record arrays on every call - a typical
+    list_dlls response is 200+ DLLs ≈ 30 KB of context per PID.
+    """
+    if not isinstance(response, dict):
+        return response
+    fmt = (response_format or "summary").strip().lower()
+    if fmt == "detailed":
+        return response
+    # Default = summary - drop heavy fields, keep counts + handles + status.
+    out = dict(response)
+    data = out.get("data")
+    if isinstance(data, list):
+        out[count_key] = len(data)
+        # Keep first 3 records as a tiny preview so the LLM has something
+        # to anchor on without context bloat.
+        out["preview"] = data[:3]
+        out.pop("data", None)
+    out["response_format"] = "summary"
+    return out
+```
+
+[`sift_mcp/server.py:1235-1260`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1235-L1260)
+
+[19] `run_analysis`의 결과 형식 변환과 `insights`, `query`·`data_source`다.
+
+```python
+    if isinstance(result_obj, pd.DataFrame):
+        result_df = result_obj
+    elif isinstance(result_obj, pd.Series):
+        result_df = result_obj.to_frame()
+    else:
+        result_df = pd.DataFrame({"result": [result_obj]})
+
+    if len(result_df) > 500:
+        result_df = result_df.head(500)
+
+    if output_format == "json":
+        table_str = result_df.to_json(orient="records", indent=2)
+    elif output_format == "csv":
+        table_str = result_df.to_csv(index=False)
+    else:
+        try:
+            from tabulate import tabulate
+
+            table_str = tabulate(
+                result_df, headers="keys", tablefmt="pipe", showindex=False
+            )
+        except ImportError:
+            table_str = result_df.to_string()
+```
+
+[`sift_mcp/safe_analysis.py:175-197`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L175-L197)
+
+```python
+    insights: list[str] = []
+    if len(result_df) > 0:
+        insights.append(f"Query returned {len(result_df)} rows")
+        for col in result_df.columns:
+            if result_df[col].dtype in ("int64", "float64"):
+                insights.append(
+                    f"{col}: min={result_df[col].min()}, max={result_df[col].max()}, mean={result_df[col].mean():.2f}"
+                )
+
+    analysis = AnalysisResult(
+        query=query,
+        result_table=table_str,
+        row_count=len(result_df),
+        columns=list(result_df.columns),
+        insights=insights,
+        data_source=str(path),
+    )
+```
+
+[`sift_mcp/safe_analysis.py:199-215`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L199-L215)
+
+[20] 질의는 `df`를 넣은 `asteval` 해석기로 실행한다: [`sift_mcp/safe_analysis.py:87-153`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L87-L153).
+
+[21] `build_contract_response`는 `summary`와 `provenance`를 응답에 더한다.
+
+```python
+    response["summary"] = summary
+    response["normalized_observations"] = normalized_observations
+    response["provenance"] = provenance
+```
+
+[`sift_mcp/tools/_contracts.py:404-406`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_contracts.py#L404-L406)
+
+[22] 사용자 활동 도구는 행마다 다섯 출처 열을 붙인다.
+
+```python
+def _tag_provenance(
+    rows: list[dict[str, str]],
+    *,
+    source_profile: str,
+    source_hive: str,
+    source_artifact_path: str,
+    parser_command: str,
+    parser_status: str,
+) -> list[dict[str, Any]]:
+    """Add the 5 standard provenance columns to each EZ-tool CSV row."""
+    tagged: list[dict[str, Any]] = []
+    for row in rows:
+        merged = dict(row)
+        merged["source_profile"] = source_profile
+        merged["source_hive"] = source_hive
+        merged["source_artifact_path"] = source_artifact_path
+        merged["parser_command"] = parser_command
+        merged["parser_status"] = parser_status
+        tagged.append(merged)
+    return tagged
+```
+
+[`sift_mcp/tools/disk.py:6257-6276`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6257-L6276)
+
+[23] `provenance`에 들어가는 필드다.
+
+```python
+    artifact_refs = compact_unique(
+        [
+            *(artifact_paths or []),
+            csv_path,
+            storage_path,
+            source_path,
+        ],
+        limit=12,
+    )
+    provenance = {
+        "tool_name": tool_name,
+        "execution_id": execution_id,
+        "raw_command": raw_command,
+        "state_path": state_path,
+        "csv_path": csv_path,
+        "storage_path": storage_path,
+        "source_path": source_path,
+        "cache_hit": cache_hit,
+        "cache_source_execution_id": cache_source_execution_id,
+        "artifact_paths": artifact_refs or None,
+    }
+```
+
+[`sift_mcp/tools/_contracts.py:154-174`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_contracts.py#L154-L174)
+
+[24] 공통 응답 함수를 거치지 않는 응답의 예다: [`sift_mcp/server.py:4950-4972`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4950-L4972), [`sift_mcp/server.py:6814-6822`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6814-L6822), [`sift_mcp/server.py:6538-6551`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6538-L6551).
+
+[25] `sigma_hunt`는 기준 등급으로 hit을 나누고 기준 이상만 줄인 항목으로 만든다.
+
+```python
+    actionable_threshold = _resolve_actionable_threshold()
+    actionable_hits_raw: list[dict[str, Any]] = []
+    below_threshold_hits: list[dict[str, Any]] = []
+    for idx, hit in enumerate(filtered_hits):
+        level = _normalize_sigma_level(hit.get("level"))
+        if _is_actionable_level(level, actionable_threshold):
+            actionable_hits_raw.append(hit)
+        else:
+            below_threshold_hits.append(hit)
+
+    # Compact projection of actionable hits - all medium+ compact inline (per
+    # "inline ≠ full raw record"; raw lives in persisted JSON for
+    # query_sigma_results drill-down).
+    actionable_hits_compact = [
+        _compact_sigma_hit(hit, index=idx)
+        for idx, hit in enumerate(actionable_hits_raw)
+    ]
+    # Below-threshold summary - per-rule {count, first_ts, last_ts, samples}.
+    # Never dump raw rows; preserve detection visibility without flooding.
+    below_threshold_summary = _aggregate_below_threshold_summary(below_threshold_hits)
+
+    # State-finding policy is now DECOUPLED from response visibility (
+    # review Q5): create individual state findings ONLY for actionable hits,
+    # capped at max_entries as a SAFETY ceiling against pathological volumes.
+    # max_entries no longer gates "what the agent sees" - it gates "how many
+    # raw_detector_hit findings pollute state.json".
+    hits_to_process = actionable_hits_raw[:max_entries]
+```
+
+[`sift_mcp/server.py:4591-4617`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4591-L4617)
+
+[26] `summarize_evtx`는 `event_ids`가 없으면 기본 목록이나 발견사항에 따른 목록을 고른다.
+
+```python
+    event_id_strategy = "explicit"
+    if event_ids is not None:
+        effective_eids = event_ids
+    else:
+        try:
+            existing_findings = _state.get_findings()
+        except Exception:
+            existing_findings = []
+
+        if existing_findings:
+            effective_eids = adaptive_eids_from_findings(existing_findings)
+            event_id_strategy = "adaptive"
+        else:
+            effective_eids = DFIR_ESSENTIAL_EIDS
+            event_id_strategy = "default"
+```
+
+[`sift_mcp/tools/disk.py:4426-4440`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4426-L4440)
+
+[27] 기준 등급은 환경변수가 없으면 `medium`이다.
+
+```python
+# Default inline-actionable threshold. Operator can override via env var
+# SAVVYDFIR_SIGMA_INLINE_LEVEL=low|medium|high|critical to expand or contract
+#. The
+# threshold ONLY moves the summary/inline boundary - it never suppresses
+# persisted JSON or queryability via query_sigma_results.
+_SIGMA_ACTIONABLE_DEFAULT_LEVEL = "medium"
+
+
+def _resolve_actionable_threshold() -> str:
+    """Return canonical level name for the inline-actionable threshold.
+    Resolution: env var → default 'medium'. Validates against enum; falls
+    back to default on garbage input.
+    """
+    raw = os.environ.get("SAVVYDFIR_SIGMA_INLINE_LEVEL", "")
+    canonical = _normalize_sigma_level(raw) if raw else _SIGMA_ACTIONABLE_DEFAULT_LEVEL
+    if canonical not in _SIGMA_VALID_SEVERITIES:
+        canonical = _SIGMA_ACTIONABLE_DEFAULT_LEVEL
+    return canonical
+```
+
+[`sift_mcp/server.py:3835-3852`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3835-L3852)
+
+[28] 발견사항의 ATT&CK 기법에 따라 이벤트 ID를 더한다.
+
+```python
+def adaptive_eids_from_findings(findings: Iterable[dict[str, Any]]) -> list[int]:
+    """Return ATT&CK-informed EVTX EIDs based on the current finding set."""
+    techniques = {
+        _to_text(finding.get("mitre_technique")).upper()
+        for finding in findings
+        if finding.get("mitre_technique")
+    }
+    eids = set(_ADAPTIVE_EVTX_BASE_EIDS)
+
+    if any(technique.startswith("T1078") for technique in techniques):
+        eids |= {4672, 4776, 4768, 4769}
+    if any(technique.startswith("T1059") for technique in techniques):
+        eids |= {4103, 4104}
+    if any(technique.startswith("T1543") for technique in techniques):
+        eids |= {7045, 4698, 4702}
+    if any(technique.startswith("T1021") for technique in techniques):
+        eids |= {5140, 5145, 4648}
+    if any(technique.startswith("T1003") for technique in techniques):
+        eids |= {4776, 4768, 4769, 4663}
+    if any(technique.startswith("T1070") for technique in techniques):
+        eids |= {1102, 4719}
+    if any(
+        technique.startswith("T1547") or technique.startswith("T1546")
+        for technique in techniques
+    ):
+        eids |= {4698, 4702, 7045}
+
+    return sorted(eids)
+```
+
+[`sift_mcp/semantics.py:1056-1083`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/semantics.py#L1056-L1083)
+
+[29] 서버가 고른 목록은 캐시 키에 넣지 않는다.
+
+```python
+
+    # Cache key for idempotency.  When the caller did NOT specify explicit
+    # event_ids (event_ids=None → adaptive or default), the cache key is
+    # based solely on the stable base params (evtx_dir, channel, dates).
+    # This prevents adaptive EID set drift (which changes every call as
+    # findings grow) from busting the cache and re-running EvtxECmd 30×.
+    caller_specified_eids = event_ids is not None
+    cache_base_params = {
+        "evtx_dir": resolved_evtx_dir,
+        "channel": channel or "",
+        "start_date": start_date or "",
+        "end_date": end_date or "",
+    }
+    if caller_specified_eids:
+        # Caller explicitly chose EIDs - include them in the cache key
+        cache_params = {
+            **cache_base_params,
+            "event_ids": sorted(effective_eids) if effective_eids else [],
+            "event_id_strategy": "explicit",
+        }
+    else:
+        # Auto-selected EIDs (adaptive or default) - cache on base params only
+        cache_params = {
+            **cache_base_params,
+            "event_id_strategy": "auto",
+        }
+    cache_key = build_cache_key(tool, cache_params)
+```
+
+[`sift_mcp/tools/disk.py:4441-4467`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4441-L4467)
+
+[30] 응답에 기준 아래 hit의 수와 기준 등급을 싣는다.
+
+```python
+    response_payload["actionable_threshold"] = actionable_threshold
+    response_payload["below_threshold_summary"] = below_threshold_summary
+    response_payload["below_threshold_total"] = len(below_threshold_hits)
+```
+
+[`sift_mcp/server.py:5015-5017`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5015-L5017)
+
+[31] 응답에 쓴 목록과 고른 방식을 싣는다.
+
+```python
+        "event_id_filter": effective_eids if effective_eids else "all",
+        "event_id_strategy": event_id_strategy,
+```
+
+[`sift_mcp/tools/disk.py:4787-4788`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4787-L4788)
+
+[32] `detection_gap_invariant` 문구는 기준 아래 hit의 등급을 고정 글로 적는다.
+
+```python
+    response_payload["detection_gap_invariant"] = (
+        f"All {len(actionable_hits_compact)} hits at level>={actionable_threshold} "
+        f"are inline above (compact projection). Full raw records persisted at "
+        f"{output_target} — use query_sigma_results(case_id, severity=..., rule_name=...) "
+        f"for drill-down. {len(below_threshold_hits)} below-threshold hits "
+        f"(low+informational) are summarized in below_threshold_summary — never dropped, "
+        f"never raw-dumped."
+    )
+```
+
+[`sift_mcp/server.py:5019-5026`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5019-L5026)
+
+[33] 캐시를 다시 쓰면 그 CSV를 만들 때의 목록을 응답에 싣는다.
+
+```python
+            "event_id_filter": cached.get(
+                "event_id_filter",
+                effective_eids if effective_eids else "all",
+            ),
+            "event_id_strategy": cached.get("event_id_strategy", event_id_strategy),
+```
+
+[`sift_mcp/tools/disk.py:4530-4534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4530-L4534)
+
+```python
+    if durable_csv:
+        _state.cache_artifact(
+            cache_key,
+            {
+                "source_execution_id": result.execution_id,
+                "csv_path": durable_csv,
+                "findings_created": finding_ids,
+                "requires_agent": response.get("requires_agent"),
+                "agent_instruction": response.get("agent_instruction"),
+                "total_records": total_records,
+                "channel_filter": channel,
+                "event_id_filter": effective_eids if effective_eids else "all",
+                "event_id_strategy": event_id_strategy,
+                "date_range": response.get("date_range"),
+            },
+```
+
+[`sift_mcp/tools/disk.py:4814-4828`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4814-L4828)

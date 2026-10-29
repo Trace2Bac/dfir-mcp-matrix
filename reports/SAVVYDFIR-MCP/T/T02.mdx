@@ -1,0 +1,379 @@
+---
+cell: T02
+details:
+- id: T02.01
+- id: T02.04
+- id: T02.05
+- id: T02.06
+- id: T02.08
+---
+
+# T02 실행 허용 범위 제한
+
+### T02.01 클라이언트 도구 선택
+
+**구현.** 이 방식은 저장소 루트의 Claude Code 설정 `.claude/settings.json`에 있다 [1].
+이 설정은 허용 목록에 `mcp__savvydfir__*`를 두어 서버 도구 전부를 확인 없이 쓰게 하고 막는 서버 도구는 없다 [1].
+같은 허용 목록에는 `fls`·`icat`·`mmls`·`yara`·`vol3`·`log2timeline.py`·`MFTECmd`·`EvtxECmd` 같은 분석 도구와 `python3`·`cp`·`mv`·`chmod`·`dotnet`의 `Bash` 실행이 들어 있다 [1].
+거부 목록은 `rm`·`dd`·`mkfs`·`shred`·`format`·`fdisk`·`parted`·`wget`·`curl`·`nc`·`netcat`의 `Bash` 실행만 막는다 [1].
+그래서 이 설정은 서버가 감싼 분석 도구를 클라이언트 셸로 직접 실행하는 것을 막지 않는다 [1].
+`install.sh`는 이 설정을 사용자 전역 설정에 복사하지 않고 저장소 폴더에서 Claude Code를 실행해야 적용된다고 적는다 [2].
+서버에는 이 목록이 없어 다른 MCP 클라이언트로 붙거나 다른 폴더에서 Claude Code를 실행하면 이 설정이 적용되지 않는다 [1][2].
+
+### T02.04 고정 명령·템플릿
+
+**구현.** 이 방식은 외부 도구를 실행하는 모든 도구에 적용된다 [3][4].
+실행기 하위 클래스와 실행기를 거치지 않는 도구는 실행 파일과 옵션을 인자 목록으로 정해 두고 모델 값을 정한 자리에 넣는다 [3][4].
+Volatility 도구는 도구마다 플러그인 이름이 코드에 정해져 있고 모델은 덤프 경로와 일부 도구의 `pid`만 넘긴다 [5].
+모델이 고르는 옵션은 `extract_registry_run_keys`의 `sync_batch`처럼 정해 둔 플래그를 붙일지 정하는 값이다 [6].
+`sync_batch`가 참이면 RECmd에 `--sync`를 붙여 배치 정의를 네트워크에서 받게 한다 [6].
+
+`SafeRunner.run`은 실행 전에 실행 파일 이름을 거부 목록 `DENIED_COMMANDS`(`rm`·`dd`·`wget`·`curl`·`ssh`·`scp`·`mkfs`·`fdisk`·`shred`)와 대조하고 목록에 있으면 `CommandDeniedError`로 실행하지 않는다 [7].
+이 대조는 전체 경로로 준 실행 파일도 이름으로 맞춘다 [7][8].
+실행 파일 이름은 실행기 코드가 정하므로 모델 값은 이 목록과 대조되지 않는다 [3].
+실행기를 거치지 않는 도구는 이 대조를 거치지 않는다 [4].
+`server.py`에도 명령 거부 목록 `BLOCKED_CMDS`가 정의되어 있지만 서버 코드 어디에서도 읽지 않는다 [9].
+
+**한계.** 위치 인자로 들어가는 모델 값은 `-`로 시작하는지 보지 않고 앞에 `--`를 두는 곳도 없다 [3][4].
+`list_deleted_files`의 `image_path`, `extract_windows_artifacts`의 `image_path`·`tsk_device_path`, `scan_files`·`scan_memory`의 `rules_path`와 검사 대상, `build_timeline`의 `source_path`, `query_timeline`의 `plaso_path`, `verify_integrity`의 `image_path`가 여기에 포함된다 [3][4].
+`list_deleted_files`의 `image_path`에 `-`로 시작하고 `/`가 없는 값을 주자 Sleuth Kit `fls`가 그 값을 이미지 경로가 아니라 옵션으로 읽어 성공으로 끝났다 [10].
+다른 도구가 이런 값을 옵션으로 읽는지는 실행해 보지 않아 확인하지 못했다.
+`query_timeline`은 모델이 쓴 `filter_expr`를 검사하지 않고 `psort.py --filter`에 넣고 `start`·`end`는 따옴표 처리 없이 `date >= '<값>'` 틀에 넣는다 [11].
+그래서 `start`·`end`에 작은따옴표가 들어가면 필터식의 구조가 바뀐다 [11].
+같은 도구의 `output_format`도 목록과 대조하지 않고 `psort.py -o`에 넘긴다 [11].
+`hayabusa_hunt`의 `min_level`은 값 목록과 대조하지 않고 `-m` 뒤에 넣는다 [12].
+
+### T02.05 연산·플러그인 허용 목록
+
+**구현.** 이 방식은 `extract_windows_artifacts`의 추출 대상 선택과 `sigma_scan`의 탐지기 선택에 적용된다 [13][14].
+`extract_windows_artifacts`는 `families`를 서버 코드의 목록 `_RAW_ARTIFACT_FAMILIES`(`evtx`·`registry`·`amcache`·`prefetch`·`mft`·`srum`·`usn`) 7개와 대조한다 [13].
+목록에 없는 값이 있거나 빈 목록이면 `ValueError`로 추출하지 않는다 [13].
+`sigma_scan`이 실행할 탐지기는 `start_investigation`이 읽은 사건 manifest의 `enabled_detectors`로 정한다 [14][15].
+`start_investigation`은 이 manifest를 모델이 넘긴 `manifest_path`의 파일에서 읽는다 [15].
+서버는 이 값을 `STABLE_DETECTORS`의 탐지기 10개와 대조하고 목록에 없는 이름이나 빈 목록은 거부한다 [14].
+목록을 바꾸는 설정이나 인자는 없다.
+
+### T02.06 질의 구조·연산 검사
+
+**구현.** 이 방식은 모델이 pandas 식을 써서 넘기는 `run_analysis`의 `query`에 적용된다 [16][17].
+서버는 질의를 소문자로 바꾼 글자와 공백을 지운 글자에서 차단 문자열 목록 `BLOCKED_PATTERNS`를 찾고 있으면 거부한다 [16].
+목록에는 `import `·`exec(`·`eval(`·`__`·`open(`·`os.`·`subprocess`, `pd.read_csv` 같은 pandas 읽기 함수 15개, `.to_csv(` 같은 쓰기 메서드 9개, `getattr(`·`dir(`가 들어 있다 [16].
+통과한 질의는 asteval의 `Interpreter`를 `minimal=True`, `builtins_readonly=True`로 만들어 평가한다 [17].
+서버는 평가 환경에 `df`, `np`, `pd`와 `len`·`int`·`str` 같은 내장 함수 15개를 넘긴다 [17].
+asteval 1.0.10의 `Interpreter`는 이 밖에 자체 내장 이름과 numpy 함수를 평가 환경에 함께 둔다 [18].
+`__`·`import `·`.to_csv(`가 들어간 질의는 거부되었다 [19].
+평가는 별도 작업 프로세스에서 하고 결과는 500행까지만 돌려준다 [17][20].
+
+**한계.** 검사는 정해 둔 문자열 목록과의 대조이므로 목록에 없는 함수와 메서드는 통과한다 [16].
+목록에 없는 pandas 쓰기 메서드에 파일 경로를 준 질의는 거부되지 않았고 그 파일이 생겼다 [19].
+목록에 없는 pandas 읽기 함수를 부른 질의는 차단 검사를 통과해 pandas 함수 호출까지 실행되었다 [21].
+asteval을 불러오지 못하면 내장 함수를 비운 파이썬 `eval`로 질의를 평가한다 [17].
+
+### T02.08 설정으로 도구 끄기
+
+**구현.** 이 방식은 환경변수 `SAVVYDFIR_DISABLE_TOOLS`에 적용된다 [22].
+사용자는 서버를 시작하기 전에 끌 도구 이름을 쉼표로 나눠 적는다 [22].
+`extract_shimcache`와 `extract_srum`은 자기 이름이 이 값에 있으면 실행하지 않고 `status: disabled`를 돌려준다 [23].
+끈 도구도 도구 목록에는 그대로 나온다 [24].
+
+**한계.** 이 값을 확인하는 도구는 `extract_shimcache`·`extract_srum` 둘뿐이다 [23].
+다른 도구 이름을 적어도 그 도구는 실행된다 [24].
+`run_analysis`를 함께 적은 서버에서 `extract_shimcache`는 `disabled`를 돌려주었고 `run_analysis`는 질의 결과를 돌려주었다 [24].
+
+### 근거
+
+[1] 저장소의 Claude Code 설정은 서버 도구 전부와 분석 도구의 `Bash` 실행을 허용하고 파괴·전송 명령만 거부한다: [`.claude/settings.json:2-85`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/settings.json#L2-L85).
+
+[2] 설치 스크립트는 `settings.json`을 사용자 전역 설정에 두지 않는다고 적는다.
+
+```bash
+# 4b. settings.json — INTENTIONALLY NOT DEPLOYED TO ~/.claude/
+#     The project-local .claude/settings.json (in the repo root) is the
+#     source of truth for hooks + permissions + MCP server registration.
+#     Claude Code picks it up automatically when launched from inside the
+#     repo. Deploying a HOME-level settings.json risks schema drift and
+#     can break `claude login` if formats change between Claude Code
+#     versions. Always launch `claude` from inside the SAVVYDFIR-MCP
+#     directory so the project-local config takes effect.
+```
+
+[`install.sh:279-286`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/install.sh#L279-L286)
+
+[3] 실행기 하위 클래스는 실행 파일과 옵션을 정해 두고 모델 값을 정한 자리에 넣는다: [`sift_mcp/runners/eztools.py:161-165`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L161-L165), [`sift_mcp/runners/sleuthkit.py:217-231`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L217-L231), [`sift_mcp/runners/sleuthkit.py:108-109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L108-L109), [`sift_mcp/runners/plaso.py:159-179`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/plaso.py#L159-L179), [`sift_mcp/runners/yara_runner.py:157-164`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/yara_runner.py#L157-L164).
+
+[4] 실행기를 거치지 않는 도구도 인자 목록을 코드에 정해 둔다: [`sift_mcp/server.py:4355-4366`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4355-L4366), [`sift_mcp/server.py:5213-5222`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5213-L5222), [`sift_mcp/server.py:6656-6664`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6656-L6664), [`sift_mcp/server.py:7924-7927`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7924-L7927).
+
+[5] Volatility 실행기는 플러그인 이름을 받아 정해 둔 인자 목록을 만들고 도구 함수가 플러그인 이름을 정한다.
+
+```python
+        if self.VOL_PATH.endswith(".py"):
+            cmd: List[str] = ["python3", self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        else:
+            cmd: List[str] = [self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        return self.run(cmd, timeout=timeout, tool_name=tool_name)
+```
+
+[`sift_mcp/runners/volatility.py:155-162`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L155-L162)
+
+```python
+    def pslist(
+        self,
+        dump_path: str,
+        tool_name: Optional[str] = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> RunResult:
+        """List running processes (``windows.pslist``).
+
+        Emits the PEB process list.  Compare against ``psscan()`` to detect
+        DKOM-hidden processes.
+
+        Returns
+        -------
+        RunResult
+            JSON array of process objects (PID, PPID, name, create time, etc.)
+        """
+        return self.run_plugin(
+            dump_path=dump_path,
+            plugin="windows.pslist",
+            output_format="json",
+            tool_name=tool_name,
+            timeout=timeout,
+        )
+```
+
+[`sift_mcp/runners/volatility.py:168-190`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L168-L190)
+
+[6] `sync_batch`는 RECmd `--sync`를 붙이고 도구 설명은 네트워크가 필요하다고 적는다.
+
+```python
+    sync_batch:
+        When ``True``, tells RECmd to download the latest batch definitions
+        before running (``--sync``).  Requires network access; default
+        ``False``.
+```
+
+[`sift_mcp/tools/disk.py:5043-5046`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5043-L5046)
+
+```python
+        if sync_batch:
+            cmd.append("--sync")
+```
+
+[`sift_mcp/runners/eztools.py:432-433`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L432-L433)
+
+[7] `SafeRunner.run`은 실행 파일 이름이 거부 목록에 있으면 실행하지 않는다.
+
+```python
+        if not self.validate_command(cmd_parts):
+            raise CommandDeniedError(
+                f"Command '{Path(cmd_parts[0]).name}' is in the deny list and "
+                "cannot be executed by SafeRunner."
+            )
+```
+
+[`sift_mcp/runners/base.py:446-450`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L446-L450)
+
+거부 목록과 이름 대조는 [`sift_mcp/runners/base.py:252-262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L252-L262), [`sift_mcp/runners/base.py:375-378`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L375-L378)에 있다.
+
+[8] (실행 확인) 컨테이너에서 `SafeRunner.run`에 `rm`과 `/bin/rm`을 주자 둘 다 `CommandDeniedError`로 실행되지 않았고 목록에 없는 `cp`는 실행되었다.
+
+[9] `BLOCKED_CMDS`는 정의만 있다.
+
+```python
+#: Commands that are unconditionally blocked.
+BLOCKED_CMDS: list[str] = [
+    "rm", "dd", "mkfs", "shred", "wget", "curl", "ssh", "scp",
+    "fdisk", "parted", "nc", "netcat", "format", "chmod", "chown",
+]
+```
+
+[`sift_mcp/server.py:187-191`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L187-L191)
+
+[10] (실행 확인) 컨테이너에서 `list_deleted_files`의 `image_path`에 `-`로 시작하고 `/`가 없는 값을 주자 `fls -r -d <값>`이 실행되어 상태 `success`로 끝났다.
+
+[11] `psort` 실행기는 시각 값을 따옴표 안에 그대로 넣고 모델의 필터식과 출력 형식을 그대로 넘긴다.
+
+```python
+        cmd: List[str] = [
+            "psort.py",
+            "--output-time-zone", timezone,
+            "-o", output_format,
+            "-w", output_file,
+        ]
+
+        # Build date/time range filters
+        date_filters: List[str] = []
+        if time_slice_start:
+            date_filters.append(f"date >= '{time_slice_start}'")
+        if time_slice_end:
+            date_filters.append(f"date <= '{time_slice_end}'")
+
+        # Combine date filters with any explicit filter expression
+        all_filters: List[str] = date_filters[:]
+        if filter_expression:
+            all_filters.append(filter_expression)
+
+        if all_filters:
+            combined = " AND ".join(all_filters)
+            cmd.extend(["--filter", combined])
+
+        cmd.append(storage_file)
+```
+
+[`sift_mcp/runners/plaso.py:242-265`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/plaso.py#L242-L265)
+
+[12] `hayabusa_hunt`는 `min_level`을 소문자로만 바꿔 `-m` 뒤에 넣는다.
+
+```python
+    rules_config = str(Path(rules) / "config")
+    cmd: list[str] = [
+        hayabusa_bin, "csv-timeline",
+        "-d" if evtx_target.is_dir() else "-f", str(evtx_target),
+        "-r", rules,
+        "-c", rules_config,
+        "-o", str(out_csv),
+        "-m", min_level.lower(),
+        "-w", "-q", "-K", "-C",
+    ]
+```
+
+[`sift_mcp/server.py:5213-5222`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5213-L5222)
+
+[13] `families`는 서버 코드의 목록과 대조한다.
+
+```python
+_RAW_ARTIFACT_FAMILIES = {"evtx", "registry", "amcache", "prefetch", "mft", "srum", "usn"}
+
+
+def _normalize_artifact_families(families: Optional[Any]) -> set[str]:
+    """Normalize MCP list/string family input for raw Windows extraction."""
+    if families is None:
+        return set(_RAW_ARTIFACT_FAMILIES)
+    if isinstance(families, str):
+        values = [part.strip().lower() for part in families.split(",")]
+    else:
+        values = [str(part).strip().lower() for part in families]
+    normalized = {value for value in values if value}
+    if not normalized:
+        raise ValueError("families must be omitted/null or a non-empty allow-list.")
+    unknown = normalized - _RAW_ARTIFACT_FAMILIES
+    if unknown:
+        raise ValueError(
+            f"Unknown artifact families: {sorted(unknown)}. "
+            f"Valid families: {sorted(_RAW_ARTIFACT_FAMILIES)}"
+        )
+    return normalized
+```
+
+[`sift_mcp/server.py:7567-7587`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7567-L7587)
+
+[14] 탐지기 이름은 `STABLE_DETECTORS`와 대조한다.
+
+```python
+STABLE_DETECTORS = {
+    "zeroed_fractional_timestamps",
+    "si_fn_timestomp",
+    "motw_presence",
+    "log_clear",
+    "encoded_powershell",
+    "defender_detection",
+    "sdelete_cipher_trace",
+    "explicit_logon_smb_correlation",
+    "m_before_c_copy",
+    "mft_sequence_anomaly",
+}
+```
+
+[`sift_mcp/detectors.py:20-31`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/detectors.py#L20-L31)
+
+```python
+def normalize_enabled_detectors(value: Any) -> set[str]:
+    """Return the enabled detector allow-list using v6 manifest semantics."""
+    if value is None:
+        return set(STABLE_DETECTORS)
+    if not isinstance(value, list):
+        raise ValueError("enabled_detectors must be omitted/null or a non-empty list.")
+    normalized = {str(item).strip() for item in value if str(item).strip()}
+    if not normalized:
+        raise ValueError("enabled_detectors=[] is invalid; omit/null to enable all detectors.")
+    unknown = normalized - STABLE_DETECTORS
+    if unknown:
+        raise ValueError(f"Unknown enabled_detectors: {sorted(unknown)}")
+    return normalized
+```
+
+[`sift_mcp/detectors.py:41-53`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/detectors.py#L41-L53)
+
+[15] `start_investigation`은 manifest의 `enabled_detectors`를 대조해 사건 상태에 둔다: [`sift_mcp/server.py:7187-7271`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7187-L7271).
+
+[16] 차단 문자열 목록과 대조 함수다: [`sift_mcp/safe_analysis.py:12-74`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L12-L74).
+
+[17] 질의는 asteval로 평가하고 asteval이 없으면 `eval`로 평가하며 결과는 500행으로 자른다: [`sift_mcp/safe_analysis.py:87-153`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L87-L153), [`sift_mcp/safe_analysis.py:166-183`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L166-L183).
+
+```python
+    pattern = blocked_pattern(query)
+    if pattern:
+        raise SafeAnalysisError(f"Query contains blocked pattern: {pattern}")
+
+    import numpy as np
+
+    df, pd = _load_dataframe(path)
+    result_obj = _evaluate_query(query, df, np, pd_module=pd)
+
+    if isinstance(result_obj, pd.DataFrame):
+        result_df = result_obj
+    elif isinstance(result_obj, pd.Series):
+        result_df = result_obj.to_frame()
+    else:
+        result_df = pd.DataFrame({"result": [result_obj]})
+
+    if len(result_df) > 500:
+        result_df = result_df.head(500)
+```
+
+[`sift_mcp/safe_analysis.py:166-183`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L166-L183)
+
+[18] (실행 확인) 컨테이너에서 asteval 1.0.10의 `Interpreter`를 서버와 같은 `minimal=True`, `builtins_readonly=True`로 만들고 `usersyms`에 `df` 하나만 넘기자 기호표에 밑줄로 시작하지 않는 이름이 388개 있었다.
+그 가운데에는 asteval 자체 내장 함수와 numpy 함수가 있었다.
+
+[19] (실행 확인) 컨테이너의 asteval 1.0.10에서 `__`·`import `·`.to_csv(`가 들어간 질의는 `Query contains blocked pattern`으로 거부되었고 목록에 없는 쓰기 메서드에 `/cases` 아래 경로를 준 질의는 결과를 돌려주며 그 파일을 만들었다.
+
+[20] 평가는 `sift_mcp.analysis_worker` 작업 프로세스에서 한다: [`sift_mcp/server.py:11516-11566`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11516-L11566).
+
+[21] (실행 확인) 컨테이너에서 목록에 없는 pandas 읽기 함수를 부른 질의는 차단 검사를 통과해 그 함수의 파일 없음 오류를 돌려주었고 목록에 있는 `pd.read_csv`와 `pd.io`는 거부되었다.
+
+[22] 서버는 시작할 때 `SAVVYDFIR_DISABLE_TOOLS`를 쉼표로 나눠 읽는다.
+
+```python
+# Tools listed here are skipped at call time (return disabled status immediately).
+# Set SAVVYDFIR_DISABLE_TOOLS=extract_shimcache,extract_srum before launching
+# the MCP server to surgically disable new tools without code changes.
+_DISABLED_TOOLS: frozenset[str] = frozenset(
+    t.strip()
+    for t in os.environ.get("SAVVYDFIR_DISABLE_TOOLS", "").split(",")
+    if t.strip()
+)
+```
+
+[`sift_mcp/server.py:193-200`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L193-L200)
+
+[23] 이 값을 확인하는 곳은 두 도구다.
+
+```python
+    if "extract_shimcache" in _DISABLED_TOOLS:
+        return {"status": "disabled", "reason": "extract_shimcache is in SAVVYDFIR_DISABLE_TOOLS"}
+```
+
+[`sift_mcp/server.py:6609-6610`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6609-L6610)
+
+```python
+    if "extract_srum" in _DISABLED_TOOLS:
+        return {"status": "disabled", "reason": "extract_srum is in SAVVYDFIR_DISABLE_TOOLS"}
+```
+
+[`sift_mcp/server.py:6869-6870`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6869-L6870)
+
+[24] (실행 확인) `SAVVYDFIR_DISABLE_TOOLS=extract_shimcache,get_heuristic,run_analysis`로 시작한 서버를 MCP SDK 클라이언트로 부르자 도구 65개가 모두 목록에 나왔고 `extract_shimcache`는 `disabled`를, `run_analysis`는 질의 결과를 돌려주었다.

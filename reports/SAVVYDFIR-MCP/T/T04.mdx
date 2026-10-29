@@ -1,0 +1,205 @@
+---
+cell: T04
+details:
+- id: T04.01
+- id: T04.02
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 Prefetch, 브라우저 기록, 휴지통, PowerShell 기록, 예약 작업, PCA를 해석하는 도구와 사건 상태로 계산하는 도구에 적용된다 [1][2].
+`extract_prefetch`는 외부 실행 파일 없이 `pyscca` 라이브러리를 서버 프로세스에 불러 Prefetch 파일을 읽는다 [2].
+`extract_browser_history`는 브라우저 DB 사본을 서버 프로세스의 `sqlite3`로 읽기 전용으로 연다 [1].
+`extract_recycle_bin`은 `$I` 파일을 `struct`로, `extract_scheduled_tasks`는 작업 XML을 `xml.etree.ElementTree`로, `extract_powershell_history`는 기록 파일을 글자 그대로 서버 프로세스에서 읽는다 [1].
+`extract_srum`은 `esedbexport`가 내보낸 표 파일을 서버 프로세스에서 읽어 해석한다 [3].
+`compare_disk_and_memory`는 사건 상태의 발견사항과 앞선 도구 실행이 남긴 CSV를 서버 프로세스에서 대조한다 [4].
+`sigma_scan`은 사건 상태의 발견사항에 서버 코드의 탐지기를 적용한다 [5].
+`query_sigma_results`는 `sigma_hunt`가 쓴 JSON을 서버 프로세스에서 읽어 거른다 [6].
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 이 방식은 외부 도구를 실행하는 모든 도구에 적용된다 [7][8][9].
+Zimmerman 도구, Sleuth Kit, Volatility 3, Plaso, YARA를 쓰는 도구는 실행기 `SafeRunner.run`을 거친다 [7][8].
+`SafeRunner.run`은 인자 목록을 `subprocess.run`에 `shell=False`로 넘겨 셸 없이 자식 프로세스로 실행한다 [7].
+셸 메타 문자를 담은 인자는 해석되지 않고 글자 그대로 실행 파일에 넘어갔다 [10].
+`sigma_hunt`·`hayabusa_hunt`·`analyze_vss`·`extract_shimcache`·`extract_srum`·`extract_windows_artifacts`·`load_memory`와 레지스트리 하이브 정리 함수는 `SafeRunner`를 거치지 않고 `subprocess.run`이나 `subprocess.Popen`에 인자 목록을 직접 넘긴다 [9].
+이 경로들도 셸을 거치지 않는다 [9].
+`generate_graph`·`merge_host_graphs`·`build_reports_index`는 저장소의 `scripts/` 스크립트를 서버와 같은 파이썬(`sys.executable`)으로 실행한다 [11].
+`run_analysis`는 질의를 같은 파이썬의 `sift_mcp.analysis_worker` 자식 프로세스에서 평가한다 [12].
+이 자식 프로세스는 pandas를 불러오기 전에 `RLIMIT_AS`로 주소 공간을 제한하지만 계정과 파일 권한은 서버와 같다 [12].
+
+자식 프로세스는 서버의 계정과 환경변수를 그대로 물려받는다 [7][9].
+작업 위치(`cwd`)를 따로 주는 곳은 Plaso 실행과 그래프·색인 스크립트뿐이다 [13][11].
+Plaso는 서버의 작업 위치에 쓸 수 없을 때만 `/tmp`를 작업 위치로 쓰고 그래프·색인 스크립트는 저장소 루트를 작업 위치로 쓴다 [13][11].
+호출마다 새 작업 폴더를 만들어 작업 위치로 쓰는 곳은 없다.
+`analyze_vss`와 하이브 정리 함수가 만드는 임시 폴더는 마운트 위치와 입출력 폴더이고 작업 위치가 아니다 [9].
+
+외부 도구를 서버와 다른 계정으로 실행하는 코드는 도구가 실행하는 경로에 없다.
+`sudo`를 붙이는 코드는 MCP 도구 목록에 없는 `mount_image`와 마운트 명령의 인자 목록만 돌려주는 `_ntfs_mount_argv`에만 있다 [14].
+`_ntfs_mount_argv`를 MCP로 부르자 인자 목록만 돌아오고 마운트 폴더는 생기지 않았다 [15].
+컨테이너, namespace, seccomp로 외부 도구를 서버와 나누는 코드도 없다.
+
+### 근거
+
+[1] 브라우저 DB, `$I` 파일, PowerShell 기록, 예약 작업 XML은 서버 프로세스의 라이브러리와 코드로 읽는다: [`sift_mcp/tools/disk.py:6838-6842`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6838-L6842), [`sift_mcp/tools/disk.py:7530-7541`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7530-L7541), [`sift_mcp/tools/disk.py:7854`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7854), [`sift_mcp/tools/disk.py:7945`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7945).
+
+[2] `extract_prefetch`는 호출 기록에 `pyscca` 명령 표시를 남기고 `pyscca`를 불러온다.
+
+```python
+    # Use pyscca (libscca) - handles Windows 10 MAM-compressed .pf files on Linux
+    # and exposes Prefetch-native run history without relying on Windows-only PECmd.
+    records: list[PrefetchRecord] = []
+    finding_ids: list[str] = []
+    exec_id = _audit.next_execution_id()
+    started_at = time.monotonic()
+    raw_command = f"pyscca {resolved_prefetch_dir}/*.pf"
+    _audit.log_execution(
+        execution_id=exec_id,
+        tool_name=tool,
+        parameters={"prefetch_dir": resolved_prefetch_dir},
+        command_line=raw_command,
+    )
+
+    try:
+        import pyscca
+```
+
+[`sift_mcp/tools/disk.py:2762-2777`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2762-L2777)
+
+[3] `extract_srum`은 `esedbexport`로 표를 내보낸 뒤 서버 프로세스에서 `csv`로 읽는다.
+
+```python
+    export_dir = Path(str(export_base) + ".export")
+    if not export_dir.exists():
+        cmd = [
+            "esedbexport", "-m", "all",
+            "-t", str(export_base),
+            str(srudb),
+        ]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        if not export_dir.exists():
+            return {
+                "status": "error",
+                "error": "esedbexport produced no output.",
+                "stderr": proc.stderr[:500],
+            }
+
+    # ---- Parse IdMapTable to resolve AppId → executable path ---------------
+    import csv as _csv
+```
+
+[`sift_mcp/server.py:6913-6932`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6913-L6932)
+
+[4] `compare_disk_and_memory`는 사건 상태를 불러 발견사항을 읽고 앞선 실행 기록의 CSV 경로를 찾는다.
+
+```python
+    # Load state for the given case
+    try:
+        _state_mgr.load(case_id)
+    except Exception as exc:
+        return {"status": "error", "error": f"Cannot load case state: {exc}"}
+
+    # Retrieve findings by domain
+    try:
+        disk_findings = _state_mgr.get_findings(artifact_type="disk")
+        memory_findings = _state_mgr.get_findings(artifact_type="memory")
+```
+
+[`sift_mcp/tools/correlation.py:186-195`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L186-L195)
+
+같은 파일의 CSV 경로 고르기는 [`sift_mcp/tools/correlation.py:1290-1320`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L1290-L1320)에 있다.
+
+[5] `sigma_scan`은 서버 코드의 탐지기 실행 함수를 부른다.
+
+```python
+        scan = run_two_phase_scan(
+```
+
+[`sift_mcp/server.py:11284-11284`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11284-L11284)
+
+[6] `query_sigma_results`는 경로를 대조한 뒤 JSON 파일을 서버 프로세스에서 읽는다: [`sift_mcp/server.py:5434-5578`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5434-L5578).
+
+[7] `SafeRunner.run`은 인자 목록을 `shell=False`로 `subprocess.run`에 넘긴다.
+
+```python
+        try:
+            proc = subprocess.run(
+                cmd_parts,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,  # CRITICAL - never use shell=True
+                cwd=cwd,
+            )
+```
+
+[`sift_mcp/runners/base.py:495-505`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L495-L505)
+
+[8] 실행기 하위 클래스는 실행 파일과 인자 목록을 만들어 `SafeRunner.run`에 넘긴다: [`sift_mcp/runners/eztools.py:59-62`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L59-L62), [`sift_mcp/runners/eztools.py:161-165`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L161-L165), [`sift_mcp/runners/volatility.py:155-162`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L155-L162), [`sift_mcp/runners/sleuthkit.py:217-231`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L217-L231), [`sift_mcp/runners/plaso.py:159-179`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/plaso.py#L159-L179), [`sift_mcp/runners/yara_runner.py:157-164`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/yara_runner.py#L157-L164).
+
+[9] 실행기를 거치지 않는 도구는 인자 목록을 `subprocess.run`이나 `subprocess.Popen`에 직접 넘긴다: [`sift_mcp/server.py:4419-4424`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4419-L4424), [`sift_mcp/server.py:5225`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5225), [`sift_mcp/server.py:5817-5820`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5817-L5820), [`sift_mcp/server.py:5913-5930`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5913-L5930), [`sift_mcp/server.py:6656-6664`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6656-L6664), [`sift_mcp/server.py:7692-7693`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7692-L7693), [`sift_mcp/server.py:7924-7927`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7924-L7927), [`sift_mcp/server.py:10807-10819`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10807-L10819), [`sift_mcp/tools/_hive_replay.py:111-119`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_hive_replay.py#L111-L119).
+
+[10] (실행 확인) 컨테이너에서 `SafeRunner.run`에 셸 메타 문자를 담은 인자를 주자 `echo`가 그 글자를 그대로 출력했고 `timeout=1`의 `sleep 5`는 시간 제한으로 끝났다.
+
+[11] 그래프·색인 도구는 `sys.executable`로 저장소 스크립트를 실행하고 두 도구는 저장소 루트를 작업 위치로 준다: [`sift_mcp/server.py:3401-3418`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3401-L3418), [`sift_mcp/server.py:3647-3657`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3647-L3657), [`sift_mcp/server.py:3759-3769`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3759-L3769).
+
+[12] `run_analysis`는 분석 작업 프로세스를 실행하고 작업 프로세스는 주소 공간 상한을 건다.
+
+```python
+    with _ANALYSIS_LOCK:  # single active analysis child (cap math on 15GiB VM)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "sift_mcp.analysis_worker"],
+                input=req,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                start_new_session=True,  # own process group -> clean timeout kill
+            )
+```
+
+[`sift_mcp/server.py:11531-11540`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11531-L11540)
+
+```python
+    try:
+        import resource
+    except Exception:
+        return
+    if cap_bytes <= 0:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        new_hard = hard
+        if hard == resource.RLIM_INFINITY or hard > cap_bytes:
+            new_hard = cap_bytes
+        resource.setrlimit(resource.RLIMIT_AS, (cap_bytes, new_hard))
+```
+
+[`sift_mcp/analysis_worker.py:47-58`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/analysis_worker.py#L47-L58)
+
+[13] Plaso 실행기는 작업 위치에 쓸 수 없을 때만 `/tmp`를 작업 위치로 준다.
+
+```python
+        # user (e.g., project directory owned by different user), use /tmp instead.
+        # This ensures the command succeeds regardless of project directory ownership.
+        import os
+        from pathlib import Path
+        cwd_override = None
+        if not os.access(Path.cwd(), os.W_OK):
+            cwd_override = "/tmp"
+
+        return self.run(cmd, timeout=timeout, tool_name=tool_name, cwd=cwd_override)
+```
+
+[`sift_mcp/runners/plaso.py:171-179`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/plaso.py#L171-L179)
+
+[14] `sudo`는 `_ntfs_mount_argv`가 돌려주는 인자 목록과 도구로 등록되지 않은 `mount_image` 안에만 있다: [`sift_mcp/server.py:10234-10256`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10234-L10256), [`sift_mcp/server.py:10268-10271`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10268-L10271), [`sift_mcp/server.py:10697-10702`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10697-L10702).
+
+[15] (실행 확인) MCP SDK 클라이언트로 도구 목록을 받자 `_ntfs_mount_argv`는 있고 `mount_image`는 없었으며 `_ntfs_mount_argv`는 `/usr/bin/mount` 인자 목록만 돌려주었다.

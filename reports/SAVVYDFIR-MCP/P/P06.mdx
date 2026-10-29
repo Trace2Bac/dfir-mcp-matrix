@@ -1,0 +1,405 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+- id: P06.05
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 이 방식은 열린 사건, 참조 지식을 붙인 횟수, 참조 지식 글자 예산, 메모리 감시 상태, 호출 기록의 반복 차수에 적용된다 [1][2][3].
+`CaseStateManager`는 `load`로 읽은 사건 상태를 프로세스 메모리의 `_state`에 두고 `_loaded`로 사건이 열렸는지 표시한다 [1].
+열린 사건이 무엇인지는 파일에 따로 적지 않으므로 프로세스가 끝나면 사라진다 [1].
+`_tool_call_counters`는 도구마다 참조 지식을 붙인 횟수를 세어 처음 세 응답에만 `corroborate_with`를 붙이는 데 쓰고 `_fk_advisory_chars_spent`는 참조 지식 글자 예산 6000자를 센다 [2].
+메모리 감시의 마지막 경고 도구 이름과 `AuditLogger`의 반복 차수 `_current_iteration`도 프로세스 메모리에만 있다 [3][4].
+서버를 다시 시작한 프로세스에서는 `_loaded`가 `False`이고 사건 ID가 `unknown`이었다 [5].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 이 방식은 사건 상태 파일, 호출 기록 파일, 추출 결과 재사용 정보, 이미지에서 꺼낸 파일, 작업 대기열에 적용된다 [6][7][8][9][10].
+`state.json`에는 발견사항, 실행 기록, 레인, 가설, 참조 지식 인용, 캐시 항목 `cached_artifacts`, ID 카운터가 들어 있다 [6][11].
+상태를 바꿀 때마다 `state.json.tmp`에 쓴 뒤 `os.replace`로 바꿔 끼운다 [12].
+`audit.jsonl`은 항목마다 이어 쓰고 `fsync`로 디스크에 내린다 [7].
+`cached_artifacts`의 키는 도구 이름과 입력 경로, 도구마다 정한 인자로 만들고 값에는 출력 CSV 경로와 실행 ID가 들어 있다 [13][14][15].
+캐시 항목은 그 CSV 파일이 있고 크기가 0보다 클 때만 다시 쓴다 [8].
+상태 파일과 별도로 출력 CSV 옆의 `.savvyreuse.json`에 입력 파일들의 경로·크기·수정 시각을 묶은 해시, 인자 해시, 파서 표시를 적는다 [8].
+이 파일이 있고 세 값이 지금 값과 모두 같으면 파싱을 건너뛰고 CSV를 다시 쓴다 [8].
+`extract_windows_artifacts`는 사건의 `artifacts/raw`에 종류별 파일이 있으면 다시 꺼내지 않고 그 파일을 돌려준다 [9][16].
+같은 이미지에서 레지스트리와 Prefetch를 다시 요청하자 `reused_from_cache`가 `true`, `cache_validation`이 `content_presence_only_no_evidence_fingerprint`인 응답이 돌아왔다 [17].
+
+**한계.** `cached_artifacts`의 키에는 입력 파일의 크기, 수정 시각, 내용이 들어 있지 않다 [13].
+그래서 같은 경로의 입력이 바뀌어도 앞서 만든 CSV가 남아 있으면 상태 캐시가 먼저 적용되어 그 CSV를 돌려준다 [13][15].
+`extract_windows_artifacts`의 재사용은 파일이 있는지만 보고 원본 이미지와 대조하지 않는다 [9][16].
+재사용 응답의 안내는 `force_reparse=True`로 다시 파싱하라고 적지만 MCP 도구는 이 인자를 받지 않는다 [8][18].
+상태 파일 주석은 한 분석 폴더를 한 서버 프로세스만 써야 하고 여러 프로세스의 접근은 지원하지 않는다고 적는다 [19].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** 이 방식은 호출 기록의 실행 ID 카운터와 해시 체인에 적용된다 [20].
+`AuditLogger`는 만들어질 때 `audit.jsonl`을 처음부터 읽어 가장 큰 `E-NNN` 번호와 마지막 항목의 해시를 메모리에 다시 채운다 [20].
+그래서 서버를 다시 시작해도 새 실행 ID는 앞 프로세스의 번호에 이어서 매기고 새 항목의 `prev_entry_hash`는 앞 프로세스의 마지막 해시를 가리킨다 [20][21].
+마지막 항목이 `E-008`인 분석 폴더로 서버를 다시 시작하자 첫 새 항목은 `E-009`였고 `prev_entry_hash`가 이전 마지막 항목의 해시와 같았다 [5].
+
+**한계.** 사건 상태 `state.json`은 서버가 시작할 때 읽지 않는다 [1][22].
+모델이 사건 ID를 받는 도구를 불러야 상태가 다시 읽힌다 [22].
+그 전에는 발견사항을 저장하는 도구가 `CaseStateManager has not been initialised` 오류를 돌려준다 [1].
+다시 시작한 직후 `verify_integrity`는 이 오류로 끝났고 `read_state("CASE-A")`를 부른 뒤에는 성공했다 [5].
+그 사이에 부른 `extract_windows_artifacts`는 성공 응답에 실행 기록 연결 실패를 알리는 `phase7_link_warning`을 실었다 [5].
+`read_state`의 도구 설명은 조사 반복을 시작할 때마다 이 도구를 불러 서버를 다시 시작한 뒤에도 이어서 진행하라고 적는다 [23].
+JSON으로 읽히지 않는 줄은 카운터를 채울 때 알림 없이 건너뛴다 [20].
+반복 차수 `_current_iteration`은 다시 시작하면 1로 돌아간다 [4].
+
+### P06.05 만료
+
+**구현.** 이 방식은 보고서 생성이 확인하는 전문 에이전트 작업 항목 `/tmp/savvydfir_delegate.json`에 적용된다 [24].
+`_pending_delegate_is_fresh`는 항목의 `created_at`이나 파일의 수정 시각이 환경변수 `SAVVYDFIR_TRIGGER_MAX_AGE_SECONDS`(기본 21600초)보다 오래되었으면 오래된 항목으로 본다 [24].
+오래된 항목은 처리되지 않았어도 보고서 생성을 막는 대기 작업으로 보지 않는다 [25].
+
+**한계.** `SAVVYDFIR_TRIGGER_MAX_AGE_SECONDS`를 0 이하로 정하면 항목이 만료되지 않는다 [24].
+만료는 보고서 생성의 판단에만 적용되고 파일과 레인별 대기열의 항목은 지우지 않는다 [24][25].
+
+### 근거
+
+[1] `CaseStateManager`는 열린 사건을 메모리에 두고 열리지 않았으면 오류를 낸다: [`sift_mcp/state.py:93-98`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L93-L98), [`sift_mcp/state.py:1362-1367`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1362-L1367), [`sift_mcp/state.py:873-876`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L873-L876).
+
+[2] 참조 지식을 붙인 횟수와 글자 예산은 모듈 변수다.
+
+```python
+# Per-session call counter - resets when Claude session restarts (correct behaviour)
+_tool_call_counters: dict[str, int] = {}
+
+# ITEM A (FK-wiring review): session-level char budget for the additive
+# advisory_* envelope reference, ON TOP of the per-tool first-3-calls decay.
+# Per-tool decay alone can't protect a 15-tool triage pass (4 memory tools in
+# one batch each open their own first-3 window against volatility_memory).
+_FK_ADVISORY_BUDGET_CHARS = 6000
+_fk_advisory_chars_spent = 0
+```
+
+[`sift_mcp/server.py:409-417`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L409-L417)
+
+[3] 메모리 감시 상태.
+
+```python
+_MEM_WATCHDOG_WARN_MB = 4096   # log a warning row at 4 GB RSS
+_MEM_WATCHDOG_CRIT_MB = 6144   # log a critical row + force gc at 6 GB RSS
+_MEM_WATCHDOG_STATE: dict[str, Any] = {"last_warn_tool": "", "last_crit_tool": ""}
+```
+
+[`sift_mcp/server.py:1381-1383`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1381-L1383)
+
+[4] 반복 차수는 객체를 만들 때 1로 둔다.
+
+```python
+    def __init__(self, output_path: str = "./analysis/audit.jsonl") -> None:
+        self.output_path = Path(output_path).resolve()
+        self._lock = threading.RLock()
+        self._execution_counter: int = 0
+        self._current_iteration: int = 1
+        self._last_entry_hash: Optional[str] = None
+
+        # Initialise counter from existing file so IDs remain monotonic
+        # across server restarts.
+        self._sync_counter_from_file()
+```
+
+[`sift_mcp/audit.py:85-94`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L85-L94)
+
+[5] (실행 확인) run1이 쓴 분석 폴더로 새 프로세스에서 서버 모듈을 불러 `_loaded`, `verify_integrity`, `extract_windows_artifacts`, `read_state`의 결과와 새 호출 기록 항목의 실행 ID·`prev_entry_hash`를 확인했다.
+
+[6] 새 사건 상태의 항목: [`sift_mcp/state.py:1622-1682`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1622-L1682).
+
+[7] 호출 기록은 이어 쓰고 `fsync`한다.
+
+```python
+            sealed = self._seal_entry(entry)
+            line = json.dumps(sealed, ensure_ascii=False, default=str) + "\n"
+
+            # Open in append mode so we never truncate existing entries.
+            with self.output_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                # Force kernel buffer to disk so a crash cannot lose the entry.
+                import os as _os
+                _os.fsync(fh.fileno())
+            self._last_entry_hash = sealed["entry_hash"]
+            return sealed
+
+```
+
+[`sift_mcp/audit.py:584-596`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L584-L596)
+
+[8] 재사용 정보 파일과 재사용 판정: [`sift_mcp/tools/_cache.py:21-45`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L21-L45), [`sift_mcp/tools/_cache.py:286-438`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L286-L438).
+
+```python
+def get_valid_cached_artifact(
+    state_manager: CaseStateManager,
+    cache_key: str,
+    *,
+    path_key: str,
+    required_keys: Optional[Iterable[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """Return cached metadata only when the backing artifact still exists."""
+    cached = state_manager.get_artifact_cache(cache_key)
+    if not isinstance(cached, dict):
+        return None
+
+    for key in required_keys or ():
+        if key not in cached or cached[key] is None or cached[key] == "":
+            return None
+
+    artifact_path = cached.get(path_key)
+    if not isinstance(artifact_path, str) or not artifact_path:
+        return None
+
+    path = Path(artifact_path)
+    if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+        return None
+
+    return cached
+```
+
+[`sift_mcp/tools/_cache.py:21-45`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L21-L45)
+
+[9] `extract_windows_artifacts`는 꺼낸 파일이 있는 종류를 다시 꺼내지 않는다.
+
+```python
+    reused_paths: dict[str, list[str]] = {}
+    if not force_reextract:
+        for _fam in sorted(selected):
+            try:
+                _hit = _probe_durable_raw(raw_base, _fam)
+            except Exception:
+                _hit = None
+            if _hit:
+                files = _reused_family_paths(_hit)
+                if files:
+                    reused_paths[_fam] = files
+    missing_families = sorted(set(selected) - set(reused_paths))
+    full_cache_hit = bool(selected) and not force_reextract and not missing_families
+    if full_cache_hit:
+        command_line = (
+            f"extract_windows_artifacts(cache_hit content_presence_only "
+            f"families={sorted(selected)})"
+        )
+```
+
+[`sift_mcp/server.py:7743-7760`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7743-L7760)
+
+[10] 작업 대기열 파일: [`scripts/delegate_queue.py:33-200`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/delegate_queue.py#L33-L200).
+
+[11] 캐시 항목을 상태 파일에 쓴다.
+
+```python
+    def cache_artifact(
+        self, cache_key: str, result_summary: dict[str, Any]
+    ) -> None:
+        """Persist a cached artifact summary for idempotent tool reuse."""
+        with self._lock:
+            self._assert_loaded()
+            self._state.setdefault("cached_artifacts", {})
+            self._state["cached_artifacts"][cache_key] = {
+                "timestamp": _utcnow_iso(),
+                **dict(result_summary),
+            }
+            self._save_locked()
+
+    def get_artifact_cache(self, cache_key: str) -> Optional[dict[str, Any]]:
+        """Return a cached artifact summary by key, or ``None``."""
+        with self._lock:
+            self._assert_loaded()
+            cached = self._state.get("cached_artifacts", {}).get(cache_key)
+            # MCP segfault fix 2026-05-23.
+            return copy.deepcopy(cached) if isinstance(cached, dict) else None
+```
+
+[`sift_mcp/state.py:878-897`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L878-L897)
+
+[12] 상태 파일은 임시 파일에 쓴 뒤 바꿔 끼운다.
+
+```python
+    def _save_locked(self) -> None:
+        """Write state to disk atomically.  Caller must hold ``_lock``."""
+        self._state["updated_at"] = _utcnow_iso()
+
+        target = self._state_path
+        tmp = target.with_suffix(".json.tmp")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        serialised = json.dumps(
+            self._state, ensure_ascii=False, indent=2, default=str) + "\n"
+
+        try:
+            tmp.write_text(serialised, encoding="utf-8")
+            os.replace(str(tmp), str(target))
+        except OSError as exc:
+            raise CaseStateError(
+                f"Failed to save state to {target}: {exc}"
+            ) from exc
+        finally:
+            # Remove tmp file if rename failed.
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+```
+
+[`sift_mcp/state.py:1369-1393`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1369-L1393)
+
+[13] `extract_mft_timeline`의 캐시 키는 도구 이름과 입력 경로다.
+
+```python
+    cache_key = build_cache_key(tool, {"mft_path": resolved_mft_path})
+    cached = get_valid_cached_artifact(
+        _state,
+        cache_key,
+        path_key="csv_path",
+        required_keys=("csv_path", "source_execution_id",
+                       "timestomping_candidates"),
+    )
+```
+
+[`sift_mcp/tools/disk.py:3266-3273`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3266-L3273)
+
+[14] `build_cache_key`는 도구 이름과 인자 `dict`의 해시로 키를 만들고 `summarize_evtx`는 이벤트 ID 선택 방식, `extract_registry_run_keys`는 배치 방식과 사용자 하이브 목록, `build_timeline`은 파서 목록도 인자에 넣는다: [`sift_mcp/tools/_cache.py:12-16`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L12-L16), [`sift_mcp/tools/disk.py:4454-4467`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4454-L4467), [`sift_mcp/tools/disk.py:5112-5122`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5112-L5122), [`sift_mcp/tools/timeline.py:308-314`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L308-L314).
+
+[15] 캐시 항목에 CSV 경로와 실행 ID를 넣는다.
+
+```python
+    if durable_csv:
+        _state.cache_artifact(
+            cache_key,
+            {
+                "source_execution_id": result.execution_id,
+                "csv_path": durable_csv,
+                "findings_created": finding_ids,
+                "requires_agent": response.get("requires_agent"),
+                "agent_instruction": response.get("agent_instruction"),
+                "timestomping_candidates": timestomping_candidates,
+                "total_records": total_records,
+            },
+        )
+```
+
+[`sift_mcp/tools/disk.py:3561-3573`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3561-L3573)
+
+[16] 재사용 응답은 파일 존재만 확인했다고 표시한다: [`sift_mcp/server.py:7781-7844`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7781-L7844).
+
+[17] (실행 확인) 컨테이너 안에서 만든 ext4 이미지로 `extract_windows_artifacts`를 두 번 불러 두 번째 응답의 재사용 표시를 확인했다.
+
+[18] MCP 도구 정의에는 `force_reparse`가 없다(`git grep -n force_reparse 9ac8e47 -- sift_mcp/server.py`의 결과 0건): [`sift_mcp/server.py:1727-1795`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1727-L1795).
+
+[19] 여러 프로세스의 접근을 지원하지 않는다는 주석.
+
+```python
+class CaseStateManager:
+    """Manages the authoritative JSON state file for a DFIR case.
+
+    Parameters
+    ----------
+    state_path:
+        Path to the state JSON file.  Defaults to
+        ``"./analysis/state.json"``.  Parent directories are created when
+        the state is first saved.
+
+    Thread safety
+    -------------
+    A reentrant lock serialises all reads and writes within a single process.
+    Cross-process access is not supported; only one MCP server instance
+    should own a given case directory.
+    """
+```
+
+[`sift_mcp/state.py:76-91`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L76-L91)
+
+[20] 시작할 때 호출 기록에서 카운터와 마지막 해시를 다시 채운다: [`sift_mcp/audit.py:616-657`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L616-L657).
+
+[21] 새 항목은 마지막 해시를 `prev_entry_hash`로 잇는다.
+
+```python
+    def _seal_entry(self, entry: AuditEntry) -> AuditEntry:
+        """Attach forward-only hash-chain metadata to a newly written entry."""
+        sealed = dict(entry)
+        sealed["schema_version"] = _SCHEMA_VERSION
+        sealed["prev_entry_hash"] = self._last_entry_hash
+        sealed["entry_hash"] = self._compute_entry_hash(sealed)
+        return sealed
+```
+
+[`sift_mcp/audit.py:597-603`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L597-L603)
+
+[22] 서버는 불러올 때 상태 관리자를 만들기만 하고 사건 ID를 받는 도구가 `load`를 부른다.
+
+```python
+_audit_logger = AuditLogger(output_path=str(_ANALYSIS_DIR / "audit.jsonl"))
+_state_manager = CaseStateManager(state_path=str(_ANALYSIS_DIR / "state.json"))
+```
+
+[`sift_mcp/server.py:176-177`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L176-L177)
+
+[23] `read_state`의 도구 설명은 서버를 다시 시작한 뒤 이어서 진행하려면 이 도구를 부르라고 적는다.
+
+```python
+
+    Call this at the start of each triage iteration to resume correctly
+```
+
+[`sift_mcp/server.py:3011-3012`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3011-L3012)
+
+[24] 작업 항목의 만료 판단.
+
+```python
+def _pending_delegate_is_fresh(
+    pending_delegate: dict[str, Any], *, delegate_file: Path
+) -> bool:
+    try:
+        max_age_seconds = int(
+            os.environ.get("SAVVYDFIR_TRIGGER_MAX_AGE_SECONDS", "21600") or "21600"
+        )
+    except ValueError:
+        max_age_seconds = 21600
+    if max_age_seconds <= 0:
+        return True
+
+    created_at = _parse_iso8601(pending_delegate.get("created_at"))
+    if created_at is None:
+        modified_at = datetime.fromtimestamp(
+            delegate_file.stat().st_mtime, tz=timezone.utc
+        )
+    else:
+        modified_at = created_at
+    age_seconds = (datetime.now(timezone.utc) - modified_at).total_seconds()
+    return age_seconds <= max_age_seconds
+```
+
+[`sift_mcp/reporting.py:53-73`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L53-L73)
+
+[25] 오래된 항목은 대기 작업으로 보지 않는다.
+
+```python
+def _pending_delegate_blocks_case(
+    pending_delegate: dict[str, Any], *, case_id: str, delegate_file: Path
+) -> bool:
+    if pending_delegate.get("processed") is not False:
+        return False
+    if not _pending_delegate_is_fresh(pending_delegate, delegate_file=delegate_file):
+        return False
+    pending_case_id = str(pending_delegate.get("case_id") or "").strip()
+    if pending_case_id and pending_case_id != case_id:
+        return False
+    # DEFECT-3: stale-dismissed and processed
+    # entries should not block. The status field is authoritative; the
+    # legacy processed boolean is checked above.
+    status = str(pending_delegate.get("status") or "").lower()
+    if status in {"processed", "stale_dismissed"}:
+        return False
+    return True
+
+```
+
+[`sift_mcp/reporting.py:76-93`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L76-L93)

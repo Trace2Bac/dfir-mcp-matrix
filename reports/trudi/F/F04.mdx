@@ -12,6 +12,7 @@ details:
 - id: F04.09
 - id: F04.10
 - id: F04.11
+- id: F04.12
 ---
 
 # F04 발견사항·결론 기록 관리
@@ -157,6 +158,20 @@ details:
 `input_call_ids`를 주지 않으면 마지막 `dair.assess` 호출 ID로 채운다 [58].
 
 **한계.** 대상 ID는 200자, 메모는 500자에서 잘려 저장되고 응답에는 잘렸다는 표시가 없다 [58][59].
+
+### F04.12 저장 시 같은 제출 확인
+
+**구현.** 이 방식은 `misc.submit_finding`에 적용된다 [11].
+서버는 모델이 준 `idempotency_key`가 비었거나 200자를 넘으면 `invalid`로 거부하고 요청 내용과 `selectors`로 요청 해시를 계산한다 [60].
+`_existing`은 같은 키로 남은 제출 항목 `finding_submission`과 그 키로 저장한 발견사항을 호출 기록에서 찾는다 [61].
+같은 키에 요청 해시가 다른 항목이 하나라도 있으면 `invalid` 상태와 `Idempotency key was already used for a different request` 오류로 거부한다 [61][62].
+같은 키와 같은 요청 해시로 저장한 발견사항이 있으면 새로 저장하지 않고 그 발견사항의 `finding_id`, `revision`, 지금 버전인지를 `cached` 참과 함께 돌려준다 [61].
+같은 키의 마지막 제출 항목이 심사 중 상태 `reviewing`이고 `lease_until`이 지나지 않았으면 `retryable-review-failure` 상태와 같은 키로 나중에 다시 시도하라는 문구를 돌려준다 [61].
+앞 제출이 `needs-evidence` 같은 거부로 끝났으면 같은 키와 같은 요청으로 다시 심사한다 [61].
+이 확인은 첫 사전 점검 전과 검토 자료를 만든 뒤 두 번째 점검 전에 거친다 [63].
+검토가 끝난 뒤 같은 키로 저장한 발견사항이 이미 있으면 새로 저장하지 않고 이 확인의 결과를 돌려준다 [63].
+제출 항목에는 키, 요청 해시, 상태가 남고 저장한 발견사항에는 `submission_key`와 `submission_request_hash`가 들어간다 [64][65].
+`misc.record_finding`과 `misc.record_agent_message`의 `findings`에는 키 인자가 없어 이 확인을 거치지 않는다 [55][3].
 
 ### 근거
 
@@ -1434,3 +1449,90 @@ def validate(target_kind: str, target_id: str, reason: str) -> str:
 ```
 
 [`tools/misc.py:1578-1582`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1578-L1582)
+
+[60] 제출 함수는 키의 길이를 검사하고 요청과 `selectors`로 요청 해시를 만든다.
+
+```python
+def submit(log, request, key, selectors=None):
+    if not isinstance(key, str) or not key.strip() or len(key) > 200:
+        return _failure('invalid', 'Provide a nonempty idempotency_key of at most 200 characters')
+    request_hash = request_identity([request, selectors or []])
+```
+
+[`core/finding_submission.py:189-192`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L189-L192)
+
+[61] `_existing`은 같은 키의 항목을 모아 요청 해시를 대조하고 저장한 발견사항이나 심사 중 상태를 돌려준다.
+
+```python
+def _existing(log, key, request_hash):
+    rows = [e for e in log._entries if e.get('submission_key') == key or
+            (e.get('type') == 'finding_submission' and e.get('idempotency_key') == key)]
+    if any(e.get('submission_request_hash', e.get('request_hash')) != request_hash for e in rows):
+        raise PacketError('Idempotency key was already used for a different request')
+    finding = next((e for e in rows if e.get('type') == 'finding'), None)
+    if finding:
+        from core.findings import active_findings
+        return {'success': True, 'status': 'recorded', 'cached': True,
+                '_trudi_call_id': finding['call_id'], 'finding_id': finding['finding_id'],
+                'revision': finding['revision'],
+                'currently_active': any(e['call_id'] == finding['call_id'] for e in active_findings(log._entries))}
+    if rows and rows[-1].get('status') == 'reviewing' and rows[-1].get('lease_until', 0) > time.time():
+        return {'success': False, 'status': 'retryable-review-failure', 'retryable': True,
+                'error': 'This submission is already being reviewed; retry the same key later'}
+    return None
+```
+
+[`core/finding_submission.py:150-165`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L150-L165)
+
+[62] 제출 중 난 `PacketError`는 그 상태 값으로 응답에 실리고 기본 상태는 `invalid`다.
+
+```python
+class PacketError(ValueError):
+    def __init__(self, message, status='invalid'):
+        super().__init__(message)
+        self.status = status
+```
+
+[`core/evidence_packets.py:22-25`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/evidence_packets.py#L22-L25)
+
+```python
+    except Exception as exc:
+        status = exc.status if isinstance(exc, PacketError) else 'retryable-review-failure'
+        if case_identity(log) == configured:
+            with log.transaction():
+                latest = next((e for e in reversed(log._entries) if e.get('type') == 'finding_submission'
+                               and e.get('idempotency_key') == key), {})
+                if latest.get('owner') == owner:
+                    _event(log, key, request_hash, status, owner=owner, error=str(exc))
+        return _failure(status, str(exc))
+```
+
+[`core/finding_submission.py:305-313`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L305-L313)
+
+[63] 제출 함수는 사전 점검 전, 두 번째 점검 전, 저장 직전에 같은 키를 확인한다: [`core/finding_submission.py:199-201`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L199-L201), [`core/finding_submission.py:220-222`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L220-L222), [`core/finding_submission.py:259-262`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L259-L262).
+
+[64] 제출 항목에는 키, 요청 해시, 상태를 남긴다.
+
+```python
+def _event(log, key, request_hash, status, **extra):
+    from core.execution_log import _utcnow
+    cid = log._next_id()
+    log._append_entry({'type': 'finding_submission', 'call_id': cid, 'ts': _utcnow(),
+                       'idempotency_key': key, 'request_hash': request_hash,
+                       'status': status, **extra})
+    return cid
+```
+
+[`core/finding_submission.py:141-147`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/core/finding_submission.py#L141-L147)
+
+[65] 저장하는 발견사항 항목에 제출 키와 요청 해시를 넣는다.
+
+```python
+    gate_metadata = {}
+    if submission:
+        gate_metadata.update({k: submission[k] for k in
+                              ('submission_key', 'submission_request_hash', 'evidence_packet_id')})
+        gate_metadata['gated_by_evaluate_call_id'] = submission['review_call_id']
+```
+
+[`tools/misc.py:1831-1835`](https://github.com/nebulae/trudi/blob/88fbca78186b6a0ca40423cf5e37a9dc46ae051e/tools/misc.py#L1831-L1835)

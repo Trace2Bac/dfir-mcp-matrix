@@ -1,0 +1,520 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.02
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 디스크 아티팩트 추출 도구, `extract_windows_artifacts`, `extract_srum`·`extract_shimcache`, `load_memory`, 보고서·그래프 도구에 적용된다 [1][2][3][4][5][6][7].
+`extract_prefetch`·`get_amcache`·`extract_mft_timeline`·`summarize_evtx`·`extract_registry_run_keys`는 파싱 전에 `_preflight_artifact_persistence`로 출력 폴더를 만들고 시험 파일을 써 본다 [1][8].
+쓸 수 없으면 외부 도구 실행이나 파싱을 시작하지 않고 `status: error`와 `artifact_persistence.status: transient`, 고칠 방법 `fix_hint`를 돌려준다 [1].
+사건 폴더의 `artifacts/mft`를 읽기 전용으로 바꾸고 `extract_mft_timeline`을 부르자 이 오류를 돌려받았다 [9].
+파싱 뒤 CSV 복사가 실패하면 `_persist_csv`는 임시 경로를 돌려주고 `_finalize_artifact_persistence`는 그 경로를 영구 위치가 아닌 것으로 판정한다 [10].
+그러면 응답의 `status`는 `warning`, `csv_path`는 비고 `warning` 문구와 `artifact_persistence.status: transient`가 실린다 [2][10].
+사용자 활동 추출 도구는 같은 경우 `status: warning`과 다시 실행하라는 `note`를 싣는다 [11].
+
+`extract_windows_artifacts`는 `icat`이 실패하거나 시간 제한을 넘거나 대상 파일을 열지 못하면 그 파일을 `failures`에 넣고 다음 파일로 간다 [3].
+실패하거나 시간 제한을 넘은 파일은 반쯤 쓴 대상 파일을 지운다 [3].
+실패나 빈 종류가 있으면 응답의 `status`는 `partial_success`, 꺼낸 파일이 하나도 없으면 `warning`이다 [12].
+`extract_srum`은 네트워크 CSV를 쓰다 `OSError`가 나면 `csv_path`를 비우고 `agent_instruction`에 CSV 저장이 실패했다고 적는다 [4].
+이때 `status`는 `success`로 남는다 [4].
+`generate_graph`는 출력 폴더를 만들지 못하면 오류 응답을 돌려준다 [7].
+`generate_report`는 보고서 파일 쓰기 예외를 따로 처리하지 않으므로 바깥 `except`가 `status: error`로 돌려준다 [6].
+`extract_shimcache`·`extract_srum`은 `/cases` 아래 폴더를 만들다 난 예외를 처리하지 않아 호출이 오류로 끝난다 [13][14].
+`/cases`에 쓸 수 없는 환경에서 MCP 클라이언트로 두 도구를 부르자 `is_error`가 참인 결과와 `Permission denied: '/cases'` 문구를 돌려받았다 [15].
+`load_memory`는 `7z`가 0이 아닌 값으로 끝나면 표준 오류를 담은 오류 응답을 돌려주고 풀 폴더를 만들다 난 예외도 오류 응답으로 바꾼다 [5].
+
+### D05.02 저장 확인·검증
+
+**구현.** 이 방식은 재사용 판단을 하는 디스크 아티팩트 추출 도구와 `build_timeline`에 적용된다 [16][17][18].
+`extract_mft_timeline`·`extract_usn_journal`·`summarize_evtx`와 사용자 활동 추출 도구는 CSV가 영구 위치에 남았을 때만 재사용 부속 자료를 쓴다 [16].
+사용자 활동 추출 도구는 파싱 실패가 하나라도 있거나 행이 0개여도 부속 자료를 쓰지 않는다 [16].
+다음 호출은 스키마 2 부속 자료가 있고 그 값이 맞을 때만 앞 CSV를 완료된 결과로 다시 쓴다 [17].
+상태 캐시 항목도 CSV가 영구 위치에 남았을 때만 `state.json`에 쓴다 [19].
+`build_timeline`은 `log2timeline.py`가 끝난 뒤 `pinfo.py`로 저장 파일을 다시 읽고 이벤트 수를 얻는다 [18].
+이벤트 수가 0이면 오류를 돌려주고 상태 캐시에 올리지 않는다 [18].
+
+**한계.** 확인 없이 앞 결과를 쓰는 경로가 있다.
+상태 캐시는 항목이 있으면 CSV가 있고 비어 있지 않은지만 보고 다시 쓴다 [20].
+`extract_windows_artifacts`의 재사용은 종류별 폴더에 정해 둔 파일이 있는지만 보고 응답에 `content_presence_only_no_evidence_fingerprint`를 적는다 [21].
+`extract_srum`은 내보내기 폴더가 이미 있으면 `esedbexport`를 실행하지 않고 그 폴더를 쓴다 [22].
+`build_timeline`은 `pinfo.py`가 실패하거나 이벤트 수를 읽지 못해도 `pinfo_validation_error`만 적고 계속한다 [18].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `list_deleted_files`, `list_processes`·`scan_processes`의 상세 응답, 재사용 부속 자료 쓰기에 적용된다 [23][24][25].
+`list_deleted_files`는 JSON 파일 쓰기에서 난 `OSError`를 처리해 `storage_path`를 비우고 `status: success`를 돌려준다 [23].
+요약 응답의 `note`에서는 파일 위치 문장만 빠지고 실패를 알리는 문구는 없다 [23].
+`deleted_files.json` 자리에 폴더를 만들어 두고 `list_deleted_files`를 부르자 `status: success`, `storage_path: null`, `warning: null`이 돌아왔다 [26].
+메모리 CSV 저장 함수는 모든 예외를 처리해 `None`을 돌려주고 `list_processes`·`scan_processes`는 `status: success`를 그대로 둔다 [24].
+요약 응답은 데이터 위치 자리에 `not persisted`를 적지만 상세 응답에는 저장 실패가 실리지 않는다 [24].
+`write_reuse_sidecar_v2`는 부속 자료 쓰기 `OSError`를 처리해 아무것도 알리지 않는다 [25].
+
+### 근거
+
+[1] 출력 폴더 쓰기 시험이 실패하면 외부 도구 실행이나 파싱 전에 오류를 돌려준다: [`sift_mcp/tools/disk.py:194-256`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L194-L256).
+
+```python
+    preflight = _preflight_artifact_persistence("mft", "mft_timeline.csv")
+    if not preflight.get("ok"):
+        return _artifact_preflight_error(tool_name=tool, preflight=preflight)
+```
+
+[`sift_mcp/tools/disk.py:3262-3264`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3262-L3264)
+
+[2] `extract_mft_timeline`은 영구 CSV가 없으면 `warning` 상태와 문구를 싣는다.
+
+```python
+        "status": "success" if durable_csv else "warning",
+```
+
+[`sift_mcp/tools/disk.py:3513-3513`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3513-L3513)
+
+```python
+    if not durable_csv:
+        response["warning"] = (
+            "MFT rows were parsed successfully, but the CSV output could not be persisted to a "
+            "durable artifact path."
+        )
+```
+
+[`sift_mcp/tools/disk.py:3556-3560`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3556-L3560)
+
+[3] `icat` 실패와 시간 제한은 `failures`에 넣고 반쯤 쓴 파일을 지운다.
+
+```python
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.communicate()
+                        failures.append({
+                            "family": family,
+                            "source_path": source_path,
+                            "meta_addr": meta_addr,
+                            "stderr": "icat timeout after 300s",
+                        })
+                        try:
+                            target.unlink()
+                        except OSError:
+                            pass
+                        continue
+```
+
+[`sift_mcp/server.py:7930-7943`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7930-L7943)
+
+```python
+            if proc.returncode != 0:
+                failures.append({
+                    "family": family,
+                    "source_path": source_path,
+                    "meta_addr": meta_addr,
+                    "stderr": stderr_buf.decode("utf-8", errors="replace")[-500:] if isinstance(stderr_buf, (bytes, bytearray)) else "",
+                })
+                try:
+                    target.unlink()  # don't leave a half-written file
+                except OSError:
+                    pass
+```
+
+[`sift_mcp/server.py:7953-7963`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7953-L7963)
+
+[4] `extract_srum`은 네트워크 CSV 쓰기 실패를 응답 문구로만 알린다: [`sift_mcp/server.py:7025-7033`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7025-L7033), [`sift_mcp/server.py:7130-7152`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7130-L7152).
+
+```python
+        ) if network_csv_path else (
+            "SRUM parsed but CSV persistence failed. Analyze top_senders in-context."
+        ),
+```
+
+[`sift_mcp/server.py:7150-7152`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7150-L7152)
+
+[5] `load_memory`는 `7z` 실패와 그 밖의 예외를 오류 응답으로 돌려준다.
+
+```python
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            proc = _sp.run(
+                ["/usr/bin/7z", "x", str(dump), f"-o{output_dir}", "-y"],
+                capture_output=True, text=True, timeout=600
+            )
+            if proc.returncode != 0:
+                return ToolResult(
+                    status="error", tool="load_memory",
+                    error=f"Extraction failed: {proc.stderr}",
+                ).model_dump()
+```
+
+[`sift_mcp/server.py:10815-10824`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10815-L10824)
+
+```python
+    except Exception as exc:
+        return ToolResult(
+            status="error", tool="load_memory", error=str(exc),
+        ).model_dump()
+```
+
+[`sift_mcp/server.py:10866-10869`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10866-L10869)
+
+[6] `generate_report`는 보고서 쓰기를 포함한 예외를 오류 응답으로 바꾼다: [`sift_mcp/reporting.py:3821-3822`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3821-L3822), [`sift_mcp/server.py:10203-10226`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10203-L10226).
+
+```python
+        return {"status": "error", "error": str(exc), "tool": "generate_report"}
+```
+
+[`sift_mcp/server.py:10226-10226`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10226-L10226)
+
+[7] `generate_graph`는 출력 폴더를 만들지 못하면 오류 결과를 만든다.
+
+```python
+        try:
+            resolved_output.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            result = {"status": "error", "error": f"Cannot create output directory: {exc}"}
+```
+
+[`sift_mcp/server.py:3396-3399`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3396-L3399)
+
+[8] 출력 폴더 쓰기 시험을 부르는 도구 다섯 곳이다: [`sift_mcp/tools/disk.py:2758-2760`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2758-L2760), [`sift_mcp/tools/disk.py:3013-3016`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3013-L3016), [`sift_mcp/tools/disk.py:3262-3262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3262-L3262), [`sift_mcp/tools/disk.py:4405-4405`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4405-L4405), [`sift_mcp/tools/disk.py:5072-5073`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5072-L5073).
+
+[9] (실행 확인) `artifacts/mft` 폴더를 `chmod 555`로 바꾸고 새 상태에서 `extract_mft_timeline`을 부르자 `status: error`, `artifact_persistence.status: transient`, `Permission denied` 문구가 돌아왔고 시험용 `dotnet`은 실행되지 않았다.
+
+[10] 복사 실패는 임시 경로로 돌아오고 임시 경로나 없는 경로는 `transient`로 판정한다: [`sift_mcp/tools/disk.py:258-299`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L258-L299).
+
+```python
+def _persist_csv(tmp_csv_path: str, tool_short_name: str) -> str:
+    """Copy a tempdir CSV to a persistent artifact path and return the new path.
+
+    Pattern: $OUTPUT_BASE/<case_id>/artifacts/<tool_short_name>/<filename>
+    Allows run_analysis() to query the full dataset after the tool returns.
+    Returns the persistent path on success, original path on failure.
+    """
+    import shutil as _shutil
+    src_path = Path(tmp_csv_path)
+    if not src_path.exists():
+        return tmp_csv_path
+    base = _artifact_output_dir(tool_short_name)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        dest = base / src_path.name
+        _shutil.copy2(str(src_path), str(dest))
+        return str(dest)
+    except OSError:
+        return tmp_csv_path
+```
+
+[`sift_mcp/tools/disk.py:309-327`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L309-L327)
+
+[11] 사용자 활동 추출 도구의 상태는 파싱 실패와 영구 CSV 여부로 정한다.
+
+```python
+    if parser_failures:
+        status = "partial_collection"
+        audit_exit = 1
+    elif not durable_csv:
+        status = "warning"
+        audit_exit = 0
+    else:
+        status = "success"
+        audit_exit = 0
+```
+
+[`sift_mcp/tools/disk.py:6156-6164`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6156-L6164)
+
+[12] 꺼낸 파일 수, 실패, 빈 종류로 상태를 정한다.
+
+```python
+        if total_artifacts_staged == 0:
+            status_value = "warning"
+        elif failures or families_empty:
+            status_value = "partial_success"
+        else:
+            status_value = "ok"
+```
+
+[`sift_mcp/server.py:8002-8007`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8002-L8007)
+
+[13] `extract_shimcache`는 `/cases/shimcache` 폴더를 `try` 밖에서 만든다.
+
+```python
+    output_dir = Path(f"/cases/shimcache/{case_id}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_in = tmp_out = None
+    try:
+```
+
+[`sift_mcp/server.py:6646-6650`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6646-L6650)
+
+[14] `extract_srum`은 `/cases/srum` 폴더를 `try` 없이 만든다.
+
+```python
+    safe_case = re.sub(r"[^a-zA-Z0-9]", "_", case_id)[:20]
+    export_base = Path(f"/cases/srum/{safe_case}")
+    export_base.parent.mkdir(parents=True, exist_ok=True)
+```
+
+[`sift_mcp/server.py:6908-6910`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6908-L6910)
+
+[15] (실행 확인) MCP Python SDK 2.2.0 클라이언트로 서버를 실행하고 `start_investigation` 뒤 `SRUDB.dat`·`SYSTEM` 시험 파일이 있는 폴더로 `extract_srum`·`extract_shimcache`를 부르자 둘 다 `is_error`가 참이고 `Error calling tool ...: [Errno 13] Permission denied: '/cases'`를 돌려받았다.
+
+[16] 부속 자료는 깨끗한 성공에서만 쓴다.
+
+```python
+    # No-poisoned-cache: write the v2 reuse sidecar ONLY on a clean success
+    # (durable CSV present, zero parser failures, rows > 0). A partial_collection
+    # / persistence-failure / zero-row outcome NEVER writes a sidecar, so the
+    # next run re-parses.
+    if (status == "success" and durable_csv and total_rows > 0
+            and reuse_source_paths and reuse_parser_signature is not None):
+        write_reuse_sidecar_v2(
+            durable_csv, tool_name=tool,
+            parser_signature=reuse_parser_signature,
+            source_paths=reuse_source_paths,
+            parameters=reuse_parameters or {},
+        )
+```
+
+[`sift_mcp/tools/disk.py:6166-6177`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6166-L6177)
+
+```python
+        # F-A: stamp a source-fingerprint sidecar next to the durable CSV so a
+        # later run (after state clear) can verify-and-reuse instead of re-parsing.
+        if durable_csv:
+            write_reuse_sidecar_v2(
+                durable_csv, tool_name=tool, parser_signature=_PARSER_SIG_MFT,
+                source_paths=[resolved_mft_path], parameters={"mft_path": resolved_mft_path},
+            )
+```
+
+[`sift_mcp/tools/disk.py:3487-3493`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3487-L3493)
+
+[17] 재사용은 스키마 2 부속 자료와 값이 모두 맞을 때만 한다.
+
+```python
+    probe = probe_durable_output_csv(output_base, case_id, subtype, filename=canonical_filename)
+    if not probe:
+        return None
+    csv_path = probe["csv_path"]
+
+    sidecar = _read_reuse_sidecar(csv_path)
+    # Strict: require a v2 sidecar. No sidecar, or a v1 sidecar -> no reuse.
+    if not isinstance(sidecar, dict) or sidecar.get("schema") != _SIDECAR_SCHEMA_V2:
+        return None
+    if sidecar.get("parser_signature") != parser_signature:
+        return None
+    if sidecar.get("parameter_fingerprint") != build_parameter_fingerprint(parameters):
+        return None
+    current_sources = build_source_set_fingerprint(source_paths)
+    prior_sources = sidecar.get("source_set_fingerprint")
+    if (not isinstance(prior_sources, dict)
+            or prior_sources.get("manifest_sha256") != current_sources.get("manifest_sha256")):
+        return None
+```
+
+[`sift_mcp/tools/_cache.py:403-420`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L403-L420)
+
+[18] `build_timeline`은 `pinfo.py`로 이벤트 수를 확인하고 0이면 오류를 돌려준다: [`sift_mcp/tools/timeline.py:395-433`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L395-L433).
+
+```python
+    if pinfo_event_count == 0:
+        return {
+            "status": "error",
+            "error": (
+                f"log2timeline produced a Plaso file with zero events at {storage_path}. "
+                "Source path is empty, parsers failed silently, or the source "
+                "was unreadable. Inspect log2timeline stderr and re-run."
+            ),
+            "storage_path": storage_path,
+            "exit_code": 0,
+            "execution_id": result.execution_id,
+            "pinfo_validated": True,
+        }
+```
+
+[`sift_mcp/tools/timeline.py:421-433`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L421-L433)
+
+[19] 상태 캐시 항목은 영구 CSV가 있을 때만 쓴다.
+
+```python
+    if durable_csv:
+        _state.cache_artifact(
+            cache_key,
+            {
+                "source_execution_id": result.execution_id,
+```
+
+[`sift_mcp/tools/disk.py:3561-3565`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3561-L3565)
+
+[20] 상태 캐시는 파일이 있고 크기가 0이 아니면 돌려준다.
+
+```python
+def get_valid_cached_artifact(
+    state_manager: CaseStateManager,
+    cache_key: str,
+    *,
+    path_key: str,
+    required_keys: Optional[Iterable[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """Return cached metadata only when the backing artifact still exists."""
+    cached = state_manager.get_artifact_cache(cache_key)
+    if not isinstance(cached, dict):
+        return None
+
+    for key in required_keys or ():
+        if key not in cached or cached[key] is None or cached[key] == "":
+            return None
+
+    artifact_path = cached.get(path_key)
+    if not isinstance(artifact_path, str) or not artifact_path:
+        return None
+
+    path = Path(artifact_path)
+    if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+        return None
+
+    return cached
+```
+
+[`sift_mcp/tools/_cache.py:21-45`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L21-L45)
+
+[21] `extract_windows_artifacts`는 종류별 파일이 있으면 다시 꺼내지 않는다.
+
+```python
+    reused_paths: dict[str, list[str]] = {}
+    if not force_reextract:
+        for _fam in sorted(selected):
+            try:
+                _hit = _probe_durable_raw(raw_base, _fam)
+            except Exception:
+                _hit = None
+            if _hit:
+                files = _reused_family_paths(_hit)
+                if files:
+                    reused_paths[_fam] = files
+    missing_families = sorted(set(selected) - set(reused_paths))
+    full_cache_hit = bool(selected) and not force_reextract and not missing_families
+```
+
+[`sift_mcp/server.py:7743-7755`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7743-L7755)
+
+```python
+                # durable-reuse trust labels (explicit, non-fingerprint)
+                "reused_from_cache": True,
+                "cache_validation": "content_presence_only_no_evidence_fingerprint",
+                "force_reextract_available": True,
+```
+
+[`sift_mcp/server.py:7815-7818`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7815-L7818)
+
+[22] `extract_srum`은 내보내기 폴더가 없을 때만 `esedbexport`를 실행한다.
+
+```python
+    # esedbexport creates {export_base}.export/
+    export_dir = Path(str(export_base) + ".export")
+    if not export_dir.exists():
+```
+
+[`sift_mcp/server.py:6912-6914`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6912-L6914)
+
+[23] `list_deleted_files`는 쓰기 `OSError`에서 `storage_path`만 비운다.
+
+```python
+    storage_path: Optional[str] = None
+    try:
+        output_dir = _artifact_output_dir("deleted_files")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "deleted_files.json"
+        output_path.write_text(
+            json.dumps(
+                {
+                    "tool_name": tool,
+                    "records_count": len(serialized_records),
+                    "raw_command": result.command_line,
+                    "records": serialized_records,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        storage_path = str(output_path)
+    except OSError:
+        storage_path = None
+```
+
+[`sift_mcp/tools/disk.py:4130-4149`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4130-L4149)
+
+```python
+        "storage_path": storage_path,
+        "response_format": response_mode,
+        "note": (
+            f"Summary mode returned {len(preview)} preview rows from {len(records)} "
+            f"deleted entries. Full parsed output is at {storage_path}."
+            if storage_path
+            else f"Summary mode returned {len(preview)} preview rows from {len(records)} deleted entries."
+        ),
+```
+
+[`sift_mcp/tools/disk.py:4160-4167`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4160-L4167)
+
+[24] 메모리 CSV 저장 실패는 `None`이 되고 응답 상태는 그대로다.
+
+```python
+        return str(dest)
+    except Exception:
+        return None
+```
+
+[`sift_mcp/tools/memory.py:238-240`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L238-L240)
+
+```python
+    response: dict[str, Any] = {
+        "tool_name": tool,
+        "status": "success",
+        "findings_created": finding_ids,
+        "execution_id": result.execution_id,
+        "raw_command": result.command_line,
+        "process_count": len(records),
+        "suspicious_count": suspicious_count,
+    }
+    if csv_path:
+        response["csv_path"] = csv_path
+
+    if normalized_format == "detailed":
+        response["data"] = all_rows
+    else:
+        # Summary: preview suspicious + a few representative normal processes
+        preview: list[dict[str, Any]] = [r.model_dump(mode="json") for r in suspicious_records[:10]]
+        normal_sample = [r for r in records if not r.suspicious][:5]
+        preview.extend(r.model_dump(mode="json") for r in normal_sample)
+        response["preview"] = preview
+        response["summary"] = (
+            f"{len(records)} processes found via pslist. "
+            f"{suspicious_count} flagged suspicious. "
+            f"Full data at {csv_path or 'not persisted'}."
+```
+
+[`sift_mcp/tools/memory.py:967-990`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L967-L990)
+
+[25] 부속 자료 쓰기 오류는 넘기지 않는다.
+
+```python
+    try:
+        sidecar = {
+            "schema": _SIDECAR_SCHEMA_V2,
+            "tool": tool_name,
+            "parser_signature": parser_signature,
+            "parameter_fingerprint": build_parameter_fingerprint(parameters),
+            "source_set_fingerprint": build_source_set_fingerprint(source_paths),
+            "csv_path": str(csv_path),
+        }
+        _sidecar_path(csv_path).write_text(json.dumps(sidecar), encoding="utf-8")
+    except OSError:
+        pass
+```
+
+[`sift_mcp/tools/_cache.py:356-367`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L356-L367)
+
+[26] (실행 확인) 사건 폴더의 `deleted_files.json` 경로에 같은 이름의 폴더를 만들고 `list_deleted_files`를 부르자 `status: success`, `storage_path: null`, `warning: null`이 돌아왔다.

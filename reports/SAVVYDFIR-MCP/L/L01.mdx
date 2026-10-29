@@ -1,0 +1,429 @@
+---
+cell: L01
+details:
+- id: L01.02
+- id: L01.03
+- id: L01.04
+---
+
+# L01 기록 방식
+
+### L01.02 도구별 기록 호출
+
+**구현.** 이 방식은 본문이 기록 함수나 기록하는 도우미 함수를 부르는 도구와 결과를 돌려주기 전에 `_finalize_tool_response`를 부르는 도구에 적용된다 [1].
+서버는 FastMCP 서버를 만들 때 미들웨어를 붙이지 않고 도구 65개를 `@mcp.tool()`로 하나씩 등록한다 [2].
+그래서 모든 호출이 지나며 항목을 쓰는 공통 단계는 없다.
+모든 항목은 프로세스에 하나인 `AuditLogger` 객체 `_audit_logger`를 거쳐 `SAVVYDFIR_ANALYSIS_DIR`(값이 없으면 `./analysis`) 아래 `audit.jsonl`에 한 줄씩 덧붙는다 [3].
+
+도구 본문은 다음 방법으로 항목을 쓴다.
+
+- `compare_disk_and_memory`, `find_temporal_clusters`, `generate_graph`, `sigma_hunt`, `hayabusa_hunt`, `analyze_vss`, `extract_pca`, `extract_windows_artifacts`, `record_analysis_lane`, `submit_finding`, `generate_report`, `sigma_scan`, `run_analysis`는 본문에서 `log_execution`과 `log_result`를 불러 `started`·`completed` 항목을 쓴다 [4].
+- 도우미 `_record_tool_success_audit`, `_record_artifact_absent_audit`, `_persist_parser_retry_execution`은 `started`·`completed` 항목을 잇달아 쓴다 [5].
+- 이 도우미는 `extract_shimcache`·`extract_srum`의 성공 경로, `extract_prefetch`·`get_amcache`·`extract_pca`·`extract_shimcache`·`extract_srum`의 아티팩트 없음 경로, `extract_mft_timeline`·`summarize_evtx`의 재추출 필요 경로가 부른다 [5].
+- 캐시에 남은 파생물을 다시 쓰는 경로는 `record_cache_hit`로 `CACHE_HIT <도구 이름>`을 명령 글로 담은 두 항목을 쓴다 [6].
+- `_finalize_tool_response`는 응답 상태가 `error`가 아니고 응답에 `execution_id`가 있으면 그 ID로 `linked` 항목을 쓴다 [7].
+- 사건이 열려 있지 않으면 상태 파일에서 실행을 찾는 처리가 먼저 실패해 `linked` 항목을 쓰지 않고 그 예외 문구를 응답의 `phase7_link_warning`에 넣는다 [7].
+- 사건이 열려 있으면 `_finalize_tool_response`는 그 앞에서 `_attach_heuristic_slice`로 아티팩트 지식 발췌를 응답에 붙이고 `context_bundle` 항목을 쓴다 [7][8].
+- `get_heuristic`과 `prepare_hypothesis_context`는 `_emit_context_bundle_for_slice`로 `context_bundle` 항목을 쓴다 [9].
+- `compare_disk_and_memory`가 발견사항 사이의 모순을 찾으면 `_add_contradiction`이 `log_correction`으로 `correction` 항목을 쓴다 [10].
+
+`compare_disk_and_memory`를 부르자 같은 ID의 `started`·`completed`·`linked` 항목이 남았고 `get_heuristic`을 부르자 `context_bundle` 항목 하나가 남았다 [11].
+
+다음 도구 22개는 어떤 항목도 쓰지 않는다 [12].
+
+- 사건 상태를 읽거나 안내만 돌려주는 도구 15개다: `get_provenance`, `read_state`, `get_finding`, `get_findings`, `export_trace`, `summarize_run`, `describe_tool_catalog`, `serve_graph`, `get_investigation_gates`, `coverage_report`, `classify_missing_artifact`, `environment_preflight`, `detect_triage_layout`, `query_sigma_results`, `_ntfs_mount_argv` [12].
+- 사건 상태를 바꾸는 도구 4개다: `start_investigation`, `add_finding`, `flag_discrepancy`, `record_hypotheses` [12].
+- 외부 프로그램을 실행하는 도구 3개다: `merge_host_graphs`와 `build_reports_index`는 서버의 `scripts/` 스크립트를, `load_memory`는 `file`과 `7z`를 실행한다 [12].
+
+이 가운데 18개를 실행하자 `audit.jsonl`에 항목이 늘지 않았고 `build_reports_index`는 스크립트를 실행하고도 항목을 남기지 않았다 [13].
+`query_sigma_results`는 응답에 `execution_id`를 싣지 않아 `_finalize_tool_response`를 거쳐도 항목이 생기지 않는다 [7][12].
+없는 도구 이름으로 온 호출은 FastMCP가 거부하고 항목을 남기지 않았다 [11].
+
+**한계.** `_finalize_tool_response`는 첫머리에서 메모리 감시 함수 `_memory_watchdog`를 부른다 [7][14].
+이 함수는 서버 프로세스의 메모리가 4096MB를 넘으면 `memory.watchdog` 항목을 쓰도록 되어 있지만 `log_execution`에 없는 인자 이름(`tool`, `status` 등)으로 부른다 [14][15].
+그래서 `TypeError`가 나고 함수는 예외를 처리해 아무것도 하지 않는다 [14].
+메모리 값을 5000MB로 바꿔 도구를 부르자 감시 항목은 남지 않았고 같은 인자로 `log_execution`을 부르자 `TypeError`가 났다 [16].
+
+### L01.03 공통 실행 함수에서 기록
+
+**구현.** 이 방식은 실행기 `SafeRunner.run`으로 외부 명령을 실행하는 도구에 적용된다 [17].
+서버는 불러올 때 `init_all_tools`로 도구 모듈의 실행기에 같은 `_audit_logger`를 넘긴다 [18].
+`SleuthKitRunner`, `EZToolsRunner`, `VolatilityRunner` 같은 실행기는 `SafeRunner`를 물려받아 명령 목록을 만들고 `run`에 넘긴다 [17].
+`run`은 금지 명령과 경로 검사를 통과한 명령마다 `next_execution_id`로 ID를 받아 실행 전에 `started` 항목을, 끝난 뒤 `completed` 항목을 쓴다 [19].
+증거 확인, 메모리 분석, 디스크 아티팩트 추출, 타임라인, YARA 도구가 이 실행기를 쓴다 [18].
+한 호출이 실행기를 여러 번 부르면 실행마다 ID와 항목이 따로 생긴다 [20].
+`extract_registry_run_keys`는 시스템 하이브와 사용자 `NTUSER.DAT`마다 RECmd를 실행한다 [20].
+`verify_integrity`를 부르자 `ewfverify` 실행 전후의 `started`·`completed` 항목과 `linked` 항목이 같은 ID로 남았다 [11].
+
+실행기를 거치지 않고 `subprocess`를 직접 부르는 도구와 함수도 있다 [21].
+
+- `generate_graph`, `sigma_hunt`, `hayabusa_hunt`, `analyze_vss`, `extract_shimcache`, `extract_srum`, `extract_windows_artifacts`, `run_analysis`는 본문의 기록 호출로 항목을 쓴다 [4][5].
+- `merge_host_graphs`, `build_reports_index`, `load_memory`는 항목을 쓰지 않는다 [12].
+- 하이브 로그를 반영하는 `replay_hive_with_rla`는 `rla`를 직접 실행하고 따로 항목을 쓰지 않는다 [21].
+
+**한계.** `run`은 `subprocess.run`의 시간 초과만 처리하고 다른 예외는 처리하지 않는다 [22].
+그래서 실행 파일이 없으면 `completed` 항목 없이 예외가 호출한 쪽으로 올라간다 [22].
+Volatility 3 실행 파일이 서버가 찾는 위치에 없는 환경에서 `list_processes`를 부르자 `started` 항목 하나만 남고 응답은 실행기 오류였다 [23].
+
+### L01.04 클라이언트의 MCP 호출 기록
+
+**구현.** 이 방식은 저장소의 Claude Code 설정 `.claude/settings.json`으로 Claude Code를 실행할 때만 적용된다 [24].
+이 설정은 모든 도구 호출 뒤(PostToolUse)에 `scripts/agent_trigger.py`를 실행한다 [24].
+`agent_trigger.py`의 `process_event`는 호출마다 `_debug_trace`로 시각, 도구 이름, 이벤트 키 목록, 세션 ID를 한 줄 덧붙인다 [25].
+이 파일은 `SAVVYDFIR_HOOK_DEBUG_LOG`가 정하고 값이 없으면 `/tmp/savvydfir_hook_debug.log`다 [25].
+MCP 도구는 이름이 `mcp__savvydfir__`로 시작해 이 줄에서 식별된다 [26].
+이 줄에는 인자, 결과, 서버 기록의 `execution_id`가 없다 [25].
+훅은 결과를 보고 하위 에이전트에게 분석을 맡겨야 한다고 판단하면 `delegation_required` 줄에 시각, 세션 ID, lane, 하위 에이전트, 도구 이름을 담아 `/tmp/savvydfir_delegation_ledger.jsonl`에 쓴다 [27].
+시험용 PostToolUse 입력 세 개를 주자 debug log에 MCP 도구 두 개와 `Bash` 한 개의 줄이 남았고 `extract_prefetch` 결과에는 `delegation_required` 줄 하나가 남았다 [26].
+`Bash` 같은 클라이언트 도구의 줄도 같은 파일에 남지만 이 상세의 근거는 아니다 [26].
+다른 MCP 클라이언트로 서버에 붙으면 이 기록은 남지 않는다.
+`.claude/hooks/post-tool-use.py`도 `agent_trigger.py`를 실행하지만 `settings.json`에 등록되어 있지 않다 [28].
+Stop 훅 `stop.py`가 서버의 `audit.jsonl`에 덧붙이는 waiver 항목은 MCP 도구 호출 기록이 아니다 [29].
+
+**한계.** 두 파일 쓰기는 실패해도 알리지 않는다 [25][27].
+`delegation_ledger.append_row`는 세션 ID를 찾지 못하면 줄을 쓰지 않는다 [27].
+두 파일의 기본 경로는 `/tmp`의 고정 이름이어서 여러 사건과 세션의 줄이 한 파일에 이어진다 [25][27].
+
+### 근거
+
+[1] 도구마다 `_finalize_tool_response`나 기록 함수를 본문에서 부른다: [`sift_mcp/server.py:1564-1570`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1564-L1570), [`sift_mcp/server.py:2784-2790`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2784-L2790), [`sift_mcp/server.py:10085-10094`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10085-L10094).
+
+[2] 서버는 미들웨어 없이 FastMCP 서버를 만들고 도구를 `@mcp.tool()`로 하나씩 등록하며 서버 코드에서 미들웨어를 붙이는 곳은 찾지 못했다.
+
+```python
+mcp = FastMCP(
+    name="savvydfir-mcp",
+    instructions=(
+        "Autonomous DFIR triage agent with cross-artifact correlation and "
+        "self-correction. Exposes 43 typed forensic tools over stdio MCP transport "
+        "for use with Claude Code on SANS SIFT Workstation."
+    ),
+)
+```
+
+[`sift_mcp/server.py:155-162`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L155-L162)
+
+[3] 기록 파일 위치와 기록 객체를 정한다.
+
+```python
+_ANALYSIS_DIR = Path(os.environ.get(
+    "SAVVYDFIR_ANALYSIS_DIR", "./analysis")).resolve()
+_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_audit_logger = AuditLogger(output_path=str(_ANALYSIS_DIR / "audit.jsonl"))
+```
+
+[`sift_mcp/server.py:171-176`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L171-L176)
+
+[4] 본문에서 `log_execution`·`log_result`를 부르는 도구다: [`sift_mcp/server.py:2784-2830`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2784-L2830), [`sift_mcp/server.py:2890-2896`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2890-L2896), [`sift_mcp/server.py:3342-3358`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3342-L3358), [`sift_mcp/server.py:4122-4137`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4122-L4137), [`sift_mcp/server.py:5083-5095`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5083-L5095), [`sift_mcp/server.py:5703-5714`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5703-L5714), [`sift_mcp/server.py:6288-6299`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6288-L6299), [`sift_mcp/server.py:7762-7775`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7762-L7775), [`sift_mcp/server.py:8993-9010`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8993-L9010), [`sift_mcp/server.py:9516-9539`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9516-L9539), [`sift_mcp/server.py:10085-10094`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10085-L10094), [`sift_mcp/server.py:11273-11279`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11273-L11279), [`sift_mcp/server.py:11462-11514`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11462-L11514).
+
+[5] 두 항목을 잇달아 쓰는 도우미와 그 호출 지점이다: [`sift_mcp/server.py:1032-1142`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1032-L1142), [`sift_mcp/server.py:1145-1232`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1145-L1232), [`sift_mcp/server.py:1263-1383`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1263-L1383), [`sift_mcp/server.py:1655`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1655), [`sift_mcp/server.py:1714`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1714), [`sift_mcp/server.py:1780`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1780), [`sift_mcp/server.py:2042`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2042), [`sift_mcp/server.py:6263`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6263), [`sift_mcp/server.py:6630`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6630), [`sift_mcp/server.py:6802`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6802), [`sift_mcp/server.py:6887`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6887), [`sift_mcp/server.py:7115`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7115).
+
+[6] 캐시 재사용 경로가 `record_cache_hit`로 두 항목을 쓴다: [`sift_mcp/tools/_cache.py:465-511`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L465-L511), [`sift_mcp/tools/disk.py:3275`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3275), [`sift_mcp/tools/disk.py:4475`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4475), [`sift_mcp/tools/disk.py:5133`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5133), [`sift_mcp/tools/timeline.py:322`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L322).
+
+[7] `_finalize_tool_response`는 메모리 감시를 부르고 실패 응답과 `execution_id`가 없는 응답에서는 돌아가며 나머지 응답에 `linked` 항목을 쓴다: [`sift_mcp/server.py:1450-1534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1450-L1534).
+
+[8] `_attach_heuristic_slice`가 `context_bundle` 항목을 쓴다.
+
+```python
+    # State WRITE path - surfaces errors (Q1 mandate: no silent swallow
+    # of state writes; only audit writes are best-effort).
+    ctx_id = resolved_state.next_context_id()
+    section_label = " + ".join(slice_data.get("sections_included") or ["unknown"])
+    # Audit write - best-effort (audit failure shouldn't lose state ref)
+    try:
+        resolved_audit.log_context_bundle(
+            case_id=case_id,
+            artifact=artifact,
+            heuristic_source_path=slice_data.get("source_path") or "",
+            heuristic_source_hash=slice_data.get("source_hash") or "",
+            heuristic_section=section_label,
+            heuristic_excerpt_hash=excerpt_hash,
+            excerpt_token_count=int(slice_data.get("token_count") or 0),
+            triggered_by=tool_name,
+            execution_id=execution_id,
+            context_id=ctx_id,
+        )
+    except Exception as exc:
+        response.setdefault("audit_write_warning", f"context_bundle: {exc}")
+```
+
+[`sift_mcp/tools/_contracts.py:324-343`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_contracts.py#L324-L343)
+
+[9] `_emit_context_bundle_for_slice`가 `context_bundle` 항목을 쓴다: [`sift_mcp/server.py:9661-9702`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9661-L9702), [`sift_mcp/server.py:9849`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9849), [`sift_mcp/server.py:10023`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10023).
+
+[10] 모순을 찾은 발견사항마다 `log_correction`으로 `correction` 항목을 쓴다: [`sift_mcp/tools/correlation.py:1472-1592`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L1472-L1592), [`sift_mcp/audit.py:257-353`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L257-L353).
+
+[11] (실행 확인) 컨테이너에서 서버를 불러 MCP 클라이언트로 도구를 부르고 호출마다 `audit.jsonl`에 늘어난 항목을 확인했다.
+
+[12] 다음 도구 본문과 그 도구가 부르는 함수에는 기록 함수 호출이 없다: [`sift_mcp/server.py:1573-1597`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1573-L1597), [`sift_mcp/server.py:1843-1899`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1843-L1899), [`sift_mcp/server.py:2958-2997`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2958-L2997), [`sift_mcp/server.py:3004-3298`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3004-L3298), [`sift_mcp/server.py:3497-3562`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3497-L3562), [`sift_mcp/server.py:3563-3822`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3563-L3822), [`sift_mcp/server.py:5433-5583`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5433-L5583), [`sift_mcp/server.py:7186-7568`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7186-L7568), [`sift_mcp/server.py:8161-8200`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8161-L8200), [`sift_mcp/server.py:9093-9160`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9093-L9160), [`sift_mcp/server.py:9162-9274`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9162-L9274), [`sift_mcp/server.py:9613-9649`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9613-L9649), [`sift_mcp/server.py:9911-9976`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9911-L9976), [`sift_mcp/server.py:10234-10257`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10234-L10257), [`sift_mcp/server.py:10763-10882`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10763-L10882).
+
+[13] (실행 확인) 사건을 연 뒤 `environment_preflight`, `add_finding`, `flag_discrepancy`, `record_hypotheses`, `get_findings`, `get_investigation_gates`, `coverage_report`, `classify_missing_artifact`, `detect_triage_layout`, `export_trace`, `summarize_run`, `build_reports_index`와 `start_investigation`, `read_state`, `describe_tool_catalog`, `serve_graph`, `get_provenance`, `_ntfs_mount_argv`를 불러 `audit.jsonl`의 항목 수를 확인했다.
+
+[14] 메모리 감시 함수는 `log_execution`을 없는 인자 이름으로 부르고 예외를 처리해 아무것도 하지 않는다: [`sift_mcp/server.py:1402-1447`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1402-L1447).
+
+[15] `log_execution`이 받는 인자다.
+
+```python
+    def log_execution(
+        self,
+        execution_id: str,
+        tool_name: str,
+        parameters: dict[str, Any],
+        command_line: str,
+        agent_turn: int = 0,
+    ) -> AuditEntry:
+```
+
+[`sift_mcp/audit.py:129-136`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L129-L136)
+
+[16] (실행 확인) 메모리 값을 읽는 `_read_rss_mb`가 5000을 돌려주도록 바꾸고 `compare_disk_and_memory`를 부른 뒤 늘어난 항목의 `tool` 값을 확인했다.
+
+[17] 실행기 클래스는 `SafeRunner`를 물려받아 `run`으로 명령을 실행한다: [`sift_mcp/runners/base.py:184-213`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L184-L213), [`sift_mcp/runners/volatility.py:79-160`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L79-L160), [`sift_mcp/runners/sleuthkit.py:84-109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L84-L109).
+
+[18] 서버가 도구 모듈과 실행기에 같은 기록 객체를 넘긴다: [`sift_mcp/server.py:247-252`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L247-L252), [`sift_mcp/tools/__init__.py:162-192`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/__init__.py#L162-L192), [`sift_mcp/tools/evidence.py:78-88`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L78-L88), [`sift_mcp/tools/disk.py:122-140`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L122-L140).
+
+[19] `run`이 실행 전에 `started` 항목을, 실행 뒤에 `completed` 항목을 쓴다.
+
+```python
+        execution_id = self._audit.next_execution_id()
+        command_line = " ".join(cmd_parts)
+        effective_tool = tool_name or self._tool_name
+
+        # Fail-closed: if this write raises, we do NOT run the command.
+        started_entry = self._audit.log_execution(
+            execution_id=execution_id,
+            tool_name=effective_tool,
+            parameters=parameters,
+            command_line=command_line,
+            agent_turn=agent_turn,
+        )
+```
+
+[`sift_mcp/runners/base.py:473-484`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L473-L484)
+
+```python
+        outputs_summary = self._build_outputs_summary(stdout, stderr, exit_code, timed_out)
+
+        completed_entry = self._audit.log_result(
+            execution_id=execution_id,
+            exit_code=exit_code,
+            duration=duration,
+            outputs_summary=outputs_summary,
+            finding_ids=[],  # Populated later by the tool layer
+            correction_event=None,
+            tool_name=effective_tool,
+            command_line=command_line,
+            parameters=parameters,
+            agent_turn=agent_turn,
+        )
+```
+
+[`sift_mcp/runners/base.py:525-538`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L525-L538)
+
+[20] `extract_registry_run_keys`는 시스템 하이브와 사용자 하이브마다 `run_recmd`를 부른다.
+
+```python
+        try:
+            result = _ez_runner.run_recmd(
+                hive_dir=cleaned_hive_dir,
+                csv_dir=tmp_dir,
+                csv_filename=csv_filename,
+                batch_file=batch_file_used,
+                sync_batch=sync_batch,
+                tool_name=tool,
+            )
+```
+
+[`sift_mcp/tools/disk.py:5309-5317`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5309-L5317)
+
+```python
+        # Also scan user NTUSER.DAT hives for per-user persistence keys
+        for idx, user_hive_path in enumerate(user_hives_found, start=1):
+            tmp_in: Optional[Path] = None
+            tmp_out: Optional[Path] = None
+            user_csv = f"registry_user_{idx}.csv"
+            user_csv_path = os.path.join(tmp_dir, user_csv)
+            try:
+                cleaned_hive, tmp_in, tmp_out = _replay_hive_with_rla(
+                    Path(user_hive_path),
+                    f"{Path(user_hive_path).parent.name}_{idx}",
+                )
+                user_result = _ez_runner.run_recmd(
+                    hive_dir=str(cleaned_hive.parent),
+                    csv_dir=tmp_dir,
+                    csv_filename=user_csv,
+                    batch_file=batch_file_used,
+                    sync_batch=False,  # only sync once
+                    tool_name=tool,
+                )
+```
+
+[`sift_mcp/tools/disk.py:5343-5361`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5343-L5361)
+
+[21] 실행기를 거치지 않고 `subprocess`를 직접 부르는 곳이다: [`sift_mcp/server.py:3410-3418`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3410-L3418), [`sift_mcp/server.py:3648`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3648), [`sift_mcp/server.py:3760`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3760), [`sift_mcp/server.py:4419`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4419), [`sift_mcp/server.py:5225`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5225), [`sift_mcp/server.py:5817`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5817), [`sift_mcp/server.py:6661`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6661), [`sift_mcp/server.py:6920`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6920), [`sift_mcp/server.py:7692-7693`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7692-L7693), [`sift_mcp/server.py:7925`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7925), [`sift_mcp/server.py:11533`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11533), [`sift_mcp/tools/_hive_replay.py:111-119`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_hive_replay.py#L111-L119).
+
+[22] `run`은 `TimeoutExpired`만 처리하고 `completed` 항목은 그 뒤 `try` 밖에서 쓴다.
+
+```python
+        try:
+            proc = subprocess.run(
+                cmd_parts,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,  # CRITICAL - never use shell=True
+                cwd=cwd,
+            )
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            exit_code = proc.returncode
+
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            # Recover any partial output the process emitted before being killed.
+            raw_out = exc.stdout or b""
+            raw_err = exc.stderr or b""
+            stdout = raw_out.decode("utf-8", errors="replace") if isinstance(raw_out, bytes) else str(raw_out)
+            stderr = raw_err.decode("utf-8", errors="replace") if isinstance(raw_err, bytes) else str(raw_err)
+            exit_code = -1
+
+        finally:
+            duration = time.monotonic() - start
+```
+
+[`sift_mcp/runners/base.py:495-520`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L495-L520)
+
+[23] (실행 확인) Volatility 3 실행 파일이 `VOL_PATH` 기본값 `/usr/local/bin/vol`에 없는 컨테이너에서 `list_processes`를 불러 응답과 늘어난 항목을 확인했다.
+
+[24] Claude Code 설정이 모든 PostToolUse에 `agent_trigger.py`를 실행한다.
+
+```json
+    "PostToolUse": [
+      {
+        "matcher": "mcp__savvydfir__mount_image|mcp__savvydfir__extract_mft_timeline|mcp__savvydfir__extract_usn_journal|mcp__savvydfir__summarize_evtx|mcp__savvydfir__extract_prefetch|mcp__savvydfir__get_amcache|mcp__savvydfir__extract_shimcache|mcp__savvydfir__extract_registry_run_keys|mcp__savvydfir__extract_srum|mcp__savvydfir__sigma_hunt|mcp__savvydfir__compare_disk_and_memory",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./venv/bin/python3 .claude/hooks/workflow-enforce-post.py"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./venv/bin/python3 scripts/agent_trigger.py"
+          }
+        ]
+      }
+    ],
+```
+
+[`.claude/settings.json:110-129`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/settings.json#L110-L129)
+
+[25] 훅이 이벤트마다 debug log에 한 줄을 덧붙이고 쓰기 실패는 알리지 않는다.
+
+```python
+_DEBUG_LOG_PATH = os.environ.get(
+    "SAVVYDFIR_HOOK_DEBUG_LOG", "/tmp/savvydfir_hook_debug.log"
+)
+
+
+def _debug_trace(message: str) -> None:
+    """Append a single timestamped line so we can verify hook invocation
+    from the agent's actual run (independent of audit.jsonl).
+    Best-effort; never raises.
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        line = f"{ts} {message}\n"
+        fd = os.open(
+            _DEBUG_LOG_PATH,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            0o666,
+        )
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(_DEBUG_LOG_PATH, 0o666)
+        except OSError:
+            pass
+    except Exception:
+        return
+```
+
+[`scripts/agent_trigger.py:1493-1521`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/agent_trigger.py#L1493-L1521)
+
+```python
+def process_event(event: dict[str, Any], *, trigger_path: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Process one PostToolUse event and return a hook response dict or None."""
+    tool_name, result_data, raw_text = _extract_event_payload(event)
+
+    # Diagnostic trace - verify the hook is being invoked by Claude Code.
+    # event-level keys (NOT inner data) + a sample of session_id are enough.
+    _debug_trace(
+        f"process_event tool={tool_name!r} "
+        f"keys={sorted(event.keys())} "
+        f"sid={(event.get('session_id') or event.get('sessionId') or '?')!r}"
+    )
+```
+
+[`scripts/agent_trigger.py:1524-1534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/agent_trigger.py#L1524-L1534)
+
+[26] (실행 확인) 컨테이너에서 `agent_trigger.py`에 시험용 PostToolUse 입력 세 개(`mcp__savvydfir__read_state`, `mcp__savvydfir__extract_prefetch`, `Bash`)를 표준 입력으로 주고 두 파일을 확인했다.
+
+[27] 위임이 필요하면 `delegation_required` 줄을 쓰고 세션 ID가 없거나 쓰기가 실패하면 알리지 않는다: [`scripts/agent_trigger.py:428-446`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/agent_trigger.py#L428-L446), [`scripts/agent_trigger.py:1741-1747`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/agent_trigger.py#L1741-L1747), [`scripts/delegation_ledger.py:41-46`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/delegation_ledger.py#L41-L46), [`scripts/delegation_ledger.py:148-217`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/delegation_ledger.py#L148-L217).
+
+[28] `post-tool-use.py`는 `agent_trigger.py`를 실행하는 감싸개다.
+
+```python
+def main() -> None:
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        runpy.run_path(str(repo_root / "scripts" /
+                       "agent_trigger.py"), run_name="__main__")
+    except Exception:
+        # Silently absorb errors — the hook must never block the session.
+        # The agent_trigger.py main() already handles most cases; this
+        # catches import errors, runpy failures, etc.
+        pass
+```
+
+[`.claude/hooks/post-tool-use.py:15-24`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/post-tool-use.py#L15-L24)
+
+[29] Stop 훅이 waiver를 쓸 때 서버의 `audit.jsonl`에 줄을 덧붙인다: [`.claude/hooks/stop.py:156-176`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/stop.py#L156-L176), [`.claude/hooks/stop.py:179-262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/stop.py#L179-L262).
+
+
+```python
+def _audit_append(record: dict, audit_path: Path) -> tuple[bool, str]:
+    """Append a JSONL record to audit.jsonl, fsync, and return (ok, error_text).
+
+    fsync is required because crash durability matters when a record is the
+    only artifact of an audited waiver consumption.
+    """
+    try:
+        with open(audit_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError as exc:
+                # fsync may legitimately fail on non-disk fs (procfs, tmpfs
+                # variants). Treat as soft warning, not fatal — the data is
+                # in the page cache and will be visible to the next reader.
+                return (True, f"fsync_warning:{exc}")
+        return (True, "")
+    except OSError as exc:
+        return (False, f"audit_append_failed:{exc}")
+
+```
+
+[`.claude/hooks/stop.py:156-176`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/stop.py#L156-L176)

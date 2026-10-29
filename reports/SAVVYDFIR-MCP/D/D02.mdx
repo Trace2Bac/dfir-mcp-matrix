@@ -1,0 +1,535 @@
+---
+cell: D02
+details:
+- id: D02.01
+- id: D02.02
+- id: D02.03
+---
+
+# D02 파생물 추적
+
+### D02.01 ID·경로 참조
+
+**구현.** 이 방식은 `_finalize_tool_response`를 거치는 도구의 실행 기록, 그 도구가 만든 발견사항, 모델이 기록한 발견사항에 적용된다 [1][2][3].
+`SafeRunner`는 실행마다 `E-NNN` 실행 ID를 매기고 호출 기록 `audit.jsonl`의 시작 항목에 실행한 명령 문자열을 남긴다 [4].
+그래서 외부 도구가 읽은 증거와 입력 파일의 경로는 명령 인자로 남는다 [4].
+응답에 실행 ID가 있고 상태가 `error`가 아니면 `_finalize_tool_response`가 응답의 경로 필드와 `provenance`의 경로를 모아 `raw_evidence_refs`를 만든다 [1][5].
+경로마다 붙이는 역할은 필드 이름과 경로 앞부분으로 정한다 [6].
+`/evidence/`·`/mnt/`·`/media/` 아래 경로는 `input`, 분석 폴더·`/cases/`·`/tmp/` 아래 경로는 `derived`, `output_path`·`report_path`·`export_dir` 필드는 `output`이다 [6].
+이 목록과 발견사항 ID는 호출 기록의 `linked` 항목과 `state.json`의 실행 기록에 함께 들어간다 [1].
+도구가 만든 발견사항에는 그 실행 ID가 들어가고 `_sync_finding_provenance`가 같은 경로 목록을 발견사항의 `raw_evidence_refs`에 합친다 [1][7].
+`get_provenance`는 `finding_ids_generated`에 그 발견사항 ID가 들어 있는 호출 기록 항목을 모두 돌려준다 [8].
+`list_deleted_files`가 만든 발견사항으로 `get_provenance`를 부르자 시작·완료·`linked` 항목이 돌아왔고 `linked` 항목에 `deleted_files.json`의 경로와 해시가 있었다 [9].
+`list_deleted_files`는 실행한 `fls` 명령 문자열을 JSON 파일 안에도 넣는다 [10].
+
+상태 캐시로 앞 CSV를 다시 쓰는 호출은 완료 항목의 출력 요약에 앞 실행 ID를 문자열로 넣는다 [11].
+이 호출의 응답 `provenance`에는 `cache_source_execution_id`가 실리지만 상태의 실행 기록에는 이 값이 남지 않았다 [12].
+`extract_shimcache`·`extract_srum`은 `_finalize_tool_response`를 거치지 않고 `_record_tool_success_audit`로 CSV 경로 하나만 `derived`로 남긴다 [13].
+
+모델이 `submit_finding`·`add_finding`으로 기록하는 발견사항은 근거 실행 ID를 `source_execution_id`·`execution_id` 인자로 받는다 [2][3].
+이 값을 주지 않으면 `CaseStateManager.add_finding`이 같은 도구 이름의 마지막 실행 ID를 넣고 그런 실행이 없으면 아무 도구의 마지막 실행 ID를 넣는다 [14].
+어느 방식으로 정했는지는 발견사항의 `confidence_support_inputs.execution_id_source`에 적는다 [14].
+
+`compare_disk_and_memory`처럼 앞 도구의 CSV를 읽는 도구는 상태에서 그 도구의 마지막 CSV를 찾아 읽는다 [15].
+읽은 CSV의 경로와 그 CSV를 만든 실행 ID는 응답과 기록에 남기지 않는다 [15].
+
+**한계.** 참조가 근거 실행이나 지금 파일 내용에 이어지지 않는 경로가 있다.
+모델이 기록한 발견사항으로 `get_provenance`를 부르면 근거 실행이 아니라 기록 호출의 항목만 돌아온다 [8][16].
+`source_execution_id`를 준 `submit_finding` 발견사항은 `submit_finding` 자신의 시작·완료 항목만 돌려받았고 `add_finding` 발견사항은 빈 목록을 돌려받았다 [16].
+실행 ID 없이 `add_finding`으로 기록하자 앞서 실행한 `list_deleted_files`의 실행 ID가 `auto_linked_latest_tool_execution`으로 들어갔다 [16].
+같은 이름으로 파생물을 다시 만들면 앞 실행 기록의 경로가 새 내용을 가리킨다 [17].
+`list_deleted_files`를 두 번 부르자 첫 실행 기록에는 첫 해시가 남았고 같은 경로의 파일은 둘째 실행의 내용으로 바뀌었다 [17].
+`generate_graph`의 응답 필드 `graph_html_path`·`graph_json_path`와 `generate_report`의 `report_json_path`는 경로 목록에 들어가지 않는다 [5][18].
+`merge_host_graphs`·`build_reports_index`·`load_memory`는 출력 경로를 실행 기록에 남기지 않는다 [19][20].
+`load_memory`는 원래 ZIP 경로를 응답의 `original_path`에만 싣고 푼 덤프 경로는 응답의 `raw_dump_path`와 상태 파일의 `evidence_access` 분석 갈래 요약 글에 적는다 [20].
+
+### D02.02 입출력 해시 연결
+
+**구현.** 이 방식은 `_finalize_tool_response`를 거치는 도구 가운데 입력 파일 경로를 응답의 `provenance.artifact_paths`에 싣는 도구에 적용된다 [5][21].
+`extract_mft_timeline`은 `$MFT`, `get_amcache`는 `Amcache.hve`, `list_processes` 같은 메모리 도구는 메모리 덤프 파일을 이 목록에 싣는다 [21].
+`_derive_artifact_hashes`는 `input` 역할이 아닌 경로가 파일이면 내용 전체의 SHA-256을 계산해 `artifact_hashes`에 `role: output`으로 넣는다 [22][23].
+`artifact_paths`의 입력 파일이 `/evidence/`·`/mnt/`·`/media/` 밖에 있으면 `derived`로 분류되므로 출력 CSV와 같은 기록에 입력 해시도 들어간다 [6][22].
+`extract_mft_timeline`의 실행 기록에는 사건 폴더 CSV의 해시와 입력 `$MFT`의 해시가 둘 다 `role: output`으로 들어갔다 [24].
+`input` 역할 경로는 다시 해시하지 않는다 [22].
+앞 실행 기록에 같은 경로의 해시가 있으면 그 값을 입력 해시로 쓰고 없으면 `hash_status: unhashed_primary_input`만 붙인다 [22][25].
+`verify_integrity`의 결과는 알고리즘이 SHA-256일 때만 이렇게 다시 쓸 해시 기록이 된다 [26].
+입력이 폴더인 `extract_prefetch`·`summarize_evtx`·`extract_registry_run_keys`는 폴더를 해시하지 않으므로 입력 해시가 없다 [21][23].
+
+**한계.** 입력 해시가 빠지거나 입력과 출력이 구별되지 않는 경로가 있다.
+입력 해시에도 `role: output`이 붙어 기록만으로는 어느 해시가 입력인지 가리지 못한다 [22][24].
+`/evidence/`·`/mnt/`·`/media/` 아래 입력 파일은 앞 실행의 해시 기록이 없으면 해시 없이 경로만 남는다 [22].
+`verify_integrity`는 `ewfverify`를 다이제스트 옵션 없이 실행하므로 E01 이미지를 검사해도 SHA-256 해시 기록이 생기지 않았다 [27].
+
+### D02.03 파생물 측 manifest
+
+**구현.** 이 방식은 재사용 판단을 하는 디스크 아티팩트 추출 도구의 CSV에 적용된다 [28].
+그런 도구는 `extract_mft_timeline`, `extract_usn_journal`, `summarize_evtx`와 사용자 활동 추출 도구 8개다 [28].
+이 도구들은 파싱이 성공하면 CSV 곁에 `<CSV 이름>.savvyreuse.json`을 쓴다 [29].
+이 파일에는 도구 이름 `tool`, 파서 이름과 버전 문자열 `parser_signature`, 인자 JSON의 SHA-256 `parameter_fingerprint`, CSV 경로가 들어간다 [29].
+입력은 `source_set_fingerprint`에 파일·폴더마다 경로, 크기, `mtime_ns`로 적고 그 목록 전체의 SHA-256을 함께 적는다 [30].
+입력 파일 내용의 해시, 출력 CSV의 해시, 실행 ID, 만든 시각은 들어가지 않는다 [29][30].
+`extract_mft_timeline`을 실행하자 CSV 곁에 입력 `$MFT`의 경로·크기·`mtime_ns`를 적은 부속 자료가 생겼다 [24].
+`extract_prefetch`·`get_amcache`·`extract_registry_run_keys`·`list_deleted_files`와 메모리·탐지·보고서 도구의 파일 곁에는 이런 파일을 두지 않는다 [31].
+
+**한계.** 부속 자료를 쓰다 `OSError`가 나면 알리지 않고 부속 자료 없이 끝난다 [29].
+
+### 근거
+
+[1] `_finalize_tool_response`는 경로 목록과 해시를 만들어 호출 기록과 상태에 넣는다: [`sift_mcp/server.py:1450-1534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1450-L1534).
+
+```python
+        raw_evidence_refs = _collect_raw_evidence_refs(tool_name, response)
+        artifact_hashes, raw_evidence_refs = _derive_artifact_hashes(
+            tool_name,
+            response,
+            raw_evidence_refs,
+        )
+        linked_entry = _audit_logger.log_link(
+            execution_id=execution_id,
+            tool_name=tool_name,
+            finding_ids=finding_ids,
+            artifact_refs=[ref["path"] for ref in raw_evidence_refs],
+            artifact_hashes=artifact_hashes,
+            raw_evidence_refs=raw_evidence_refs,
+        )
+        _state_manager.link_execution(
+            execution_id,
+            tool_name=tool_name,
+            command_line=response.get("raw_command"),
+            finding_ids_generated=finding_ids,
+            audit_linked_entry_hash=linked_entry.get("entry_hash"),
+            artifact_hashes=artifact_hashes,
+            raw_evidence_refs=raw_evidence_refs,
+```
+
+[`sift_mcp/server.py:1497-1518`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1497-L1518)
+
+[2] `submit_finding`은 `source_execution_id`를 받아 발견사항의 `execution_id`로 넣는다.
+
+```python
+        if source_execution_id:
+            finding["execution_id"] = source_execution_id
+```
+
+[`sift_mcp/server.py:9452-9453`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9452-L9453)
+
+[3] `add_finding`은 `execution_id`를 받아 그대로 넣는다.
+
+```python
+        if execution_id:
+            finding["execution_id"] = execution_id
+```
+
+[`sift_mcp/server.py:9249-9250`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9249-L9250)
+
+[4] `SafeRunner.run`은 실행 ID를 매기고 명령 문자열을 시작 항목에 남긴 뒤 실행한다.
+
+```python
+        execution_id = self._audit.next_execution_id()
+        command_line = " ".join(cmd_parts)
+        effective_tool = tool_name or self._tool_name
+
+        # Fail-closed: if this write raises, we do NOT run the command.
+        started_entry = self._audit.log_execution(
+            execution_id=execution_id,
+            tool_name=effective_tool,
+            parameters=parameters,
+            command_line=command_line,
+            agent_turn=agent_turn,
+        )
+```
+
+[`sift_mcp/runners/base.py:473-484`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L473-L484)
+
+[5] 경로 목록은 응답의 `provenance`, `handle`과 정해 둔 필드 이름에서 모은다: [`sift_mcp/server.py:731-771`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L731-L771).
+
+```python
+    for key in (
+        "csv_path",
+        "suppressed_csv_path",
+        "storage_path",
+        "output_path",
+        "report_path",
+        "export_dir",
+        "image_path",
+        "target_path",
+        "dump_path",
+        "source_path",
+        "plaso_path",
+        "evtx_path",
+        "disk_image_path",
+        "mount_point",
+    ):
+        _append_ref(refs, path=response.get(key), key_hint=key)
+```
+
+[`sift_mcp/server.py:748-764`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L748-L764)
+
+[6] 역할은 필드 이름과 경로 앞부분으로 정한다.
+
+```python
+def _guess_ref_role(path: str, *, key_hint: Optional[str] = None) -> str:
+    hint = (key_hint or "").lower()
+    normalized = _normalize_path_ref(path) or path
+    if hint == "handle":
+        return "handle"
+    if hint in {"csv_path", "storage_path"}:
+        return "derived"
+    if hint in {"output_path", "report_path", "export_dir"}:
+        return "output"
+    if normalized.startswith(("/evidence/", "/mnt/", "/media/")):
+        return "input"
+    if normalized.startswith((str(_ANALYSIS_DIR), "/cases/", "/tmp/")):
+        return "derived"
+    if hint.endswith("_path"):
+        return "input"
+    return "derived"
+```
+
+[`sift_mcp/server.py:515-530`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L515-L530)
+
+[7] 발견사항의 `raw_evidence_refs`에 실행의 경로 목록을 합친다.
+
+```python
+def _sync_finding_provenance(finding_ids: list[str], raw_evidence_refs: list[dict[str, Any]]) -> None:
+    for finding_id in finding_ids:
+        finding = _state_manager.get_finding(finding_id)
+        if not finding:
+            continue
+        base_refs: list[dict[str, Any]] = []
+        _append_ref(
+            base_refs,
+            path=finding.get("artifact_path"),
+            offset=finding.get("artifact_offset"),
+            key_hint="artifact_path",
+        )
+        merged = _merge_ref_dicts(base_refs, raw_evidence_refs)
+        _state_manager.update_finding(finding_id, raw_evidence_refs=merged)
+```
+
+[`sift_mcp/server.py:946-959`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L946-L959)
+
+[8] `get_execution_chain`은 `finding_ids_generated`에 발견사항 ID가 있는 실행의 항목만 모은다.
+
+```python
+                    entries.append(entry)
+                    generated: list[str] = entry.get("finding_ids_generated") or []
+                    if finding_id in generated:
+                        execution_id = entry.get("execution_id")
+                        if execution_id:
+                            matching_execution_ids.add(str(execution_id))
+
+        return [
+            entry
+            for entry in entries
+            if entry.get("execution_id") in matching_execution_ids
+        ]
+```
+
+[`sift_mcp/audit.py:525-536`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L525-L536)
+
+[9] (실행 확인) `start_investigation` 뒤 시험용 `fls`로 `list_deleted_files`를 실행하고 그 발견사항으로 `get_provenance`를 부르자 `linked` 항목에 `deleted_files.json`의 경로, `derived` 역할, SHA-256이 있었다.
+
+[10] `deleted_files.json`에는 `raw_command`가 함께 들어간다.
+
+```python
+        output_path.write_text(
+            json.dumps(
+                {
+                    "tool_name": tool,
+                    "records_count": len(serialized_records),
+                    "raw_command": result.command_line,
+                    "records": serialized_records,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+```
+
+[`sift_mcp/tools/disk.py:4135-4145`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4135-L4145)
+
+[11] 상태 캐시 재사용 호출은 출력 요약에 앞 실행 ID를 넣는다.
+
+```python
+    outputs_summary = (
+        f"Cache hit: reused artifact {artifact_path}"
+        + (
+            f" from execution {cache_source_execution_id}"
+            if cache_source_execution_id
+            else ""
+        )
+    )
+```
+
+[`sift_mcp/tools/_cache.py:488-495`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L488-L495)
+
+[12] (실행 확인) `extract_mft_timeline`을 같은 상태에서 두 번 부르자 둘째 호출의 완료 항목 출력 요약에는 `from execution E-004`가 들어갔고 상태의 실행 기록에서 `cache_hit`·`cache_source_execution_id`는 비어 있었다.
+
+[13] `_record_tool_success_audit`는 받은 `csv_path`를 `derived` 경로 하나로 넣는다.
+
+```python
+    refs: list[dict[str, Any]] = list(raw_evidence_refs or [])
+    if csv_path:
+        refs.insert(0, {"path": str(csv_path), "role": "derived", "kind": "csv"})
+```
+
+[`sift_mcp/server.py:1326-1328`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1326-L1328)
+
+[14] 실행 ID가 없는 발견사항은 같은 도구의 마지막 실행, 그다음 아무 도구의 마지막 실행에 연결한다.
+
+```python
+            incoming_eid = str(original.get("execution_id") or "").strip()
+            if incoming_eid and incoming_eid != "E-000":
+                resolved_eid = incoming_eid
+                resolved_source = "operator_supplied"
+            else:
+                tool_name = str(original.get("tool_name") or "").strip().lower()
+                executions = self._state.get("executions") or []
+                if tool_name:
+                    for execution in reversed(executions):
+                        if not isinstance(execution, dict):
+                            continue
+                        if str(execution.get("tool_name") or "").strip().lower() == tool_name:
+                            candidate = str(execution.get("execution_id") or "").strip()
+                            if candidate:
+                                resolved_eid = candidate
+                                resolved_source = "auto_linked_same_tool_execution"
+                                break
+                if not resolved_eid:
+                    for execution in reversed(executions):
+                        if not isinstance(execution, dict):
+                            continue
+                        candidate = str(execution.get("execution_id") or "").strip()
+                        if candidate:
+                            resolved_eid = candidate
+                            resolved_source = "auto_linked_latest_tool_execution"
+                            break
+                if not resolved_eid:
+                    resolved_eid = self.generate_execution_id()
+                    resolved_source = "state_autogenerated"
+                original["execution_id"] = resolved_eid
+                support_inputs = dict(original.get("confidence_support_inputs") or {})
+                support_inputs.setdefault("execution_id_source", resolved_source)
+                original["confidence_support_inputs"] = support_inputs
+```
+
+[`sift_mcp/state.py:220-252`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L220-L252)
+
+[15] 대조 도구는 상태에서 도구별 마지막 CSV를 찾아 읽고 그 경로를 결과에 넣지 않는다: [`sift_mcp/tools/correlation.py:1091-1100`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L1091-L1100), [`sift_mcp/tools/correlation.py:595-605`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L595-L605), [`sift_mcp/tools/correlation.py:1290-1325`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L1290-L1325).
+
+[16] (실행 확인) `source_execution_id="E-001"`로 `submit_finding`을, 실행 ID 없이 `add_finding`을 부른 뒤 두 발견사항으로 `get_provenance`를 부르자 앞의 것은 `state.submit_finding` 항목 2개, 뒤의 것은 빈 목록을 돌려받았고 `add_finding` 발견사항의 `execution_id`는 `E-001`이었다.
+
+[17] (실행 확인) `list_deleted_files`를 같은 사건에서 두 번 부르자 첫 실행 기록의 해시 `8098d1ef…`와 같은 경로 파일의 해시 `180917c1…`가 달랐다.
+
+[18] (실행 확인) `generate_graph`에 `output_path`를 주어 부르자 `graph.html`과 `graph.json`이 생겼지만 응답의 `raw_evidence_refs`와 `artifact_hashes`는 빈 목록이었다.
+
+[19] `merge_host_graphs`·`build_reports_index`는 실행 기록을 만들지 않고 결과만 돌려준다: [`sift_mcp/server.py:3564-3696`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3564-L3696), [`sift_mcp/server.py:3700-3797`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3700-L3797).
+
+[20] `load_memory`는 실행 기록을 만들지 않고 원래 경로와 푼 덤프 경로를 응답에 싣고 덤프 경로를 분석 갈래 요약에 더한다.
+
+```python
+        data: dict[str, Any] = {"original_path": str(dump)}
+```
+
+[`sift_mcp/server.py:10804-10804`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10804-L10804)
+
+```python
+            data["raw_dump_path"] = str(raw_path)
+            data["file_size"] = raw_path.stat().st_size
+        else:
+            data["was_extracted"] = False
+            data["raw_dump_path"] = str(dump)
+            data["file_size"] = dump.stat().st_size
+
+        _mark_evidence_access_lane("load_memory", f"Memory dump ready at {data['raw_dump_path']}")
+```
+
+[`sift_mcp/server.py:10851-10858`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10851-L10858)
+
+[`sift_mcp/server.py:8747-8768`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8747-L8768), [`sift_mcp/server.py:10763-10869`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10763-L10869).
+
+[21] `provenance.artifact_paths`에 싣는 입력 경로다: [`sift_mcp/tools/disk.py:1138`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1138), [`sift_mcp/tools/disk.py:1219`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1219), [`sift_mcp/tools/disk.py:1312`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1312), [`sift_mcp/tools/disk.py:1412`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1412), [`sift_mcp/tools/disk.py:1507`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1507), [`sift_mcp/tools/memory.py:299`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L299).
+
+[22] `input` 역할은 앞 해시를 찾아 쓰고 나머지 역할의 파일은 SHA-256을 계산한다: [`sift_mcp/server.py:803-872`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L803-L872).
+
+```python
+        artifact_role = "input" if role == "input" else "output"
+        if artifact_role == "input":
+            reused = _state_manager.lookup_artifact_hash(path)
+            if reused:
+                candidate = {
+                    "path": _normalize_path_ref(reused.get("path")) or path,
+                    "sha256": str(reused.get("sha256") or "").strip().lower(),
+                    "role": "input",
+                    "source": str(reused.get("source") or "verify_integrity").strip().lower(),
+                }
+                key = (
+                    candidate["path"],
+                    candidate["sha256"],
+                    candidate["role"],
+                    candidate["source"],
+                )
+                if candidate["sha256"] and key not in seen:
+                    seen.add(key)
+                    artifact_hashes.append(candidate)
+                continue
+            ref.setdefault("hash_status", "unhashed_primary_input")
+            continue
+
+        sha256 = _sha256_file(path)
+        if not sha256:
+            continue
+        candidate = {
+            "path": _normalize_path_ref(path) or path,
+            "sha256": sha256,
+            "role": artifact_role,
+```
+
+[`sift_mcp/server.py:829-858`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L829-L858)
+
+[23] 파일이 아닌 경로는 해시하지 않는다.
+
+```python
+def _sha256_file(path: str) -> Optional[str]:
+    target = Path(path)
+    if not target.is_file():
+        return None
+    digest = hashlib.sha256()
+    with target.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+```
+
+[`sift_mcp/server.py:774-782`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L774-L782)
+
+[24] (실행 확인) 시험용 `dotnet`으로 `extract_mft_timeline`을 실행하자 `artifact_hashes`에 CSV와 `$MFT`가 둘 다 `role: output`, `source: computed`로 들어갔고 CSV 곁의 부속 자료에 `$MFT`의 경로, 크기, `mtime_ns`가 있었다.
+
+[25] `lookup_artifact_hash`는 앞 실행 기록에서 같은 경로의 마지막 해시를 찾는다.
+
+```python
+    def lookup_artifact_hash(self, artifact_path: str) -> Optional[dict[str, Any]]:
+        """Return the most recent artifact-hash record for *artifact_path*."""
+        with self._lock:
+            self._assert_loaded()
+            needle = _normalize_path_lookup(artifact_path)
+            for execution in reversed(self._state.get("executions", [])):
+                if not isinstance(execution, dict):
+                    continue
+                for artifact_hash in reversed(execution.get("artifact_hashes", [])):
+                    if not isinstance(artifact_hash, dict):
+                        continue
+                    candidate = _normalize_path_lookup(artifact_hash.get("path"))
+                    if candidate == needle:
+                        # MCP segfault fix 2026-05-23.
+                        return copy.deepcopy(artifact_hash)
+            return None
+```
+
+[`sift_mcp/state.py:640-655`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L640-L655)
+
+[26] `verify_integrity` 결과는 SHA-256일 때만 해시 기록이 된다.
+
+```python
+def _extract_verify_integrity_hash(response: dict[str, Any]) -> Optional[dict[str, str]]:
+    data = response.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    record = data[0]
+    algorithm = str(record.get("algorithm") or "").strip().lower()
+    computed_hash = str(record.get("computed_hash") or "").strip().lower()
+    image_path = _normalize_path_ref(record.get("image_path"))
+    if algorithm != "sha256" or not computed_hash or not image_path:
+        return None
+    return {
+        "path": image_path,
+        "sha256": computed_hash,
+        "role": "input",
+        "source": "verify_integrity",
+    }
+```
+
+[`sift_mcp/server.py:785-800`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L785-L800)
+
+[27] (실행 확인) `ewfacquire -d sha256`으로 만든 E01을 `verify_integrity`로 검사하자 결과의 `algorithm`은 `md5`, `computed_hash`는 `<unparseable>`이었고 `artifact_hashes`는 빈 목록이었다.
+
+```python
+        cmd: List[str] = ["ewfverify", image_path]
+        return self.run(cmd, timeout=timeout, tool_name=tool_name)
+```
+
+[`sift_mcp/runners/sleuthkit.py:108-109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L108-L109)
+
+[28] 재사용 부속 자료를 쓰는 곳이다: [`sift_mcp/tools/disk.py:3489-3493`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3489-L3493), [`sift_mcp/tools/disk.py:3866`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3866), [`sift_mcp/tools/disk.py:4833`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4833), [`sift_mcp/tools/disk.py:6170-6177`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6170-L6177).
+
+[29] 부속 자료에는 도구, 파서 문자열, 인자 해시, 입력 목록, CSV 경로만 들어가고 쓰기 오류는 넘기지 않는다.
+
+```python
+def write_reuse_sidecar_v2(
+    csv_path: str,
+    *,
+    tool_name: str,
+    parser_signature: str,
+    source_paths: Iterable[str],
+    parameters: dict[str, Any],
+) -> None:
+    """Persist a v2 sidecar next to a freshly-parsed CSV. Best-effort; never raises.
+
+    Caller MUST only invoke this on a SUCCESSFUL parse with a durable CSV (never
+    on partial_collection / collection_failed / tool_incompatible / zero rows) -
+    no-poisoned-cache invariant.
+    """
+    try:
+        sidecar = {
+            "schema": _SIDECAR_SCHEMA_V2,
+            "tool": tool_name,
+            "parser_signature": parser_signature,
+            "parameter_fingerprint": build_parameter_fingerprint(parameters),
+            "source_set_fingerprint": build_source_set_fingerprint(source_paths),
+            "csv_path": str(csv_path),
+        }
+        _sidecar_path(csv_path).write_text(json.dumps(sidecar), encoding="utf-8")
+    except OSError:
+        pass
+```
+
+[`sift_mcp/tools/_cache.py:342-367`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L342-L367)
+
+[30] 입력 목록은 경로, 크기, `mtime_ns`로 만든다.
+
+```python
+    for raw in sorted({str(p) for p in paths if p}):
+        p = Path(raw)
+        try:
+            if p.is_dir():
+                files: list[str] = []
+                total = 0
+                fcount = 0
+                for f in sorted(p.rglob("*")):
+                    if f.is_file():
+                        st = f.stat()
+                        files.append(f"{f.relative_to(p)}|{st.st_size}|{st.st_mtime_ns}")
+                        total += st.st_size
+                        fcount += 1
+                dir_manifest = hashlib.sha256("\n".join(files).encode("utf-8")).hexdigest()
+                entries.append({"path": str(p.resolve()), "kind": "dir",
+                                "file_count": fcount, "total_bytes": total,
+                                "manifest_sha256": dir_manifest})
+                lines.append(f"dir|{p.resolve()}|{fcount}|{total}|{dir_manifest}")
+            elif p.is_file():
+                st = p.stat()
+                entries.append({"path": str(p.resolve()), "kind": "file",
+                                "size": st.st_size, "mtime_ns": st.st_mtime_ns})
+                lines.append(f"file|{p.resolve()}|{st.st_size}|{st.st_mtime_ns}")
+            else:
+                entries.append({"path": raw, "kind": "missing"})
+                lines.append(f"missing|{raw}")
+        except OSError:
+            entries.append({"path": raw, "kind": "error"})
+            lines.append(f"error|{raw}")
+    manifest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+```
+
+[`sift_mcp/tools/_cache.py:298-327`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L298-L327)
+
+[31] 부속 자료를 쓰는 함수와, 부속 자료 없이 파일을 쓰는 도구의 쓰기 위치다: [`sift_mcp/tools/_cache.py:342`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L342), [`sift_mcp/tools/disk.py:2872-2876`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2872-L2876), [`sift_mcp/tools/disk.py:4130-4149`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4130-L4149).

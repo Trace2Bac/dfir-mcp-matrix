@@ -1,0 +1,74 @@
+---
+cell: I02
+details:
+- id: not_implemented
+---
+
+# I02 분석 도구 통신 차단
+
+### 미구현
+
+**판단.** 서버는 분석 도구를 실행할 때 그 도구의 통신을 끊거나 끄는 옵션이나 장치를 두지 않는다 [1].
+실행기 `SafeRunner.run`은 `subprocess.run`에 `env`를 넘기지 않아 분석 도구는 서버 프로세스의 환경변수와 네트워크 설정을 그대로 물려받는다 [1].
+실행기의 금지 명령 목록에는 `wget`, `curl`, `ssh`, `scp`가 있지만 이 목록은 실행할 프로그램 이름만 검사하고 실행한 분석 도구의 통신은 막지 않는다 [2].
+저장소에는 분석 도구를 네트워크 없는 컨테이너, network namespace, 방화벽 규칙 아래에서 실행하는 구성이 없다.
+
+Volatility 3는 통신을 끄지 않은 채 실행된다 [3][4].
+
+- `VolatilityRunner.run_plugin`은 `vol`에 메모리 파일(`-f`), 출력 형식(`-r`), 플러그인 이름, 플러그인 인자만 넘기고 `--offline`을 붙이지 않는다 [3].
+- `list_processes`의 항목에 남은 명령도 `-f`, `-r json`, `windows.pslist`뿐이었다 [5].
+- Volatility 3 2.28.2에서 `constants.OFFLINE`의 기본값은 거짓이고 명령 행의 `--offline`이 이 값을 켠다 [4].
+- 이 값이 꺼져 있으면 Volatility 3는 Windows 커널의 PDB 심볼 표가 로컬 심볼 폴더와 캐시에 없을 때 Microsoft 심볼 서버(`http://msdl.microsoft.com/download/symbols`)에서 PDB를 받아 변환한다 [4].
+- 원격 ISF 목록 주소 `REMOTE_ISF_URL`은 기본값이 `None`이라 `-u`를 주지 않으면 그 목록은 조회하지 않는다 [4].
+
+`extract_registry_run_keys`의 `sync_batch` 인자가 참이면 서버는 RECmd에 `--sync`를 붙여 배치 파일을 내려받게 한다 [6][7].
+`sync_batch`를 켜고 부르자 시험용 `dotnet`이 받은 RECmd 인자 끝에 `--sync`가 있었다 [5].
+이 내려받기는 서버 코드가 인자로 켜는 연결이므로 분석 도구가 스스로 여는 통신으로 보지 않는다 [6].
+
+Plaso, Chainsaw, Hayabusa, YARA, Sleuth Kit와 RECmd를 뺀 Zimmerman 도구가 스스로 통신하는지는 확인하지 않았다.
+
+### 근거
+
+[1] 실행기는 `env` 없이 `subprocess.run`을 부른다.
+
+```python
+        try:
+            proc = subprocess.run(
+                cmd_parts,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,  # CRITICAL - never use shell=True
+                cwd=cwd,
+            )
+```
+
+[`sift_mcp/runners/base.py:495-505`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L495-L505)
+
+[2] 금지 명령 목록과 검사는 실행할 프로그램의 이름만 본다: [`sift_mcp/runners/base.py:252-262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L252-L262), [`sift_mcp/runners/base.py:375-378`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L375-L378), [`sift_mcp/runners/base.py:446-450`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L446-L450).
+
+[3] `run_plugin`이 만드는 명령이다.
+
+```python
+        # vol3/vol on SIFT is a standalone binary, not a Python script
+        if self.VOL_PATH.endswith(".py"):
+            cmd: List[str] = ["python3", self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        else:
+            cmd: List[str] = [self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        return self.run(cmd, timeout=timeout, tool_name=tool_name)
+```
+
+[`sift_mcp/runners/volatility.py:154-162`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L154-L162)
+
+[4] Volatility 3 2.28.2(`volatilityfoundation/volatility3@881e970`)의 오프라인 설정, 심볼 서버 주소, 심볼 내려받기다: [`volatility3/framework/constants/__init__.py:58`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/constants/__init__.py#L58), [`volatility3/framework/constants/__init__.py:122-125`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/constants/__init__.py#L122-L125), [`volatility3/cli/__init__.py:222-236`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/cli/__init__.py#L222-L236), [`volatility3/cli/__init__.py:310-311`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/cli/__init__.py#L310-L311), [`volatility3/framework/symbols/windows/pdbutil.py:110-115`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/symbols/windows/pdbutil.py#L110-L115), [`volatility3/framework/symbols/windows/pdbconv.py:945-953`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/symbols/windows/pdbconv.py#L945-L953), [`volatility3/framework/layers/resources.py:331-336`](https://github.com/volatilityfoundation/volatility3/blob/881e970121c16f0932fb9d16fbd5fb258cbcbf75/volatility3/framework/layers/resources.py#L331-L336).
+
+[5] (실행 확인) 컨테이너에서 `list_processes`와 `sync_batch`를 켠 `extract_registry_run_keys`를 부르고 기록 항목의 명령과 시험용 `dotnet`이 받은 인자를 확인했다.
+
+[6] `sync_batch`가 참이면 `--sync`를 더하고 도구 인자의 기본값은 거짓이다: [`sift_mcp/runners/eztools.py:430-434`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L430-L434), [`sift_mcp/server.py:2058-2064`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2058-L2064), [`sift_mcp/server.py:2094-2096`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2094-L2096).
+
+[7] RECmd(`EricZimmerman/RECmd@bcd0ac3`)의 `--sync` 옵션과 내려받기다: [`RECmd/Program.cs:237-241`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L237-L241), [`RECmd/Program.cs:454-466`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L454-L466), [`RECmd/Program.cs:1835-1848`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L1835-L1848).
