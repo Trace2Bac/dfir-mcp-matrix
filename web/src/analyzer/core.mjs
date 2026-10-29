@@ -5,6 +5,8 @@
 //
 // 출력(extractTree):
 //   tools     등록 도구. name·path·line·reg, description(MCP 클라이언트가 보는 설명. 코드만으로 못 읽으면 description_expr), params(인자),
+//             title, annotations(ToolAnnotations를 JSON으로), input_schema·output_schema(코드에 직접 쓴 스키마),
+//             structured_output(코드 그대로). 코드만으로 못 읽은 값은 *_expr(python.mjs의 toolArgs)
 //             fn(graph.functions의 시작 함수 번호), scope(호출하는 함수·파일 수)
 //             line은 함수 정의(def) 줄이다. reg는 등록한 코드 한 줄이다(python.mjs의 findTools).
 //   dynamic   코드만 보고 함수를 정할 수 없는 등록(반복문 안의 x.tool()(변수) 등)

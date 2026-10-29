@@ -141,7 +141,89 @@ function calleeName(f) {
 }
 
 /**
+ * 파이썬 리터럴(딕셔너리·리스트·문자열·숫자·True/False/None) → JSON 값. 실행해야 정해지는 값이 섞이면 undefined.
+ * 키워드 인자만 쓴 ToolAnnotations(…)·dict(…)는 딕셔너리로 본다
+ */
+function jsonLiteral(n, str) {
+  switch (n?.type) {
+    case 'call': {
+      if (!/^(ToolAnnotations|dict)$/.test(calleeName(field(n, 'function')) ?? '')) return undefined;
+      const out = {};
+      for (const a of argNodes(n)) {
+        const v = a.type === 'keyword_argument' ? jsonLiteral(field(a, 'value'), str) : undefined;
+        if (v === undefined) return undefined;
+        out[field(a, 'name').text] = v;
+      }
+      return out;
+    }
+    case 'dictionary': {
+      const out = {};
+      for (const p of n.namedChildren) {
+        if (p.type === 'comment') continue;
+        const k = p.type === 'pair' ? str(field(p, 'key')) : null;
+        const v = k !== null ? jsonLiteral(field(p, 'value'), str) : undefined;
+        if (v === undefined) return undefined;
+        out[k] = v;
+      }
+      return out;
+    }
+    case 'list': case 'tuple': {
+      const out = [];
+      for (const c of n.namedChildren) {
+        if (c.type === 'comment') continue;
+        const v = jsonLiteral(c, str);
+        if (v === undefined) return undefined;
+        out.push(v);
+      }
+      return out;
+    }
+    case 'integer': case 'float': return Number.isFinite(Number(n.text)) ? Number(n.text) : undefined;
+    case 'unary_operator': { const v = jsonLiteral(n.namedChildren[0], str); return n.text.startsWith('-') && typeof v === 'number' ? -v : undefined; }
+    case 'true': return true;
+    case 'false': return false;
+    case 'none': return null;
+    default: return str(n) ?? undefined;
+  }
+}
+
+// JSON으로 읽는 등록 인자 → 결과 이름. 저수준 Tool은 inputSchema·outputSchema, fastmcp는 output_schema다
+const JSON_ARGS = [['annotations', 'annotations'], ['inputSchema', 'input_schema'], ['outputSchema', 'output_schema'], ['output_schema', 'output_schema']];
+
+/**
+ * 도구 등록 코드의 키워드 인자: description(descriptionOf), title, structured_output(MCP SDK, 코드 그대로)과 JSON_ARGS.
+ * JSON_ARGS는 리터럴(annotations=ToolAnnotations(…)·딕셔너리, 스키마 딕셔너리, None이면 null)로 읽고,
+ * 같은 파일의 모듈 수준 변수(RO = ToolAnnotations(…))는 consts로 따라간다. 코드만으로 못 읽으면 *_expr에 코드를 남긴다
+ */
+function toolArgs(call, str, consts) {
+  if (!call) return { description: null };
+  const out = descriptionOf(call, str);
+  const title = keywordStr(call, 'title', str);
+  if (title !== null) out.title = title;
+  const so = keywordArg(call, 'structured_output');
+  if (so) out.structured_output = so.text;
+  for (const [key, name] of JSON_ARGS) {
+    const arg = keywordArg(call, key);
+    if (!arg) continue;
+    const json = jsonLiteral((arg.type === 'identifier' && consts.get(arg.text)) || arg, str);
+    if (json !== undefined) out[name] = json;
+    else out[`${name}_expr`] = snippet(arg);
+  }
+  return out;
+}
+
+/** 모듈 수준의 x = 값 대입: 이름 → 값 노드 */
+function moduleAssigns(root) {
+  const m = new Map();
+  for (const st of root.namedChildren) {
+    const a = st.type === 'expression_statement' ? st.namedChildren[0] : null;
+    if (a?.type === 'assignment' && field(a, 'left')?.type === 'identifier' && field(a, 'right')) m.set(field(a, 'left').text, field(a, 'right'));
+  }
+  return m;
+}
+
+/**
  * 등록 방식: @x.tool 데코레이터, x.add_tool(f), x.tool()(f), 저수준 SDK의 Tool(name=…)(mcp에서 import한 것만). reg는 등록한 코드 한 줄이다.
+ * 등록 코드의 키워드 인자(description, title, annotations, 스키마)도 읽는다(toolArgs).
  * 코드만 보고 함수를 정할 수 없는 등록(반복문 안의 x.tool()(변수) 등)은 dynamic으로 따로 둔다
  */
 function findTools({ trees, imports }, value) {
@@ -164,6 +246,8 @@ function findTools({ trees, imports }, value) {
   for (const [path, tree] of trees) {
     const str = n => value(n, path);
     const imp = imports.get(path);
+    const consts = moduleAssigns(tree.rootNode);
+    const args = call => toolArgs(call, str, consts);
     for (const n of walk(tree.rootNode)) {
       if (n.type === 'function_definition') {
         if (n.parent?.type !== 'decorated_definition') continue;
@@ -173,7 +257,7 @@ function findTools({ trees, imports }, value) {
           if (isToolAttr(isCall ? field(expr, 'function') : expr, imp)) {
             tools.push({
               name: (isCall ? explicitName(expr, str) : null) ?? field(n, 'name').text, path, line: line(n), reg: snippet(dec),
-              ...descriptionOf(isCall ? expr : null, str),
+              ...args(isCall ? expr : null),
             });
             break;
           }
@@ -182,13 +266,13 @@ function findTools({ trees, imports }, value) {
         const f = field(n, 'function');
         let fn = null, name = null, desc = null;
         if (f?.type === 'attribute' && field(f, 'attribute')?.text === 'add_tool' && positional(n).length) {
-          fn = positional(n)[0]; name = explicitName(n, str, true); desc = descriptionOf(n, str);
+          fn = positional(n)[0]; name = explicitName(n, str, true); desc = args(n);
         } else if (f?.type === 'call' && isToolAttr(field(f, 'function'), imp) && positional(n).length) {
-          fn = positional(n)[0]; name = explicitName(f, str); desc = descriptionOf(f, str);
+          fn = positional(n)[0]; name = explicitName(f, str); desc = args(f);
         } else if (calleeName(f) === 'Tool' && fromMcp(f, imp)) {
           // 저수준 SDK의 Tool(name=…). LangChain 등 다른 라이브러리의 Tool은 import한 곳으로 거른다
           const toolName = explicitName(n, str);
-          if (toolName !== null) tools.push({ name: toolName, path, line: line(n), reg: snippet(n), ...descriptionOf(n, str) });
+          if (toolName !== null) tools.push({ name: toolName, path, line: line(n), reg: snippet(n), ...args(n) });
           continue;
         }
         if (!fn) continue;
@@ -802,7 +886,7 @@ function versionKey(v) {
   while (nums.length < 3) nums.push(0);
   return /\d(a|b|rc|dev)\d*$/i.test(v) ? [...nums, -1] : [...nums, 0];
 }
-const versionAtLeast = (v, min) => {
+export const versionAtLeast = (v, min) => {
   const a = versionKey(v), b = versionKey(min);
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
   return true;
@@ -862,7 +946,8 @@ function pyprojectDeps(text) {
  * 의존성 파일에서 MCP SDK(mcp 또는 fastmcp) 버전을 읽고 지원하는 규격을 정한다.
  * lock 파일(uv.lock, poetry.lock)에 있으면 그 버전(exact), 아니면 pyproject.toml·requirements*.txt의 조건에서
  * 가장 낮은 버전(atLeast: 설치할 때 더 새 버전이 들어올 수 있다). fastmcp만 적혀 있으면 fastmcp가 요구하는 mcp로 바꿔 본다.
- * 결과: {package, version, spec, source, exact, atLeast, oldest, latest, via} 또는 null(의존성 파일에 없음).
+ * 결과: {package, version, spec, source, exact, atLeast, oldest, latest, via, pinned} 또는 null(의존성 파일에 없음).
+ * pinned는 패키지마다 정확히 아는 버전(lock 파일, == 조건)이다. fastmcp 서버도 lock 파일에는 mcp가 함께 있어 package는 mcp가 된다
  * oldest~latest가 지원하는 규격 범위다. 실제 통신 규격은 이 안에서 클라이언트가 요청한 것으로 정해진다
  */
 export function readSdk(depFiles) {
@@ -888,6 +973,11 @@ export function readSdk(depFiles) {
       if (!declared[pkg] || (main && !declared[pkg].main)) declared[pkg] = { spec, source: path, main };
     }
   }
+  const pinned = {};
+  for (const pkg of ['mcp', 'fastmcp']) {
+    const pin = locked[pkg]?.version ?? declared[pkg]?.spec.match(/^==\s*([\d.]+)$/)?.[1];
+    if (pin) pinned[pkg] = pin;
+  }
   // 실제 규격을 구현하는 것은 mcp 패키지라 mcp를 먼저 본다
   for (const pkg of ['mcp', 'fastmcp']) {
     const l = locked[pkg];
@@ -895,7 +985,7 @@ export function readSdk(depFiles) {
     const mcpMin = pkg === 'fastmcp' ? lookup(FASTMCP_MCP, l.version) : l.version;
     return {
       package: pkg, version: l.version, spec: null, source: l.source, exact: pkg === 'mcp', atLeast: pkg !== 'mcp',
-      ...range(mcpMin && lookup(MCP_SDK_PROTOCOLS, mcpMin)), ...(pkg === 'fastmcp' && { via: `mcp ${mcpMin} 이상` }),
+      ...range(mcpMin && lookup(MCP_SDK_PROTOCOLS, mcpMin)), ...(pkg === 'fastmcp' && { via: `mcp ${mcpMin} 이상` }), pinned,
     };
   }
   // 선언만 있으면 실행용 의존성을 먼저, 그다음 mcp를 본다
@@ -906,7 +996,7 @@ export function readSdk(depFiles) {
     const exact = pkg === 'mcp' && /^==\s*[\d.]+$/.test(d.spec);
     return {
       package: pkg, version: exact ? low : null, spec: d.spec, source: d.source, exact, atLeast: !exact,
-      ...range(mcpMin ? lookup(MCP_SDK_PROTOCOLS, mcpMin) : null), ...(pkg === 'fastmcp' && mcpMin && { via: `mcp ${mcpMin} 이상` }),
+      ...range(mcpMin ? lookup(MCP_SDK_PROTOCOLS, mcpMin) : null), ...(pkg === 'fastmcp' && mcpMin && { via: `mcp ${mcpMin} 이상` }), pinned,
     };
   }
   return null;
