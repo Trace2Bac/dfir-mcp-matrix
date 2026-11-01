@@ -1,14 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ToolExplorer from "./ToolExplorer";
+import DepsPanel, { type OsvState } from "./DepsPanel";
 import { PromptsPanel, ResourcesPanel, ServerPanel, SharedPanel } from "./McpPanels";
 import { Loc, type Analysis } from "./parts";
 import { sdkOf, toolsListEntry } from "@site/src/analyzer/toolslist.mjs";
 import styles from "./styles.module.css";
 
-// 분석 결과 화면: 위에 요약, 아래에 탭(도구, 리소스, 프롬프트, 공통 경로, 서버).
+// 분석 결과 화면: 위에 요약, 아래에 탭(도구, 리소스, 프롬프트, 공통 경로, 서버, 의존성).
 // 리소스·프롬프트는 없어도 탭을 두어 MCP 서버가 무엇을 제공하는지 한 줄로 보이게 한다
 
-type Tab = "tools" | "resources" | "prompts" | "shared" | "server";
+type Tab = "tools" | "resources" | "prompts" | "shared" | "server" | "deps";
 
 /** data를 JSON 파일로 내려받게 한다 */
 function download(name: string, data: unknown) {
@@ -31,6 +32,7 @@ export default function ResultView({ file, r, texts, blob, initialTool, onTool }
   const [tab, setTab] = useState<Tab>("tools");
   const [sel, setSel] = useState(() => Math.max(0, tools.findIndex((t) => t.name === initialTool)));
   const [copied, setCopied] = useState(false);
+  const [osv, setOsv] = useState<OsvState>({ state: "idle" });
   const tabsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (tools[sel]) onTool?.(tools[sel].name);
@@ -57,6 +59,7 @@ export default function ResultView({ file, r, texts, blob, initialTool, onTool }
     ["prompts", "프롬프트", mcp.prompts.length],
     ["shared", "공통 경로", s.shared.length],
     ["server", "서버", null],
+    ["deps", "의존성", r.deps ? r.deps.packages.length : null],
   ];
 
   return (
@@ -106,6 +109,7 @@ export default function ResultView({ file, r, texts, blob, initialTool, onTool }
       {tab === "prompts" && <PromptsPanel prompts={mcp.prompts} texts={texts} blob={blob} />}
       {tab === "shared" && <SharedPanel shared={s.shared} tools={tools} fns={fns} texts={texts} blob={blob} onTool={openTool} />}
       {tab === "server" && <ServerPanel mcp={mcp} blob={blob} />}
+      {tab === "deps" && <DepsPanel deps={r.deps} osv={osv} setOsv={setOsv} />}
     </>
   );
 }

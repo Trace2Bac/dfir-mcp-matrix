@@ -26,7 +26,10 @@ export type Tool = {
   returns?: Returns;
   fn?: number;
   scope?: { functions: number; files: number };
+  flows?: Flow[]; // 인자 값이 닿는 저장소 밖 호출(python.mjs의 paramFlows)
 };
+// 도구 인자 param의 값이 functions[fn]의 line 줄 호출 call(종류 kind)의 인자로 들어간다. mode는 open의 읽기·쓰기
+export type Flow = { param: string; kind: "exec" | "open" | "fs" | "sqlite" | "net" | "eval"; call: string; mode?: "r" | "w" | "?"; fn: number; line: number };
 // 도구의 리턴: 타입 표시, 저장소 안 모델이면 그 필드(list면 목록), 딕셔너리면 모은 키(partial: 코드만으로 다 정할 수 없음).
 // 키마다 type은 값으로 짐작한 타입, values는 짧은 리터럴 값, expr은 타입을 모를 때 값 코드
 export type ReturnKey = { name: string; type: string | null; values: string[]; expr: string | null };
@@ -57,6 +60,19 @@ export type Mcp = {
     pinned: { mcp?: string; fastmcp?: string }; // 패키지마다 정확히 아는 버전(lock 파일, == 조건)
   } | null;
 };
+// 의존성 패키지(python.mjs의 readDeps). scope: main(실행용)·extra(선택 설치, group이 묶음 이름)·dev(개발용)·null(구분 못함)
+export type DepScope = "main" | "extra" | "dev" | null;
+export type Dep = { name: string; version: string; scope: DepScope; group: string | null };
+export type Deps = {
+  source: string;
+  packages: Dep[];
+  skipped: { name: string; version: string | null; reason: string }[];
+  unpinned: { name: string; spec: string; source: string }[];
+};
+// osv.mjs의 queryOsv 결과. 취약점이 있는 패키지만
+export type Vuln = { id: string; ids: string[]; cves: string[]; summary: string | null; fixed: string | null; url: string };
+export type VulnDep = Dep & { vulns: Vuln[] };
+
 // 분석한 결과. 지원하지 않는 언어면 language만 있다
 export type Analysis = {
   language: string;
@@ -65,6 +81,7 @@ export type Analysis = {
   dynamic: { path: string; line: number }[];
   graph: { functions: Fn[] };
   mcp: Mcp;
+  deps: Deps | null;
   summary: {
     tools: number;
     functions_reached: number;
@@ -123,21 +140,67 @@ export function Description({ text, expr }: { text: string | null; expr?: string
 }
 
 /** 파라미터·필드 목록: 이름 | 타입, 필수 또는 기본값, Field(description=…). title은 목록 머리 */
-export function Params({ params, title = "파라미터" }: { params: Param[]; title?: React.ReactNode }) {
+// 인자 흐름의 종류 표시(open은 모드까지)
+const FLOW_LABELS: Record<string, string> = {
+  exec: "실행", "open:r": "읽기", "open:w": "쓰기", "open:?": "열기", fs: "파일 변경", sqlite: "SQLite", net: "네트워크", eval: "코드 실행",
+};
+const FLOW_NOTE = "인자 값이 변수 대입과 함수 호출(3단계까지)을 거쳐 닿는 외부 호출. 이름으로 따라가서 넓게 잡힐 수 있고, 객체를 모르는 메서드 호출(path.open() 등)은 따라가지 않음";
+
+/** 인자 하나의 흐름: → 실행 pcap.py:113, :137 · 쓰기 optical.py:607. 위치를 누르면 그 함수의 코드를 연다 */
+function ParamFlows({ flows, fns, onFn }: { flows: Flow[]; fns: Fn[]; onFn?: (id: number) => void }) {
+  const groups = new Map<string, Flow[]>();
+  for (const f of flows) {
+    const label = FLOW_LABELS[f.kind === "open" ? `open:${f.mode}` : f.kind];
+    const list = groups.get(label) ?? [];
+    if (!list.some((x) => x.fn === f.fn && x.line === f.line)) groups.set(label, [...list, f]);
+  }
+  return (
+    <span className={styles.pflow} title={FLOW_NOTE}>
+      →{" "}
+      {[...groups].map(([label, fs], gi) => (
+        <React.Fragment key={label}>
+          {gi > 0 && " · "}
+          {label}{" "}
+          {fs.map((f, i) => {
+            const fn = fns[f.fn];
+            const same = i > 0 && fns[fs[i - 1].fn].path === fn.path;
+            return (
+              <React.Fragment key={i}>
+                {i > 0 && ", "}
+                <button className={styles.jump} onClick={() => onFn?.(f.fn)} title={`${f.call} · ${fn.name} (${fn.path}:${f.line})`}>
+                  {same ? `:${f.line}` : `${fn.path.split("/").pop()}:${f.line}`}
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </React.Fragment>
+      ))}
+    </span>
+  );
+}
+
+// flows·fns가 있으면(도구 파라미터) 인자마다 값이 닿는 외부 호출을 붙인다. onFn: 위치를 누르면 그 함수를 연다
+export function Params({ params, title = "파라미터", flows, fns, onFn }: {
+  params: Param[]; title?: React.ReactNode; flows?: Flow[]; fns?: Fn[]; onFn?: (id: number) => void;
+}) {
   if (!params.length) return null;
   return (
     <div className={styles.params}>
       <span className={styles.paramsHead}>{title}</span>
-      {params.map((p) => (
+      {params.map((p) => {
+        const mine = flows?.filter((f) => f.param === p.name) ?? [];
+        return (
         <div key={p.name} className={styles.param}>
           <code>{p.name}</code>
           <span className={styles.ptype}>
             {p.type}
             {p.required ? <span className={styles.req}>필수</span> : <span> = {p.default}</span>}
+            {mine.length > 0 && fns && <ParamFlows flows={mine} fns={fns} onFn={onFn} />}
           </span>
           {p.description && <p className={styles.pdesc}>{p.description}</p>}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

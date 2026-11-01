@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { extModule, reachOf } from "@site/src/analyzer/core.mjs";
 import {
   Code,
@@ -14,7 +14,7 @@ import {
 import { toolsListEntry, type sdkOf } from "@site/src/analyzer/toolslist.mjs";
 import styles from "./styles.module.css";
 
-// 도구 탭: 왼쪽에 도구 목록, 오른쪽에 고른 도구의 명세(설명·인자·힌트, tools/list 추정)와 다이어그램, 누른 함수의 코드
+// 도구 탭: 왼쪽에 도구 목록, 오른쪽에 고른 도구의 명세(설명·인자와 인자 흐름·힌트, tools/list 추정)와 다이어그램, 누른 함수의 코드
 
 // ── 다이어그램 ──
 
@@ -157,6 +157,12 @@ export default function ToolExplorer({
 }) {
   const [q, setQ] = useState("");
   const [fnSel, setFnSel] = useState<number | null>(null);
+  const codeRef = useRef<HTMLDivElement>(null);
+  // 파라미터 옆 흐름 위치를 누르면 그 함수 코드를 열고 코드로 내려간다(코드는 다이어그램 아래에 있다)
+  const openFn = (id: number) => {
+    setFnSel(id);
+    requestAnimationFrame(() => codeRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+  };
   const tool = tools[sel] as Tool | undefined; // 등록 도구가 없으면 undefined
   const listed = useMemo(() => (tool ? toolsListEntry(tool, sdk) : null), [tool, sdk]);
   useEffect(() => setFnSel(tool?.fn ?? null), [tool]);
@@ -213,7 +219,7 @@ export default function ToolExplorer({
           <h3>{tool.name}</h3>
           <Hints tool={tool} />
           <Description text={tool.description} expr={tool.description_expr} />
-          <Params params={tool.params} />
+          <Params params={tool.params} flows={tool.flows} fns={fns} onFn={openFn} />
           <ReturnInfo r={tool.returns} />
           <details className={styles.jsonView}>
             <summary>tools/list 항목(추정)</summary>
@@ -244,15 +250,17 @@ export default function ToolExplorer({
         ) : (
           <>
             <Diagram fns={fns} root={tool.fn} sel={fnSel} onSel={setFnSel} />
-            {fnSel !== null && (
-              <Code
-                fn={fns[fnSel]}
-                fns={fns}
-                lines={texts.get(fns[fnSel].path) ?? []}
-                onSel={setFnSel}
-                blob={blob}
-              />
-            )}
+            <div ref={codeRef}>
+              {fnSel !== null && (
+                <Code
+                  fn={fns[fnSel]}
+                  fns={fns}
+                  lines={texts.get(fns[fnSel].path) ?? []}
+                  onSel={setFnSel}
+                  blob={blob}
+                />
+              )}
+            </div>
           </>
         )}
       </section>
