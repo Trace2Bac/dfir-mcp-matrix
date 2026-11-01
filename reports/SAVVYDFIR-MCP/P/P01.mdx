@@ -1,0 +1,413 @@
+---
+cell: P01
+details:
+- id: P01.01
+- id: P01.02
+- id: P01.03
+- id: P01.04
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 이 방식은 `detect_triage_layout`, 디스크 도구가 입력 경로를 정하는 함수, `load_memory`, `analyze_vss`, `extract_recycle_bin`에 적용된다 [1][2][3][4][5].
+`detect_triage_layout`은 받은 경로가 `.7z`·`.zip`·`.tar`·`.gz`·`.tgz`로 끝나는 파일이면 `archive_unextracted`로 정하고 먼저 풀라는 안내를 돌려준다 [1].
+폴더이면 바로 아래에 `Windows` 폴더와 `Users`·`Documents and Settings`·`ProgramData` 가운데 하나가 있을 때 `raw_mount`로 정한다 [6].
+한 글자 이름의 폴더 아래에 그런 구조가 있으면 드라이브 트리로 보고 하위 이름이나 경로에 `kape`·`cylr` 표시가 있으면 형식 이름을 `kape`·`cylr`로 정한다 [6][7].
+`uploads` 폴더와 `collection_context.json`·`uploads.json` 같은 Velociraptor 수집 파일 이름이 함께 있으면 `velociraptor`로 정한다 [8].
+응답의 `recommended_next`는 정한 형식에 따라 디스크 도구에 넘길 `image_path`를 적는다 [7].
+도구 설명은 이 도구가 판별만 하고 판별 결과를 추출 도구에 잇는 단계는 아직 없다고 적는다 [9].
+`Windows`·`Users`가 있는 폴더, 같은 구조의 드라이브 폴더 두 개를 둔 폴더, 확장자가 `.zip`인 파일을 넘기자 각각 `raw_mount`, `windows_drive_tree`, `archive_unextracted`가 돌아왔다 [10].
+
+디스크 도구는 입력 인자가 없을 때 받은 `image_path`의 이름으로 입력을 정한다 [2].
+`_resolve_evtx_dir_input`은 경로가 `.evtx`로 끝나는 파일이면 그 부모 폴더를 EVTX 폴더로 쓴다 [2].
+`_resolve_registry_hive_dir_input`은 파일 이름이 `SYSTEM`·`SOFTWARE`·`SECURITY`·`SAM`·`NTUSER.DAT`이면 그 부모 폴더를 하이브 폴더로 쓴다 [2].
+`_resolve_mft_path_input`은 파일 이름이 `$MFT`이면, `_resolve_amcache_hive_input`은 이름이 `amcache.hve`이면 그 파일을 입력으로 쓴다 [2].
+이름이 맞지 않으면 받은 경로를 Windows 볼륨 루트로 보고 `Windows/System32/winevt/Logs` 같은 정해 둔 상대 경로를 붙인다 [2][11].
+상대 경로의 각 부분은 대소문자를 구별하지 않고 찾는다 [11].
+
+`load_memory`는 확장자가 `.zip`이면 보관 파일로 보고 푼 뒤 `.raw`·`.mem`·`.vmem`·`.lime`·`.dmp` 차례로 처음 찾은 파일을 메모리 덤프로 정한다 [3].
+`analyze_vss`는 확장자가 `.E01`·`.E02`·`.EWF`이면 EWF 이미지로 보고 `ewfmount`로 드러낸 원시 장치를 `vshadowinfo`에 넘긴다 [4].
+`extract_recycle_bin`은 볼륨 루트 아래 `$Recycle.Bin`과 `RECYCLER` 폴더를 이름으로 찾아 휴지통 형식을 정한다 [5].
+
+**한계.** `_resolve_mft_path_input`의 이름 비교는 대소문자를 구별하므로 이름이 `$mft`인 파일은 `$MFT`로 보지 않는다 [2].
+`analyze_vss`의 확장자 목록에는 `.Ex01`이 없어 이 형식의 이미지는 EWF로 보지 않고 경로를 그대로 `vshadowinfo`에 넘긴다 [4].
+
+### P01.02 메타데이터 조회
+
+**구현.** 이 방식은 디스크 도구의 입력 결정, `summarize_evtx`의 채널 목록, `load_memory`, `analyze_vss`, 디스크 도구의 부재 판정에 적용된다 [12][13][3][14][15].
+`probe_durable_raw`는 사건의 `artifacts/raw/<종류>` 폴더에 그 종류의 파일이 실제로 있는지 본다 [12].
+EVTX는 `*.evtx` 파일이 하나 이상, 레지스트리는 `SYSTEM`이나 `SOFTWARE` 파일, Prefetch는 `*.pf` 파일이 있어야 하고 Amcache·`$MFT`·SRUM은 파일 크기가 0보다 커야 한다 [12].
+디스크 도구의 입력 결정 함수는 입력 인자가 없으면 이 확인을 먼저 하고 통과한 폴더를 받은 `image_path`보다 앞서 쓴다 [2].
+받은 경로가 폴더이면 그 안에 `*.evtx`·`*.pf`가 있는지, `SYSTEM`·`SOFTWARE`·`NTUSER.DAT`가 있는지로 그 폴더를 바로 입력으로 쓸지 정한다 [2].
+`_enumerate_evtx_channels`는 EVTX 파일마다 크기를 읽어 4096바이트를 넘으면 기록이 있는 채널로 본다 [13].
+`load_memory`는 푼 폴더에서 확장자로 덤프를 찾지 못하면 크기가 100,000,000바이트를 넘는 첫 파일을 덤프로 정한다 [3].
+
+`analyze_vss`는 `partition_offset_sectors`가 없으면 `mmls` 출력에서 시작 섹터가 0보다 크고 공백으로 나눈 넷째 칸이 100000을 넘는 줄을 모아 넷째 칸이 가장 큰 줄의 시작 섹터를 고른다 [14].
+Sleuth Kit 4.11.1 `mmls`의 넷째 칸은 길이가 아니라 끝 섹터이고 미할당 영역도 같은 형식의 줄로 출력된다 [16].
+고른 시작 위치는 `vshadowinfo`와 `vshadowmount`의 `-o` 인자로 전달된다 [17].
+디스크 이미지를 드러내고 `mmls`·`parted`로 파티션 위치를 정하는 `mount_image` 함수도 있지만 MCP 도구로 등록되어 있지 않다 [18].
+서버의 도구 목록 65개에 `mount_image`가 없는 것을 실행으로 확인했다 [19].
+
+`extract_prefetch`·`get_amcache` 같은 디스크 도구는 입력을 찾지 못하면 `_windows_volume_resolves`로 받은 경로 아래에서 `Windows` 폴더가 찾아지는지 본다 [15].
+찾아지면 그 아티팩트가 없는 것으로 기록하고 찾아지지 않으면 다시 시도할 경로 오류로 둔다 [15][20].
+
+**한계.** `probe_durable_raw`는 사건 폴더의 파일이 어느 이미지에서 꺼낸 것인지 보지 않는다 [12].
+그래서 한 사건에 디스크 이미지가 여럿이면 다른 이미지의 `image_path`로 디스크 도구를 불러도 앞서 꺼낸 자료를 입력으로 쓴다 [2].
+`analyze_vss`가 고르는 줄은 가장 긴 파티션이 아니라 끝 섹터가 가장 뒤에 있는 줄이고 미할당 영역일 수도 있다 [14][16].
+두 파티션 뒤에 미할당 영역을 둔 MBR 이미지에서 `analyze_vss`는 가장 긴 파티션의 시작 2048이 아니라 미할당 영역의 시작 422048을 골랐다 [21].
+`analyze_vss`의 주석은 가장 큰 NTFS 파티션을 고른다고 적지만 코드는 파티션의 파일시스템 종류를 보지 않는다 [14].
+`_windows_volume_resolves`는 확인 중 예외가 나면 `True`를 돌려줘 아티팩트가 없는 것으로 기록하게 한다 [15].
+
+### P01.03 내용·헤더 검사
+
+**구현.** 이 방식은 `load_memory`와 `detect_profile`에 적용된다 [3][22].
+`load_memory`는 `/usr/bin/file`로 파일 종류를 읽고 그 출력에 `zip`이 있거나 확장자가 `.zip`이면 보관 파일로 보고 `7z`로 푼다 [3].
+그 밖의 파일은 받은 경로를 그대로 덤프 경로로 돌려준다 [3].
+4096바이트짜리 파일을 넘기자 `was_extracted`가 `false`인 응답이 돌아왔다 [10].
+`detect_profile`은 Volatility 3 `windows.info`를 실행해 덤프를 연다 [22][23].
+`NtMajorVersion`·`NtMinorVersion`·`NtBuildLab`로 Windows 버전과 빌드를, `Is64Bit`로 아키텍처를 정해 응답과 발견사항 하나로 남긴다 [23].
+다른 메모리 도구가 이 결과를 읽는 코드는 없다 [24].
+`mount_image` 함수에는 섹터 0의 서명으로 NTFS·exFAT·FAT을 정하는 단계가 있지만 이 함수는 도구로 등록되어 있지 않다 [18].
+
+**한계.** `load_memory`는 `file` 출력을 소문자로 바꿔 `zip` 글자가 들어 있는지만 본다 [3].
+그래서 `gzip compressed data`처럼 설명에 `zip`이 들어간 다른 형식도 `7z`로 푸는 경로로 간다 [3].
+`file`의 출력은 파일 경로로 시작하므로 경로에 `zip`이 들어간 덤프도 `7z`로 푸는 경로로 간다 [3].
+폴더 이름에 `unzipped`가 들어간 경로에 둔 원시 덤프를 넘기자 푸는 경로로 갔고 기본 `output_dir`를 만들지 못해 오류로 끝났다 [25].
+`detect_profile`은 `os_name`을 늘 `Windows`로 적고 Windows가 아닌 덤프는 `windows.info` 실행 오류로 끝난다 [23].
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** 이 방식은 `extract_recycle_bin`에 적용된다 [5].
+이 도구의 파서는 `$Recycle.Bin/<SID>/$I*` 파일만 읽는다 [5].
+볼륨 루트 아래에서 `$I` 파일을 찾지 못하고 `RECYCLER` 폴더가 있으면 옛 INFO2 형식으로 보고 파싱하지 않는다 [26].
+이때 응답 상태는 `tool_incompatible`, 사유는 `legacy_info2_unsupported`이고 호출 기록 요약에도 `status=tool_incompatible`가 남는다 [26][27].
+`$I` 파일과 `RECYCLER`가 함께 있으면 `$I` 파일만 파싱하고 응답에 `legacy_info2_not_parsed`를 붙인다 [28].
+
+다른 도구는 실행 전에 방법을 판별한 형식이나 OS와 대조하지 않는다.
+`start_investigation`은 매니페스트의 `memory_dumps`가 비어 있으면 메모리 도구를 보고서 필수 도구 목록에서 빼고 다음 단계도 메모리 단계를 건너뛰라고 적는다 [29].
+이 값은 사용자가 매니페스트에 적은 증거 목록이고 서버가 덤프를 판별한 결과가 아니다 [29].
+파일 접근 도구 묶음을 필수로 정하는 `windows_in_scope`도 매니페스트의 `os_in_scope` 글에 `windows`가 있는지만 보고 마운트 경로에서 OS를 추정하지 않는다 [30].
+Volatility 실행이 실패하면 `classify_error`가 표준 오류의 글로 `incompatible_profile`·`missing_symbols`를 정해 호출 기록 요약 앞에 `tool_incompatible`를 붙인다 [31].
+이 분류는 오류 글만 보고 덤프를 다시 열어 보지 않는다 [31].
+
+**한계.** `RECYCLER` 폴더 안에 `INFO2` 파일이 있는지는 보지 않으므로 빈 `RECYCLER` 폴더만 있어도 `tool_incompatible`로 정한다 [26].
+
+### 근거
+
+[1] `detect_triage_layout`은 보관 파일 확장자로 `archive_unextracted`를 정한다.
+
+```python
+    # Archive: detect + instruct (NEVER auto-extract - heavy I/O stays in Bash).
+    if _path_is_file(base) and base.suffix.lower() in _TRIAGE_ARCHIVE_SUFFIXES:
+        return {
+            "status": "ok", "format": "archive_unextracted", "confidence": "high",
+            "source_root": str(base), "volume_roots": [], "artifact_paths": {},
+            "drive_candidates": [], "requires_drive_selection": False,
+            "requires_normalization": False,
+            "markers": {"archive_suffix": base.suffix.lower()},
+            "notes": [
+                f"{base.suffix} archive - this tool does not extract archives "
+                "(collection_unresolved, NOT artifact_absent)."],
+            "recommended_next": (
+                f"Extract first (e.g. 7z x / unzip) to a working dir under "
+                "/cases or /tmp, then re-run detect_triage_layout on that dir."),
+        }
+```
+
+[`sift_mcp/tools/disk.py:8278-8292`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8278-L8292)
+
+[2] 디스크 도구의 입력 결정 함수는 꺼낸 자료 폴더를 먼저 보고 이름과 폴더 내용으로 입력을 정한다: [`sift_mcp/tools/disk.py:802-899`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L802-L899).
+
+[3] `load_memory`는 `file` 출력과 확장자로 ZIP을 정하고 확장자와 크기로 덤프를 고른다: [`sift_mcp/server.py:10806-10856`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10806-L10856).
+
+[4] `analyze_vss`는 확장자로 EWF 이미지를 정하고 `ewfmount`로 드러낸 장치를 쓴다: [`sift_mcp/server.py:5756-5808`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5756-L5808).
+
+[5] `extract_recycle_bin`은 `$Recycle.Bin`의 `$I` 파일과 `RECYCLER` 폴더를 이름으로 찾는다: [`sift_mcp/tools/disk.py:7574-7613`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7574-L7613).
+
+[6] Windows 볼륨 루트와 드라이브 폴더를 폴더 이름으로 정한다.
+
+```python
+def _triage_is_windows_root(p: Path) -> bool:
+    """A directory that looks like a Windows volume root (has Windows/, and a
+    user container). Case-insensitive (triage trees vary in casing)."""
+    if _ci_resolve(p, "Windows") is None:
+        return False
+    return (
+        _ci_resolve(p, "Users") is not None
+        or _ci_resolve(p, "Documents and Settings") is not None
+        or _ci_resolve(p, "ProgramData") is not None
+    )
+```
+
+[`sift_mcp/tools/disk.py:8172-8181`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8172-L8181)
+
+```python
+        for c in children:
+            name = c.name
+            if len(name) == 1 and name.isalpha() and _triage_is_windows_root(c):
+```
+
+[`sift_mcp/tools/disk.py:8198-8200`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8198-L8200)
+
+[7] 드라이브 트리의 형식 이름과 `recommended_next`를 정한다: [`sift_mcp/tools/disk.py:8393-8437`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8393-L8437).
+
+[8] Velociraptor 수집은 `uploads` 폴더와 수집 파일 이름으로 정한다.
+
+```python
+    uploads = _ci_resolve(base, "uploads")
+    _velo_markers = [
+        m for m in (
+            "collection_context.json", "upload_transactions.json", "uploads.json",
+            "task.db", "stats.json.db", "stats.json", "logs.json", "velo_collections.json",
+        ) if _ci_resolve(base, m) is not None
+    ]
+    if uploads is not None and _path_is_dir(uploads) and _velo_markers:
+```
+
+[`sift_mcp/tools/disk.py:8307-8314`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8307-L8314)
+
+[9] 도구 설명은 판별만 하고 추출 도구와 잇는 단계는 아직 없다고 적는다.
+
+```python
+    """EXPERIMENTAL (detect-only, still under testing). Recognize a triage-package
+    or evidence layout and REPORT what it is - it does NOT extract anything.
+
+    READ-ONLY. Emits no findings and is not part of any coverage gate. Idea: when
+    the evidence is a triage collection (CyLR / KAPE / Velociraptor offline
+    collector) rather than a mounted disk image, this classifies the layout and
+    reports the volume root(s) it found. Wiring the existing extractors to run on
+    a recognized triage tree (the Velociraptor accessor split + a normalized view)
+    is a SEPARATE, not-yet-shipped increment - so for now treat the output as
+    informational recognition, not an extraction shortcut.
+```
+
+[`sift_mcp/server.py:1849-1858`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1849-L1858)
+
+[10] (실행 확인) 컨테이너 안에서 만든 폴더와 파일로 `detect_triage_layout`과 `load_memory`를 같은 프로세스에서 불러 돌아온 `format`과 `was_extracted`를 확인했다.
+
+[11] 정해 둔 상대 경로를 대소문자 구별 없이 찾는다: [`sift_mcp/tools/disk.py:539-621`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L539-L621).
+
+[12] `probe_durable_raw`는 종류마다 파일이 있는지와 크기를 본다: [`sift_mcp/tools/disk.py:627-693`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L627-L693).
+
+[13] `_enumerate_evtx_channels`는 파일 크기로 기록이 있는 채널을 정한다.
+
+```python
+    directory = Path(evtx_dir)
+    inventory: dict[str, Any] = {}
+    for evtx_file in sorted(directory.glob("*.evtx")):
+        try:
+            size = evtx_file.stat().st_size
+        except OSError:
+            size = 0
+        stem = evtx_file.stem.lower()
+        tier: str
+        if stem in _EVTX_BASELINE_STEMS:
+            tier = "baseline"
+        elif stem in _EVTX_HIGH_VALUE_STEMS:
+            tier = "high_value"
+        else:
+            tier = "other"
+        inventory[stem] = {
+            "file_path": str(evtx_file),
+            "size_bytes": size,
+            "is_present": size > 4096,
+            "tier": tier,
+        }
+    present = sum(1 for v in inventory.values() if v["is_present"])
+    empty = len(inventory) - present
+```
+
+[`sift_mcp/tools/disk.py:4210-4232`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4210-L4232)
+
+[14] `analyze_vss`는 `mmls` 출력 줄의 넷째 칸이 가장 큰 줄의 시작 섹터를 고른다.
+
+```python
+    offset_sectors: Optional[int] = partition_offset_sectors
+    if offset_sectors is None:
+        try:
+            mmls = subprocess.run(
+                ["mmls", str(image_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if mmls.returncode == 0:
+                # Parse mmls output - find the largest NTFS partition
+                # (offset, size, index)
+                ntfs_partitions: list[tuple[int, int, int]] = []
+                for line in mmls.stdout.splitlines():
+                    # Format: 000:  Meta  0000000000  0000000000  0000000001  ...
+                    # NTFS lines contain "NTFS" or have large sizes
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        try:
+                            idx = int(parts[0].rstrip(":"))
+                            start = int(parts[2])
+                            size = int(parts[3])
+                            if start > 0 and size > 100000:  # Skip tiny partitions
+                                ntfs_partitions.append((start, size, idx))
+                        except (ValueError, IndexError):
+                            continue
+                if ntfs_partitions:
+                    # Pick the largest partition (most likely to be Windows C:)
+                    ntfs_partitions.sort(key=lambda x: x[1], reverse=True)
+                    offset_sectors = ntfs_partitions[0][0]
+        except FileNotFoundError:
+            pass  # mmls not available - try without offset
+```
+
+[`sift_mcp/server.py:5720-5749`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5720-L5749)
+
+[15] 입력을 찾지 못하면 Windows 볼륨 루트가 찾아지는지로 부재와 경로 오류를 나눈다.
+
+```python
+def _windows_volume_resolves(image_path: str) -> bool:
+    """True if a Windows volume root resolves (case-insensitive) under image_path.
+
+    1c positive-absence guard (review 2026-06-06): only call an artifact
+    'absent' when the Windows root actually resolves but the artifact is missing
+    (genuine absence, e.g. pre-Win8 Amcache, Server-OS Prefetch). If the root
+    itself is unresolvable it is a path/mount FAILURE (retryable error), NOT
+    absence - prevents the XP uppercase-path (WINDOWS) false-absence overclaim.
+    On any internal error, returns True to preserve genuine documented-absence.
+    """
+    try:
+        from sift_mcp.tools.disk import _candidate_windows_volume_roots, _ci_resolve
+        roots = _candidate_windows_volume_roots(str(image_path))
+        return any(_ci_resolve(r, "Windows") is not None for r in roots)
+    except Exception:
+        return True
+```
+
+[`sift_mcp/server.py:1014-1029`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1014-L1029)
+
+```python
+        if isinstance(_r, dict) and _r.get("needs_extract_windows_artifacts"):
+            if _windows_volume_resolves(str(image_path)):
+                return _record_artifact_absent_audit(
+                    tool_name="disk.extract_prefetch",
+                    artifact_name="Prefetch",
+                    checked_paths=_r.get("checked_paths") or [str(image_path)],
+                    reason=str(_r.get("error_message") or "Prefetch not present (e.g. disabled by default on Server OS)"),
+                    case_id=case_id,
+                    command_line=f"extract_prefetch(image_path={image_path!r}, case_id={case_id!r})",
+                )
+```
+
+[`sift_mcp/server.py:1653-1662`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1653-L1662)
+
+[16] Sleuth Kit 4.11.1 `mmls`는 줄마다 슬롯 다음에 시작, 끝, 길이를 차례로 출력하고 미할당 영역은 슬롯 칸에 `-------`를 적는다: [`tools/vstools/mmls.cpp:59-78`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L59-L78), [`tools/vstools/mmls.cpp:112-116`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L112-L116), 머리줄은 [`tools/vstools/mmls.cpp:140-141`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tools/vstools/mmls.cpp#L140-L141)에 있다.
+
+[17] 고른 시작 위치를 `vshadowinfo`·`vshadowmount`에 바이트 단위로 넘긴다.
+
+```python
+    vshadow_cmd = [vshadowinfo_bin]
+    if offset_sectors is not None:
+        # vshadowinfo takes byte offset
+        vshadow_cmd += ["-o", str(offset_sectors * 512)]
+    vshadow_cmd.append(str(target_path))
+```
+
+[`sift_mcp/server.py:5810-5814`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5810-L5814)
+
+```python
+            mount_cmd = [vshadowmount_bin]
+            if offset_sectors is not None:
+                mount_cmd += ["-o", str(offset_sectors * 512)]
+            mount_cmd += [str(image_path), str(mount_point)]
+```
+
+[`sift_mcp/server.py:5921-5924`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5921-L5924)
+
+[18] `mount_image`에는 `@mcp.tool()`이 없고 바로 위 `_ntfs_mount_argv`에 붙어 있다: [`sift_mcp/server.py:10234-10293`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10234-L10293), 섹터 0 서명은 [`sift_mcp/server.py:10353-10367`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10353-L10367), 파티션 위치는 [`sift_mcp/server.py:10497-10570`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10497-L10570)에 있다.
+
+[19] (실행 확인) MCP SDK 2.2.0 클라이언트로 서버를 시작해 받은 도구 65개의 이름에 `mount_image`가 없고 `_ntfs_mount_argv`와 `load_memory`가 있었다.
+
+[20] 부재로 기록하는 경로는 실행 기록을 남기고 `evidence_access_gap` 발견사항 저장은 실패해도 진행한다: [`sift_mcp/server.py:1032-1142`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1032-L1142).
+
+[21] (실행 확인) 2048부터 30만 섹터 파티션, 그 뒤 12만 섹터 파티션, 끝에 미할당 영역을 둔 MBR 이미지로 `analyze_vss`를 부르자 `partition_offset_sectors` 422048이 돌아왔고 `vshadowinfo`는 `-o 216088576`을 받았다.
+
+[22] `detect_profile`은 Volatility 3 `windows.info`를 실행한다.
+
+```python
+    try:
+```
+
+[`sift_mcp/tools/memory.py:595-595`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L595-L595)
+
+```python
+        # If VOL_PATH is a binary (not a .py script), invoke directly
+        # vol3/vol on SIFT is a standalone binary, not a Python script
+        if self.VOL_PATH.endswith(".py"):
+            cmd: List[str] = ["python3", self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+        else:
+            cmd: List[str] = [self.VOL_PATH, "-f", dump_path, "-r", output_format, plugin]
+```
+
+[`sift_mcp/runners/volatility.py:153-158`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L153-L158)
+
+[23] 판별한 버전·빌드·아키텍처를 응답과 발견사항으로 남긴다: [`sift_mcp/tools/memory.py:619-713`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L619-L713).
+
+[24] 메모리 도구 모듈에서 `ProfileResult`를 쓰는 곳은 `detect_profile`의 응답뿐이다(`git grep -n -i profile 9ac8e47 -- sift_mcp/tools/memory.py`): [`sift_mcp/tools/memory.py:43`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L43), [`sift_mcp/tools/memory.py:664-671`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L664-L671), [`sift_mcp/tools/memory.py:712`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L712).
+
+[25] (실행 확인) 0으로 채운 같은 덤프 파일을 `unzipped`가 들어간 폴더와 들어가지 않은 폴더에 두고 `load_memory`를 부르자 앞의 것은 `/evidence` 권한 오류로, 뒤의 것은 `was_extracted: false`로 돌아왔다.
+
+[26] `$I` 파일이 없고 `RECYCLER`가 있으면 `tool_incompatible`로 돌아간다.
+
+```python
+    if not discovered:
+        # Legacy INFO2-only volume (XP/RECYCLER, no modern $Recycle.Bin/$I): the
+        # artifact IS present but this native $I parser cannot read INFO2. That is
+        # tool incompatibility, NOT proven absence - returning artifact_absent
+        # would be a false negative on INFO2-only hosts. tool_incompatible still
+        # satisfies the file-access coverage gate (documented non-applicability).
+        if legacy_seen:
+            return _useractivity_tool_incompatible_response(
+                tool=tool, exec_id=exec_id, raw_command=raw_command,
+                started_at=started_at, profiles_checked=profiles_checked,
+                reason="legacy_info2_unsupported",
+                artifact_label="Recycle Bin $I metadata files",
+                detail=(
+                    "legacy RECYCLER/INFO2 store present but the native $I parser "
+                    "does not support the INFO2 format; absence is NOT proven."
+                ),
+            )
+```
+
+[`sift_mcp/tools/disk.py:7632-7648`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7632-L7648)
+
+[27] `tool_incompatible` 응답은 호출 기록 요약에 상태와 사유를 적는다: [`sift_mcp/tools/disk.py:5908-5965`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5908-L5965).
+
+[28] `$I` 파일과 `RECYCLER`가 함께 있으면 `legacy_info2_not_parsed`를 붙인다.
+
+```python
+    if legacy_seen:
+        response["legacy_info2_not_parsed"] = True
+    return response
+```
+
+[`sift_mcp/tools/disk.py:7738-7740`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7738-L7740)
+
+[29] `memory_dumps`가 비면 메모리 도구를 필수 목록과 다음 단계에서 뺀다: [`sift_mcp/server.py:7274-7376`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7274-L7376).
+
+[30] `windows_in_scope`는 매니페스트의 글만 본다.
+
+```python
+def windows_in_scope(os_in_scope: Any) -> bool:
+    """Normalized, type-guarded 'is Windows in scope' predicate.
+
+    Accepts a list/str/None. Returns True iff any entry contains 'windows'
+    (case-insensitive) -- handles 'Windows 10/11', 'Windows Server 2019/2022'.
+    Missing/malformed -> False (fail-closed on the OS axis; do NOT infer Windows
+    from mount paths here).
+    """
+    if isinstance(os_in_scope, str):
+        return "windows" in os_in_scope.lower()
+    if isinstance(os_in_scope, (list, tuple)):
+        return any(isinstance(o, str) and "windows" in o.lower() for o in os_in_scope)
+    return False
+```
+
+[`sift_mcp/reporting.py:1388-1400`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L1388-L1400)
+
+[31] Volatility 오류는 표준 오류의 글로 분류한다: [`sift_mcp/runners/volatility.py:390-475`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L390-L475).

@@ -1,0 +1,225 @@
+---
+cell: E02
+details:
+- id: E02.04
+---
+
+# E02 증거 무결성 검증
+
+### E02.04 도구를 요청해 검증
+
+**구현.** 이 방식은 `verify_integrity`에 적용된다 [1].
+모델이 이 도구를 부를 때만 서버가 받은 경로에 `ewfverify`를 실행기 `SafeRunner.run`으로 실행한다 [1][2].
+`ewfverify`는 EWF 파일에 담긴 취득 해시와 이미지 데이터에서 다시 계산한 해시를 대조하고 결과를 표준 출력과 종료 코드로 낸다 [3].
+기준값은 이미지를 만들 때 EWF 파일에 담긴 해시이고 서버는 기준값을 따로 계산하거나 저장하지 않는다 [1].
+`_parse_ewfverify_output`은 출력에서 저장 해시와 계산 해시를 정규식으로 찾는다 [4].
+둘 다 찾으면 두 값이 같은지로, 찾지 못하면 종료 코드가 0인지로 `verified`를 정한다 [4].
+결과는 응답의 `data`·`verified`와 발견사항 하나로 남는다 [5].
+`verified`가 `true`이면 무결성이 확인되었다는 발견사항, 저장 해시를 찾지 못했으면 검증할 수 없다는 발견사항, 두 해시가 다르면 `defense_evasion` 유형의 발견사항을 만든다 [5].
+응답 정리 단계는 알고리즘이 `sha256`일 때만 계산 해시를 실행 기록의 `artifact_hashes`에 넣는다 [6].
+다른 도구의 입력 경로가 그 값과 같으면 그 해시를 가져다 붙이고 없으면 `unhashed_primary_input`으로 표시하며 다시 대조하지 않는다 [7].
+사건 시작, 증거를 읽는 도구, 보고서 생성은 증거의 해시를 계산하거나 대조하지 않는다 [8].
+
+**한계.** 버전 기준 환경의 `ewfverify` 20140807은 `MD5 hash stored in file:`과 `MD5 hash calculated over data:` 뒤에 해시를 출력한다 [3].
+`_HASH_RE`는 알고리즘 이름 바로 뒤에 `:`이나 `=`와 해시가 오는 형식만 찾으므로 이 출력에서 두 해시를 하나도 찾지 못한다 [4].
+그래서 `stored_hash`는 `null`, `computed_hash`는 `<unparseable>`이 되고 `verified`는 종료 코드로만 정해진다 [3][4].
+정상 E01 이미지에서는 `verified`가 `true`였지만 `data`에 두 해시가 없었고 `artifact_hashes`는 비어 있었다 [3].
+데이터 1바이트를 바꾼 E01 이미지에서 `ewfverify`는 두 해시가 다르다고 출력하고 종료 코드 1로 끝났다 [3].
+서버는 저장 해시를 찾지 못한 경우로 처리해 `verified: false`와 함께 검증할 수 없으니 조사를 계속하라는 확신도 0.5의 발견사항을 만들었다 [3][5].
+두 해시가 다를 때 만드는 `defense_evasion` 발견사항은 저장 해시를 찾았을 때만 만들어지므로 이 출력 형식에서는 만들어지지 않는다 [5].
+`verify_integrity`는 `verified`가 거짓이어도 응답의 `status`를 `success`로 둔다 [9].
+응답에는 대조 결과 `data`·`verified`와 발견사항 ID `findings_created`만 실리고 해시가 다르다는 경고 문장은 사건 상태에 저장한 발견사항의 설명에만 들어간다 [5][9].
+도구 설명은 원시 이미지면 `sha256sum`으로 계산한다고 적지만 그런 코드는 없다 [10][2].
+원시 이미지에서는 `ewfverify`가 실패하고 해시 없이 검증할 수 없다는 발견사항만 남았다 [3].
+도구 설명은 계산한 해시가 사건을 닫을 때의 해시와 맞아야 한다고 적지만 닫을 때 대조하는 코드는 없다 [11][8].
+서버를 다시 시작한 뒤 사건 ID를 받는 도구를 부르기 전에는 발견사항을 저장하지 못해 오류로 끝난다 [12].
+
+### 근거
+
+[1] `verify_integrity`는 `ewfverify`를 실행해 결과를 해석한다: [`sift_mcp/tools/evidence.py:217-364`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L217-L364).
+
+[2] `ewfverify` 명령은 이미지 경로 하나만 받는다.
+
+```python
+        cmd: List[str] = ["ewfverify", image_path]
+        return self.run(cmd, timeout=timeout, tool_name=tool_name)
+```
+
+[`sift_mcp/runners/sleuthkit.py:108-109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/sleuthkit.py#L108-L109)
+
+[3] (실행 확인) 컨테이너 안에서 `ewfacquire`로 만든 64KiB E01 이미지, 데이터 1바이트를 바꾼 사본, 원시 이미지에 `verify_integrity`를 불러 응답·발견사항·`artifact_hashes`를 보고 같은 파일에 `ewfverify`(ewf-tools 20140807)를 직접 실행한 출력과 대조했다.
+
+[4] 해시 정규식과 `verified` 결정.
+
+```python
+_HASH_RE = re.compile(
+    r"(?:md5|sha[-_ ]?1|sha[-_ ]?256)\s*[:\s=]+\s*([0-9a-fA-F]{32,64})",
+    re.IGNORECASE,
+)
+```
+
+[`sift_mcp/tools/evidence.py:95-98`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L95-L98)
+
+```python
+    # If we still haven't found a computed hash, try any hash on the last
+    # non-empty line (some versions print a single summary line)
+    if computed_hash == "<unparseable>":
+        hashes = _HASH_RE.findall(stdout)
+        if hashes:
+            computed_hash = hashes[-1].lower()
+            if stored_hash is None and len(hashes) >= 2:
+                stored_hash = hashes[0].lower()
+
+    # Determine verified status
+    if exit_code == 0:
+        verified = True
+    elif _VERIFIED_RE.search(stdout):
+        verified = True
+    else:
+        verified = not bool(_FAILED_RE.search(stdout)) and exit_code == 0
+
+    # If stored matches computed we know it's verified regardless of exit code
+    if stored_hash and computed_hash != "<unparseable>":
+        verified = stored_hash == computed_hash
+```
+
+[`sift_mcp/tools/evidence.py:181-200`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L181-L200)
+
+[5] `verified`와 저장 해시 유무로 발견사항을 나눈다.
+
+```python
+    no_stored_hash = not integrity.stored_hash or integrity.stored_hash in (
+        "N/A", "<unparseable>", "none", "")
+
+    if integrity.verified:
+        finding_type = "other"
+        description = (
+            f"Image integrity verified: {image_path}. "
+            f"Computed {integrity.algorithm.upper()} hash {integrity.computed_hash} "
+            f"matches stored hash {integrity.stored_hash}. "
+            "Evidence chain-of-custody is intact."
+        )
+        confidence = 0.99
+    elif no_stored_hash:
+        # No acquisition hash in image - cannot verify, but not a failure
+        finding_type = "other"
+        description = (
+            f"Image integrity unverifiable for {image_path}. "
+            f"No stored acquisition hash present in image metadata. "
+            f"Computed {integrity.algorithm.upper()} hash: {integrity.computed_hash}. "
+            "This is normal for training/CTF images. Proceed with investigation."
+        )
+        confidence = 0.5
+    else:
+        finding_type = "defense_evasion"
+        description = (
+            f"Image integrity FAILED for {image_path}. "
+            f"Stored hash: {integrity.stored_hash}, "
+            f"Computed hash: {integrity.computed_hash}. "
+            "The evidence image may have been modified after acquisition."
+        )
+```
+
+[`sift_mcp/tools/evidence.py:301-330`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L301-L330)
+
+[6] `artifact_hashes`에는 `sha256`만 넣는다.
+
+```python
+def _extract_verify_integrity_hash(response: dict[str, Any]) -> Optional[dict[str, str]]:
+    data = response.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    record = data[0]
+    algorithm = str(record.get("algorithm") or "").strip().lower()
+    computed_hash = str(record.get("computed_hash") or "").strip().lower()
+    image_path = _normalize_path_ref(record.get("image_path"))
+    if algorithm != "sha256" or not computed_hash or not image_path:
+        return None
+    return {
+        "path": image_path,
+        "sha256": computed_hash,
+        "role": "input",
+        "source": "verify_integrity",
+    }
+```
+
+[`sift_mcp/server.py:785-800`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L785-L800)
+
+[7] 다른 도구의 입력은 앞서 기록한 해시를 찾아 붙이거나 `unhashed_primary_input`으로 표시한다.
+
+```python
+        artifact_role = "input" if role == "input" else "output"
+        if artifact_role == "input":
+            reused = _state_manager.lookup_artifact_hash(path)
+            if reused:
+                candidate = {
+                    "path": _normalize_path_ref(reused.get("path")) or path,
+                    "sha256": str(reused.get("sha256") or "").strip().lower(),
+                    "role": "input",
+                    "source": str(reused.get("source") or "verify_integrity").strip().lower(),
+                }
+                key = (
+                    candidate["path"],
+                    candidate["sha256"],
+                    candidate["role"],
+                    candidate["source"],
+                )
+                if candidate["sha256"] and key not in seen:
+                    seen.add(key)
+                    artifact_hashes.append(candidate)
+                continue
+            ref.setdefault("hash_status", "unhashed_primary_input")
+            continue
+```
+
+[`sift_mcp/server.py:829-850`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L829-L850)
+
+[8] `verify_integrity` 밖에서 해시 대조 결과를 쓰는 곳은 위 정리 단계뿐이다(`git grep -n -E "verify_integrity|lookup_artifact_hash|stored_hash" 9ac8e47 -- sift_mcp scripts`): [`sift_mcp/server.py:766-850`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L766-L850).
+
+[9] `verify_integrity`는 대조 결과와 관계없이 응답의 `status`를 `success`로 둔다.
+
+```python
+    finding_id = _state.add_finding(finding.model_dump(mode="json"))
+
+    return {
+        "tool_name": "evidence.verify_integrity",
+        "status": "success",
+        "data": [integrity.model_dump(mode="json")],
+        "findings_created": [finding_id],
+        "execution_id": result.execution_id,
+        "raw_command": result.command_line,
+        "verified": integrity.verified,
+    }
+```
+
+[`sift_mcp/tools/evidence.py:354-364`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L354-L364)
+
+판정과 발견사항 설명을 정하는 곳부터 응답까지는 [`sift_mcp/tools/evidence.py:298-364`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L298-L364)에 있다.
+
+[10] 도구 설명의 `sha256sum` 문장.
+
+```python
+    For non-EWF images (raw ``.dd``, ``.raw``) the runner will fall back to
+    ``sha256sum`` if ``ewfverify`` reports an unsupported format.
+```
+
+[`sift_mcp/tools/evidence.py:224-225`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/evidence.py#L224-L225)
+
+```python
+    Runs ``ewfverify`` (for E01 images) or ``sha256sum`` (for raw/dd images)
+    to compute and compare the image hash against any stored reference hash.
+```
+
+[`sift_mcp/server.py:1546-1547`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1546-L1547)
+
+[11] 사건을 닫을 때 해시가 맞아야 한다는 도구 설명.
+
+```python
+    This is the FIRST tool that should be called when evidence is registered -
+    the computed hash is recorded in the audit log and must match the
+    case-opening hash when the case is closed (zero-spoliation guarantee).
+```
+
+[`sift_mcp/server.py:1549-1551`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1549-L1551)
+
+[12] (실행 확인) 서버를 다시 시작한 프로세스에서 사건을 불러오기 전에 `verify_integrity`를 부르자 `CaseStateManager has not been initialised` 오류가, `read_state` 뒤에 부르자 성공 응답이 돌아왔다.

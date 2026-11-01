@@ -1,0 +1,241 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 비밀 값을 응답과 남긴 파일에 싣고 그 값을 가리거나 빼는 처리를 두지 않는다.
+호출 기록과 보고서를 쓰는 코드에도 이 값을 가리는 처리가 없다 [1].
+
+응답에서는 증거의 글을 그대로 싣는 도구가 비밀번호가 들어간 줄도 그대로 돌려준다.
+`extract_powershell_history`는 PSReadLine 기록의 줄을 행마다 `command`에 그대로 담고 `preview`에 싣는다 [2][3].
+(실행 확인) `-AsPlainText`로 만든 비밀번호와 `net user` 명령의 비밀번호가 들어간 합성 기록을 주자 두 비밀번호가 `preview`의 `command`에 그대로 실렸다 [2].
+`summarize_evtx`의 `detailed` 형식은 EvtxECmd 행의 `PayloadData1`과 나머지 열을 `message_summary`·`extra_fields`에 담는다 [4].
+이 값은 증거 글을 감싸는 `<EVIDENCE_CONTENT>` 표시만 붙고 내용은 바뀌지 않는다 [5][6].
+`run_analysis`는 사건 폴더의 CSV를 모델이 보낸 질의로 읽어 고른 행을 그대로 돌려준다 [7].
+
+남긴 파일에서도 값을 바꾸지 않는다.
+사용자 활동 도구는 파싱한 행 전체를 사건 폴더 아래 CSV로 남기고 응답의 `csv_path`에 그 경로를 싣는다 [3][8].
+추출 도구는 외부 도구가 쓴 CSV를 그대로 사건 폴더 아래로 복사한다 [9].
+
+가림 코드는 그래프 생성에만 있고 이 셀에 해당하지 않는다.
+`scripts/investigation_graph.py`의 `_build_infra_redactions`는 그래프 HTML에 들어가는 설치 경로, 사용자 홈 폴더, 사건·증거·마운트 폴더 경로를 자리표시자로 바꾼다 [10].
+이 함수의 설명은 증거 내용은 건드리지 않는다고 적는다 [10].
+`_sanitize_advisory`는 FK 지식 문구에서 숫자와 단정하는 낱말을 바꾸는 함수이고 증거 값을 다루지 않는다 [11].
+보고서 요약의 `_strip_internal_tokens`는 발견사항·실행 ID와 ATT&CK 코드를 문장에서 지우는 함수이고 증거 값을 다루지 않는다 [12].
+
+### 근거
+
+[1] 기준 커밋의 `sift_mcp/`와 서버 도구가 실행하는 `scripts/` 모듈에서 `redact`, `scrub`, `sanitiz`를 찾으면 그래프 경로 가림, FK 문구 다듬기, 제어 문자 제거, 보고서 요약의 내부 식별자 제거만 나온다: [`sift_mcp/`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/tree/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp), [`scripts/`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/tree/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts).
+
+[2] (실행 확인) 컨테이너 안 합성 볼륨 `/tmp/vol`에 비밀번호 두 개가 들어간 PSReadLine 기록을 두고 `extract_powershell_history`를 부르자 네 줄이 `command`에 그대로 실렸다.
+
+[3] PSReadLine 줄을 행으로 만들고 응답의 `preview`와 CSV에 싣는다.
+
+```python
+        for idx, line in enumerate(text.splitlines(), start=1):
+            if line == "":
+                continue
+            rows.append({
+                "command": line,
+                "line_no": idx,
+                "source_history_file": hist.name,
+                "file_mtime_utc": mtime_iso,
+                "high_signal": bool(_PS_HIGH_SIGNAL.search(line)),
+            })
+```
+
+[`sift_mcp/tools/disk.py:7865-7874`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7865-L7874)
+
+```python
+    response: dict[str, Any] = {
+        "tool_name": tool,
+        "status": status,
+        "execution_id": exec_id,
+        "raw_command": raw_command,
+        "csv_path": durable_csv,
+        "records_count": total_rows,
+        "total_rows": total_rows,
+        "truncated": truncated,
+        "profiles_checked": profiles_checked,
+        "profiles_with_data": profiles_with_data,
+        "parser_failures": parser_failures,
+        "partial_failure_count": len(parser_failures),
+        "findings_created": finding_ids,
+        "preview": preview,
+        "artifact_persistence": artifact_persistence,
+```
+
+[`sift_mcp/tools/disk.py:6206-6221`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6206-L6221)
+
+[4] EVTX 행의 `PayloadData1`과 나머지 열을 담는다.
+
+```python
+        message = (
+            row.get("PayloadData1")
+            or row.get("MapDescription")
+            or row.get("UserData")
+            or row.get("Message")
+            or f"Event ID {event_id}"
+        ).strip()[:500]
+
+        extra: dict[str, Any] = {}
+        for k, v in row.items():
+            if k in _EVTX_SKIP_COLS or not v or not v.strip():
+                continue
+            if truncate_wide:
+                kn = k.lower().replace(" ", "").replace("_", "")
+                if kn in _EVTX_WIDE_FIELD_DROP:
+                    continue
+                if len(v) > _EVTX_WIDE_FIELD_MAX_CHARS:
+                    v = v[:_EVTX_WIDE_FIELD_MAX_CHARS] + "...[truncated]"
+            extra[k] = v
+```
+
+[`sift_mcp/tools/disk.py:1981-1999`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L1981-L1999)
+
+[5] `detailed` 형식의 `data`는 두 필드에 감싸기 처리만 한다.
+
+```python
+    if "data" in response:
+        response["data"] = [
+            sanitize_payload_fields(record, "message_summary", "extra_fields")
+            for record in response["data"]
+        ]
+```
+
+[`sift_mcp/tools/disk.py:4842-4846`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4842-L4846)
+
+[6] 감싸기 처리는 제어 문자를 지우고 길이를 줄인 뒤 표시를 붙인다.
+
+```python
+def fence_evidence_content(
+    text: Optional[str],
+    max_chars: int = DEFAULT_EVIDENCE_EXCERPT_MAX_CHARS,
+) -> Optional[str]:
+    """Fence model-facing evidence content so it is treated as data, not instruction.
+
+    The default 1600-character cap is intentional: it keeps excerpts small
+    enough to avoid prompt flooding while still preserving enough raw context
+    for a reviewer or follow-up pivot. Full raw artifacts stay recoverable via
+    persisted CSV/storage handles and provenance paths.
+    """
+    if not text:
+        return None
+    cleaned = str(text).replace("\x00", "")
+    cleaned = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", cleaned).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[: max_chars - 3].rstrip() + "..."
+    return f"<EVIDENCE_CONTENT>{cleaned}</EVIDENCE_CONTENT>"
+```
+
+[`sift_mcp/tools/_contracts.py:43-62`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_contracts.py#L43-L62)
+
+[7] `run_analysis`는 고른 행을 표나 JSON·CSV로 돌려준다.
+
+```python
+    if len(result_df) > 500:
+        result_df = result_df.head(500)
+
+    if output_format == "json":
+        table_str = result_df.to_json(orient="records", indent=2)
+    elif output_format == "csv":
+        table_str = result_df.to_csv(index=False)
+    else:
+        try:
+            from tabulate import tabulate
+
+            table_str = tabulate(
+                result_df, headers="keys", tablefmt="pipe", showindex=False
+            )
+        except ImportError:
+            table_str = result_df.to_string()
+```
+
+[`sift_mcp/safe_analysis.py:182-197`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/safe_analysis.py#L182-L197)
+
+[8] 행을 CSV로 남긴다.
+
+```python
+def _persist_rows_as_csv(
+    rows: list[dict[str, Any]],
+    *,
+    tool_short_name: str,
+    filename: str,
+) -> Optional[str]:
+    """Persist structured rows as a reusable CSV artifact."""
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"savvydfir_{tool_short_name}_rows_") as tmp_dir:
+            tmp_csv = os.path.join(tmp_dir, filename)
+            _write_csv_rows(
+                [{key: "" if value is None else str(value) for key, value in row.items()} for row in rows],
+                tmp_csv,
+            )
+            return _persist_csv(tmp_csv, tool_short_name)
+    except Exception:
+        return None
+```
+
+[`sift_mcp/tools/disk.py:335-351`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L335-L351)
+
+[9] 외부 도구 CSV를 사건 폴더로 복사한다.
+
+```python
+def _persist_csv(tmp_csv_path: str, tool_short_name: str) -> str:
+    """Copy a tempdir CSV to a persistent artifact path and return the new path.
+
+    Pattern: $OUTPUT_BASE/<case_id>/artifacts/<tool_short_name>/<filename>
+    Allows run_analysis() to query the full dataset after the tool returns.
+    Returns the persistent path on success, original path on failure.
+    """
+    import shutil as _shutil
+    src_path = Path(tmp_csv_path)
+    if not src_path.exists():
+        return tmp_csv_path
+    base = _artifact_output_dir(tool_short_name)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        dest = base / src_path.name
+        _shutil.copy2(str(src_path), str(dest))
+        return str(dest)
+    except OSError:
+        return tmp_csv_path
+```
+
+[`sift_mcp/tools/disk.py:309-327`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L309-L327)
+
+[10] 그래프의 경로 가림은 설치·사용자·사건 경로만 바꾼다: [`scripts/investigation_graph.py:689-738`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/investigation_graph.py#L689-L738).
+
+[11] FK 지식 문구를 다듬는 함수다.
+
+```python
+def _sanitize_advisory(text: Any, cap: int = _FIELD_CAP) -> str:
+    """Strip promotion numerics/phrasing and cap length (no gate thresholds leak)."""
+    s = str(text or "").strip()
+    s = _PROMO_NUM_RE.sub("", s)
+    s = _PROMO_WORD_RE.sub("strongly-corroborated", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > cap:
+        s = s[: cap - 1].rstrip() + "…"
+    return s
+```
+
+[`sift_mcp/corroboration.py:539-547`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/corroboration.py#L539-L547)
+
+[12] `_strip_internal_tokens`는 보고서 요약 문장에서 내부 식별자를 지운다.
+
+```python
+def _strip_internal_tokens(text: str) -> str:
+    """Remove internal identifiers (F-/E-/CTX- IDs, raw MITRE TAxxxx/Txxxx codes,
+    26-char ULIDs) from executive-summary prose, then tidy the punctuation/space
+    the removal leaves behind. Court-readable narrative only; the IDs live in the
+    appendix."""
+```
+
+[`sift_mcp/reporting.py:2615-2619`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L2615-L2619)

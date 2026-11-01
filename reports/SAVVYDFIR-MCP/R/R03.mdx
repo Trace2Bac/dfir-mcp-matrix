@@ -1,0 +1,549 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+- id: R03.04
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 모든 MCP 도구의 응답에 적용된다.
+도구 함수는 결과를 `dict`로 돌려주고 그 `status` 필드로 성공과 실패를 가른다 [1].
+도구 래퍼 대부분은 도구 함수가 낸 예외를 처리해 `status`가 `error`이고 예외 문구를 `error`에 담은 `dict`로 돌려준다 [1].
+`status`의 성공 값은 도구마다 `success`·`ok`로 다르고 실패는 `error`다 [1][2].
+오류 문구를 담는 키도 도구마다 `error`나 `error_message`로 다르다 [1][3].
+래퍼의 `try` 밖에서 예외가 나면 FastMCP가 MCP 오류 결과 `isError`로 오류 문구를 돌려준다 [4][5].
+(실행 확인) 실행 전 기록 쓰기가 실패한 `compare_disk_and_memory`와 `generate_report`는 `isError` 결과로 끝났다 [5].
+
+**한계.** `_finalize_tool_response`는 응답과 호출 기록을 잇는 처리에서 예외가 나면 `phase7_link_warning`에 문구만 남기고 `status`를 바꾸지 않는다 [6].
+(실행 확인) 사건을 열지 않고 `extract_powershell_history`를 부르자 `status`는 `success`이고 `phase7_link_warning`에 상태 관리자가 초기화되지 않았다는 문구가 실렸다 [6].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 사용자 활동 도구, 탐지 도구, 아티팩트가 없는 경우를 기록하는 추출 도구, `_warn_if_empty`를 거치는 추출 도구에 적용된다 [7][8][9][10].
+사용자 활동 도구(`extract_shellbags`·`extract_lnk_files`·`extract_jump_lists`·`extract_browser_history`·`extract_registry_fileaccess`·`extract_recycle_bin`·`extract_powershell_history`·`extract_scheduled_tasks`)는 결과가 0행이면 세 상태 값으로 나눈다 [7].
+찾은 아티팩트가 없으면 `artifact_absent`, 찾았지만 파싱이 실패했으면 `collection_failed`, 찾아서 파싱했는데 행이 없으면 `no_data`다 [7].
+`extract_recycle_bin`은 휴지통이 옛 형식 `INFO2`만 있으면 `tool_incompatible`을 돌려준다 [11].
+이 도구들은 `image_path`가 Windows 볼륨이 아니면 `error`를 돌려준다 [12].
+(실행 확인) `extract_powershell_history`에 사용자 폴더만 있는 볼륨을 주자 `artifact_absent`를, Windows 볼륨이 아닌 폴더를 주자 `error`와 `reason` `no_windows_volume_at_image_path`를 돌려줬다 [7][12].
+`sigma_hunt`·`hayabusa_hunt`·`query_sigma_results`는 일치가 없으면 `no_hits`를 돌려주고 Chainsaw나 Hayabusa가 없으면 `tool_not_found`를 돌려준다 [8][13].
+`extract_prefetch`·`get_amcache`·`extract_pca`·`extract_shimcache`·`extract_srum`은 아티팩트가 없다고 판단하면 `artifact_absent`와 확인한 경로 `checked_paths`를 돌려준다 [9].
+`extract_prefetch`·`get_amcache`는 아티팩트 파일을 찾지 못하면 입력 경로 아래에서 Windows 폴더를 대소문자와 관계없이 찾는다 [14][15].
+Windows 폴더를 찾으면 `artifact_absent`를 돌려주고 찾지 못하면 `error`를 돌려준다 [15].
+(실행 확인) Windows 폴더만 있는 시험 폴더에서는 두 도구가 `artifact_absent`를, Windows 폴더가 없는 시험 폴더에서는 `error`를 돌려주었다 [16].
+`_warn_if_empty`는 결과가 0건인데 입력 경로가 있으면 `status`를 `warning`으로 바꾸고 경고 문구를 붙인다 [10].
+
+**한계.** `get_finding`은 없는 발견사항 ID를 받으면 `found`를 거짓으로 두지만 `status`도 `error`로 돌려준다 [17].
+`_warn_if_empty`는 `min_expected` 인자를 받지만 비교에 쓰지 않고 0건일 때만 `warning`으로 바꾼다 [10].
+`_windows_volume_resolves`는 Windows 폴더를 찾다가 예외가 나면 찾은 것으로 보므로 두 도구는 이때 `artifact_absent`를 돌려준다 [14].
+`extract_shimcache`·`extract_srum`·`extract_pca`는 Windows 폴더를 확인하지 않고 파일이 없으면 `artifact_absent`를 돌려준다 [18].
+Windows 폴더가 없는 시험 폴더에서도 `extract_srum`은 `artifact_absent`를 돌려주었다 [16].
+`extract_registry_run_keys`에 `sync_batch`를 참으로 주면 시스템 하이브를 처리하는 RECmd 실행은 배치 파일을 내려받은 뒤 하이브를 처리하지 않고 종료 코드 0으로 끝난다 [19][20].
+서버는 이 실행의 CSV가 없어도 빈 목록으로 읽고 사용자 하이브 행이 있으면 `status`를 `success`로 돌려준다 [21][22].
+RECmd의 이 동작은 소스로 확인했고 RECmd를 실행하지 않았다.
+버전 기준 Hayabusa v4.1.0에는 서버가 넘기는 `csv-timeline` 명령이 없어 `hayabusa_hunt`는 일치가 있든 없든 `no_hits`가 아니라 `error`를 돌려준다 [23][24].
+Hayabusa의 이 동작은 소스로 확인했고 Hayabusa를 실행하지 않았다.
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `extract_windows_artifacts`와 사용자 활동 도구에 적용된다 [25][26].
+`extract_windows_artifacts`는 아티팩트 계열마다 꺼낸 파일 경로 목록을 `extracted`에 싣는다 [25].
+꺼내지 못한 파일은 계열, 증거 안 경로, 메타데이터 주소, 표준 오류를 담아 `failures`에 하나씩 싣는다 [27].
+파일을 하나도 꺼내지 못한 계열은 `families_empty`에 싣고 중요한 파일의 실패는 `critical_failures`와 `data_gaps`에 따로 싣는다 [25].
+상위 `status`는 실패나 빈 계열이 있으면 `partial_success`, 꺼낸 파일이 하나도 없으면 `warning`이다 [28].
+사용자 활동 도구는 파싱에 실패한 파일마다 프로필, 파일 경로, 상태, 이유를 `parser_failures`에 싣는다 [26].
+이때 행이 일부 있으면 `status`를 `partial_collection`으로 두고 `note`에 빠진 출처를 적는다 [29].
+
+### R03.04 시간 초과·부분 완료 표시
+
+**구현.** 이 방식은 `sigma_hunt`에 적용된다 [30].
+`sigma_hunt`는 EVTX 폴더 전체를 대상으로 한 Chainsaw 실행이 300초 안에 끝나지 않으면 정해 둔 채널 파일 하나로 다시 실행한다 [30].
+이때 응답에 `fallback_applied`를 참으로, `fallback_reason`을 `directory_timeout`으로 싣고 다시 실행할 채널별 호출 목록을 `recommended_next_calls`에 싣는다 [31].
+다른 도구의 시간 초과는 `status`가 `error`인 응답의 문구로만 알린다 [32].
+psort와 YARA는 "timed out" 문구를 `error`에 싣고 `run_analysis`는 시간·메모리 상한 초과를 `error` 문구로 알린다 [32].
+`extract_windows_artifacts`는 파일 하나를 꺼내다 300초가 지나면 그 파일의 `failures` 항목 `stderr`에 "icat timeout after 300s"를 적는다 [27].
+
+**한계.** 다시 실행한 결과의 `status`는 일치 여부에 따라 `success`나 `no_hits`이고 부분 결과라는 사실은 `fallback_*` 필드에만 있다 [31].
+
+### 근거
+
+[1] 서버 쪽 래퍼는 예외를 `status`가 `error`인 `dict`로 바꾼다.
+
+```python
+    try:
+        return _finalize_tool_response(
+            "evidence.verify_integrity",
+            _verify_integrity(image_path=image_path),
+        )
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "tool": "verify_integrity"}
+```
+
+[`sift_mcp/server.py:1564-1570`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1564-L1570)
+
+[2] `status` 값의 예다: [`sift_mcp/tools/disk.py:4753`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4753), [`sift_mcp/server.py:3141`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3141), [`sift_mcp/server.py:5537`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5537).
+
+[3] 메모리 도구는 오류 문구를 `error_message`에 싣는다.
+
+```python
+def _runner_error(
+    tool_name: str,
+    exc: Exception,
+    execution_id: Optional[str] = None,
+    stderr: str = "",
+) -> dict[str, Any]:
+    return {
+        "tool_name": tool_name,
+        "status": "error",
+        "error_message": f"Runner error: {exc}",
+        "data": [],
+        "findings_created": [],
+        "execution_id": execution_id,
+        "raw_command": str(exc),
+        "stderr": stderr,
+    }
+```
+
+[`sift_mcp/tools/memory.py:243-258`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L243-L258)
+
+[4] `try` 밖에서 `started` 항목을 쓰는 도구다: [`sift_mcp/server.py:2784-2792`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2784-L2792), [`sift_mcp/server.py:2890-2898`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L2890-L2898), [`sift_mcp/server.py:10085-10095`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10085-L10095), [`sift_mcp/server.py:11273-11281`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11273-L11281).
+
+[5] (실행 확인) 컨테이너에서 기록 함수 `_write_entry`가 첫 번째 쓰기에 `OSError`를 내도록 바꾸고 MCP 클라이언트로 `compare_disk_and_memory`와 `generate_report`를 부르자 두 호출 모두 `isError` 결과와 예외 문구를 돌려받았다.
+
+[6] 호출 기록과 잇는 처리의 예외는 `phase7_link_warning`에만 남긴다.
+(실행 확인) 사건을 열지 않은 서버에서 `extract_powershell_history`의 응답에 `status` `success`와 `phase7_link_warning`이 함께 실렸다.
+
+```python
+    except Exception as exc:
+        response.setdefault("phase7_link_warning", str(exc))
+        return response
+```
+
+[`sift_mcp/server.py:1532-1534`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1532-L1534)
+
+[7] 0행 결과를 세 상태 값으로 나눈다: [`sift_mcp/tools/disk.py:5818-5906`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5818-L5906).
+
+```python
+    if not discovered:
+        status = "artifact_absent"
+        exit_code = 0
+        summary = (
+            f"status=artifact_absent: no {artifact_label} discovered across "
+            f"{len(profiles_checked)} profile(s)."
+        )
+    elif parser_failures:
+        status = "collection_failed"
+        exit_code = 1
+        # MUST NOT contain the substring ``artifact_absent`` (constraint 2).
+        summary = (
+            f"status=collection_failed: {artifact_label} discovered but "
+            f"{len(parser_failures)} parser/query failure(s) across "
+            f"{len(profiles_checked)} profile(s); zero rows collected - "
+            "absence is NOT evidence of absence."
+        )
+    else:
+        status = "no_data"
+        exit_code = 0
+        summary = (
+            f"status=no_data: {artifact_label} discovered and parsed cleanly "
+            f"across {len(profiles_checked)} profile(s) but yielded zero rows."
+        )
+```
+
+[`sift_mcp/tools/disk.py:5846-5869`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5846-L5869)
+
+[8] 탐지 도구는 일치가 없으면 `no_hits`를 돌려준다: [`sift_mcp/server.py:4951`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4951), [`sift_mcp/server.py:5413`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5413), [`sift_mcp/server.py:5537`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5537).
+
+[9] 아티팩트가 없을 때 돌려주는 응답과 이 함수를 부르는 곳이다: [`sift_mcp/server.py:1655`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1655), [`sift_mcp/server.py:1714`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1714), [`sift_mcp/server.py:6263`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6263), [`sift_mcp/server.py:6630`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6630), [`sift_mcp/server.py:6887`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6887).
+
+```python
+    return {
+        "status": "artifact_absent",
+        "tool": tool_name,
+        "artifact_name": artifact_name,
+        "checked_paths": checked_paths,
+        "reason": reason,
+        "execution_id": eid,
+        "findings_created": [finding_id] if finding_id else [],
+    }
+
+```
+
+[`sift_mcp/server.py:1134-1143`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1134-L1143)
+
+[10] `_warn_if_empty`는 0건이고 경로가 있으면 `warning`으로 바꾼다.
+
+```python
+def _warn_if_empty(result: dict, tool_name: str, path: str, min_expected: int = 1) -> dict:
+    """Upgrade status to 'warning' if records=0 but path exists.
+
+    Silent 0-record success is the worst failure mode - it looks like
+    a clean system when the tool silently failed. This makes it loud.
+    """
+    count = result.get("records_count", len(result.get("data", [])))
+    if count == 0 and os.path.exists(path):
+        result = dict(result)
+        result["status"] = "warning"
+        result["warning"] = (
+            f"{tool_name} found 0 records but path exists: {path}. "
+            f"Verify mount point and tool parameters. "
+            f"A clean Windows system should always have records here."
+        )
+    return result
+```
+
+[`sift_mcp/tools/disk.py:431-446`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L431-L446)
+
+[11] 옛 형식 휴지통만 있으면 `tool_incompatible`을 돌려준다.
+
+```python
+    return {
+        "tool_name": tool,
+        "status": status,
+        "reason": reason,
+        "execution_id": exec_id,
+        "raw_command": raw_command,
+```
+
+[`sift_mcp/tools/disk.py:5948-5953`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5948-L5953)
+
+```python
+        # tool incompatibility, NOT proven absence - returning artifact_absent
+        # would be a false negative on INFO2-only hosts. tool_incompatible still
+        # satisfies the file-access coverage gate (documented non-applicability).
+        if legacy_seen:
+            return _useractivity_tool_incompatible_response(
+                tool=tool, exec_id=exec_id, raw_command=raw_command,
+                started_at=started_at, profiles_checked=profiles_checked,
+```
+
+[`sift_mcp/tools/disk.py:7635-7641`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7635-L7641)
+
+[12] Windows 볼륨이 아니면 `error`를 돌려준다.
+(실행 확인) Windows 볼륨이 아닌 폴더를 주자 `status` `error`, `reason` `no_windows_volume_at_image_path`가 돌아왔다.
+
+```python
+    return {
+        "tool_name": tool,
+        "status": "error",
+        "execution_id": exec_id,
+        "raw_command": raw_command,
+        "error": (
+            "image_path does not resolve to a mounted Windows volume root "
+            "(expected a directory containing Windows/ or Users/); refusing to "
+            "fall back to an ambient /mnt/disk mount to avoid cross-case "
+            "evidence contamination."
+        ),
+        "reason": "no_windows_volume_at_image_path",
+```
+
+[`sift_mcp/tools/disk.py:5795-5806`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5795-L5806)
+
+[13] Chainsaw가 없으면 `tool_not_found`를 돌려준다.
+
+```python
+        return _finalize_tool_response("detection.sigma_hunt", {
+            "status": "tool_not_found",
+            "tool": tool_name,
+            "error": msg,
+            "hint": "Run sigma_hunt after installing Chainsaw. Investigation can continue with summarize_evtx + LLM analysis in the meantime.",
+            "execution_id": _eid,
+            "raw_command": command_repr,
+        })
+```
+
+[`sift_mcp/server.py:4279-4286`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4279-L4286)
+
+[14] Windows 폴더가 찾아지는지 보고 예외가 나면 참을 돌려준다.
+
+```python
+def _windows_volume_resolves(image_path: str) -> bool:
+    """True if a Windows volume root resolves (case-insensitive) under image_path.
+
+    1c positive-absence guard (review 2026-06-06): only call an artifact
+    'absent' when the Windows root actually resolves but the artifact is missing
+    (genuine absence, e.g. pre-Win8 Amcache, Server-OS Prefetch). If the root
+    itself is unresolvable it is a path/mount FAILURE (retryable error), NOT
+    absence - prevents the XP uppercase-path (WINDOWS) false-absence overclaim.
+    On any internal error, returns True to preserve genuine documented-absence.
+    """
+    try:
+        from sift_mcp.tools.disk import _candidate_windows_volume_roots, _ci_resolve
+        roots = _candidate_windows_volume_roots(str(image_path))
+        return any(_ci_resolve(r, "Windows") is not None for r in roots)
+    except Exception:
+        return True
+```
+
+[`sift_mcp/server.py:1014-1029`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1014-L1029)
+
+[15] `extract_prefetch`와 `get_amcache`는 Windows 폴더가 찾아질 때만 부재를 기록하고 그 밖에는 추출 함수의 오류 응답을 돌려준다.
+
+```python
+        if isinstance(_r, dict) and _r.get("needs_extract_windows_artifacts"):
+            if _windows_volume_resolves(str(image_path)):
+                return _record_artifact_absent_audit(
+                    tool_name="disk.extract_prefetch",
+                    artifact_name="Prefetch",
+                    checked_paths=_r.get("checked_paths") or [str(image_path)],
+                    reason=str(_r.get("error_message") or "Prefetch not present (e.g. disabled by default on Server OS)"),
+                    case_id=case_id,
+                    command_line=f"extract_prefetch(image_path={image_path!r}, case_id={case_id!r})",
+                )
+        return _finalize_tool_response("disk.extract_prefetch", _r)
+```
+
+[`sift_mcp/server.py:1653-1663`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1653-L1663)
+
+```python
+        if isinstance(_r, dict) and _r.get("needs_extract_windows_artifacts"):
+            if _windows_volume_resolves(str(image_path)):
+                return _record_artifact_absent_audit(
+                    tool_name="disk.get_amcache",
+                    artifact_name="Amcache.hve",
+                    checked_paths=_r.get("checked_paths") or [str(image_path)],
+                    reason=str(_r.get("error_message") or "Amcache.hve not present (introduced in Win8; absent on older Windows)"),
+                    case_id=case_id,
+                    command_line=f"get_amcache(image_path={image_path!r}, case_id={case_id!r})",
+                )
+        return _finalize_tool_response("disk.get_amcache", _r)
+```
+
+[`sift_mcp/server.py:1712-1722`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1712-L1722)
+
+[16] (실행 확인) Windows 폴더만 있는 시험 폴더와 Windows 폴더가 없는 시험 폴더에 `extract_prefetch`, `get_amcache`, `extract_srum`을 불렀다.
+앞 폴더에서는 세 도구 모두 `artifact_absent`였고 뒤 폴더에서는 앞 두 도구가 `error`, `extract_srum`이 `artifact_absent`였다.
+
+[17] `get_finding`은 찾지 못하면 `found`를 거짓으로, `status`를 `error`로 둔다.
+
+```python
+        if finding is None:
+            return {
+                "status": "error",
+                "tool": "get_finding",
+                "case_id": case_id,
+                "finding": None,
+                "found": False,
+                "error": f"Finding {finding_id!r} not found in case {case_id!r}.",
+            }
+        return {
+```
+
+[`sift_mcp/server.py:3040-3049`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3040-L3049)
+
+[18] 다른 추출 도구는 파일이 없으면 Windows 폴더를 확인하지 않고 부재를 기록한다: [`sift_mcp/server.py:6259-6275`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6259-L6275), [`sift_mcp/server.py:6615-6640`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6615-L6640), [`sift_mcp/server.py:6875-6900`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6875-L6900).
+
+[19] RECmd(`EricZimmerman/RECmd@bcd0ac3`)는 `--sync`를 받으면 내려받기를 마친 뒤 하이브를 처리하지 않고 `Environment.Exit(0)`로 끝난다: [`RECmd/Program.cs:454-466`](https://github.com/EricZimmerman/RECmd/blob/bcd0ac33ed98de61ea6de551eef96052bddbbd49/RECmd/Program.cs#L454-L466).
+
+[20] `sync_batch`는 시스템 하이브를 처리하는 RECmd 실행에만 넘기고 사용자 하이브 실행에는 거짓을 넘긴다.
+
+```python
+        try:
+            result = _ez_runner.run_recmd(
+                hive_dir=cleaned_hive_dir,
+                csv_dir=tmp_dir,
+                csv_filename=csv_filename,
+                batch_file=batch_file_used,
+                sync_batch=sync_batch,
+                tool_name=tool,
+            )
+```
+
+[`sift_mcp/tools/disk.py:5309-5317`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5309-L5317)
+
+```python
+                user_result = _ez_runner.run_recmd(
+                    hive_dir=str(cleaned_hive.parent),
+                    csv_dir=tmp_dir,
+                    csv_filename=user_csv,
+                    batch_file=batch_file_used,
+                    sync_batch=False,  # only sync once
+                    tool_name=tool,
+                )
+```
+
+[`sift_mcp/tools/disk.py:5354-5361`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5354-L5361)
+
+[21] RECmd가 0으로 끝나면 CSV가 없어도 계속하고 `_read_csv`는 없는 파일을 빈 목록으로 읽는다.
+
+```python
+        if not result.ok and not Path(csv_path).exists():
+            return {
+                "tool_name": tool,
+                "status": "error",
+                "error_message": (
+                    f"RECmd exited with code {result.exit_code}. "
+                    f"stderr: {result.stderr[:300]}"
+                ),
+                "data": [],
+                "findings_created": [],
+                "execution_id": result.execution_id,
+                "raw_command": result.command_line,
+                "stderr": result.stderr,
+            }
+
+        rows = _read_csv(csv_path)
+```
+
+[`sift_mcp/tools/disk.py:5326-5341`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5326-L5341)
+
+```python
+    p = Path(csv_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return []
+```
+
+[`sift_mcp/tools/disk.py:368-370`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L368-L370)
+
+[22] 사용자 하이브 행을 합친 CSV를 저장하고 저장한 CSV가 있으면 `status`를 `success`로 둔다.
+
+```python
+        combined_csv_path = os.path.join(tmp_dir, "registry_combined.csv")
+        if rows:
+            _write_csv_rows(rows, combined_csv_path)
+            persistent_csv = _persist_csv(combined_csv_path, "registry")
+        else:
+            persistent_csv = _persist_csv(csv_path, "registry")
+```
+
+[`sift_mcp/tools/disk.py:5372-5377`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5372-L5377)
+
+```python
+    response: dict[str, Any] = {
+        "tool_name": tool,
+        "status": "success" if durable_csv else "warning",
+```
+
+[`sift_mcp/tools/disk.py:5416-5418`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5416-L5418)
+
+[23] Hayabusa v4.1.0(`Yamato-Security/hayabusa` 태그 커밋 `11a7f64`)의 명령 목록에는 `csv-timeline`이 없고 명령 해석이 실패하면 clap 4.6.6이 표준 오류에 오류를 쓰고 종료 코드 2로 끝낸다: [`CHANGELOG.md:26`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/CHANGELOG.md#L26), [`src/detections/configs.rs:826-986`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/src/detections/configs.rs#L826-L986), [`src/detections/configs.rs:1980-2000`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/src/detections/configs.rs#L1980-L2000), [`Cargo.lock:288-289`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/Cargo.lock#L288-L289), [`clap_builder/src/error/mod.rs:218-249`](https://github.com/clap-rs/clap/blob/4a622b4340d5e1fffff60c0ecefdc6882f738159/clap_builder/src/error/mod.rs#L218-L249), [`clap_builder/src/util/mod.rs:26-32`](https://github.com/clap-rs/clap/blob/4a622b4340d5e1fffff60c0ecefdc6882f738159/clap_builder/src/util/mod.rs#L26-L32).
+
+[24] `hayabusa_hunt`는 Hayabusa가 0이 아닌 코드로 끝나면 `completed` 항목을 쓰고 `status`가 `error`인 응답을 돌려준다: [`sift_mcp/server.py:5241-5288`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5241-L5288).
+
+[25] `extract_windows_artifacts`의 응답 필드다.
+
+```python
+            "extracted": extracted,
+            "evtx_dir": str(evtx_dir) if extracted.get("evtx") else None,
+            "registry_dir": str(registry_dir) if extracted.get("registry") else None,
+            "amcache_hive": str(amcache_hive) if amcache_hive.exists() else None,
+            "prefetch_dir": str(prefetch_dir) if extracted.get("prefetch") else None,
+            "mft_path": str(mft_path) if mft_path.exists() else None,
+            "data_gaps": data_gaps,
+            "failures": failures,
+            "raw_command": command_line,
+            # Run-11: honest top-line counts so the agent sees signal first
+            "total_artifacts_staged": total_artifacts_staged,
+            "families_with_artifacts": sorted(families_with_artifacts),
+            "families_empty": sorted(families_empty),
+            "failures_count": len(failures),
+            "critical_failures": critical_failures,
+            "critical_failures_count": len(critical_failures),
+```
+
+[`sift_mcp/server.py:8085-8100`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8085-L8100)
+
+[26] 사용자 활동 도구는 파싱에 실패한 파일을 `parser_failures`에 싣는다.
+
+```python
+        except Exception as exc:
+            status = f"parser_error:{type(exc).__name__}"
+            parser_failures.append({
+                "profile": profile_name, "artifact": str(hist), "status": status,
+                "reason": str(exc), "recovered_rows": 0,
+            })
+            continue
+```
+
+[`sift_mcp/tools/disk.py:7857-7863`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7857-L7863)
+
+[27] 파일을 꺼내지 못하면 계열, 경로, 메타데이터 주소, 표준 오류를 `failures`에 싣는다.
+
+```python
+                    try:
+                        _, stderr_bytes = proc.communicate(timeout=300)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.communicate()
+                        failures.append({
+                            "family": family,
+                            "source_path": source_path,
+                            "meta_addr": meta_addr,
+                            "stderr": "icat timeout after 300s",
+                        })
+                        try:
+                            target.unlink()
+                        except OSError:
+                            pass
+                        continue
+```
+
+[`sift_mcp/server.py:7928-7943`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7928-L7943)
+
+[28] 상위 `status`를 정한다.
+
+```python
+        #   - status="error"        - already returned earlier via the exception path
+        families_with_artifacts = [f for f in selected if extracted.get(f)]
+        families_empty = [f for f in selected if not extracted.get(f)]
+        total_artifacts_staged = sum(len(paths) for paths in extracted.values())
+
+        if total_artifacts_staged == 0:
+            status_value = "warning"
+        elif failures or families_empty:
+            status_value = "partial_success"
+        else:
+            status_value = "ok"
+```
+
+[`sift_mcp/server.py:7997-8007`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7997-L8007)
+
+[29] 파싱 실패가 있으면 `partial_collection`으로 둔다.
+
+```python
+    if parser_failures:
+        status = "partial_collection"
+        audit_exit = 1
+    elif not durable_csv:
+        status = "warning"
+        audit_exit = 0
+    else:
+        status = "success"
+        audit_exit = 0
+```
+
+[`sift_mcp/tools/disk.py:6156-6164`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6156-L6164)
+
+[30] 폴더 대상 실행이 시간 제한을 넘으면 우선순위 파일 하나로 다시 실행한다: [`sift_mcp/server.py:4416-4489`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4416-L4489).
+
+[31] 응답의 `status`와 `fallback_*` 필드다.
+
+```python
+        "status": "success" if hits_total > 0 else "no_hits",
+        "tool": tool_name,
+```
+
+[`sift_mcp/server.py:4951-4952`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4951-L4952)
+
+```python
+        "fallback_applied": fallback_applied,
+        "fallback_reason": fallback_reason or None,
+        "fallback_targets": fallback_targets,
+        "recommended_next_calls": recommended_next_calls,
+        "recommended_next_calls_note": (
+            "Chainsaw timed out on full EVTX directory; only one channel was "
+            "scanned. Run these single-channel sigma_hunt calls to close "
+            "high-value coverage gaps (System=EID 7045 service install was the "
+            "Run-10 miss). Inventory-aware ranking; empty list means no "
+            "high-value channels are present on this image."
+        ) if recommended_next_calls else "",
+        "response_format": normalized_format,
+```
+
+[`sift_mcp/server.py:4977-4988`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4977-L4988)
+
+[32] 다른 도구의 시간 초과 응답이다: [`sift_mcp/tools/timeline.py:585-590`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L585-L590), [`sift_mcp/tools/yara.py:150-155`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/yara.py#L150-L155), [`sift_mcp/server.py:11636-11650`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11636-L11650).

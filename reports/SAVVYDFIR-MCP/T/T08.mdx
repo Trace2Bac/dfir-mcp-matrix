@@ -1,0 +1,817 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.02
+- id: T08.03
+- id: T08.04
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 외부 프로그램을 실행하는 도구 모두에 적용된다 [1][2].
+실행기 `SafeRunner.run`은 종료 코드를 `RunResult.exit_code`에 담고 `ok`는 종료 코드가 0이고 시간 초과가 아닐 때만 참이다 [1].
+Volatility 3, Plaso, YARA를 실행하는 도구는 `ok`가 거짓이면 종료 코드와 표준 오류 앞부분을 담은 오류 응답을 돌려준다 [3].
+사용자 활동 도구는 하이브나 프로필마다 `ok`를 보고 거짓이면 그 항목을 `parser_error` 상태의 실패로 기록한다 [4].
+실행기를 거치지 않고 `subprocess.run`을 직접 부르는 `sigma_hunt`, `hayabusa_hunt`, `extract_shimcache`, 그래프 도구 3개도 종료 코드가 0이 아니면 오류를 돌려준다 [2].
+`extract_windows_artifacts`는 `fls`의 종료 코드가 0이 아니면 오류로 끝내고 파일마다 실행한 `icat`의 종료 코드가 0이 아니면 그 파일을 실패 목록에 넣는다 [5][6].
+실행 확인에서 종료 코드 2로 끝나는 시험용 Chainsaw로 부른 `sigma_hunt`는 `Chainsaw exited with code 2`를 돌려줬다 [7].
+버전 기준 Hayabusa v4.1.0에는 서버가 넘기는 `csv-timeline` 명령이 없어 Hayabusa가 종료 코드 2로 끝나므로 `hayabusa_hunt`는 언제나 이 오류 응답을 돌려준다 [8][2].
+Hayabusa의 이 동작은 소스로 확인했고 Hayabusa를 실행하지 않았다.
+
+다음 도구는 종료 코드가 0이 아니고 출력 파일이나 표준 출력도 없을 때만 실패로 본다 [9].
+
+- `get_amcache`, `extract_mft_timeline`, `extract_usn_journal`, `summarize_evtx`, `extract_registry_run_keys`는 Zimmerman 도구가 실패해도 CSV 파일이 있으면 그 CSV를 읽어 계속한다 [9].
+- `list_deleted_files`는 `fls`가 실패해도 표준 출력이 있으면 계속한다 [9].
+
+**한계.** 이 도구들은 종료 코드가 0이 아닌데 출력으로 계속한 경우 응답에 그 종료 코드나 실패 사실을 싣지 않는다 [9].
+실행 확인에서 CSV를 쓰고 종료 코드 1로 끝나는 시험용 MFTECmd로 부른 `extract_mft_timeline`은 상태 값 `success`와 1행을 돌려줬고 호출 기록의 `completed` 항목에는 종료 코드 1이 남았다 [7].
+`analyze_vss`는 vshadowinfo의 종료 코드를 보지 않고 출력에서 그림자 복사본을 찾는다 [10].
+그래서 vshadowinfo가 실패하면 그림자 복사본 0개의 성공으로 처리하고 VSS가 꺼졌거나 지워졌을 수 있다는 발견사항을 만든다 [10][11].
+실행 확인에서 종료 코드 1로 끝나는 시험용 vshadowinfo로 부르면 상태 값 `success`, `total_shadows` 0과 이 문구의 발견사항이 나왔다 [7].
+vshadowmount가 0이 아닌 종료 코드로 끝나면 복사본 안 아티팩트 확인을 하지 않고 응답에 그 사실을 싣지 않는다 [12].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 서버가 실행하는 외부 프로그램과 `run_analysis`의 작업 프로세스에 적용된다 [1][13][14].
+`SafeRunner.run`은 실행기마다 정한 시간 제한을 `subprocess.run`에 넘기고 시간 제한을 넘으면 프로세스를 끝낸 뒤 `timed_out`을 참, 종료 코드를 -1로 둔다 [1].
+이때 끊기 전에 나온 표준 출력과 표준 오류는 `RunResult`에 남는다 [1].
+호출 기록의 출력 요약은 `collection_timeout: process exceeded its timeout budget and was killed`로 쓴다 [15].
+실행 확인에서 30초 동안 멈추는 시험용 프로그램을 시간 제한 2초로 실행하면 `timed_out`이 참, 종료 코드가 -1이었고 끊기 전 출력 한 줄이 남았다 [7].
+
+실행 대상마다 시간 제한을 따로 정해 둔다 [16].
+
+- Volatility 3 플러그인은 300초이고 `windows.malfind`는 환경변수 `SAVVYDFIR_MALFIND_TIMEOUT`(기본 900초)을 쓴다 [16].
+- `windows.psscan`은 메모리 이미지 크기에 따라 300초에 1GB당 60초를 더하고 1,800초를 넘지 않는다 [16].
+- Zimmerman 도구는 1,800초이고 `extract_usn_journal`은 `$J` 크기에 따라 1,800초에서 3,600초 사이로 정한다 [16].
+- log2timeline은 7,200초, psort와 pinfo는 600초다 [16].
+- Chainsaw는 300초, Hayabusa는 1,800초, `icat`은 파일마다 300초다 [16].
+- `run_analysis`의 작업 프로세스는 환경변수 `SAVVYDFIR_ANALYSIS_TIMEOUT_SECS`(기본 240초, 최소 10초)를 쓴다 [16].
+
+시간 초과를 알아차린 뒤의 처리는 도구마다 다르다.
+
+- `build_timeline`, `query_timeline`, `scan_files`, `scan_memory`는 시간 초과를 다른 실패와 나눠 시간 초과 문구의 오류를 돌려준다 [17].
+- `scan_processes`는 psscan이 시간 초과로 끝나면 그 시간 제한의 두 배로 한 번 다시 실행한다 [18].
+- `sigma_hunt`는 EVTX 폴더 전체가 시간 초과로 끝나면 `Security.evtx` 등 정해 둔 채널 파일 가운데 있는 첫 파일 하나로 Chainsaw를 다시 실행한다 [19].
+- `sigma_hunt`는 이렇게 다시 실행한 응답에 `fallback_applied`, `fallback_reason` `directory_timeout`, `fallback_targets`를 싣고 나머지 채널을 하나씩 검사할 `recommended_next_calls`를 붙인다 [19][20].
+- `extract_windows_artifacts`는 `icat`이 시간 초과로 끝난 파일을 지우고 실패 목록에 `icat timeout after 300s`로 넣는다 [6].
+- `run_analysis`는 작업 프로세스가 시간 제한을 넘으면 `AnalysisBudgetError`로 처리해 오류를 돌려주고 호출 기록에 종료 코드 137을 남긴다 [14][21].
+
+**한계.** 종료 코드가 0이 아니어도 CSV가 있으면 계속하는 Zimmerman 도구 5개는 시간 초과로 끝난 경우에도 끊기 전에 쓴 CSV가 있으면 성공으로 처리한다 [9][1].
+이 경우 호출 기록에는 `collection_timeout`이 남지만 응답에는 시간 초과 사실이 없다 [15][9].
+`sigma_hunt`가 다시 실행한 단일 파일도 시간 초과로 끝나면 응답만 돌려주고 호출 기록에 `completed` 항목을 쓰지 않는다 [19].
+`hayabusa_hunt`도 시간 초과로 끝나면 `completed` 항목 없이 오류를 돌려준다 [22].
+버전 기준 Hayabusa v4.1.0에서는 Hayabusa가 명령 해석 단계에서 끝나므로 `hayabusa_hunt`는 1,800초 시간 제한과 이 시간 초과 경로에 이르지 않는다 [8].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 Volatility 3 도구, `build_timeline`, `sigma_hunt`, `hayabusa_hunt`, `extract_shimcache`, 사용자 활동 도구, `extract_windows_artifacts`에 적용된다 [23][24][25][26][27][28][29].
+Volatility 3 실행기는 실패한 실행의 표준 오류 문구로 `missing_symbols`, `incompatible_profile`, `unsupported_plugin`, `corrupted_dump`를 나누고 도구 응답의 `volatility_error`에 싣는다 [23][3].
+앞의 두 분류이면 호출 기록의 출력 요약 앞에 `tool_incompatible:`을 붙인다 [23].
+`build_timeline`은 log2timeline이 성공해도 `pinfo.py`가 알린 이벤트 수가 0이면 오류로 돌려준다 [24].
+`pinfo.py`가 실패하거나 이벤트 수를 읽지 못하면 성공으로 두고 `pinfo_validation_error`에 그 사실을 싣는다 [24].
+`sigma_hunt`는 출력 JSON 파일을 먼저 읽고 없거나 비면 표준 출력을 읽어 탐지 결과를 모은다 [25].
+결과가 0건이면 상태 값을 `no_hits`로 두고 Chainsaw 표준 오류의 불러온 문서 수와 룰 수, 대상 폴더의 EVTX 파일 수로 `zero_hit_diagnostic` 문구를 고른다 [25].
+`hayabusa_hunt`는 출력 CSV가 있고 비어 있지 않을 때만 행을 읽고 행이 없으면 `no_hits`로 둔다 [26].
+`extract_shimcache`는 AppCompatCacheParser가 0으로 끝났는데 CSV가 없으면 아티팩트 부재(`artifact_absent`)로 기록한다 [27].
+사용자 활동 도구는 행이 하나도 없을 때 찾은 원본이 없으면 `artifact_absent`, 찾았지만 파싱 실패가 있으면 `collection_failed`, 찾았고 실패가 없으면 `no_data`로 나눈다 [28].
+`extract_windows_artifacts`는 실패한 `icat`의 표준 오류 문구로 NTFS 압축 해제 오류를 골라 그림자 복사본에서 복구할 대상으로 분류한다 [29].
+디스크 도구 다수는 결과 0건인데 입력 경로가 있으면 상태 값을 `warning`으로 바꾼다 [30].
+
+**한계.** Chainsaw v2.16.5는 불러온 파일 수를 `Loaded N forensic artefacts`로, 탐지가 나온 문서 수를 `Detections found on N documents`로 표준 오류에 적는다 [31][32].
+서버의 정규식은 `Loaded N (forensic) document` 꼴만 찾으므로 이 버전에서는 `documents_loaded`가 언제나 `None`이다 [33][31].
+그래서 0건 진단은 대상 폴더의 EVTX 파일 수가 0일 때만 문서 0개 문구를 고른다 [25].
+Volatility 3 도구는 표준 출력을 JSON으로 해석하지 못하면 빈 목록으로 처리해 성공 응답을 돌려준다 [34].
+실행 확인에서 JSON이 아닌 글을 출력하고 종료 코드 0으로 끝나는 시험용 `vol`로 부르면 `list_processes`는 `success`와 프로세스 0개를, `detect_profile`은 `success`와 `Windows (unknown)`을 돌려줬다 [7].
+`hayabusa_hunt`는 출력 CSV가 없어도 `no_hits`로 처리하고 CSV를 읽다 예외가 나면 그때까지 센 행으로 계속한다 [26].
+실행 확인에서 CSV를 쓰지 않고 종료 코드 0으로 끝나는 시험용 Hayabusa로 부르면 상태 값은 `no_hits`였다 [7].
+버전 기준 Hayabusa v4.1.0에서는 `hayabusa_hunt`가 출력 CSV를 읽기 전에 종료 코드 오류로 끝나므로 CSV 해석 경로에 이르지 않는다 [8][2].
+
+### T08.04 입력별 부분 완료 집계
+
+**구현.** 이 방식은 사용자 활동 도구 8개, `extract_windows_artifacts`, `analyze_vss`에 적용된다 [35][36][37].
+사용자 활동 도구는 프로필, 하이브, 파일마다 상태를 정하고 실패한 항목을 `parser_failures`에 프로필, 경로, 상태, 사유, 건진 행 수와 함께 넣는다 [4][35].
+응답에는 확인한 프로필 `profiles_checked`, 행을 낸 프로필 `profiles_with_data`, 실패 항목 수 `partial_failure_count`를 싣는다 [35].
+실패 항목이 있고 행도 있으면 상태 값은 `partial_collection`이고 호출 기록에 종료 코드 1과 실패한 출처 목록을 남긴다 [35].
+실행 확인에서 `$Recycle.Bin`에 해석할 수 있는 `$I` 파일 하나와 해석할 수 없는 파일 하나를 두고 `extract_recycle_bin`을 부르면 상태 값 `partial_collection`, 1행, `partial_failure_count` 1이었다 [7].
+`extract_windows_artifacts`는 파일마다 `icat` 실패를 `failures`에 넣고 아티팩트 종류마다 추출한 파일이 있는지 나눈다 [6][36].
+응답에는 `failures_count`, `families_with_artifacts`, `families_empty`, `critical_failures_count`, 추출한 파일 수를 싣는다 [36].
+상태 값은 실패와 빈 종류가 없으면 `ok`, 하나라도 있으면 `partial_success`, 추출한 파일이 없으면 `warning`이다 [36].
+`analyze_vss`는 그림자 복사본마다 찾은 아티팩트 `artifacts_found`와 없는 아티팩트 `artifacts_missing`을 싣는다 [37].
+
+`extract_prefetch`는 `.pf` 파일 하나를 읽다 예외가 나면 그 파일을 건너뛰고 건너뛴 수를 세지 않는다 [38].
+
+**한계.** `extract_windows_artifacts`는 추출한 파일이 하나도 없는 `warning`도 호출 기록에 종료 코드 0으로 남긴다 [39].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 서버 프로세스 안에서 증거를 해석하는 도구와 `run_analysis`에 적용된다 [40][21].
+`server.py`의 도구 처리기 대부분은 본문 전체를 `try`로 감싸고 예외가 나면 상태 값 `error`와 예외 문구를 돌려준다 [40].
+사용자 활동 도구 가운데 서버 코드로 파싱하는 `extract_recycle_bin`, `extract_powershell_history`, `extract_scheduled_tasks`는 파일 하나의 해석 예외를 그 파일의 `parser_error` 실패로 기록하고 나머지 파일을 계속 읽는다 [41].
+실행 확인에서 형식 버전이 9인 `$I` 파일은 `parser_failures`에 `parser_error:ValueError`와 `unknown_i_format_version:9`로 남았다 [7].
+`run_analysis`는 작업 프로세스가 거부한 질의를 `SafeAnalysisError`, 메모리나 시간 한도를 넘은 경우를 `AnalysisBudgetError`, 그 밖의 예외를 일반 실패로 나눠 오류를 돌려준다 [21].
+세 경우 모두 호출 기록에 종료 코드 2, 137, 1을 각각 남긴다 [21].
+
+**한계.** `extract_shimcache`는 예외를 처리하지 않아 `rla`나 AppCompatCacheParser 실행 파일이 없으면 예외가 도구 밖으로 나간다 [42].
+`extract_prefetch`는 `.pf` 파일 하나의 해석 예외를 실패로 기록하지 않고 건너뛰며 나머지 파일로 `success`를 돌려준다 [38].
+`hayabusa_hunt`는 CSV 해석 예외를 처리 없이 넘기고 성공 응답을 돌려준다 [26].
+버전 기준 Hayabusa v4.1.0에서는 `hayabusa_hunt`가 CSV를 읽기 전에 오류로 끝나 이 예외 경로에 이르지 않는다 [8][2].
+
+### 근거
+
+[1] `SafeRunner.run`은 종료 코드와 시간 초과 여부를 담고 시간 초과 때 끊기 전 출력을 남긴다: [`sift_mcp/runners/base.py:76-84`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L76-L84).
+
+```python
+        stderr = ""
+        exit_code = -1
+        start = time.monotonic()
+
+        try:
+            proc = subprocess.run(
+                cmd_parts,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,  # CRITICAL - never use shell=True
+                cwd=cwd,
+            )
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            exit_code = proc.returncode
+
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            # Recover any partial output the process emitted before being killed.
+            raw_out = exc.stdout or b""
+            raw_err = exc.stderr or b""
+            stdout = raw_out.decode("utf-8", errors="replace") if isinstance(raw_out, bytes) else str(raw_out)
+            stderr = raw_err.decode("utf-8", errors="replace") if isinstance(raw_err, bytes) else str(raw_err)
+            exit_code = -1
+
+        finally:
+            duration = time.monotonic() - start
+```
+
+[`sift_mcp/runners/base.py:491-520`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L491-L520)
+
+[2] 직접 실행하는 도구의 종료 코드 확인: [`sift_mcp/server.py:4505-4567`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4505-L4567), [`sift_mcp/server.py:5243-5290`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5243-L5290), [`sift_mcp/server.py:6666-6671`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6666-L6671), [`sift_mcp/server.py:3427-3432`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3427-L3432), [`sift_mcp/server.py:3663-3668`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3663-L3668), [`sift_mcp/server.py:3775-3780`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3775-L3780).
+
+[3] Volatility 3 도구는 `ok`가 거짓이면 종료 코드, 표준 오류, 오류 분류를 싣는다: [`sift_mcp/tools/timeline.py:372-380`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L372-L380), [`sift_mcp/tools/yara.py:157-169`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/yara.py#L157-L169).
+
+```python
+    if not result.ok:
+        return {
+            "tool_name": tool,
+            "status": "error",
+            "error_message": (
+                f"windows.info exited with code {result.exit_code}. "
+                f"stderr: {result.stderr[:300]}"
+            ),
+            "data": [],
+            "findings_created": [],
+            "execution_id": result.execution_id,
+            "raw_command": result.command_line,
+            "stderr": result.stderr,
+            "volatility_error": _runner.classify_error(result),
+        }
+```
+
+[`sift_mcp/tools/memory.py:600-614`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L600-L614)
+
+[4] 사용자 활동 도구는 하이브마다 `ok`를 보고 실패를 기록한다.
+
+```python
+            try:
+                result = _ez_runner.run_sbecmd(
+                    hive_dir=hive_dir,
+                    csv_dir=str(csv_out),
+                    tool_name=tool,
+                )
+                if not result.ok:
+                    status = f"parser_error:{_ez_runner.classify_error(result)}"
+            except Exception as exc:
+                status = f"exception:{type(exc).__name__}"
+```
+
+[`sift_mcp/tools/disk.py:6409-6418`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6409-L6418)
+
+[5] `fls`가 `-p`를 빼고 다시 실행한 뒤에도 실패하면 오류로 끝낸다: [`sift_mcp/server.py:7850-7884`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7850-L7884).
+
+[6] `icat`은 파일마다 시간 제한 300초로 실행하고 시간 초과와 0이 아닌 종료 코드를 실패 목록에 넣는다: [`sift_mcp/server.py:7915-7964`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7915-L7964).
+
+```python
+            stderr_buf = []
+            try:
+                with open(target, "wb") as fh_out:
+                    proc = subprocess.Popen(
+                        icat_args, stdout=fh_out, stderr=subprocess.PIPE
+                    )
+                    try:
+                        _, stderr_bytes = proc.communicate(timeout=300)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.communicate()
+                        failures.append({
+                            "family": family,
+                            "source_path": source_path,
+                            "meta_addr": meta_addr,
+                            "stderr": "icat timeout after 300s",
+                        })
+                        try:
+                            target.unlink()
+                        except OSError:
+```
+
+[`sift_mcp/server.py:7922-7941`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7922-L7941)
+
+[7] (실행 확인) 컨테이너에서 서버 도구 함수와 실행기를 같은 프로세스로 부르고 응답과 호출 기록 항목을 확인했다.
+Chainsaw, Hayabusa, vshadowinfo, MFTECmd, `vol`은 받은 인자를 기록하고 정해 둔 출력과 종료 코드를 내는 시험용 실행 파일로 바꿨다.
+
+[8] Hayabusa v4.1.0(`Yamato-Security/hayabusa` 태그 커밋 `11a7f64`)의 명령 목록에는 `csv-timeline`이 없고 명령 해석이 실패하면 clap 4.6.6이 표준 오류에 오류를 쓰고 종료 코드 2로 끝낸다: [`CHANGELOG.md:26`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/CHANGELOG.md#L26), [`src/detections/configs.rs:826-986`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/src/detections/configs.rs#L826-L986), [`src/detections/configs.rs:1980-2000`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/src/detections/configs.rs#L1980-L2000), [`Cargo.lock:288-289`](https://github.com/Yamato-Security/hayabusa/blob/11a7f64accf9fa815a92aea1b36e174975f1df9a/Cargo.lock#L288-L289), [`clap_builder/src/error/mod.rs:218-249`](https://github.com/clap-rs/clap/blob/4a622b4340d5e1fffff60c0ecefdc6882f738159/clap_builder/src/error/mod.rs#L218-L249), [`clap_builder/src/util/mod.rs:26-32`](https://github.com/clap-rs/clap/blob/4a622b4340d5e1fffff60c0ecefdc6882f738159/clap_builder/src/util/mod.rs#L26-L32).
+
+[9] 종료 코드가 0이 아니어도 CSV나 표준 출력이 있으면 계속한다: [`sift_mcp/tools/disk.py:3036`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3036), [`sift_mcp/tools/disk.py:3464`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3464), [`sift_mcp/tools/disk.py:3834`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3834), [`sift_mcp/tools/disk.py:4022`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4022), [`sift_mcp/tools/disk.py:4714`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L4714), [`sift_mcp/tools/disk.py:5326`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5326).
+
+```python
+        if not result.ok and not Path(csv_path).exists():
+            return {
+                "tool_name": tool,
+                "status": "error",
+                "error_message": (
+                    f"MFTECmd exited with code {result.exit_code}. "
+                    f"stderr: {result.stderr[:300]}"
+                ),
+                "data": [],
+                "findings_created": [],
+                "execution_id": result.execution_id,
+                "raw_command": result.command_line,
+                "stderr": result.stderr,
+            }
+```
+
+[`sift_mcp/tools/disk.py:3464-3477`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3464-L3477)
+
+[10] `analyze_vss`는 vshadowinfo 실행 뒤 종료 코드를 보지 않고 출력을 해석한다: [`sift_mcp/server.py:5816-5889`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5816-L5889).
+
+```python
+    try:
+        vsi_result = subprocess.run(
+            vshadow_cmd,
+            capture_output=True, text=True, timeout=120
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "tool": tool_name,
+            "error": "vshadowinfo timed out. Try providing partition_offset_sectors explicitly.",
+        }
+    except Exception as exc:
+        return {"status": "error", "tool": tool_name, "error": str(exc)}
+```
+
+[`sift_mcp/server.py:5816-5828`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5816-L5828)
+
+[11] 그림자 복사본이 0개이면 VSS 비활성화나 삭제 가능성을 적은 발견사항을 만든다.
+
+```python
+        noshadow_finding = {
+            "case_id": case_id,
+            "finding_type": "observation",
+            "artifact_type": "vss",
+            "artifact_path": disk_image_path,
+            "tool_name": tool_name,
+            "execution_id": execution_id,
+            "evidence_kind": "observation",
+            "finding_status": "active",
+            "confidence": 0.80,
+            "description": (
+                f"VSS analysis of {disk_image_path}: no shadow copies found. "
+                "This may indicate VSS was disabled (T1490: Inhibit System Recovery) or "
+                "shadow copies were deleted by ransomware (vssadmin delete shadows /all). "
+                "Check for 'vssadmin' or 'wmic shadowcopy delete' in EVTX EID 4688."
+            ),
+            "supporting_indicators": ["No VSS shadows found"],
+        }
+```
+
+[`sift_mcp/server.py:6064-6081`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6064-L6081)
+
+[12] vshadowmount 종료 코드가 0일 때만 아티팩트를 확인한다: [`sift_mcp/server.py:5920-5962`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5920-L5962).
+
+[13] Zimmerman 도구, Plaso, Volatility 3 실행기의 기본 시간 제한.
+
+```python
+#: Default timeout for EZ Tools.  .NET startup adds latency; large MFT or
+#: EVTX sets can take several minutes.
+DEFAULT_TIMEOUT = 1800  # seconds - EvtxECmd on 251MB Security.evtx needs up to 20 min
+```
+
+[`sift_mcp/runners/eztools.py:64-66`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L64-L66)
+
+```python
+#: Default timeout for log2timeline (slow - up to 2 hours for large images).
+LOG2TIMELINE_TIMEOUT = 7_200  # seconds
+
+#: Default timeout for psort / pinfo.
+PSORT_TIMEOUT = 600  # seconds
+```
+
+[`sift_mcp/runners/plaso.py:71-75`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/plaso.py#L71-L75)
+
+[14] `run_analysis`는 작업 프로세스에 시간 제한을 주고 넘으면 `AnalysisBudgetError`를 낸다: [`sift_mcp/server.py:11444-11448`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11444-L11448).
+
+```python
+    with _ANALYSIS_LOCK:  # single active analysis child (cap math on 15GiB VM)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "sift_mcp.analysis_worker"],
+                input=req,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                start_new_session=True,  # own process group -> clean timeout kill
+            )
+        except subprocess.TimeoutExpired:
+            raise AnalysisBudgetError(
+                f"analysis exceeded the {timeout}s wall-clock budget on {resolved_path}"
+            )
+```
+
+[`sift_mcp/server.py:11531-11544`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11531-L11544)
+
+[15] 시간 초과면 출력 요약을 `collection_timeout` 문구로 쓴다.
+
+```python
+        if timed_out:
+            # F-B (review 2026-06-04): a recognizable token so the stop
+            # hook + report gate treat a genuine timeout as "attempted-with-gap"
+            # (breaks the re-demand loop) rather than "never ran" (re-demanded
+            # forever) or "success". exit_code stays non-zero -> still a gap.
+            return "collection_timeout: process exceeded its timeout budget and was killed"
+```
+
+[`sift_mcp/runners/base.py:665-670`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L665-L670)
+
+[16] 시간 제한 값: [`sift_mcp/runners/volatility.py:52-71`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L52-L71), [`sift_mcp/runners/volatility.py:225-235`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L225-L235), [`sift_mcp/tools/disk.py:3812-3822`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3812-L3822), [`sift_mcp/server.py:4418-4424`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4418-L4424), [`sift_mcp/server.py:5225`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5225), [`sift_mcp/server.py:11444-11448`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11444-L11448).
+
+[17] 시간 초과를 따로 나눠 오류 문구를 돌려준다: [`sift_mcp/tools/timeline.py:364-370`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L364-L370), [`sift_mcp/tools/timeline.py:585-590`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L585-L590), [`sift_mcp/tools/yara.py:150-155`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/yara.py#L150-L155), [`sift_mcp/tools/yara.py:257-262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/yara.py#L257-L262).
+
+[18] `scan_processes`는 psscan 시간 초과 때 두 배 시간 제한으로 한 번 다시 실행한다.
+
+```python
+    # Run-11 fix (2026-05-29): on timeout, retry once with 2x timeout.
+    # Operator hit "timeout on 19 GB image; succeeded on retry" - mandatory
+    # DKOM check was silently dropped. The base psscan() already picks an
+    # adaptive timeout from image size; if even that wasn't enough, double it.
+    if not result.ok and getattr(result, "timed_out", False):
+        try:
+            _retry_timeout = _runner._psscan_adaptive_timeout(dump_path) * 2
+            result = _runner.psscan(dump_path=dump_path, tool_name=tool, timeout=_retry_timeout)
+        except Exception:
+            pass  # fall through to error path below
+```
+
+[`sift_mcp/tools/memory.py:1092-1101`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L1092-L1101)
+
+[19] `sigma_hunt`는 폴더 전체가 시간 초과로 끝나면 정해 둔 채널 파일 하나로 다시 실행하고 그것도 시간 초과면 오류만 돌려준다: [`sift_mcp/server.py:4418-4495`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4418-L4495).
+
+[20] 다시 실행한 경우 나머지 채널을 검사할 호출 목록을 만든다: [`sift_mcp/server.py:4850-4902`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4850-L4902), [`sift_mcp/server.py:4977-4987`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4977-L4987).
+
+```python
+        "fallback_applied": fallback_applied,
+        "fallback_reason": fallback_reason or None,
+        "fallback_targets": fallback_targets,
+        "recommended_next_calls": recommended_next_calls,
+        "recommended_next_calls_note": (
+            "Chainsaw timed out on full EVTX directory; only one channel was "
+            "scanned. Run these single-channel sigma_hunt calls to close "
+            "high-value coverage gaps (System=EID 7045 service install was the "
+            "Run-10 miss). Inventory-aware ranking; empty list means no "
+            "high-value channels are present on this image."
+        ) if recommended_next_calls else "",
+```
+
+[`sift_mcp/server.py:4977-4987`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4977-L4987)
+
+[21] `run_analysis`는 예외 종류마다 호출 기록의 종료 코드를 나눠 남긴다: [`sift_mcp/server.py:11622-11659`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11622-L11659).
+
+```python
+    try:
+        result = _run_analysis_isolated(str(path), query, output_format)
+    except SafeAnalysisError as exc:
+        _audit_analysis_completed(
+            eid, started, params, command_repr,
+            exit_code=2, outputs_summary=f"run_analysis rejected/error: {exc}",
+        )
+        out = ToolResult(status="error", tool="run_analysis", error=str(exc)).model_dump()
+        if eid:
+            out["execution_id"] = eid
+        return out
+    except AnalysisBudgetError as exc:
+        _audit_analysis_completed(
+            eid, started, params, command_repr,
+            exit_code=137, outputs_summary=f"run_analysis budget exceeded: {exc}",
+        )
+        out = ToolResult(
+            status="error", tool="run_analysis",
+            error=(
+                f"{exc}. Narrow the query (filter rows, select columns, .head(N)) "
+                "or raise SAVVYDFIR_ANALYSIS_MEM_CAP_MB. The server was not affected."
+            ),
+        ).model_dump()
+        if eid:
+            out["execution_id"] = eid
+        return out
+```
+
+[`sift_mcp/server.py:11625-11650`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11625-L11650)
+
+[22] `hayabusa_hunt`는 시간 초과면 호출 기록을 마치지 않고 오류를 돌려준다.
+
+```python
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "tool": tool_name,
+            "error": "Hayabusa timed out after 1800 seconds.",
+            "execution_id": _eid,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "tool": tool_name,
+            "error": f"Hayabusa execution failed: {exc}",
+            "execution_id": _eid,
+        }
+
+```
+
+[`sift_mcp/server.py:5224-5240`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5224-L5240)
+
+[23] Volatility 3 실행기는 표준 오류 문구로 실패를 나누고 출력 요약 앞에 `tool_incompatible:`을 붙인다: [`sift_mcp/runners/volatility.py:414-441`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L414-L441).
+
+```python
+        self, stdout: str, stderr: str, exit_code: int, timed_out: bool
+    ) -> str:
+        base_summary = super()._build_outputs_summary(stdout, stderr, exit_code, timed_out)
+        # Only consider classification when there was a real failure.
+        if timed_out or exit_code == 0:
+            return base_summary
+        # Reconstruct a minimal RunResult so we can reuse the canonical
+        # classify_error logic (no duplication of substring patterns).
+        synthetic = RunResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            duration_seconds=0.0,
+            command_line="",
+            execution_id="",
+            timed_out=timed_out,
+        )
+        code = self.classify_error(synthetic)
+        if code in {"missing_symbols", "incompatible_profile"}:
+            return f"tool_incompatible: {code}; {base_summary}"[:500]
+        return base_summary
+```
+
+[`sift_mcp/runners/volatility.py:455-475`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/volatility.py#L455-L475)
+
+[24] `build_timeline`은 `pinfo.py`의 이벤트 수가 0이면 오류로 돌려주고 확인 실패는 필드에 싣는다: [`sift_mcp/tools/timeline.py:398-446`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L398-L446).
+
+```python
+
+    if pinfo_event_count == 0:
+        return {
+            "status": "error",
+            "error": (
+                f"log2timeline produced a Plaso file with zero events at {storage_path}. "
+                "Source path is empty, parsers failed silently, or the source "
+                "was unreadable. Inspect log2timeline stderr and re-run."
+            ),
+            "storage_path": storage_path,
+            "exit_code": 0,
+            "execution_id": result.execution_id,
+            "pinfo_validated": True,
+        }
+```
+
+[`sift_mcp/tools/timeline.py:420-433`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/timeline.py#L420-L433)
+
+[25] `sigma_hunt`는 출력 파일과 표준 출력에서 탐지 결과를 읽고 0건이면 진단 문구를 고른다: [`sift_mcp/server.py:4368-4384`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4368-L4384), [`sift_mcp/server.py:4904-4937`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4904-L4937).
+
+```python
+    def _parse_chainsaw_hits(output_path: Path, stdout_text: str) -> list[dict[str, Any]]:
+        parsed_hits: list[dict[str, Any]] = []
+        if output_path.exists():
+            try:
+                parsed_hits = json.loads(output_path.read_text(encoding="utf-8"))
+                if not isinstance(parsed_hits, list):
+                    parsed_hits = [parsed_hits]
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                parsed_hits = []
+        if not parsed_hits and stdout_text.strip():
+            try:
+                parsed_hits = json.loads(stdout_text.strip())
+                if not isinstance(parsed_hits, list):
+                    parsed_hits = [parsed_hits]
+            except json.JSONDecodeError:
+                parsed_hits = []
+        return [hit for hit in parsed_hits if isinstance(hit, dict)]
+```
+
+[`sift_mcp/server.py:4368-4384`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4368-L4384)
+
+[26] `hayabusa_hunt`는 CSV가 있고 비어 있지 않을 때만 읽고 해석 예외는 넘긴다: [`sift_mcp/server.py:5292-5347`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5292-L5347).
+
+```python
+    if out_csv.is_file() and out_csv.stat().st_size > 0:
+        try:
+            import csv as _csv
+            with out_csv.open(encoding="utf-8", newline="") as fh:
+                reader = _csv.DictReader(fh)
+                for i, row in enumerate(reader):
+                    hits_total += 1
+```
+
+[`sift_mcp/server.py:5294-5300`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5294-L5300)
+
+[27] AppCompatCacheParser가 CSV를 만들지 않으면 아티팩트 부재로 기록한다.
+
+```python
+        # Find the CSV - named {timestamp}_..._AppCompatCache.csv
+        csv_files = sorted(output_dir.glob("*AppCompatCache.csv"))
+        if not csv_files:
+            # AppCompatCacheParser exited cleanly but produced no CSV.
+            # In SleuthKit-direct workflows the staged SYSTEM hive may lack
+            # replayed transaction logs (.LOG1/.LOG2), leaving the
+            # AppCompatCache key dirty/empty. This is a legitimate
+            # documented gap, not a tool failure - route through the audit
+            # pipeline so the hook gate sees the gap (state.json:executions
+            # gets a row with outputs_summary containing "artifact_absent").
+            response = _record_artifact_absent_audit(
+                tool_name="disk.extract_shimcache",
+                artifact_name="ShimCache_AppCompatCache_Key",
+                checked_paths=[str(cleaned_hive)],
+                reason=(
+                    "AppCompatCacheParser exited 0 but produced no CSV. "
+                    "Staged SYSTEM hive may lack replayed transaction logs "
+                    "(LOG1/LOG2) or the AppCompatCache key was empty/dirty. "
+                    "Cross-reference execution evidence with Prefetch + Amcache + EVTX EID 4688."
+                ),
+                case_id=case_id,
+                parameters={"mount_point": mount_point, "case_id": case_id, "max_entries": max_entries},
+            )
+            response["alternative"] = (
+                "For execution evidence without ShimCache, corroborate via "
+                "Prefetch (FirstRun/LastRun timestamps) + Amcache (SHA-1 hashes) "
+                "+ EVTX EID 4688 (process creation) + Sysmon EID 1."
+            )
+            return response
+        csv_path = csv_files[-1]
+```
+
+[`sift_mcp/server.py:6673-6702`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6673-L6702)
+
+[28] 사용자 활동 도구의 0행 결과 분류.
+
+```python
+    if not discovered:
+        status = "artifact_absent"
+        exit_code = 0
+        summary = (
+            f"status=artifact_absent: no {artifact_label} discovered across "
+            f"{len(profiles_checked)} profile(s)."
+        )
+    elif parser_failures:
+        status = "collection_failed"
+        exit_code = 1
+        # MUST NOT contain the substring ``artifact_absent`` (constraint 2).
+        summary = (
+            f"status=collection_failed: {artifact_label} discovered but "
+            f"{len(parser_failures)} parser/query failure(s) across "
+            f"{len(profiles_checked)} profile(s); zero rows collected - "
+            "absence is NOT evidence of absence."
+        )
+    else:
+        status = "no_data"
+        exit_code = 0
+        summary = (
+            f"status=no_data: {artifact_label} discovered and parsed cleanly "
+            f"across {len(profiles_checked)} profile(s) but yielded zero rows."
+```
+
+[`sift_mcp/tools/disk.py:5846-5868`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L5846-L5868)
+
+[29] `icat` 실패 가운데 중요 아티팩트의 실패를 표준 오류 문구로 분류한다: [`sift_mcp/server.py:8014-8060`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8014-L8060).
+
+[30] `_warn_if_empty`는 0건인데 경로가 있으면 상태 값을 `warning`으로 바꾼다.
+
+```python
+def _warn_if_empty(result: dict, tool_name: str, path: str, min_expected: int = 1) -> dict:
+    """Upgrade status to 'warning' if records=0 but path exists.
+
+    Silent 0-record success is the worst failure mode - it looks like
+    a clean system when the tool silently failed. This makes it loud.
+    """
+    count = result.get("records_count", len(result.get("data", [])))
+    if count == 0 and os.path.exists(path):
+        result = dict(result)
+        result["status"] = "warning"
+        result["warning"] = (
+            f"{tool_name} found 0 records but path exists: {path}. "
+            f"Verify mount point and tool parameters. "
+            f"A clean Windows system should always have records here."
+        )
+    return result
+```
+
+[`sift_mcp/tools/disk.py:431-446`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L431-L446)
+
+[31] Chainsaw v2.16.5의 `hunt` 표준 오류 문구: [`src/main.rs:714-722`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/main.rs#L714-L722), [`src/main.rs:800`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/main.rs#L800), [`src/main.rs:867`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/main.rs#L867).
+
+[32] Chainsaw v2.16.5는 파일마다 `hunter.hunt`가 돌려준 탐지 목록의 길이를 `documents`에 더한다: [`src/main.rs:803-828`](https://github.com/WithSecureLabs/chainsaw/blob/82fabe2436876f951d37485ed2bfb42e7568bdb3/src/main.rs#L803-L828).
+
+[33] 서버는 `Loaded N document` 꼴과 `Loaded N detection rule` 꼴을 찾는다.
+
+```python
+        text = stderr_text or ""
+        telemetry: dict[str, Any] = {
+            "documents_loaded": None,
+            "rules_loaded": None,
+        }
+        doc_match = re.search(
+            r"[Ll]oaded\s+([\d,]+)\s+(?:forensic\s+)?document", text
+        )
+        if doc_match:
+            telemetry["documents_loaded"] = int(doc_match.group(1).replace(",", ""))
+        rule_match = re.search(
+            r"[Ll]oaded\s+([\d,]+)\s+(?:detection\s+rule|rule|sigma)", text
+        )
+        if rule_match:
+            telemetry["rules_loaded"] = int(rule_match.group(1).replace(",", ""))
+        return telemetry
+```
+
+[`sift_mcp/server.py:4394-4409`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L4394-L4409)
+
+[34] Volatility 3 JSON을 해석하지 못하면 빈 목록을 돌려준다: [`sift_mcp/tools/memory.py:361-400`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L361-L400).
+
+```python
+    stdout = stdout.strip()
+    if not stdout:
+        return []
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        # Volatility sometimes emits non-JSON warnings before the JSON block;
+        # try to find the first '[' or '{'
+        for start_char in ("[", "{"):
+            idx = stdout.find(start_char)
+            if idx >= 0:
+                try:
+                    parsed = json.loads(stdout[idx:])
+                    break
+                except json.JSONDecodeError:
+                    continue
+        else:
+            return []
+```
+
+[`sift_mcp/tools/memory.py:378-396`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L378-L396)
+
+[35] 사용자 활동 도구의 부분 결과 응답과 호출 기록: [`sift_mcp/tools/disk.py:6084-6255`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6084-L6255).
+
+```python
+        str(f.get("profile") or f.get("artifact") or f.get("source") or "?")
+        for f in parser_failures
+    ]
+
+    if parser_failures:
+        status = "partial_collection"
+        audit_exit = 1
+    elif not durable_csv:
+        status = "warning"
+        audit_exit = 0
+    else:
+        status = "success"
+        audit_exit = 0
+```
+
+[`sift_mcp/tools/disk.py:6152-6164`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6152-L6164)
+
+[36] `extract_windows_artifacts`의 상태 값과 집계 필드: [`sift_mcp/server.py:8073-8109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8073-L8109).
+
+```python
+        families_with_artifacts = [f for f in selected if extracted.get(f)]
+        families_empty = [f for f in selected if not extracted.get(f)]
+        total_artifacts_staged = sum(len(paths) for paths in extracted.values())
+
+        if total_artifacts_staged == 0:
+            status_value = "warning"
+        elif failures or families_empty:
+            status_value = "partial_success"
+        else:
+            status_value = "ok"
+```
+
+[`sift_mcp/server.py:7998-8007`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7998-L8007)
+
+[37] `analyze_vss`는 그림자 복사본마다 찾은 아티팩트와 없는 아티팩트를 싣는다: [`sift_mcp/server.py:5926-5957`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5926-L5957).
+
+[38] `extract_prefetch`는 파일 하나의 예외를 건너뛴다: [`sift_mcp/tools/disk.py:2796-2831`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2796-L2831).
+
+```python
+            )
+            records.append(record)
+        except Exception:
+            continue
+```
+
+[`sift_mcp/tools/disk.py:2828-2831`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2828-L2831)
+
+[39] `extract_windows_artifacts`는 `warning`도 종료 코드 0으로 남긴다.
+
+```python
+        _audit_logger.log_result(
+            execution_id=execution_id,
+            exit_code=0 if response["status"] in {"ok", "partial_success", "warning"} else 1,
+            duration=duration,
+            outputs_summary=(
+                f"status={response['status']} staged={total_artifacts_staged} "
+                f"families_ok={len(families_with_artifacts)}/{len(selected)} "
+                f"failures={len(failures)} critical_failures={len(critical_failures)}"
+            ),
+```
+
+[`sift_mcp/server.py:8111-8119`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8111-L8119)
+
+[40] 도구 처리기는 예외를 오류 응답으로 바꾼다(`server.py`의 `except Exception as exc` 107곳 가운데 하나).
+
+```python
+    try:
+        _r = _extract_prefetch(image_path=image_path,
+                               case_id=case_id, max_entries=max_entries,
+                               response_format=response_format)
+        if isinstance(_r, dict) and _r.get("status") != "error":
+            _r.update(_forensic_envelope("disk.extract_prefetch"))
+        # Genuine artifact absence (e.g. Prefetch disabled by default on Server OS)
+        # -> record documented-absence via the AUDIT-BACKED helper (exit 0 + audit
+        # + state parity) so the gate is satisfied by a REAL tool run with
+        # provenance, NOT a fabricated state row. 1c positive-absence guard
+        # (review 2026-06-06): ONLY claim absent if the Windows volume root
+        # actually resolves (case-insensitive); if the root itself is unresolvable
+        # this is a path/mount FAILURE, not genuine absence -> keep it a retryable
+        # error, never overclaim "not present" (the XP case-sensitivity false-absence).
+        if isinstance(_r, dict) and _r.get("needs_extract_windows_artifacts"):
+            if _windows_volume_resolves(str(image_path)):
+                return _record_artifact_absent_audit(
+                    tool_name="disk.extract_prefetch",
+                    artifact_name="Prefetch",
+                    checked_paths=_r.get("checked_paths") or [str(image_path)],
+                    reason=str(_r.get("error_message") or "Prefetch not present (e.g. disabled by default on Server OS)"),
+                    case_id=case_id,
+                    command_line=f"extract_prefetch(image_path={image_path!r}, case_id={case_id!r})",
+                )
+        return _finalize_tool_response("disk.extract_prefetch", _r)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "tool": "extract_prefetch"}
+```
+
+[`sift_mcp/server.py:1639-1665`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1639-L1665)
+
+[41] 서버 코드 파서는 파일 하나의 예외를 그 파일의 실패로 기록한다: [`sift_mcp/tools/disk.py:7858`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7858), [`sift_mcp/tools/disk.py:8114`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L8114).
+
+```python
+    for sid, i_file, r_file in discovered:
+        status = "ok"
+        try:
+            data = i_file.read_bytes()
+            parsed = _parse_recycle_i_file(data)
+        except Exception as exc:
+            status = f"parser_error:{type(exc).__name__}"
+            parser_failures.append({
+                "profile": sid, "artifact": str(i_file), "status": status,
+                "reason": str(exc), "recovered_rows": 0,
+            })
+            continue
+```
+
+[`sift_mcp/tools/disk.py:7688-7699`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7688-L7699)
+
+[42] `extract_shimcache`의 `try`에는 `except`가 없다: [`sift_mcp/server.py:6650-6828`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6650-L6828).
+
+```python
+    finally:
+        for d in (tmp_in, tmp_out):
+            if d and Path(d).exists():
+                shutil.rmtree(str(d), ignore_errors=True)
+```
+
+[`sift_mcp/server.py:6825-6828`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6825-L6828)

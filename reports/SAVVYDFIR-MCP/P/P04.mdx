@@ -1,0 +1,367 @@
+---
+cell: P04
+details:
+- id: P04.01
+- id: P04.02
+- id: P04.03
+- id: P04.04
+---
+
+# P04 조사 단위 관리
+
+### P04.01 사건 시작 시 ID 확정
+
+**구현.** 이 방식은 `start_investigation`에 적용된다 [1].
+`start_investigation`은 매니페스트 JSON의 `case_id`를 읽고 값이 없으면 `UNKNOWN`을 쓴다 [1].
+읽은 사건 ID로 `CaseStateManager.load`를 불러 상태 파일을 읽거나 새로 만든다 [1][2].
+상태 파일에 다른 사건 ID가 있으면 `CaseStateError`로 거부하고 사건마다 상태 파일을 따로 쓰라는 문장을 돌려준다 [2].
+같은 분석 폴더에서 `CASE-A`를 연 뒤 `CASE-B` 매니페스트로 부르자 이 문장이 담긴 오류가 돌아왔다 [3].
+사건을 연 뒤 사건 ID를 받지 않는 도구는 불러온 상태의 사건 ID를 발견사항과 출력 폴더에 쓴다 [4].
+
+**한계.** 사건 ID의 문자는 검사하지 않는다 [1].
+`extract_windows_artifacts`·`extract_shimcache`·`extract_srum`은 폴더 이름에 쓸 때 일부 문자를 `_`로 바꾸지만 다른 추출 도구의 출력 폴더와 보고서 폴더는 사건 ID를 그대로 쓴다 [4][5][6].
+
+### P04.02 호출마다 사건 ID 전달·검사
+
+**구현.** 이 방식은 사건 ID를 인자로 받아 `_state_manager.load`를 부르는 도구에 적용된다 [7].
+`read_state`, `get_finding`, `get_findings`, `record_analysis_lane`, `get_investigation_gates`, `coverage_report`, `prepare_hypothesis_context`, `record_hypotheses`, `generate_report`, `sigma_scan`, `compare_disk_and_memory`가 여기에 속한다 [7].
+`load`는 상태 파일의 `case_id`와 받은 값을 대조해 다르면 오류로 거부한다 [2].
+`CASE-A` 상태 파일이 있는 서버에 `read_state("CASE-B")`를 부르자 오류가 돌아왔다 [3].
+대조 대상은 프로세스가 연 사건이 아니라 상태 파일에 적힌 값이다 [2].
+
+**한계.** 상태 파일이 없으면 대조하지 않고 받은 사건 ID로 새 상태를 만든다 [2].
+`extract_prefetch`·`summarize_evtx` 같은 디스크 추출 도구는 `case_id`를 받지만 대조하지 않고 발견사항에는 불러온 상태의 사건 ID를 쓴다 [8].
+`extract_windows_artifacts`·`extract_shimcache`·`extract_srum`은 받은 `case_id`로 출력 폴더를 정하고 열린 사건과 대조하지 않는다 [5][6].
+`CASE-A`를 연 서버에서 `extract_windows_artifacts`에 다른 사건 ID를 주자 꺼낸 파일이 그 ID의 폴더에 생겼다 [3].
+`add_finding`과 `submit_finding`은 받은 `case_id`를 발견사항에 그대로 적는다 [9].
+`CASE-A`를 연 서버에서 `add_finding`에 `CASE-B`를 주자 `case_id`가 `CASE-B`인 발견사항이 `CASE-A` 상태 파일에 저장되었다 [3].
+
+### P04.03 폴더·DB·manifest에 사건 ID 연결
+
+**구현.** 이 방식은 상태 파일, 실행 기록, 발견사항, 추출 출력 폴더, 보고서 폴더, 그래프 병합에 적용된다 [10][11][4][12][13].
+상태 파일 `state.json`은 최상위에 `case_id`를 두고 실행 기록과 발견사항에도 `case_id`를 넣는다 [10][11].
+추출 도구의 CSV는 `OUTPUT_BASE/<case_id>/artifacts/<도구>`에, 이미지에서 꺼낸 파일은 `OUTPUT_BASE/<case_id>/artifacts/raw`에 둔다 [4][5].
+메모리 도구의 CSV는 그 아래 덤프 파일 이름으로 만든 하위 폴더에 둔다 [14].
+보고서는 `./reports/<case_id>`에 쓴다 [12].
+`merge_host_graphs`는 `reports/<case_id>/graph.json`을 모으고 `cases` 인자로 합칠 사건 ID를 고른다 [13].
+
+**한계.** 호출 기록 `audit.jsonl`의 항목에는 사건 ID 칸이 없다 [15].
+호출 기록은 상태 파일과 같은 분석 폴더에 있다는 것으로만 사건에 이어진다 [16].
+`extract_shimcache`와 `extract_srum`의 중간 출력은 `OUTPUT_BASE`가 아니라 고정 경로 `/cases/shimcache/<case_id>`와 `/cases/srum/<사건 ID 앞 20자>`에 생긴다 [6].
+
+### P04.04 사건별 폴더·DB 분리
+
+**구현.** 이 방식은 추출 출력 폴더와 보고서 폴더에 적용된다 [4][12].
+추출 도구와 보고서는 사건 ID로 만든 폴더 아래에 써서 사건마다 따로 둔다 [4][12].
+상태 파일과 호출 기록은 사건마다 나뉘지 않고 분석 폴더 하나에 하나씩 있다 [16].
+분석 폴더는 환경변수 `SAVVYDFIR_ANALYSIS_DIR`이고 없으면 서버를 실행한 폴더의 `./analysis`다 [16].
+서버 주석은 호스트마다 이 값을 사건 폴더로 정해 서버를 따로 실행하는 방식을 적는다 [16].
+같은 분석 폴더로 두 번째 사건을 열면 상태 파일의 사건 ID가 달라 거부된다 [2][3].
+
+**한계.** 상태 파일과 호출 기록을 사건마다 나누려면 사용자가 서버를 실행할 때마다 `SAVVYDFIR_ANALYSIS_DIR`을 다르게 정해야 한다 [16].
+`load_memory`가 ZIP을 푸는 폴더의 기본값은 사건과 관계없는 `/evidence/memory`다 [17].
+전문 에이전트 작업 대기열 `/tmp/savvydfir_delegate_queue.json`은 모든 사건이 함께 쓰고 항목마다 `case_id`를 적는다 [18].
+
+### 근거
+
+[1] `start_investigation`은 매니페스트의 `case_id`로 상태를 불러온다.
+
+```python
+    try:
+        manifest_file = Path(manifest_path).resolve()
+        if not manifest_file.exists():
+            return {"status": "error", "error": f"Manifest not found: {manifest_path}"}
+
+        with manifest_file.open("r", encoding="utf-8") as f:
+            manifest = _json.load(f)
+
+        case_id = manifest.get("case_id", "UNKNOWN")
+        mode = manifest.get("mode", "blind")
+        known_iocs = manifest.get("known_iocs", [])
+        enabled_detectors_raw = manifest.get("enabled_detectors")
+        enabled_detectors = (
+            None
+            if enabled_detectors_raw is None
+            else sorted(normalize_enabled_detectors(enabled_detectors_raw))
+        )
+
+        # Initialise case state
+        _state_manager.load(case_id)
+```
+
+[`sift_mcp/server.py:7208-7227`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7208-L7227)
+
+[2] `load`는 상태 파일의 `case_id`와 받은 값을 대조하고 파일이 없으면 새로 만든다.
+
+```python
+        with self._lock:
+            if self._state_path.exists():
+                try:
+                    raw = self._state_path.read_text(encoding="utf-8")
+                    loaded: dict[str, Any] = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise CaseStateError(
+                        f"state.json at {self._state_path} is not valid JSON: {exc}"
+                    ) from exc
+
+                if loaded.get("case_id") != case_id:
+                    raise CaseStateError(
+                        f"state.json contains case_id={loaded.get('case_id')!r} "
+                        f"but load() was called with case_id={case_id!r}. "
+                        "Use a separate state file per case."
+                    )
+
+                self._state = loaded
+                self._migrate_loaded_state_locked()
+            else:
+                # Create a new, empty state.
+                self._state = _new_state(case_id)
+                self._save_locked()
+```
+
+[`sift_mcp/state.py:128-150`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L128-L150)
+
+[3] (실행 확인) 컨테이너 안의 한 분석 폴더에서 `start_investigation`, `read_state`, `extract_windows_artifacts`, `add_finding`에 다른 사건 ID를 주어 거부 여부와 상태 파일·출력 폴더에 남은 사건 ID를 확인했다.
+
+[4] 추출 도구의 출력 폴더는 불러온 상태의 사건 ID로 정한다.
+
+```python
+def _case_id() -> str:
+    """Return the current case ID from state, or 'unknown'."""
+    if _state is None:
+        return "unknown"
+    try:
+        return _state.case_id
+    except Exception:
+        return "unknown"
+
+
+def _artifact_output_dir(tool_short_name: str) -> Path:
+    """Return the durable artifact directory for one disk tool."""
+    return (
+        Path(os.environ.get("OUTPUT_BASE", "/cases"))
+        / _case_id()
+        / "artifacts"
+        / tool_short_name
+    )
+```
+
+[`sift_mcp/tools/disk.py:166-183`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L166-L183)
+
+[5] `extract_windows_artifacts`는 받은 `case_id`의 일부 문자를 바꿔 출력 폴더를 정한다.
+
+```python
+    device = str(tsk_device_path or image_path)
+    safe_case_id = re.sub(r"[^A-Za-z0-9._-]+", "_", str(case_id)).strip("._") or "UNKNOWN"
+    raw_base = Path(os.environ.get("OUTPUT_BASE", "/cases")) / safe_case_id / "artifacts" / "raw"
+```
+
+[`sift_mcp/server.py:7716-7718`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7716-L7718)
+
+[6] `extract_shimcache`·`extract_srum`의 출력 폴더: [`sift_mcp/server.py:6623-6647`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6623-L6647), [`sift_mcp/server.py:6879-6880`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6879-L6880), [`sift_mcp/server.py:6908-6910`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L6908-L6910).
+
+[7] 사건 ID를 받아 상태를 불러오는 곳(`git grep -n "load(case_id)" 9ac8e47 -- sift_mcp`): [`sift_mcp/server.py:3038`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3038), [`sift_mcp/server.py:3124`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3124), [`sift_mcp/server.py:8793`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8793), [`sift_mcp/server.py:9097`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9097), [`sift_mcp/server.py:9617`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9617), [`sift_mcp/server.py:9731`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9731), [`sift_mcp/server.py:9932`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9932), [`sift_mcp/server.py:10104`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10104), [`sift_mcp/server.py:11282`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11282), [`sift_mcp/tools/correlation.py:188`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/correlation.py#L188), [`sift_mcp/tools/state_tools.py:132`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/state_tools.py#L132).
+
+[8] `extract_prefetch`는 받은 `case_id` 대신 불러온 상태의 사건 ID를 발견사항에 쓴다.
+
+```python
+def extract_prefetch(
+    image_path: str,
+    prefetch_dir: Optional[str] = None,
+    case_id: Optional[str] = None,
+    max_entries: int = 0,
+    response_format: str = "summary",
+) -> dict[str, Any]:
+    """Extract Windows Prefetch execution evidence on Linux with `pyscca`.
+```
+
+[`sift_mcp/tools/disk.py:2703-2710`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2703-L2710)
+
+```python
+            case_id=_case_id(),
+```
+
+[`sift_mcp/tools/disk.py:2846-2846`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L2846-L2846)
+
+[9] `add_finding`은 받은 `case_id`를 발견사항에 넣는다.
+
+```python
+    try:
+        finding: dict[str, Any] = {
+            "case_id": case_id,
+            "finding_type": "other",
+            "artifact_type": artifact_type,
+            "evidence_kind": evidence_kind,
+            "description": description,
+```
+
+[`sift_mcp/server.py:9234-9240`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L9234-L9240)
+
+[10] 새 상태의 최상위 `case_id`.
+
+```python
+def _new_state(case_id: str) -> dict[str, Any]:
+    """Return a fresh state dict for a new case.
+
+    Parameters
+    ----------
+    case_id:
+        The forensic case identifier.
+
+    Returns
+    -------
+    dict[str, Any]
+        A minimal valid state structure.
+    """
+    now = _utcnow_iso()
+    return {
+        "case_id": case_id,
+        "status": "IN_PROGRESS",
+        "triage_status": "IN_PROGRESS",
+        "status_flags": {},
+```
+
+[`sift_mcp/state.py:1622-1640`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1622-L1640)
+
+[11] 실행 기록과 발견사항에 사건 ID를 넣는다.
+
+```python
+def _normalize_execution_record(
+    execution: dict[str, Any],
+    *,
+    fallback_case_id: Optional[str],
+    fallback_iteration: int,
+) -> dict[str, Any]:
+    normalized = dict(execution)
+    if fallback_case_id and not normalized.get("case_id"):
+        normalized["case_id"] = fallback_case_id
+    normalized.setdefault("iteration", fallback_iteration)
+    normalized.setdefault("tool_name", "unknown.tool")
+    normalized.setdefault("parameters", {})
+    normalized.setdefault("command_line", "<unavailable>")
+    normalized.setdefault("agent_reason", None)
+    normalized.setdefault("outputs_summary", None)
+    normalized.setdefault("agent_turn", 0)
+    normalized.setdefault("finding_ids_generated", [])
+    normalized.setdefault("artifact_hashes", [])
+    normalized.setdefault("raw_evidence_refs", [])
+    normalized.setdefault("recorded_at", _utcnow_iso())
+    return Execution(**normalized).model_dump(mode="json")
+
+```
+
+[`sift_mcp/state.py:1577-1598`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1577-L1598)
+
+```python
+            finding = validate_and_prepare_finding(
+                original,
+                fallback_case_id=self._state.get("case_id"),
+                fallback_execution_id=resolved_eid,
+                fallback_iteration=original.get("iteration") or 1,
+                state_manager=self,
+            )
+```
+
+[`sift_mcp/state.py:254-260`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L254-L260)
+
+[12] 보고서 폴더는 `./reports/<case_id>`다.
+
+```python
+def generate_report_payload(
+    *,
+    case_id: str,
+    state_manager: Any,
+    sigma_scan_fn: Callable[[str], dict[str, Any]],
+    coverage_fn: Callable[[str], dict[str, Any]],
+    reports_root: str = "./reports",
+    allow_partial: bool = False,
+    delegate_path: str | None = None,
+) -> dict[str, Any]:
+    """Build the final report payload, write HTML, and then mark the case complete."""
+    report_dir = (Path(reports_root) / case_id).resolve()
+    report_path = report_dir / "report.html"
+    report_json_path = report_dir / "report.json"
+    graph_html_path = report_dir / "graph.html"
+    graph_json_path = report_dir / "graph.json"
+```
+
+[`sift_mcp/reporting.py:3273-3288`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3273-L3288)
+
+```python
+        _state_manager.load(case_id)
+        result = generate_report_payload(
+            case_id=case_id,
+            state_manager=_state_manager,
+            sigma_scan_fn=sigma_scan,
+            coverage_fn=coverage_report,
+            allow_partial=allow_partial,
+        )
+```
+
+[`sift_mcp/server.py:10104-10111`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10104-L10111)
+
+[13] `merge_host_graphs`는 사건 폴더의 그래프를 모은다: [`sift_mcp/server.py:3563-3645`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3563-L3645).
+
+[14] 메모리 도구 CSV는 덤프 이름 하위 폴더에 둔다: [`sift_mcp/tools/memory.py:184-239`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/memory.py#L184-L239).
+
+[15] 호출 기록 항목의 필드에는 사건 ID가 없다: [`sift_mcp/audit.py:129-173`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L129-L173).
+
+[16] 분석 폴더 하나에 호출 기록과 상태 파일을 둔다.
+
+```python
+# Ensure the default analysis directory exists so audit + state files can be written.
+# SAVVYDFIR_ANALYSIS_DIR env var allows per-host isolation: each host investigation
+# sets this to investigations/{case_id}/ before launching Claude.
+_ANALYSIS_DIR = Path(os.environ.get(
+    "SAVVYDFIR_ANALYSIS_DIR", "./analysis")).resolve()
+_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+_audit_logger = AuditLogger(output_path=str(_ANALYSIS_DIR / "audit.jsonl"))
+_state_manager = CaseStateManager(state_path=str(_ANALYSIS_DIR / "state.json"))
+```
+
+[`sift_mcp/server.py:168-177`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L168-L177)
+
+[17] `load_memory`의 기본 출력 폴더.
+
+```python
+@mcp.tool()
+def load_memory(
+    dump_path: str,
+    output_dir: str = "/evidence/memory",
+) -> dict[str, Any]:
+```
+
+[`sift_mcp/server.py:10763-10767`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10763-L10767)
+
+[18] 작업 대기열 파일의 기본 경로: [`scripts/delegate_queue.py:33-106`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/delegate_queue.py#L33-L106), 항목의 `case_id`.
+
+```python
+    trigger = {
+        "agent": f"@{_SYNTHESIS_SPECIALIST}",
+        "subagent_type": _SYNTHESIS_SPECIALIST,
+        "description": "Cross-artifact synthesis after all artifact lanes complete",
+        "prompt": (
+            f"All artifact-collection lanes for case {case_id} are recorded "
+            "(memory, disk_execution_persistence, event_auth, timeline_correlation). "
+            "Stress-test confirmed/active findings across all artifact families, "
+            "stack 3+ source evidence to promote ACTIVE → CONFIRMED, populate full "
+            "alternative_hypothesis / evidence_against_it / disposition fields, "
+            "downgrade weak claims, flag contradictions with flag_discrepancy, and "
+            f"return the Specialist Contract with lane_id={_SYNTHESIS_LANE_ID!r}."
+        ),
+        "lane_id": _SYNTHESIS_LANE_ID,
+        "tool": "state.record_analysis_lane",
+        "case_id": case_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "processed": False,
+        "dispatch_origin": "state_transition",
+        # DEFECT-2: deterministic idempotency
+        "delegate_key": delegate_key or "",
+        "status": "pending",
+        "retry_count": 0,
+    }
+```
+
+[`sift_mcp/server.py:8637-8660`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8637-L8660)

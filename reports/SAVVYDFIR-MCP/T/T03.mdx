@@ -1,0 +1,382 @@
+---
+cell: T03
+details:
+- id: T03.01
+- id: T03.10
+---
+
+# T03 실행 조건 확인
+
+### T03.01 선행 결과 대조
+
+**구현.** 이 방식은 분석 lane의 진행 상태를 기록하는 `record_analysis_lane`과 보고서를 쓰는 `generate_report`에 적용된다 [1][2].
+lane은 증거 접근, 메모리, 이벤트·인증처럼 서버가 정해 둔 조사 갈래 7개다 [3].
+`record_analysis_lane`은 lane을 `COMPLETE`나 `COMPLETE_WITH_GAPS`로 기록하기 전에 앞선 실행 기록을 확인한다 [1].
+재시도가 필요하다고 남은 파서 실행이 그 뒤 같은 파서의 성공한 실행으로 해소되지 않았으면 거부한다 [1].
+`event_auth` lane은 `summarize_evtx` 실행이나 그 발견사항이 사건 상태에 없으면 거부한다 [4].
+`COMPLETE`로 기록할 때는 그 lane이 맡은 도구 출력 가운데 추출만 하고 발견사항으로 이어지지 않은 것(analysis debt)이 있으면 거부한다 [5].
+EVTX 증거가 없는 빈 사건에서 `event_auth`를 `COMPLETE`로 기록하자 거부되었다 [6].
+
+`generate_report`는 보고서 파일을 쓰기 전에 다음 조건을 차례로 본다 [2].
+- 처리하지 않은 하위 에이전트 위임 파일이 있으면 `needs_delegate`로 거부한다 [2].
+- 사건의 그래프 파일 `graph.html`이나 `graph.json`이 없으면 `needs_graph`로 거부한다 [7].
+- 서버 안에서 `sigma_scan`과 `coverage_report`를 실행하고 둘 가운데 하나가 오류이면 멈춘다 [7].
+- lane별 담당 에이전트가 발견사항을 낸 기록이 없으면 `needs_specialist_contribution`으로 거부한다 [8].
+- `CONFIRMED` 발견사항이 있거나 발견사항이 25개 이상이거나 서버 안 `sigma_scan`이 성공했는데 기록된 가설이 없으면 `needs_hypothesis`로 거부한다 [9].
+- 필수 도구 실행 결과와 analysis debt를 보는 적용 범위 검사를 통과하지 못하면 `needs_coverage`로 거부한다 [10].
+- `CONFIRMED` 발견사항에 재추출 표시가 있거나 대안 가설 처분이 비어 있으면 거부한다 [10].
+그래프 파일이 없는 사건에서 `generate_report`를 부르자 `needs_graph`가 돌아왔다 [6].
+
+그 밖의 도구에는 앞선 결과로 호출을 막는 검사가 없다.
+`start_investigation`의 응답은 `environment_preflight`를 마치기 전에 수집을 시작하지 말라는 `do_not_start_artifact_collection_until`과 보고서 필수 도구 목록을 담지만 다른 도구는 이 값을 보지 않는다 [11].
+`environment_preflight`의 결과도 사건 상태에 저장되지 않고 다른 도구가 읽지 않는다 [12].
+발견사항을 기록하는 도구는 사건 상태를 불러오지 않았으면 `CaseStateError`로 끝나지만 디스크·메모리 도구는 외부 도구를 실행한 뒤 발견사항을 쓰는 단계에서 이 오류를 낸다 [13][14].
+
+저장소의 Claude Code 훅 `workflow-enforce-pre.py`에도 순서 검사가 있다 [15].
+이 훅은 `generate_report` 전에 사건 상태의 실행 기록에서 필수 도구 15개가 성공했거나 부재로 기록되었는지 보고 아니면 거부한다 [15].
+같은 훅에는 `sigma_hunt`·`hayabusa_hunt`·`compare_disk_and_memory` 전에 디스크 도구 8개를 요구하는 검사도 있다 [15].
+그러나 `.claude/settings.json`의 PreToolUse matcher는 `generate_report`와 `record_analysis_lane`만 맞추므로 탐지 도구 앞의 검사 `_check_phase3_entry_gate`는 실행되지 않는다 [15][16].
+`record_analysis_lane`에 대한 훅 검사는 판단을 기록만 하고 거부하지 않는다 [15].
+이 훅은 클라이언트 쪽 설정이라 다른 MCP 클라이언트로 붙으면 적용되지 않는다.
+
+**한계.** `generate_report`의 인자 `allow_partial`이 참이면 위임 파일, 그래프 파일, 담당 에이전트 기여, 적용 범위, 재추출·대안 가설 검사를 거부 없이 건너뛴다 [2][7][8][10].
+이 인자는 모델이 호출에 넣는 값이다 [17].
+발견사항과 실행 기록이 없는 빈 사건에서 `allow_partial`을 참으로 주자 보고서 파일이 쓰였다 [6].
+가설 검사는 `allow_partial`과 관계없이 실행되지만 환경변수 `SAVVYDFIR_SKIP_HYPOTHESIS_GATE=1`로 끈다 [18].
+`record_analysis_lane`은 analysis debt를 계산하다 예외가 나면 debt가 없는 것으로 보고 통과시킨다 [5].
+`COMPLETE_WITH_GAPS`로 기록하면 analysis debt 검사를 하지 않는다 [5].
+
+### T03.10 동시 실행 수 제한
+
+**구현.** 이 방식은 `run_analysis`의 질의 평가 프로세스에 적용된다 [19].
+`run_analysis`는 분석 작업 프로세스를 모듈 전역 잠금 `_ANALYSIS_LOCK` 안에서 실행해 한 번에 하나만 실행한다 [19].
+잠금을 얻지 못한 호출은 거부되지 않고 기다리며 기다리는 시간에 상한은 없다 [19].
+코드 주석은 이 제한의 목적을 작업 프로세스의 메모리 상한 계산을 지키는 것으로 적는다 [19].
+같은 프로세스의 두 스레드에서 `run_analysis`를 동시에 부르자 두 번째 호출은 첫 호출이 끝난 뒤에 끝났다 [20].
+
+FastMCP 4.0.9는 동기 도구 함수를 스레드 풀에서 실행하므로 다른 도구 호출은 동시에 실행될 수 있다 [21].
+외부 도구를 실행하는 다른 도구에는 동시 실행 수를 세는 장치가 없다 [22].
+서버 메모리를 읽는 `_memory_watchdog`는 도구가 끝난 뒤 RSS가 4096MB나 6144MB를 넘으면 호출 기록에 경고를 남기고 실행을 막거나 미루지 않는다 [23].
+
+### 근거
+
+[1] `record_analysis_lane`은 완료 기록 전에 해소되지 않은 재시도 실행을 찾아 거부한다: [`sift_mcp/server.py:8841-8894`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8841-L8894), [`sift_mcp/server.py:8335-8418`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8335-L8418).
+
+[2] `generate_report`는 처리하지 않은 위임 파일이 있고 `allow_partial`이 거짓이면 `needs_delegate`를 돌려준다.
+
+```python
+            and _pending_delegate_blocks_case(
+                pending_delegate,
+                case_id=case_id,
+                delegate_file=delegate_file,
+            )
+            and not allow_partial
+        ):
+            # Tier-B2: enrich deny message with
+            # allow_partial=True escape hatch. The agent shouldn't loop
+            # forever trying to clear a stuck delegate.
+            return {
+                "status": "needs_delegate",
+                "tool": "generate_report",
+                "case_id": case_id,
+                "reason": (
+```
+
+[`sift_mcp/reporting.py:3376-3390`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3376-L3390)
+
+보고서 생성 함수 전체는 [`sift_mcp/reporting.py:3273-3823`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3273-L3823)에 있다.
+
+[3] lane ID와 상태 값은 서버 코드의 목록으로 정한다.
+
+```python
+_LANE_STATUSES = {
+    "PENDING",
+    "IN_PROGRESS",
+    "COMPLETE",
+    "COMPLETE_WITH_GAPS",
+    "FAILED",
+}
+
+
+def _valid_lane_ids() -> set[str]:
+    return {
+        "evidence_access",
+        "memory",
+        "disk_execution_persistence",
+        "event_auth",
+        "anti_forensics_recovery",
+        "timeline_correlation",
+        "synthesis_corroboration",
+```
+
+[`sift_mcp/server.py:8193-8210`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8193-L8210)
+
+[4] `event_auth` lane은 EVTX 증거가 없으면 완료로 기록되지 않는다.
+
+```python
+        if (
+            normalized_lane == "event_auth"
+            and normalized_status in {"COMPLETE", "COMPLETE_WITH_GAPS"}
+            and not _event_auth_evidence_exists(
+                normalized_execution_ids, normalized_finding_ids
+            )
+        ):
+            return {
+                "status": "error",
+                "tool": "record_analysis_lane",
+                "error": (
+                    "event_auth cannot be marked COMPLETE/COMPLETE_WITH_GAPS "
+                    "before EVTX evidence is collected."
+                ),
+                "next_required_tool": "summarize_evtx",
+                "required_tool_name": "disk.summarize_evtx",
+            }
+```
+
+[`sift_mcp/server.py:8896-8912`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8896-L8912)
+
+[5] `COMPLETE` 기록은 lane이 맡은 analysis debt가 있으면 거부하고 계산 중 예외는 빈 목록으로 처리한다.
+
+```python
+        if normalized_status == "COMPLETE":
+            try:
+                _adbt = _compute_analysis_debt_for_state()
+                _owned = _lane_debt(_adbt.get("by_lane", {}), normalized_lane)
+            except Exception:
+                _owned = []
+            if _owned:
+```
+
+[`sift_mcp/server.py:8921-8927`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8921-L8927)
+
+[6] (실행 확인) 컨테이너에서 빈 사건에 `event_auth`를 `COMPLETE`로 기록하자 거부되었고 `generate_report`는 `needs_graph`를, `allow_partial=True`일 때는 상태 `ok`와 보고서 경로를 돌려주었다.
+
+[7] 그래프 파일이 없고 `allow_partial`이 거짓이면 `needs_graph`를 돌려주고 그 뒤 `sigma_scan`·`coverage_report` 오류에서 멈춘다.
+
+```python
+    graph_missing = not (graph_html_path.exists() or graph_json_path.exists())
+    if graph_missing and not allow_partial:
+        return {
+            "status": "needs_graph",
+            "tool": "generate_report",
+            "case_id": case_id,
+            "reason": "Graph output is required before final report files are written.",
+            "next_required_tool": "generate_graph",
+            "recommended_call": {
+                "tool": "generate_graph",
+                "arguments": {"case_id": case_id},
+            },
+            "report_path": str(report_path),
+            "report_json_path": str(report_json_path),
+            "graph_path": str(graph_html_path),
+            "graph_json_path": str(graph_json_path),
+        }
+
+    sigma_result = sigma_scan_fn(case_id)
+    if sigma_result.get("status") == "error":
+        return {
+            "status": "error",
+            "tool": "generate_report",
+            "error": sigma_result.get("error", "sigma_scan preflight failed"),
+            "sigma_scan": sigma_result,
+        }
+```
+
+[`sift_mcp/reporting.py:3407-3432`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3407-L3432)
+
+`coverage_report` 오류 처리는 [`sift_mcp/reporting.py:3434-3441`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3434-L3441)에 있다.
+
+[8] 담당 에이전트 기여 검사는 `allow_partial`이 거짓일 때만 실행된다.
+
+```python
+    if not allow_partial:
+        # Phase 5: investigation-success gate.
+        # Checked BEFORE the existing coverage gate so the operator first
+        # sees specialist-contribution failures (which are usually the
+        # actionable signal), then tool-coverage failures.
+        success_check = evaluate_investigation_success_gate(
+            case_id=case_id,
+            state_manager=state_manager,
+        )
+        if success_check.get("status") == "needs_specialist_contribution":
+            return {
+                **success_check,
+                "report_path": str(report_path),
+                "report_json_path": str(report_json_path),
+            }
+```
+
+[`sift_mcp/reporting.py:3446-3460`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3446-L3460)
+
+[9] 가설 검사는 `allow_partial` 조건 밖에서 실행된다.
+
+```python
+    # W1.7 (Run 2 review 2026-05-24, Q4 / ordering): hypothesis
+    # gate is now EXTRACTED from the `if not allow_partial:` wrapper so it
+    # fires even under partial mode. Run 2 used allow_partial=True to bypass
+    # a stuck synthesis delegate and the hypothesis gate was silently
+    # disabled. Only SAVVYDFIR_SKIP_HYPOTHESIS_GATE=1 (audited) bypasses
+    # now; allow_partial=True still bypasses delegate/coverage/provenance
+    # checks but NOT hypothesis formation. Ordering preserved: in non-partial
+    # runs, success_check still runs first (above).
+    confirmed_count = sum(
+        1 for f in findings
+        if str(f.get("finding_status") or "").upper() == "CONFIRMED"
+    )
+    hypothesis_check = evaluate_hypothesis_gate(
+        case_id=case_id,
+        state_manager=state_manager,
+        findings_count=len(findings),
+        confirmed_count=confirmed_count,
+        sigma_result=sigma_result,
+    )
+    if hypothesis_check.get("status") == "needs_hypothesis":
+        return {
+            **hypothesis_check,
+            "report_path": str(report_path),
+            "report_json_path": str(report_json_path),
+        }
+```
+
+[`sift_mcp/reporting.py:3462-3486`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3462-L3486)
+
+[10] 적용 범위 검사와 `CONFIRMED` 발견사항 검사는 `allow_partial`이 거짓일 때만 실행된다: [`sift_mcp/reporting.py:3505-3600`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L3505-L3600), [`sift_mcp/reporting.py:1709-1800`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L1709-L1800).
+
+[11] `start_investigation`은 작업 순서를 응답의 문구와 목록으로만 돌려준다: [`sift_mcp/server.py:7340-7375`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7340-L7375).
+
+[12] `environment_preflight`는 확인 결과를 응답으로만 돌려준다.
+
+```python
+        "status": "ok" if not missing else "warning",
+        "tool": "environment_preflight",
+        "case_id": case_id,
+        "checks": checks,
+        "missing": missing,
+        "recommended_next_actions": [
+            str(check.get("fix_hint") or f"Review missing dependency: {check['name']}")
+            for check in missing
+        ],
+    }
+
+```
+
+[`sift_mcp/server.py:7555-7565`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7555-L7565)
+
+[13] 사건 상태 관리자는 불러오지 않은 상태에서 쓰기를 거부한다.
+
+```python
+    def _assert_loaded(self) -> None:
+        """Raise ``CaseStateError`` if :py:meth:`load` has not been called."""
+        if not self._loaded:
+            raise CaseStateError(
+                "CaseStateManager has not been initialised. Call load(case_id) first."
+            )
+```
+
+[`sift_mcp/state.py:1362-1367`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1362-L1367)
+
+[14] (실행 확인) 사건 상태를 불러오지 않은 채 `extract_pca`를 부르자 `CaseStateError`로 끝났다.
+
+[15] 저장소의 PreToolUse 훅은 보고서 전 필수 도구와 3단계 도구 전 디스크 도구를 검사하고 lane 기록 검사는 거부하지 않는다: [`.claude/hooks/workflow-enforce-pre.py`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/hooks/workflow-enforce-pre.py).
+
+[16] 훅 matcher는 `generate_report`와 `record_analysis_lane`만 맞춘다.
+
+```json
+    "PreToolUse": [
+      {
+        "matcher": "mcp__savvydfir__generate_report|mcp__savvydfir__record_analysis_lane",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./venv/bin/python3 .claude/hooks/workflow-enforce-pre.py"
+          }
+        ]
+      }
+    ],
+```
+
+[`.claude/settings.json:99-109`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/.claude/settings.json#L99-L109)
+
+[17] `allow_partial`은 `generate_report`의 도구 인자다.
+
+```python
+def generate_report(case_id: str, response_format: str = "summary", allow_partial: bool = False) -> dict[str, Any]:
+```
+
+[`sift_mcp/server.py:10062-10062`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10062-L10062)
+
+[18] 가설 검사는 증거 기준에 못 미치면 통과시키고 환경변수가 `1`이면 우회를 기록하고 통과시킨다.
+
+```python
+    # Triage-only threshold
+    sigma_ok = bool(
+        sigma_result
+        and (
+            sigma_result.get("status") == "ok"
+            or sigma_result.get("exit_code") == 0
+            or (sigma_result.get("total_hits") or 0) > 0
+        )
+    )
+    meaningful_evidence = (
+        confirmed_count >= 1
+        or findings_count >= 25
+        or sigma_ok
+    )
+    if not meaningful_evidence:
+        return {"status": "ok", "reason": "below_evidence_threshold"}
+
+    # Escape hatch - audit-visible, never silent
+    if os.environ.get("SAVVYDFIR_SKIP_HYPOTHESIS_GATE") == "1":
+        try:
+            scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+            import sys as _sys
+            if str(scripts_dir) not in _sys.path:
+                _sys.path.insert(0, str(scripts_dir))
+            from delegation_ledger import write_event as _ledger_write
+            _ledger_write({
+                "event_type": "hypothesis_gate_bypassed",
+                "case_id": case_id,
+                "reason": "SAVVYDFIR_SKIP_HYPOTHESIS_GATE=1",
+                "findings_count": findings_count,
+```
+
+[`sift_mcp/reporting.py:441-470`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/reporting.py#L441-L470)
+
+[19] `run_analysis`는 모듈 전역 잠금 안에서 작업 프로세스를 실행한다.
+
+```python
+# --- run_analysis memory isolation (F1, review 2026-06-04) -----------
+# run_analysis used to execute pandas IN this MCP server process; a runaway query
+# on the MFT/USN CSV drove server RSS to 15.3GB and systemd-oomd killed the whole
+# server mid-investigation. It now runs in a memory-capped CHILD process
+# (sift_mcp.analysis_worker). ONE child at a time so the RLIMIT_AS cap math holds
+# on a 15GiB VM that is also running sequential dotnet tools. This restores the
+# process isolation that existed when analysis ran via Bash, before the P0 fix
+# made run_analysis an in-process MCP tool.
+_ANALYSIS_LOCK = threading.Lock()
+```
+
+[`sift_mcp/server.py:11421-11429`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11421-L11429)
+
+```python
+    with _ANALYSIS_LOCK:  # single active analysis child (cap math on 15GiB VM)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "sift_mcp.analysis_worker"],
+                input=req,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                start_new_session=True,  # own process group -> clean timeout kill
+            )
+```
+
+[`sift_mcp/server.py:11531-11540`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11531-L11540)
+
+[20] (실행 확인) 컨테이너에서 150만 행 CSV에 대한 `run_analysis`를 두 스레드로 동시에 부르자 하나는 약 1.5초, 다른 하나는 약 3.1초에 끝났고 혼자 실행은 1.4초였다.
+
+[21] FastMCP 4.0.9는 동기 도구의 실행을 스레드 풀로 보낸다: [`fastmcp/tools/function_tool.py:477-481`](https://github.com/PrefectHQ/fastmcp/blob/b21a49a1e87ff6cb842204e1e0680481709fc5fe/fastmcp_slim/fastmcp/tools/function_tool.py#L477-L481), [`fastmcp/utilities/async_utils.py:26-34`](https://github.com/PrefectHQ/fastmcp/blob/b21a49a1e87ff6cb842204e1e0680481709fc5fe/fastmcp_slim/fastmcp/utilities/async_utils.py#L26-L34).
+
+[22] 서버 코드의 잠금은 `_ANALYSIS_LOCK`과 호출 기록·상태 파일 잠금뿐이다: [`sift_mcp/server.py:11429`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L11429), [`sift_mcp/audit.py:87`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/audit.py#L87), [`sift_mcp/state.py:95`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L95).
+
+[23] 메모리 감시는 기록과 `gc.collect()`만 한다: [`sift_mcp/server.py:1380-1447`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1380-L1447).

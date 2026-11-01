@@ -1,0 +1,282 @@
+---
+cell: P05
+details:
+- id: P05.01
+- id: P05.03
+- id: P05.05
+---
+
+# P05 사건 자료 정리
+
+### P05.01 모델 도구로 삭제·초기화
+
+**구현.** 이 방식은 `start_investigation`에 적용된다 [1].
+같은 사건 ID로 `start_investigation`을 다시 부르면 사건 상태의 `status`와 `triage_status`를 `IN_PROGRESS`로 되돌린다 [1].
+레인 6개도 `PENDING` 상태로 다시 기록한다 [2].
+레인을 다시 기록하는 함수는 상태, 맡은 에이전트, 요약, 시작·완료 시각을 처음 값으로 바꾸고 실행 ID·발견사항 ID·`data_gaps` 목록은 합쳐 남긴다 [3].
+`COMPLETE_WITH_GAPS`로 기록한 레인이 있는 사건에서 다시 부르자 그 레인은 `PENDING`, 맡은 에이전트 `null`, 빈 요약이 되었고 `data_gaps` 1건은 남았다 [4].
+발견사항과 실행 기록은 지우지 않는다 [1].
+응답의 `case_reuse_warning`은 새 발견사항이 앞선 발견사항에 이어 붙는다고 알리고 지우려면 사용자가 `state.json`과 `audit.jsonl`을 옮기거나 지우라고 적는다 [5].
+`start_investigation`은 호출 기록 항목을 남기지 않아 이 초기화도 호출 기록에 남지 않는다 [4].
+
+추출 도구 함수에는 재사용 판정 파일을 지우는 `force_reparse` 인자가 있지만 MCP 도구는 이 인자를 받지 않는다 [6][7].
+상태 파일, 호출 기록, 추출 출력 폴더를 지우는 도구나 사용자 명령은 없다.
+
+**한계.** 매니페스트에 적은 메모리 덤프가 없어 오류로 끝나는 호출도 레인을 처음 값으로 되돌린 뒤 오류를 돌려준다 [2][8].
+
+### P05.03 자동 정리
+
+**구현.** 이 방식은 추출 도구의 임시 폴더, `extract_windows_artifacts`의 실패한 사본, `analyze_vss`의 임시 마운트 폴더, 전문 에이전트 작업 대기열에 적용된다 [9][10][11][12].
+추출 도구는 외부 도구의 출력과 하이브·DB 사본을 `tempfile.TemporaryDirectory`나 `mkdtemp`로 만든 `savvydfir_` 접두어의 임시 폴더에 두고 호출이 끝나면 지운다 [9].
+CSV 출력은 지우기 전에 사건의 출력 폴더로 복사한다 [13].
+`extract_windows_artifacts`는 `icat`이 실패하거나 시간 제한 300초를 넘긴 파일을 지운다 [10].
+`analyze_vss`는 `ewfmount`와 `vshadowmount`에 쓴 임시 폴더를 `fusermount -u`를 실행한 뒤 지운다 [11].
+`record_analysis_lane`이 레인을 기록하면 그 레인 작업 대기열의 맨 앞 항목이 같은 사건의 것일 때 그 항목을 뺀다 [12][14].
+서버를 불러올 때 작업 대기열 파일에 쓸 수 없으면 그 파일을 지운다 [15].
+임시 폴더, 실패한 사본, 대기열 항목을 지운 사실은 서버 운영 로그와 호출 기록 어디에도 남지 않는다 [9][10][11][12].
+쓸 수 없는 대기열 파일을 지울 때만 그 경로를 표준 오류의 서버 운영 로그에 쓴다 [15].
+
+### P05.05 원본 증거를 삭제 대상에서 제외
+
+**구현.** 이 방식은 위 자동 정리 경로와 `start_investigation`의 초기화에 적용된다 [9][10][11][12][1].
+지우는 대상은 서버가 만든 임시 폴더, 서버가 쓴 사본 파일, 작업 대기열 항목과 파일이다 [9][10][12][15].
+받은 증거 경로를 지울 경로로 쓰는 코드는 없다 [16].
+`start_investigation`의 초기화는 상태 파일 안의 값만 바꾼다 [1][3].
+ext4 이미지에서 파일을 꺼내고 브라우저 DB를 읽은 뒤 이미지 크기와 DB·`-wal`·`-shm` 파일 크기는 그대로였다 [17].
+
+**한계.** `analyze_vss`는 `fusermount -u`의 종료 코드를 보지 않고 임시 마운트 폴더를 지운다 [11].
+이 폴더는 원본 이미지를 드러낸 FUSE 마운트 지점이고 해제가 실패한 상태에서 지우기가 무엇에 적용되는지는 `vshadowmount`가 없는 환경이라 확인하지 못했다 [11].
+
+### 근거
+
+[1] `start_investigation`은 같은 사건 상태를 불러와 상태 값을 다시 쓴다.
+
+```python
+
+        # Initialise case state
+        _state_manager.load(case_id)
+        existing_summary = _state_manager.to_summary()
+        existing_case_counts = {
+            "findings_count": int(existing_summary.get("findings_count", 0) or 0),
+            "executions_count": int(existing_summary.get("executions_count", 0) or 0),
+            "unresolved_discrepancies": int(existing_summary.get("unresolved_discrepancies", 0) or 0),
+        }
+        existing_case_state_detected = any(existing_case_counts.values())
+        _state_manager.set_status("IN_PROGRESS")
+        _state_manager.update_triage_state(triage_status="IN_PROGRESS")
+        _state_manager.set_enabled_detectors(enabled_detectors)
+        # SEAM 0 (review 2026-06-03): persist investigative_taxonomy + a frozen
+        # file-access selector snapshot so the report-time coverage gate and Phase-4
+        # hypothesis context key on a stable decision (taxonomy was {} in state before).
+        _manifest_taxonomy = manifest.get("investigative_taxonomy")
+        if not isinstance(_manifest_taxonomy, dict):
+            _manifest_taxonomy = None
+        _file_access_selector = build_file_access_selector_snapshot(_manifest_taxonomy)
+        _state_manager.set_investigation_taxonomy(_manifest_taxonomy, _file_access_selector)
+```
+
+[`sift_mcp/server.py:7225-7245`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7225-L7245)
+
+[2] 레인 6개를 `PENDING`으로 다시 기록하는 단계는 메모리 덤프 확인보다 앞에 있다: [`sift_mcp/server.py:7246-7287`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7246-L7287).
+
+[3] 레인을 다시 기록하면 목록은 합치고 나머지 값은 새 레코드의 기본값으로 바꾼다: [`sift_mcp/state.py:1194-1250`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1194-L1250), [`sift_mcp/state.py:1600-1619`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1600-L1619).
+
+```python
+def _normalize_analysis_lane_record(lane: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(lane)
+    normalized.setdefault("title", str(normalized.get("lane_id") or "Unknown").replace("_", " ").title())
+    normalized.setdefault("status", "PENDING")
+    normalized.setdefault("required", True)
+    normalized.setdefault("legacy_inferred", False)
+    normalized.setdefault("phase", "analysis")
+    normalized.setdefault("assigned_agent", None)
+    normalized.setdefault("supporting_agents", [])
+    normalized.setdefault("summary", "")
+    normalized.setdefault("lane_inference_confidence", None)
+    normalized.setdefault("execution_ids", [])
+    normalized.setdefault("finding_ids", [])
+    normalized.setdefault("related_lane_ids", [])
+    normalized.setdefault("data_gaps", [])
+    normalized.setdefault("anti_forensics_warnings", [])
+    normalized.setdefault("next_pivots", [])
+    normalized.setdefault("started_at", None)
+    normalized.setdefault("completed_at", None)
+    return normalized
+```
+
+[`sift_mcp/state.py:1600-1619`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1600-L1619)
+
+[4] (실행 확인) 레인을 기록한 사건에 같은 매니페스트로 `start_investigation`을 다시 불러 레인 값의 변화와 `audit.jsonl` 줄 수(30줄 그대로)를 확인했다.
+
+[5] 앞선 상태가 있으면 경고를 싣는다.
+
+```python
+        if existing_case_state_detected:
+            result["case_reuse_warning"] = (
+                "Existing persisted state was found for this case_id. New findings "
+                "will append to prior findings unless the operator archives/clears "
+                "analysis/state.json and audit.jsonl before rerun."
+            )
+            result["finding_count_accuracy_note"] = (
+                "Finding totals from this run may include prior executions; compare "
+                "new execution IDs and report finding_quality_summary before using "
+                "the count as an investigation-quality metric."
+            )
+```
+
+[`sift_mcp/server.py:7437-7447`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7437-L7447)
+
+[6] `force_reparse`는 재사용 판정 파일을 지운다.
+
+```python
+    source_paths = list(source_paths or [])
+    if force_reparse:
+        try:
+            probe = probe_durable_output_csv(output_base, case_id, subtype, filename=canonical_filename)
+            if probe:
+                _sidecar_path(probe["csv_path"]).unlink(missing_ok=True)
+        except (OSError, TypeError):
+            pass
+```
+
+[`sift_mcp/tools/_cache.py:393-400`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L393-L400)
+
+[7] MCP 도구 정의에는 `force_reparse`가 없다(`git grep -n force_reparse 9ac8e47 -- sift_mcp/server.py`의 결과 0건): [`sift_mcp/server.py:1727-1795`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L1727-L1795).
+
+[8] (실행 확인) 목록에 없는 메모리 덤프를 적은 매니페스트로 부른 `start_investigation`은 오류를 돌려주었고 그 뒤 `memory` 레인은 `PENDING`이었다.
+
+[9] 추출 도구의 임시 폴더와 정리(`git grep -n -E "TemporaryDirectory|mkdtemp|rmtree" 9ac8e47 -- sift_mcp`): [`sift_mcp/tools/disk.py:3450`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L3450), [`sift_mcp/tools/disk.py:6466-6468`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L6466-L6468), [`sift_mcp/tools/disk.py:7079-7107`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L7079-L7107), [`sift_mcp/tools/_hive_replay.py:71-145`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_hive_replay.py#L71-L145).
+
+[10] `icat`이 실패하거나 시간 제한을 넘긴 사본을 지운다: [`sift_mcp/server.py:7923-7964`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7923-L7964).
+
+[11] `analyze_vss`의 임시 마운트 폴더 정리.
+
+```python
+    if ewf_mount_point is not None and ewf_mount_point.exists():
+        try:
+            subprocess.run(["fusermount", "-u", str(ewf_mount_point)],
+                           capture_output=True, timeout=10)
+            import shutil as _shutil
+            _shutil.rmtree(str(ewf_mount_point), ignore_errors=True)
+        except Exception:
+            pass
+```
+
+[`sift_mcp/server.py:5833-5840`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5833-L5840)
+
+```python
+                # Unmount
+                subprocess.run(
+                    ["fusermount", "-u", str(mount_point)],
+                    capture_output=True, timeout=15
+                )
+        except Exception as exc:
+            for shadow in shadow_copies:
+                if "artifacts_found" not in shadow:
+                    shadow["artifacts_found"] = {}
+                    shadow["artifacts_missing"] = check_artifacts
+                    shadow["mount_error"] = str(exc)
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(str(mount_base), ignore_errors=True)
+            except Exception:
+                pass
+```
+
+[`sift_mcp/server.py:5958-5974`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5958-L5974)
+
+[12] 레인을 기록하면 대기열 항목을 뺀다.
+
+```python
+        from delegate_queue import get_pending_delegate, mark_delegate_processed
+
+        # Check if the pending delegate for this lane matches the case_id
+        pending = get_pending_delegate(lane_id=lane_id)
+        if not pending:
+            return
+
+        pending_case = str(pending.get("case_id") or "").strip()
+        if pending_case and pending_case != case_id:
+            return  # Delegate is for a different case
+
+        # Pop the delegate from this lane's queue
+        mark_delegate_processed(lane_id)
+```
+
+[`sift_mcp/server.py:8730-8742`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L8730-L8742)
+
+[13] CSV를 사건 출력 폴더로 복사한다.
+
+```python
+def _persist_csv(tmp_csv_path: str, tool_short_name: str) -> str:
+    """Copy a tempdir CSV to a persistent artifact path and return the new path.
+
+    Pattern: $OUTPUT_BASE/<case_id>/artifacts/<tool_short_name>/<filename>
+    Allows run_analysis() to query the full dataset after the tool returns.
+    Returns the persistent path on success, original path on failure.
+    """
+    import shutil as _shutil
+    src_path = Path(tmp_csv_path)
+    if not src_path.exists():
+        return tmp_csv_path
+    base = _artifact_output_dir(tool_short_name)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        dest = base / src_path.name
+        _shutil.copy2(str(src_path), str(dest))
+        return str(dest)
+    except OSError:
+        return tmp_csv_path
+```
+
+[`sift_mcp/tools/disk.py:309-327`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L309-L327)
+
+[14] 대기열의 맨 앞 항목을 빼는 함수.
+
+```python
+def mark_delegate_processed(lane_id: str) -> None:
+    """Pop the head delegate from the specified lane's queue.
+
+    Args:
+        lane_id: Lane identifier whose head delegate should be removed.
+    """
+    if not lane_id:
+        return
+
+    queue = _read_queue()
+    lane_queue = queue.get(lane_id, [])
+
+    if lane_queue:
+        # Remove head of queue
+        lane_queue.pop(0)
+        queue[lane_id] = lane_queue
+        _write_queue(queue)
+
+```
+
+[`scripts/delegate_queue.py:411-428`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/scripts/delegate_queue.py#L411-L428)
+
+[15] 서버를 불러올 때 쓸 수 없는 대기열 파일을 지운다.
+
+```python
+_QUEUE_PATH = Path(os.environ.get("SAVVYDFIR_DELEGATE_QUEUE_PATH", "/tmp/savvydfir_delegate_queue.json"))
+if _QUEUE_PATH.exists():
+    try:
+        # Test write access by opening in append mode
+        with _QUEUE_PATH.open("a") as _:
+            pass
+    except (OSError, IOError):
+        # Not writable - delete and let agent_trigger.py recreate it
+        try:
+            _QUEUE_PATH.unlink()
+            print(f"[server] Cleared unwritable delegate queue: {_QUEUE_PATH}", file=sys.stderr)
+        except OSError as e:
+            print(f"[server] Warning: Could not clear delegate queue: {e} - delegates may fail silently", file=sys.stderr)
+```
+
+[`sift_mcp/server.py:137-149`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L137-L149)
+
+[16] 서버 코드의 삭제 호출은 임시 폴더, 쓰기 시험 파일, 사본, 대기열, 상태 임시 파일, 재사용 판정 파일에만 있다(`git grep -n -E "unlink\(|rmtree|os\.remove" 9ac8e47 -- sift_mcp scripts/delegate_queue.py`): [`sift_mcp/server.py:146`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L146), [`sift_mcp/server.py:7940`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7940), [`sift_mcp/state.py:1391`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/state.py#L1391), [`sift_mcp/tools/_cache.py:228`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L228), [`sift_mcp/tools/_cache.py:398`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/_cache.py#L398), [`sift_mcp/server.py:7515`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7515).
+
+[17] (실행 확인) `extract_windows_artifacts`와 `extract_browser_history`를 부르기 전후에 입력 이미지와 브라우저 DB·`-wal`·`-shm` 파일의 크기를 출력해 같음을 확인했다.

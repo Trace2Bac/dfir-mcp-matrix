@@ -1,0 +1,111 @@
+---
+cell: T09
+details:
+- id: not_applicable
+---
+
+# T09 대상 시스템 대응 조치 처리
+
+### 비적용
+
+**판단.** 서버는 대상 시스템에 접속하거나 그 상태를 바꾸는 도구를 두지 않는다.
+도구 65개는 사건 증거로 받은 디스크·메모리 이미지와 그 안에서 꺼낸 파일, 서버가 만든 사건 상태와 호출 기록을 읽어 결과를 만든다 [1].
+서버 코드에는 원격 호스트에 접속하는 클라이언트나 수집 백엔드 호출이 없고 실행기는 `ssh`, `scp`, `curl`, `wget`을 실행 거부 목록에 둔다 [2].
+
+서버가 바꾸는 것은 증거 사본과 서버 자신의 작업 파일이다.
+`analyze_vss`는 E01 이미지와 그림자 복사본을 임시 폴더에 `ewfmount`·vshadowmount로 붙였다가 확인이 끝나면 해제한다 [3].
+`extract_windows_artifacts`와 디스크 도구는 이미지에서 꺼낸 파일과 CSV를 `OUTPUT_BASE` 아래 사건 폴더에 쓴다 [4].
+`_ntfs_mount_argv`는 이미지를 읽기 전용으로 붙이는 `mount`·`ntfs-3g` 명령 인자를 만들어 돌려줄 뿐 실행하지 않는다 [5].
+`serve_graph`는 웹 서버를 시작하지 않고 그래프 파일 경로와 사용자가 실행할 명령을 돌려준다 [6].
+`extract_registry_run_keys`의 `sync_batch`를 참으로 주면 RECmd가 배치 정의를 내려받지만 이것은 조사 도구의 자료를 갱신하는 것이고 대상 시스템을 바꾸지 않는다 [7].
+그래서 조치 전후 상태, 변경 내역, 되돌림을 남길 대상 시스템 조치가 없다.
+
+### 근거
+
+[1] (실행 확인) MCP 클라이언트로 받은 도구 목록은 65개였고 도구 이름과 입력 schema에 원격 호스트나 대상 시스템을 받는 인자가 없었다.
+
+[2] 실행기의 실행 거부 목록.
+
+```python
+    DENIED_COMMANDS: list[str] = [
+        "rm",
+        "dd",
+        "wget",
+        "curl",
+        "ssh",
+        "scp",
+        "mkfs",
+        "fdisk",
+        "shred",
+    ]
+```
+
+[`sift_mcp/runners/base.py:252-262`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/base.py#L252-L262)
+
+[3] `analyze_vss`는 임시 폴더에 그림자 복사본을 붙였다가 `fusermount -u`로 해제하고 폴더를 지운다: [`sift_mcp/server.py:5784-5808`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5784-L5808), [`sift_mcp/server.py:5830-5838`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5830-L5838), [`sift_mcp/server.py:5913-5974`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L5913-L5974).
+
+[4] 꺼낸 파일은 사건 폴더의 `artifacts/raw` 아래에 쓴다: [`sift_mcp/server.py:7610-7646`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L7610-L7646).
+CSV는 `OUTPUT_BASE/<사건>/artifacts/<도구>` 아래에 쓴다.
+
+```python
+def _artifact_output_dir(tool_short_name: str) -> Path:
+    """Return the durable artifact directory for one disk tool."""
+    return (
+        Path(os.environ.get("OUTPUT_BASE", "/cases"))
+        / _case_id()
+        / "artifacts"
+        / tool_short_name
+    )
+```
+
+[`sift_mcp/tools/disk.py:176-183`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/tools/disk.py#L176-L183)
+
+[5] `_ntfs_mount_argv`는 명령 인자 목록만 만든다.
+
+```python
+@mcp.tool()
+def _ntfs_mount_argv(device: str, offset_sectors: Optional[int], disk_mount: str,
+                     *, use_sudo: bool = True) -> list[str]:
+    """Pinned read-only ntfs-3g mount argv (dual-path NTFS mount fix).
+
+    offset 0 / None -> ntfs-3g directly on the device; offset != 0 -> mount -t
+    ntfs-3g with loop,offset (the proven Step-3 mechanism). Options:
+      ro          - the controlling no-write guarantee (zero evidence writes)
+      norecover   - do NOT replay/clear $LogFile on the dirty live volume
+                    (replaces the deprecated 'force'; ro already prevents writes)
+      allow_other - the MCP user's disk tools can read root's mount
+      streams_interface=windows - expose ADS (Zone.Identifier)
+    """
+    common = "norecover,allow_other,streams_interface=windows"
+    off = int(offset_sectors or 0)
+    if off != 0:
+        argv = ["/usr/bin/mount", "-t", "ntfs-3g", "-o",
+                f"ro,loop,offset={off * 512},{common}", str(device), str(disk_mount)]
+    else:
+        argv = ["/usr/bin/ntfs-3g", "-o", f"ro,{common}", str(device), str(disk_mount)]
+    if use_sudo and hasattr(os, "geteuid") and os.geteuid() != 0 and Path("/usr/bin/sudo").exists():
+        argv = ["/usr/bin/sudo", "-n", *argv]
+    return argv
+```
+
+[`sift_mcp/server.py:10234-10256`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L10234-L10256)
+
+[6] `serve_graph`는 웹 서버를 시작하지 않는다: [`sift_mcp/server.py:3497-3560`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/server.py#L3497-L3560).
+
+[7] RECmd 명령은 `sync_batch`가 참일 때 `--sync`를 붙인다.
+
+```python
+        cmd: List[str] = [
+            *([_sift_bin("RECmd")] if _sift_bin("RECmd") else ["dotnet", _dll("RECmd.dll", subdir="RECmd")]),
+            "-d", hive_dir,
+            "--csv", csv_dir,
+            "--csvf", csv_filename,
+        ]
+        if batch_file is not None:
+            cmd.extend(["--bn", batch_file])
+        if sync_batch:
+            cmd.append("--sync")
+        return self.run(cmd, timeout=timeout, tool_name=tool_name)
+```
+
+[`sift_mcp/runners/eztools.py:424-434`](https://github.com/kismatkunwar89/SAVVYDFIR-MCP/blob/9ac8e47540d4826227ac8957a5c5f4caf4f6c80b/sift_mcp/runners/eztools.py#L424-L434)
