@@ -1,0 +1,132 @@
+---
+cell: R08
+details:
+- id: R08.01
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`와 `opencti-mcp`의 조회 도구에 적용된다 [1][2][3].
+`run_command`는 분석 도구가 출력한 시각 문자열을 바꾸지 않고 `stdout`에 싣거나 CSV·JSON·텍스트로 파싱한 값 그대로 싣는다 [1].
+서버는 분석 도구를 실행할 때 시간대 환경변수나 시각 형식 인자를 더하지 않으므로 도구가 정한 형식이 그대로 실린다 [4].
+(실행 확인) `TimeCreated` 열에 `2024-03-01 12:00:01.1234567`을 쓰는 `EvtxECmd` 시험용 실행 파일의 응답에서 그 값이 `rows`에 그대로 실렸다 [5].
+`opencti-mcp`의 검색 결과와 `get_entity`는 OpenCTI의 `created`·`modified`·`valid_from`·`published`·`first_seen` 같은 시각 값을 바꾸지 않고 싣는다 [2].
+`lookup_ioc`는 플랫폼 레코드의 시각을 그대로 싣고 최상위 `created`에는 철회되지 않은 OpenCTI 일치 레코드의 `created` 문자열 가운데 문자열 비교로 가장 작은 것을 바꾸지 않고 싣는다 [3].
+(실행 확인) `created`가 `2024-01-02T03:04:05.000Z`인 지표를 결과 항목 함수에 넘기고 같은 값의 레코드로 `lookup_ioc`를 부르자 두 응답 모두 같은 문자열을 실었다 [6].
+
+`run_command` 응답의 `field_notes`는 FK에 적힌 아티팩트 시각 필드의 뜻을 싣는다 [7].
+이 값은 응답에 실린 시각 값의 시간대나 정밀도 표시가 아니므로 시간대 표시 방식으로 보지 않는다 [7].
+`lookup_ioc`의 `queried_at`과 `report-mcp`의 `generated_at` 같은 서버가 만든 시각은 UTC ISO 문자열이고 도구 출력의 시각이 아니다 [8].
+
+### 근거
+
+[1] 표준 출력은 디코딩만 하고 파서는 줄·행·항목 값을 바꾸지 않는다.
+
+```python
+        stdout_raw = b"".join(stdout_chunks)
+        stderr_raw = b"".join(stderr_chunks)
+        stdout = stdout_raw.decode("utf-8", errors="replace")
+        stderr = stderr_raw.decode("utf-8", errors="replace")
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:133-136`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L133-L136)
+
+```python
+    try:
+        for row in reader:
+            if max_rows and len(rows) >= max_rows:
+                break
+            row_dict = dict(row)
+            if byte_budget:
+                row_bytes = (
+                    sum(len(str(v).encode("utf-8")) for v in row_dict.values())
+                    + len(row_dict) * 4
+                )
+                if used_bytes + row_bytes > byte_budget and rows:
+                    budget_hit = True
+                    break
+                used_bytes += row_bytes
+            rows.append(row_dict)
+```
+
+[`packages/sift-common/src/sift_common/parsers/csv_parser.py:53-67`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/parsers/csv_parser.py#L53-L67)
+
+[2] OpenCTI 결과 항목 함수는 시각 필드를 받은 값 그대로 싣는다: [`packages/opencti/src/opencti_mcp/client.py:2263-2281`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L2263-L2281), [`packages/opencti/src/opencti_mcp/client.py:2384-2407`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L2384-L2407), [`packages/opencti/src/opencti_mcp/client.py:2641-2708`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L2641-L2708).
+
+[3] `lookup_ioc`의 최상위 `created`는 레코드의 `created` 문자열 가운데 가장 작은 값이다.
+
+```python
+    records = [r for r in answer.get("matches") or [] if not r.get("revoked")]
+    if answer.get("outcome") == providers.MATCH and records:
+        current = {r.get("id") for r in records}
+        confidences = [
+            r["confidence"] for r in records if isinstance(r.get("confidence"), int)
+        ]
+        created = [r["created"] for r in records if isinstance(r.get("created"), str)]
+        labels = {
+            label.get("value")
+            for r in records
+            for label in (r.get("objectLabel") or [])
+            if isinstance(label, dict) and isinstance(label.get("value"), str)
+        }
+        summary.update(
+            entity_type="indicator",
+            name=ioc,
+            confidence=max(confidences, default=0),
+            labels=sorted(labels),
+            created=min(created, default=""),
+            source="opencti",
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:150-170`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L150-L170)
+
+[4] 실행기는 환경을 따로 정하지 않고 하위 프로세스를 실행한다.
+
+```python
+    try:
+        proc = subprocess.Popen(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:76-82`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L76-L82)
+
+[5] (실행 확인) 사건 안에서 CSV 400행을 출력하는 `EvtxECmd` 시험용 실행 파일을 실행하자 `rows[0].TimeCreated`가 `2024-03-01 12:00:01.1234567`이었다.
+
+[6] (실행 확인) `_format_indicators`에 `created`가 `2024-01-02T03:04:05.000Z`인 지표를 넘긴 결과와, 같은 `created`를 가진 레코드를 돌려주는 시험용 OpenCTI 전송 함수로 부른 `lookup_ioc`의 최상위 `created`가 모두 `2024-01-02T03:04:05.000Z`였다.
+
+[7] `field_notes`는 FK 아티팩트의 `timestamps` 항목에서 필드 이름과 뜻을 옮긴 것이다.
+
+```python
+        # Timestamp field notes
+        for ts in artifact.get("timestamps", []):
+            field_notes[ts["field"]] = ts["meaning"]
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:285-287`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L285-L287)
+
+[8] 서버가 만든 시각은 `datetime.now(timezone.utc).isoformat()`이다.
+
+```python
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:73-74`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L73-L74)
+
+```python
+    result: dict = {
+        "profile": profile_name,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "report_data": report_data,
+        "sections": sections,
+    }
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:861-866`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L861-L866)

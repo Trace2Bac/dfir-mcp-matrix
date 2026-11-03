@@ -1,0 +1,633 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+- id: R01.07
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`에서 표준 출력이 응답 예산 이하인 경우와 `get_tool_help`의 도움말에 적용된다 [1][2].
+`run_command`는 표준 출력이 `response_byte_budget`(기본 10,240바이트) 이하이면 실행 결과 `dict`를 파싱하지 않고 응답의 `data`에 싣는다 [1].
+이 `data`에는 도구가 쓴 표준 출력 `stdout`과 표준 오류 `stderr`, 실행한 명령 `command`, 종료 코드가 들어간다 [1][3].
+(실행 확인) 사건 안에서 `echo hello`를 실행하자 `data.stdout`은 `hello\n` 그대로였고 `data.command`에는 실제 경로로 바꾼 실행 파일과 인자가 실렸다 [3].
+`get_tool_help`는 설치된 도구가 출력한 도움말을 표준 출력, 구분 줄, 표준 오류 차례로 이어 `help`에 싣는다 [2].
+`opencti-mcp`의 `lookup_ioc`는 플랫폼마다 `providers.<이름>` 아래 플랫폼이 돌려준 레코드를 플랫폼의 필드 이름 그대로 싣는다 [4].
+OpenCTI 레코드는 서버가 정한 GraphQL 필드 목록 `SELECTION`으로 읽은 값이다 [4].
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`에서 표준 출력이 응답 예산을 넘는 경우, `sift-mcp`의 버전 확인, `opencti-mcp`의 검색 도구와 `lookup_ioc`의 MISP 레코드, `rag-mcp`의 `search_knowledge`에 적용된다 [5][6][7][8][9].
+`run_command`는 표준 출력이 응답 예산을 넘으면 도구 목록 `catalog`에 적힌 출력 형식으로 표준 출력을 파싱한다 [5].
+CSV는 열 이름을 키로 한 행 `dict`의 목록 `rows`로, JSON은 배열 항목이나 JSONL 줄의 객체로, 그 밖의 글은 줄 목록 `lines`로 바꾼다 [5].
+이때 응답의 `data`에는 파싱한 미리보기만 들어가고 실행 결과의 `stdout`·`stderr`·`command`는 들어가지 않는다 [1][5].
+(실행 확인) CSV를 출력하는 `EvtxECmd` 시험용 실행 파일로 400행을 내자 `data`에는 `columns`·`rows`·`total_rows`·`preview_rows`·`preview_bytes`·`truncated`만 있었고 표준 오류는 응답에 없었다 [10].
+`get_tool_help`·`check_tools`와 `run_command`는 도구의 버전 출력에서 정해 둔 정규식으로 버전 문자열만 골라 `installed_version`·`tool_version`에 싣는다 [6].
+`get_tool_help`·`check_tools`는 버전을 고르지 못하면 `installed_version`을 `unknown`으로 두고 출력의 첫 줄을 200자까지 `version_output`에 싣는다 [6].
+`opencti-mcp`의 검색 도구는 OpenCTI 객체에서 유형마다 정한 필드만 골라 결과 항목을 만든다 [7].
+예를 들어 지표 항목은 이름, 패턴, 패턴 유형, 설명, 신뢰도, 생성 시각, 레이블만 싣는다 [7].
+`lookup_ioc`의 MISP 레코드는 속성의 `uuid`·`type`·`value`·`to_ids`·`decay_score`와 이벤트의 정해 둔 필드만 싣는다 [8].
+`rag-mcp`의 `search_knowledge`는 색인 레코드의 메타데이터에서 `source`·`mitre_techniques`·`platform`·`title`을 골라 순위, 점수, 본문과 함께 싣는다 [9].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`에서 표준 출력이 응답 예산을 넘는 경우, `opencti-mcp`의 `lookup_ioc`, `windows-triage-mcp`의 `check_registry`·`check_hijackable_dll`, `case-mcp`의 `evidence_verify`·`audit_summary`에 적용된다 [5][11][12][13][14][15][16].
+`run_command`는 CSV 출력을 JSON 객체 목록으로 바꾸고 전체 행 수와 미리보기 행 수를 센다 [5].
+`lookup_ioc`는 OpenCTI 레코드 가운데 철회되지 않은 일치 레코드에서 신뢰도의 최댓값, 레이블의 합집합, 가장 이른 생성 시각을 계산해 최상위 `confidence`·`labels`·`created`에 싣는다 [11].
+같은 레코드에 걸린 관계를 따라 위협 행위자, 악성코드, ATT&CK 기법 이름을 모아 `related_threat_actors`·`related_malware`·`mitre_techniques`에 싣는다 [11].
+최상위 `outcome`은 플랫폼 하나라도 일치하면 `MATCH`, 그렇지 않고 하나라도 묻지 못했으면 `UNAVAILABLE`, 나머지는 `NO_MATCH`로 묶은 값이다 [12].
+`check_registry`는 기준 DB의 일치 행에서 OS 버전 수 `os_version_count`, 일치 수 `match_count`, 값 수 `value_count`를 센다 [13].
+`check_hijackable_dll`은 DLL hijacking 사례를 hijack 유형별로 묶고 사례 수를 `total_scenarios`에 싣는다 [14].
+`evidence_verify`는 증거 파일마다 대조한 결과를 상태별로 세어 `verified`·`modified`·`missing`·`errors`에 싣는다 [15].
+`audit_summary`는 사건의 호출 기록을 서버별·도구별로 세어 돌려준다 [16].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command` 응답에 적용된다 [17].
+응답의 `output_format`은 파싱하지 않은 출력이면 도구 목록의 형식(`text`·`csv`·`json`)이고 미리보기로 파싱한 출력이면 `parsed_text`·`parsed_csv`·`parsed_json`이다 [5][17].
+응답에는 도구 목록에 있는 도구를 실행했을 때만 그 버전 `tool_version`과 실제로 실행한 경로 `resolved_path`가 실린다 [17][6].
+사건 안에서 실행한 `run_command`는 남긴 원래 표준 출력의 경로 `full_output_path`, 해시 `full_output_sha256`, 바이트 수 `full_output_bytes`를 싣는다 [18][19].
+(실행 확인) 사건 안에서 20,000줄을 출력하자 `output_format`은 `parsed_text`였고 `full_output_path`에 사건 폴더 `extractions/` 아래 표준 출력 파일 경로가 실렸다 [20].
+`lookup_ioc`의 최상위 요약 필드에는 요약한 플랫폼을 `source`에 `opencti`로 적는다 [11].
+
+**한계.** 응답을 만드는 `build_response`는 실행한 명령을 인자 `command`로 받지만 응답에 넣지 않는다 [17].
+그래서 표준 출력이 응답 예산을 넘어 파싱한 응답에는 실행한 명령과 입력 경로가 없다 [1][17].
+도구 목록에 없는 실행 파일의 파싱한 응답에는 어느 프로그램의 출력인지 가리키는 값이 없다 [17][6].
+사건 없이 실행하면 `save_output`을 주어도 원래 출력을 남기지 않으므로 파싱한 응답에 `full_output_path`가 없다 [19][21].
+(실행 확인) 사건 없이 20,000줄을 출력하자 응답에는 `parsed_text` 미리보기만 있었고 `full_output_path`·`output_files`가 없었다 [21].
+(실행 확인) 사건 없이 `save_output`을 참으로 주고 `seq 1 20000`을 실행해도 `full_output_path`·`output_files`가 없었다 [22].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `opencti-mcp`의 `lookup_ioc`·`search_threat_intel`·`search_entity`와 `rag-mcp`의 `search_knowledge`에 적용된다 [23][24][25][26].
+`lookup_ioc`는 플랫폼이 돌려준 레코드 가운데 값이 IOC와 정확히 같은 것만 `matches`에 싣는다 [23][24].
+같은지는 IP 주소면 주소 값으로, SSDEEP·TLSH 해시면 대소문자까지, 그 밖에는 대소문자를 무시하고 판단한다 [23].
+OpenCTI는 이름이 IOC와 같은 지표를 질의하고 서버가 위 규칙으로 다시 고른다 [23].
+MISP는 값으로 속성을 찾고 서버가 값이나 복합 속성(`domain|ip` 등)의 두 값 가운데 하나가 IOC와 같은 속성만 고른다 [24].
+(실행 확인) OpenCTI 응답 대신 `Evil.COM`과 `evil.com.example` 지표를 돌려주는 시험용 전송 함수로 `evil.com`을 조회하자 `matches`에는 `Evil.COM`만 실렸다 [27].
+`search_threat_intel`과 `search_entity`의 위협 행위자 검색은 OpenCTI의 intrusion set과 threat actor group 결과를 합친 뒤 ID가 같은 항목을 하나만 남긴다 [25].
+`search_knowledge`는 배포 색인과 사용자 색인에서 가까운 레코드를 모은 뒤 ID와 본문이 모두 같은 레코드를 하나만 남긴다 [26].
+남긴 항목의 값은 바꾸지 않는다.
+
+### R01.07 응답 선별 사실·건수 표시
+
+**구현.** 이 방식은 `lookup_ioc`가 정확히 같은 레코드를 하나도 고르지 못하고 후보가 읽은 한도를 넘은 경우에 적용된다 [28].
+이 경우 그 플랫폼의 결과를 `UNAVAILABLE`로 두고 `reason`에 후보 수와 읽은 후보 가운데 정확히 같은 값이 없다는 사실을 적는다 [28].
+OpenCTI는 이름이 IOC와 같은 지표를 묻는 질의의 전체 수 `globalCount`와 읽은 수를, MISP는 100건을 넘는 속성이 있었다는 사실을 적는다 [28].
+(실행 확인) MISP 응답 대신 IOC를 포함한 다른 도메인 속성 101건을 돌려주자 MISP 결과는 `UNAVAILABLE`이고 `reason`은 "too many candidate matches: more than 100 attributes match evil.com, and none of those read is exactly it"였다 [29].
+
+**한계.** 정확히 같은 레코드가 하나라도 있거나 후보가 한도 안이면 `lookup_ioc` 응답에는 걸러 낸 레코드의 수나 거른 규칙이 없다 [23][24].
+걸러 낸 규칙은 도구 설명에만 있다 [30].
+위협 행위자 검색과 `search_knowledge`의 응답에도 중복으로 뺀 항목의 수가 없다 [25][26].
+
+### 근거
+
+[1] `run_command`는 표준 출력이 응답 예산 이하이면 실행 결과를 그대로 `data`로 쓰고 넘으면 파싱한 미리보기를 `data`로 쓴다.
+
+```python
+    # Small output — return as-is (no parsing overhead)
+    if stdout_bytes <= cfg.response_byte_budget:
+        exec_result["_output_format"] = output_format
+        return exec_result
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:185-188`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L185-L188)
+
+```python
+            # Use parsed preview for large output, raw result for small
+            if exec_result.get("_parsed"):
+                resp_data = exec_result["_parsed"]
+                resp_format = exec_result["_output_format"]
+                # The preview's own flag means "shorter than the output"; the
+                # output itself may have been cut at the limit too
+                if exec_result.get("truncated"):
+                    resp_data["truncated"] = True
+            else:
+                resp_data = exec_result
+                resp_format = exec_result.get("_output_format", "text")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:356-366`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L356-L366)
+
+[2] `get_tool_help`의 도움말은 도구가 출력한 표준 출력과 표준 오류를 이은 글이다.
+
+```python
+def as_shown(out: str, err: str) -> str:
+    """Both streams, stdout first, stderr under its label."""
+    return f"{out}\n{STDERR_LABEL}\n{err}\n"
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:76-78`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L76-L78)
+
+```python
+    text = as_shown(out, err)
+    data = text.encode("utf-8")
+    if len(data) <= HELP_INLINE and not cut:
+        reply = {"help": text, "help_exit_code": code}
+    else:
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:215-219`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L215-L219)
+
+[3] (실행 확인) 사건 안에서 `echo hello`를 실행한 응답의 `data`에 `stdout`·`stderr`·`command`·`exit_code`가 실렸고 `stdout`은 `hello\n`이었다.
+
+[4] 위협 정보 제공자는 플랫폼의 레코드를 플랫폼의 필드 이름 그대로 넘기고 OpenCTI 레코드는 정해 둔 필드 목록으로 읽는다.
+
+```python
+Each adapter answers a lookup with the platform's own records for an exact
+match of the IOC, passed through under the platform's own field names. No
+adapter computes a verdict, score or freshness.
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:3-5`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L3-L5)
+
+```python
+SELECTION = (
+    "id name created revoked confidence x_opencti_score valid_from valid_until "
+    "x_opencti_detection indicator_types objectLabel { value }"
+)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:37-40`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L37-L40)
+
+[5] 표준 출력이 응답 예산을 넘으면 도구 목록의 형식으로 파싱하고 `output_format`을 `parsed_*`로 바꾼다.
+
+```python
+    if output_format == "csv":
+        csv_kwargs = {"byte_budget": budget}
+        if preview_lines:
+            csv_kwargs["max_rows"] = ml
+        parsed = csv_parser.parse_csv(stdout, **csv_kwargs)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_csv"
+    elif output_format == "json":
+        json_kwargs = {"byte_budget": budget}
+        if preview_lines:
+            json_kwargs["max_entries"] = ml
+        parsed = json_parser.parse_json(stdout, **json_kwargs)
+        if parsed.get("parse_error"):
+            parsed = json_parser.parse_jsonl(stdout, **json_kwargs)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_json"
+    else:
+        parsed = text_parser.parse_text(stdout, byte_budget=budget, max_lines=ml)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_text"
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:201-220`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L201-L220)
+
+[6] 버전 문자열은 도구 출력에서 정규식으로 고르고 고르지 못하면 첫 줄을 `version_output`에 싣는다.
+`run_command`도 같은 함수를 부른다: [`packages/sift-mcp/src/sift_mcp/server.py:329-334`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L329-L334).
+
+```python
+def _version(text: str) -> str | None:
+    """The version on the first line that has one: a tool names its version
+    near the top, and a usage text further down holds other numbers (1.4 GiB)."""
+    for line in text.splitlines():
+        for pattern in _VERSIONS:
+            m = pattern.search(line)
+            if m:
+                return m.group(1)
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:34-42`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L34-L42)
+
+```python
+        _, out, err, _, _ = _run(command)
+        version = _version(out) or _version(err)
+        if version:
+            return {"installed_version": version, "resolved_path": path}
+        printed = _first_line(err) or _first_line(out) or printed
+    return {
+        "installed_version": "unknown",
+        "resolved_path": path,
+        "version_output": printed,
+    }
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:171-180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L171-L180)
+
+[7] OpenCTI 지표 검색 결과는 정해 둔 필드만 골라 만든다.
+
+```python
+    def _format_indicators(self, results: list) -> list[dict[str, Any]]:
+        """Format indicator results."""
+        formatted = []
+        for r in results:
+            formatted.append(
+                {
+                    "type": "indicator",
+                    "name": r.get("name", ""),
+                    "pattern": r.get("pattern", "")[:200] if r.get("pattern") else "",
+                    "pattern_type": r.get("pattern_type", ""),
+                    "description": r.get("description", "")[:500]
+                    if r.get("description")
+                    else "",
+                    "confidence": r.get("confidence", 0),
+                    "created": r.get("created", ""),
+                    "labels": self._extract_labels(r),
+                }
+            )
+        return formatted
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:2263-2281`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L2263-L2281)
+
+[8] MISP 레코드는 속성과 이벤트의 정해 둔 필드만 싣는다.
+
+```python
+def _record(attribute: dict) -> dict:
+    record = {k: attribute.get(k) for k in ("uuid", "type", "value", "to_ids")}
+    if "decay_score" in attribute:
+        record["decay_score"] = attribute["decay_score"]
+    event = attribute.get("Event")
+    if isinstance(event, dict):
+        record["Event"] = {k: event[k] for k in EVENT_FIELDS if k in event}
+    return record
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:71-78`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L71-L78)
+
+[9] `search_knowledge`의 결과 항목은 메타데이터의 정해 둔 필드와 본문으로 만든다.
+
+```python
+            item = {
+                "rank": 0,  # Will be set after sorting
+                "score": round(score, 3),
+                "source": result_source if result_source else "unknown",
+                "mitre_techniques": meta.get("mitre_techniques", ""),
+                "platform": meta.get("platform", ""),
+                "title": meta.get("title", ""),
+                "text": doc[:MAX_TEXT_LENGTH],
+            }
+            if merged:
+                item["origin"] = origin
+            formatted.append(item)
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:606-617`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L606-L617)
+
+[10] (실행 확인) CSV 400행을 출력하는 `EvtxECmd` 시험용 실행 파일을 사건 안에서 실행하자 `output_format`은 `parsed_csv`였고 `data`의 키는 `columns`·`preview_bytes`·`preview_rows`·`rows`·`total_rows`·`truncated`뿐이었다.
+
+[11] `lookup_ioc`의 최상위 요약은 철회되지 않은 OpenCTI 일치 레코드와 그 관계로 계산한다: [`packages/opencti/src/opencti_mcp/server.py:143-198`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L143-L198).
+
+[12] 최상위 `outcome`은 플랫폼별 결과를 정해 둔 차례로 묶은 값이다.
+
+```python
+def aggregate(answers: dict[str, dict]) -> str:
+    """MATCH when any provider matched; otherwise UNAVAILABLE when any
+    couldn't be asked; otherwise NO_MATCH."""
+    outcomes = {answer["outcome"] for answer in answers.values()}
+    if MATCH in outcomes:
+        return MATCH
+    if UNAVAILABLE in outcomes or not outcomes:
+        return UNAVAILABLE
+    return NO_MATCH
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:244-252`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L244-L252)
+
+[13] `check_registry`는 일치 행의 OS 버전 수, 일치 수, 값 수를 센다.
+
+```python
+            result = {
+                "verdict": "EXPECTED",
+                "reasons": ["Registry entry found in Windows baseline"],
+                "confidence": "high",
+                "in_baseline": True,
+                "os_versions": sorted(list(all_os_versions))[
+                    :10
+                ],  # Limit for readability
+                "os_version_count": len(all_os_versions),
+                "match_count": len(matches),
+            }
+
+            if values_found:
+                result["values"] = values_found[:10]  # Limit for readability
+                result["value_count"] = len(values_found)
+
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1640-1655`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1640-L1655)
+
+[14] `check_hijackable_dll`은 사례를 유형별로 묶고 사례 수를 싣는다.
+
+```python
+        # Group by hijack type
+        by_type = {}
+        for scenario in scenarios:
+            hijack_type = scenario.get("hijack_type", "unknown")
+            if hijack_type not in by_type:
+                by_type[hijack_type] = []
+            by_type[hijack_type].append(
+                {
+                    "vulnerable_exe": scenario.get("vulnerable_exe"),
+                    "vulnerable_exe_path": scenario.get("vulnerable_exe_path"),
+                }
+            )
+
+        return {
+            "is_hijackable": True,
+            "verdict": "EXPECTED_LOLBIN",
+            "total_scenarios": len(scenarios),
+            "hijack_types": list(by_type.keys()),
+            "scenarios_by_type": by_type,
+            "mitre_technique": "T1574.001",
+        }
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1763-1783`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1763-L1783)
+
+[15] `evidence_verify`는 `vhir_cli`의 `verify_evidence_data`가 만든 파일별 결과와 상태별 수를 돌려준다.
+`verify_evidence_data`는 [`src/vhir_cli/commands/evidence.py:845-963`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L845-L963)에 있다.
+
+```python
+    @server.tool()
+    def evidence_verify() -> dict:
+        """Verify integrity of all registered evidence files by comparing
+        current SHA-256 hashes against the registry. Reports OK, MODIFIED,
+        MISSING, or ERROR for each file (a folder root's, file by file), or
+        PENDING with a job_id while a large file hashes: call again later."""
+        try:
+            case_dir = _resolve_case_dir()
+            result = verify_evidence_data(case_dir, folder_hasher=_folder_hashes)
+            return result
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:538-549`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L538-L549)
+
+[16] `audit_summary`는 `vhir_cli`의 `audit_summary_data`로 호출 기록을 서버별·도구별로 센다: [`src/vhir_cli/commands/audit_cmd.py:173-213`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/audit_cmd.py#L173-L213).
+
+[17] `build_response`는 `command`를 인자로 받지만 응답에는 `tool_version`·`resolved_path`·`output_format` 등만 넣는다.
+
+```python
+def build_response(
+    *,
+    tool_name: str,
+    success: bool,
+    data: Any,
+    audit_id: str,
+    output_format: str = "text",
+    elapsed_seconds: float | None = None,
+    exit_code: int | None = None,
+    command: list[str] | None = None,
+    error: str | None = None,
+    fk_tool_name: str | None = None,
+    output_files: list | None = None,
+    extractions: list | None = None,
+    skip_enrichment: bool = False,
+    artifact_context: str | None = None,
+    tool_version: str | None = None,
+    resolved_path: str | None = None,
+    stopped: str | None = None,
+) -> dict:
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:96-115`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L96-L115)
+
+```python
+    response: dict[str, Any] = {
+        "success": success,
+        "tool": tool_name,
+        "data": data,
+        "data_provenance": "tool_output_may_contain_untrusted_evidence",
+        "output_format": output_format,
+        "audit_id": audit_id,
+        "examiner": resolve_examiner(),
+    }
+
+    if error:
+        response["error"] = error
+    if stopped:
+        response["stopped"] = stopped
+    if tool_version:
+        response["tool_version"] = tool_version
+    if resolved_path:
+        response["resolved_path"] = resolved_path
+    if output_files:
+        response["output_files"] = output_files
+    if extractions:
+        response["extractions"] = extractions
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:135-156`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L135-L156)
+
+[18] 사건 안에서 원래 표준 출력을 남긴 실행만 `full_output_path`와 그 해시·바이트 수를 싣는다.
+
+```python
+            response["output_sha256"] = exec_result.get("output_sha256", "")
+            response["output_sha256_scope"] = exec_result.get("output_sha256_scope", "")
+            # Add full output metadata if file was saved
+            if exec_result.get("output_file"):
+                response["full_output_path"] = exec_result["output_file"]
+                response["full_output_sha256"] = exec_result.get("output_sha256")
+                response["full_output_bytes"] = exec_result.get("stdout_total_bytes")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:460-466`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L460-L466)
+
+[19] 서버는 실행기에 `save_dir`를 넘기지 않고 사건이 없으면 작업 폴더 `op_dir`를 두지 않으므로 `save_output`을 주어도 `_save_output`이 아무것도 쓰지 않는다.
+
+작업 폴더와 실행기 호출은 [`packages/sift-mcp/src/sift_mcp/server.py:255-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L255-L267), [`packages/sift-mcp/src/sift_mcp/server.py:337-347`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L337-L347)에 있다.
+
+```python
+        # In a case every output is kept, whatever its size or save_output:
+        # those are the bytes a finding cites. Without a case, when asked.
+        if case_dir is None:
+            case_dir = resolve_case_dir()
+        elif case_dir and not os.path.isfile(os.path.join(case_dir, "CASE.yaml")):
+            case_dir = ""  # moved away since the call started: never recreated
+
+        if case_dir and (stdout_raw or stderr_raw):
+            folder = os.path.join(case_dir, "extractions")
+            if op_id and not save_dir:  # each operation's output in its own folder
+                response["op_id"] = op_id()
+                folder = os.path.join(folder, response["op_id"])
+            _save_output(
+                cmd_list, stdout_raw, stderr_raw, save_dir or folder, response, case_dir
+            )
+        elif save_output and (stdout_raw or stderr_raw):
+            _save_output(
+                cmd_list,
+                stdout_raw,
+                stderr_raw,
+                save_dir or (str(Path(cwd) / "extracted") if cwd else None),
+                response,
+                case_dir,
+            )
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:157-180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L157-L180)
+
+```python
+def _save_output(
+    cmd_list: list[str],
+    stdout: bytes,
+    stderr: bytes,
+    save_dir: str | None,
+    response: dict,
+    case_dir: str | None = None,
+) -> None:
+    """Save stdout/stderr, as the bytes the tool wrote, with their SHA-256.
+    `case_dir`: the operation's case, as resolved for it ("" for none)."""
+    if not save_dir:
+        return
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:203-214`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L203-L214)
+
+[20] (실행 확인) 사건 안에서 `seq 1 20000`을 실행하자 응답의 `output_format`은 `parsed_text`였고 `full_output_path`·`full_output_bytes`가 실렸으며 최상위와 `data`에 `command` 키가 없었다.
+
+[21] (실행 확인) 사건 없이 `seq 1 20000`을 실행하자 `full_output_path`와 `output_files`가 비었고 `data`에는 미리보기만 있었다.
+
+[22] (실행 확인) 사건 없이 `save_output`을 참으로 주고 `seq 1 20000`과 `echo hi`를 `run_command`로 실행하자 두 응답 모두 `full_output_path`와 `output_files`가 비었고 출력 파일이 생기지 않았다.
+
+[23] OpenCTI 제공자는 서버가 받은 지표 가운데 값이 IOC와 같은 것만 고르고 같은지는 `same_value`가 판단한다.
+질의 조건은 [`packages/opencti/src/opencti_mcp/providers/opencti.py:84-89`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L84-L89)이다.
+
+```python
+def same_value(value: Any, ioc: str) -> bool:
+    """Whether a platform record's value is exactly the IOC: IP addresses as
+    addresses, fuzzy hashes as given, anything else ignoring case."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return ipaddress.ip_address(value) == ipaddress.ip_address(ioc)
+    except ValueError:
+        pass
+    if case_sensitive(ioc):
+        return value == ioc
+    return value.lower() == ioc.lower()
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:97-108`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L97-L108)
+
+```python
+        # The server's `eq` ignores case; fuzzy hashes are compared as given.
+        matches = [node for node in nodes if same_value(node.get("name"), ioc)]
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:190-191`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L190-L191)
+
+[24] MISP 제공자는 값이나 복합 속성의 두 값 가운데 하나가 IOC와 같은 속성만 고른다.
+
+```python
+def _is_the_ioc(attribute: dict, ioc: str) -> bool:
+    value = attribute.get("value")
+    if not isinstance(value, str):
+        return False
+    kind = str(attribute.get("type", ""))
+    # A composite holds two values; a malware sample is "filename|md5"
+    # though its type has no "|".
+    composite = "|" in kind or kind == "malware-sample"
+    halves = value.split("|") if composite else [value]
+    return any(same_value(half, ioc) for half in halves)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:81-90`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L81-L90)
+
+```python
+        matches = [_record(a) for a in attributes if _is_the_ioc(a, ioc)]
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:245-245`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L245-L245)
+
+[25] 위협 행위자 검색은 두 목록을 합친 뒤 ID로 중복을 뺀다.
+
+```python
+            # Deduplicate by id (name-based dedup can drop distinct actors)
+            seen = set()
+            unique = []
+            for r in results:
+                entity_id = r.get("id")
+                if not entity_id or entity_id not in seen:
+                    if entity_id:
+                        seen.add(entity_id)
+                    unique.append(r)
+
+            # Apply offset and limit
+            return self._format_threat_actors(unique[offset : offset + limit])
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:1278-1289`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1278-L1289)
+
+[26] `search_knowledge`는 ID와 본문이 같은 레코드를 하나만 남긴다.
+
+```python
+        found.sort(key=lambda r: r[0])
+        seen: set[tuple[str, str]] = set()
+        nearest = []
+        for distance, record_id, doc, meta, origin in found:
+            if (record_id, doc) in seen:
+                continue
+            seen.add((record_id, doc))
+            nearest.append((doc, meta, distance, origin))
+        return nearest[:k]
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:677-685`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L677-L685)
+
+[27] (실행 확인) 시험용 OpenCTI 전송 함수가 `Evil.COM`과 `evil.com.example` 두 지표를 돌려주게 하고 `lookup_ioc`로 `evil.com`을 조회하자 OpenCTI의 `matches`에는 `Evil.COM`만 실렸다.
+
+[28] 정확히 같은 레코드가 없고 후보가 한도를 넘으면 그 플랫폼을 `UNAVAILABLE`로 두고 후보 수를 `reason`에 적는다.
+
+```python
+        truncated = len(nodes) > MAX_MATCHES or (
+            isinstance(total, int) and total > MAX_MATCHES
+        )
+        if truncated and not matches:
+            # The exact record may be past the ones read: not an absence.
+            return unavailable(
+                f"too many candidate matches: {total} indicators are named like "
+                f"{ioc}, and none of the first {len(nodes)} is exactly it",
+                version,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:192-201`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L192-L201)
+
+```python
+        if len(attributes) > MAX_MATCHES and not matches:
+            # The exact attribute may be past the ones read: not an absence.
+            return unavailable(
+                f"too many candidate matches: more than {MAX_MATCHES} attributes "
+                f"match {ioc}, and none of those read is exactly it",
+                **self._facts_by(deadline),
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:246-252`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L246-L252)
+
+[29] (실행 확인) 시험용 MISP 전송 함수가 IOC가 아닌 도메인 속성 101건을 돌려주게 하자 MISP 결과가 `UNAVAILABLE`이었고 `reason`에 후보 수와 정확히 같은 값이 없다는 문구가 실렸다.
+
+[30] `lookup_ioc`의 도구 설명은 정확히 같은 레코드를 돌려준다고 적는다.
+
+```python
+                Tool(
+                    name="lookup_ioc",
+                    description="Look up one IOC (IP, hash, domain, or URL) in every configured threat-intel platform. Each platform's records for an exact match are returned under providers.<name> as the platform holds them (for OpenCTI: revoked, valid_from, valid_until, x_opencti_score, confidence, labels and relationships; an empty relationships list with relationships_unavailable means they were not retrieved, not that there are none), with outcome MATCH, NO_MATCH or UNAVAILABLE (the platform couldn't be asked, which is not a not-found). This is each platform's record, not a verdict. The top-level outcome is MATCH when any platform matched. found is true for MATCH, false for NO_MATCH and null when UNAVAILABLE. confidence, labels, created, related_threat_actors, related_malware and mitre_techniques are compatibility summaries of OpenCTI's matching records that aren't revoked (absent when none is current); providers.* is the authoritative answer.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "ioc": {
+                                "type": "string",
+                                "description": "IOC value (IP address, file hash, domain, or URL)",
+                                "maxLength": MAX_IOC_LENGTH,
+                            }
+                        },
+                        "required": ["ioc"],
+                    },
+                ),
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:378-392`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L378-L392)

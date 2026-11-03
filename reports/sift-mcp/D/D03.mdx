@@ -1,0 +1,592 @@
+---
+cell: D03
+details:
+- id: D03.01
+- id: D03.02
+- id: D03.04
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 보관한 표준 출력과 출력 파일, `case-mcp`의 `log_external_action`이 적은 출력 파일, 게이트웨이의 참조 응답 사본, `backup_case`의 복사본, 검토 포털 `case-dashboard`가 승인을 커밋한 발견사항·타임라인 사건에 적용된다 [1][2][3][4][5].
+도구 출력과 사본의 기준값은 키를 쓰지 않는 SHA-256이다 [1][2][3][4].
+`run_command`는 분석 도구가 쓴 표준 출력 바이트를 메모리에서 해시해 `output_sha256`으로 응답과 호출 기록 항목의 `result_summary`에 남긴다 [1][6].
+출력이 `max_output_bytes`에서 잘리면 읽은 앞부분의 해시이고 `output_sha256_scope`를 `prefix`로 적는다 [1].
+작업 폴더의 파일과 출력 인자 경로에서 새로 생기거나 바뀐 파일은 파일 전체의 SHA-256, 크기, inode, 수정 시각을 호출 기록 항목의 `outputs`에 남긴다 [2][7].
+한 호출에서 해시할 크기의 합이 1 GB를 넘으면 나머지 파일은 백그라운드 작업이 해시해 `audit/file-identity.jsonl`의 `hash_complete` 항목에 남긴다 [2][8].
+해시하는 동안 파일의 장치·inode·크기·수정 시각·변경 시각이 바뀌면 해시를 버리고 실패로 적는다 [9].
+`log_external_action`은 모델이 알린 출력 파일을 같은 함수로 해시해 `outputs`에 남긴다 [10].
+게이트웨이는 참조 응답 사본을 쓸 때 쓴 바이트의 SHA-256을 그 조회 항목의 `reference.response.sha256`에 남긴다 [3].
+`backup_case`는 복사하며 읽은 바이트로 파일마다 SHA-256을 계산해 `backup-manifest.json`에 적는다 [4].
+검토 포털은 승인 결정을 커밋할 때 그 항목의 서명 대상 내용 `content_snapshot`과 그 SHA-256 `content_sha256`을 원장 줄에 담는다 [5].
+검토자의 브라우저가 검토자 키로 원장 줄에 서명하고 서버는 원장에 쓰기 전에 서명을 검사한다 [11].
+모델이 해시 도구를 부르지 않아도 서버가 계산한다.
+`run_command`와 참조 사본의 기준값은 대조 대상과 같은 사건 폴더의 호출 기록 파일에 들어간다 [6][3].
+시험용 실행 파일로 `run_command`를 부르자 호출 기록 항목에 표준 출력의 SHA-256과 도구가 쓴 파일의 SHA-256·크기·inode·수정 시각이 남았다 [12].
+
+표준 오류 파일의 해시는 호출 기록 항목에 들어가지 않는다 [6].
+`save_report`가 쓴 보고서 파일에는 기준값이 없다 [13].
+
+**한계.** 표준 출력 파일 쓰기가 실패해도 `output_sha256`은 기록되고 `output_file`은 빈 값이 된다 [14].
+활성 사건이 없으면 1 GB를 넘는 출력 파일은 해시하지 않는다 [8].
+
+### D03.02 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 `forensic-mcp`의 `record_finding`과 승인 항목을 읽는 `report-mcp`의 `generate_report`·`save_report`, `forensic-mcp`의 `get_findings`·`get_timeline`, `case-mcp`의 `case_status`·`export_bundle`에 적용된다 [15][16][17].
+`record_finding`은 인용 `artifacts`마다 인용 줄이 인용한 호출의 출력에 있는지 찾으며 그 출력을 기준값과 대조한다 [15][18].
+`run_command` 호출이면 보관한 표준 출력을 먼저 읽고 줄이 남으면 `outputs`의 파일을 차례로 읽는다 [18].
+파일은 1 MiB씩 읽으며 해시하고 다 읽은 해시가 호출 기록의 SHA-256과 같을 때만 그 파일에서 찾은 줄을 인정한다 [19].
+기록된 해시가 `pending:<job>`이면 그 작업의 `hash_complete` 값으로 대조한다 [18].
+게이트웨이의 참조 응답 사본은 파일 전체를 읽어 기록된 SHA-256과 같을 때만 그 값을 쓴다 [20].
+모델이나 사용자가 검증을 따로 요청하지 않아도 발견사항을 기록할 때마다 대조한다.
+인용한 호출의 보관 표준 출력 끝에 한 줄을 덧붙인 뒤 같은 줄을 인용해 발견사항을 기록하자 대조가 맞지 않아 `CITED-UNVERIFIED`로 저장되었다 [21].
+승인 항목을 읽는 도구는 호출마다 `vhir_cli`의 `approved_view`로 승인한 발견사항·타임라인 사건의 현재 내용 해시를 원장 줄의 `content_sha256`과 대조한다 [16][22][23].
+
+**한계.** 인용 줄을 모두 찾으면 남은 출력 파일은 읽지 않으므로 그 파일이 바뀌었는지는 대조하지 않는다 [18].
+64 MiB를 넘는 출력 파일은 읽지 않고 건너뛴 이유만 남긴다 [18][19].
+`artifacts` 없이 `audit_ids`나 `supporting_commands`만 준 발견사항은 대조하지 않는다 [15].
+발견사항을 기록한 뒤에는 인용한 출력을 다시 대조하지 않는다.
+`generate_report`와 `save_report`는 저장된 출처 판정을 옮겨 적고 인용한 출력 파일을 다시 해시하지 않는다 [16].
+`backup-manifest.json`의 해시를 대조하는 MCP 도구는 없고 사용자 CLI `vhir backup --verify`가 대조한다 [24].
+
+### D03.04 불일치 시 중단·경고
+
+**구현.** 이 방식은 `record_finding`의 대조 결과와 승인 항목을 읽는 도구의 대조 결과에 적용된다 [15][16].
+대조가 어긋난 파일에서는 인용 줄을 찾지 못한 것으로 보아 그 인용을 `CITED-UNVERIFIED`로 판정한다 [19][25].
+발견사항은 거부하지 않고 DRAFT로 저장하며 응답의 `message`에 판정과 이유를 싣는다 [26].
+판정과 이유는 발견사항의 `provenance_grade`·`provenance_reason`·`provenance_break`에 남는다 [15].
+발견사항 전체의 `provenance_grade`는 참조 자료 인용을 뺀 인용 판정 가운데 가장 낮은 값이다 [27].
+승인 뒤 `save_report`가 덧붙이는 출처 목록은 이 판정을 그대로 적는다 [28].
+시험에서 응답의 `message`는 "Finding staged as CITED-UNVERIFIED"로 시작했고 같은 판정이 `findings.json`에 남았다 [21].
+승인 항목의 내용 해시가 원장 줄과 다르면 `verify_case`는 그 항목을 `ALTERED_AFTER_APPROVAL`로 판정한다 [22].
+`generate_report`는 그 항목을 보고 자료에서 빼고 `integrity_warning`을 싣는다 [16][29].
+`save_report`가 붙이는 검증 블록은 그 항목의 ID와 상태를 싣고 출처 블록은 그 항목을 싣지 않는다 [30].
+조회 도구는 그 항목의 `approval_verification`에 상태를 적고 응답의 `warning`에 항목 ID를 싣는다 [23].
+승인한 뒤 관찰을 바꾼 발견사항은 보고 자료에서 빠지고 `not_verified`에 `ALTERED_AFTER_APPROVAL`로 실렸다 [31].
+같은 사건에서 `get_findings`는 그 발견사항을 `warning`에 적었다 [31].
+
+**한계.** 판정 이유는 인용 줄이 출력에 없다고만 적고 출력이 기록 뒤에 바뀐 경우와 인용 줄이 처음부터 없던 경우를 구별하지 않는다 [25][21].
+`run_command`가 같은 출력 인자 경로에 다시 쓰면 앞 호출이 기록한 파일이 바뀐다 [32].
+그 앞 호출을 인용하자 같은 이유로 `CITED-UNVERIFIED`가 되었다 [32].
+
+### 근거
+
+[1] 표준 출력 바이트를 해시하고 잘렸으면 `prefix`로 적는다.
+
+```python
+        stdout_raw = b"".join(stdout_chunks)
+        stderr_raw = b"".join(stderr_chunks)
+        stdout = stdout_raw.decode("utf-8", errors="replace")
+        stderr = stderr_raw.decode("utf-8", errors="replace")
+        stdout_byte_count = len(stdout_raw)
+
+        response: dict[str, Any] = {
+            "exit_code": proc.returncode,
+            "stdout": stdout,
+            "stderr": _truncate(stderr, config.max_output_bytes // 10),
+            "elapsed_seconds": round(elapsed, 2),
+            "command": cmd_list,
+            "stdout_total_bytes": stdout_byte_count,
+            # the bytes the tool wrote, whether or not they're saved
+            "output_sha256": hashlib.sha256(stdout_raw).hexdigest(),
+            # cut at max_output_bytes: the hash covers only what was read
+            "output_sha256_scope": "prefix" if truncated else "full",
+        }
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:133-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L133-L150)
+
+[2] 출력 파일은 해시·크기·inode·수정 시각과 함께 기록하고 한도를 넘는 파일은 백그라운드 작업에 넘긴다.
+
+```python
+def output_records(case_dir, paths, requested_by: str = "") -> list[dict]:
+    """The files a call wrote, each hashed with its size, inode and mtime:
+    in the call while their summed sizes stay within the inline limit, the
+    rest in one background job (``pending:<job_id>``)."""
+    paths = [str(p) for p in paths]
+    batch = fi.hash_files_for_call(
+        [p for p in paths if os.path.isfile(p)],  # a missing one: nothing to hash
+        case_dir=case_dir or "",
+        requested_by=requested_by,
+        inline_limit=fi.INLINE_LIMIT,  # read now: the limit in force
+    )
+    recs = []
+    for p in paths:
+        rec = place(p)
+        h = batch.done.get(p)
+        if h is not None:
+            rec.update(
+                sha256=h.sha256, size=h.size, st_ino=h.st_ino, mtime_ns=h.mtime_ns
+            )
+        else:
+            if batch.job_id and p in batch.pending:
+                rec["sha256"] = f"pending:{batch.job_id}"
+            try:
+                st = os.stat(p)
+                rec.update(size=st.st_size, st_ino=st.st_ino, mtime_ns=st.st_mtime_ns)
+            except OSError:
+                pass
+        recs.append(rec)
+    return recs
+```
+
+[`packages/sift-common/src/sift_common/file_place.py:197-225`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_place.py#L197-L225)
+
+[3] 참조 응답 사본의 해시를 조회 항목에 남긴다.
+
+```python
+                "backend": backend_name,
+                "backend_audit_id": _extract_audit_id(result),
+                "examiner": examiner,
+                "reference": {
+                    "source": source,
+                    "source_version": getattr(backend, "server_version", "") or "",
+                    "response": {
+                        "path": path,
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    },
+                },
+            },
+        )
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:89-101`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L89-L101)
+
+[4] 백업은 복사 중 읽은 바이트로 해시하고 manifest에 적는다: [`src/vhir_cli/commands/backup.py:237-258`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L237-L258), [`src/vhir_cli/commands/backup.py:534-599`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L534-L599).
+
+[5] 검토 포털은 결정마다 항목의 서명 대상 내용을 원장 줄 본문에 넣고 그 SHA-256을 함께 적는다: [`src/vhir_cli/ledger.py:353-354`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/ledger.py#L353-L354).
+
+```python
+    decisions = [
+        {"item_id": d.id, "type": d.type, "decision": d.decision,
+         "status_after": d.status_after, "coupled_from": d.coupled_from,
+         "content_snapshot": signed_text(item, d.type),
+         **({"checks": d.checks} if d.checks is not None else {}),
+         **({"approval_override_reason": d.approval_override_reason}
+            if d.approval_override_reason is not None else {})}
+        for d, item in zip(every, items, strict=True)
+    ]  # fmt: skip
+    refs, notes = chain_references(case_dir, case_id)
+    bodies = ledger.prepare(
+        case_id, decisions, examiner, public, "portal", now, head=head,
+        retired=credentials.retired_fingerprints(examiner), prior_chains=refs or None,
+        case_uuid=load_case_meta(case_dir).get("case_uuid"),
+    )  # fmt: skip
+```
+
+[`packages/case-dashboard/src/case_dashboard/signing.py:449-463`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/signing.py#L449-L463)
+
+[6] 호출 기록 항목은 사건 폴더 `audit/`의 JSONL 파일에 쓰고 `result_summary`에는 표준 출력의 경로와 해시만 들어간다: [`packages/sift-common/src/sift_common/audit.py:224-257`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L224-L257).
+
+```python
+            logged_id = audit.log(
+                tool="run_command",
+                audit_id=op_id,
+                case_dir=case_dir,
+                params={"command": command, "purpose": purpose},
+                result_summary={
+                    "exit_code": exec_result["exit_code"],
+                    "output_file": exec_result.get("output_file", ""),
+                    "output_sha256": exec_result.get("output_sha256", ""),
+                    "output_sha256_scope": exec_result.get("output_sha256_scope", ""),
+                    "stdout_bytes": exec_result.get("stdout_total_bytes", 0),
+                    "stdout_head": (exec_result.get("stdout") or "")[:500],
+                    **({"truncated": True} if exec_result.get("truncated") else {}),
+                    **({"stopped": stopped} if stopped else {}),
+                    **version_summary,
+                },
+                elapsed_ms=elapsed * 1000,
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:405-421`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L405-L421)
+
+[7] 실행 뒤 출력 파일 목록을 모아 해시 기록을 만든다.
+
+```python
+            # Its outputs: every file in its own folder (but the saved stdout,
+            # recorded as output_file) and every file new or changed under an
+            # output flag's value, each hashed
+            saved = os.path.realpath(exec_result.get("output_file") or "")
+            made = [
+                p
+                for p in (command_files.files_at([op_dir]) if op_dir else {})
+                if os.path.realpath(p) != saved
+            ]
+            made += [
+                p
+                for p, key in command_files.files_at(flagged).items()
+                if before.get(p) != key and p not in made
+            ]
+            outputs = file_place.output_records(case_dir, made, "run_command")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:370-384`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L370-L384)
+
+[8] 백그라운드 작업은 사건이 있을 때만 시작하고 결과를 `hash_complete`나 `hash_failed` 항목으로 쓴다: [`packages/sift-common/src/sift_common/file_identity.py:383-417`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L383-L417).
+
+```python
+        if not stat.S_ISREG(st.st_mode):
+            not_regular.append(p)
+        elif st.st_size <= budget:
+            try:
+                done[p] = hash_file(p)
+                budget -= st.st_size
+            except (OSError, NotRegularFile):
+                rest.append(p)
+        else:
+            rest.append(p)
+    if not rest or not case_dir:
+        return Batch(done, "", rest, not_regular)
+    key = tuple(_file_key(p) for p in rest)
+    return Batch(
+        done, _start(key, rest, str(case_dir), requested_by), rest, not_regular
+    )
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:304-319`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L304-L319)
+
+[9] 해시하는 동안 상태 값이 바뀌면 `FileChanged`를 낸다.
+
+```python
+def hash_file(path) -> HashResult:
+    """The SHA-256 of the whole file, however large. The file is opened
+    non-blocking and checked before any read, so a FIFO never blocks."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise NotRegularFile(f"{path} is not a regular file")
+    with os.fdopen(fd, "rb") as f:
+        h, read = hashlib.sha256(), 0
+        while chunk := f.read(_CHUNK):
+            h.update(chunk)
+            read += len(chunk)
+        # the bytes hashed are the file's only if nothing changed while they were read
+        fields = _changed(_stat_key(st), _stat_key(os.fstat(f.fileno())))
+    if fields or read != st.st_size:
+        raise FileChanged(path, fields or ["size"])
+    return HashResult(str(path), h.hexdigest(), st.st_size, st.st_dev, st.st_ino,
+                      st.st_mtime_ns, st.st_ctime_ns)  # fmt: skip
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:222-240`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L222-L240)
+
+[10] `log_external_action`은 출력 파일마다 `output_record`를 부른다.
+
+```python
+        outputs = [
+            file_place.output_record(case_dir, f, "log_external_action")
+            for f in output_files or []
+        ]
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:795-798`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L795-L798)
+
+[11] 브라우저가 원장 줄에 서명하고 서버는 원장에 쓰기 전에 서명을 검사한다: [`src/vhir_cli/ledger.py:541-546`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/ledger.py#L541-L546).
+
+```python
+2. `POST /api/commit/key`: the login response. Once it verifies, the
+   examiner's wrapped signing key. The browser unwraps it with the
+   passphrase and signs each body string as handed.
+3. `POST /api/commit`: under the case lock, the plan is made again from the
+   challenge's entries; a moved head or any changed body refuses it, with
+   nothing written. vhir's ledger writer checks every signature and appends;
+   then the case files are saved and exactly the signed entries leave
+   pending-reviews.json.
+```
+
+[`packages/case-dashboard/src/case_dashboard/signing.py:8-15`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/signing.py#L8-L15)
+
+[12] (실행 확인) `faketool`로 사건 안에서 `run_command`를 부르자 항목의 `result_summary.output_sha256`과 `outputs[0]`의 `sha256`·`size`·`st_ino`·`mtime_ns`가 기록되었다.
+
+[13] `save_report`는 보고서를 쓰고 파일 이름과 글자 수만 기록한다.
+
+```python
+            _atomic_write(report_path, saved)
+
+            logged_id = audit.log(
+                tool="save_report",
+                params={
+                    "filename": sanitized,
+                    "profile": profile,
+                    "characters": len(content),
+                },
+                result_summary={"status": "saved", "filename": sanitized},
+            )
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1156-1166`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1156-L1166)
+
+[14] 표준 출력 쓰기가 실패하면 경고 로그만 남기고 `output_file`을 넣지 않는다.
+
+```python
+    if stdout:
+        try:
+            stdout_path = out_dir / f"{prefix}_stdout.txt"
+            with open(stdout_path, "xb") as f:
+                f.write(stdout)
+                f.flush()
+                os.fsync(f.fileno())
+            response["output_file"] = str(stdout_path)
+            response["output_sha256"] = hashlib.sha256(stdout).hexdigest()
+        except OSError as e:
+            logger.warning("Failed to save stdout to %s: %s", stdout_path, e)
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:263-273`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L263-L273)
+
+[15] `record_finding`은 인용이 있을 때만 사건 기록을 읽어 인용마다 추적한다: [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1377-1428`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1377-L1428).
+
+```python
+            loaded_ids = case.by_id
+            identity_read = not any(
+                s.startswith(f"audit/{_FILE_IDENTITY_LOG} ") for s in case.skipped
+            )
+            for art, quote in zip(validated_artifacts, quotes, strict=True):
+                t = pv.trace_artifact(case, art["audit_id"], quote)
+                artifact_traces.append(t)
+                art.update(
+                    provenance_grade=t.grade,
+                    provenance_reason=t.reason,
+                    provenance_chain=_distinct_links(t.links),
+                    provenance_root=t.root,
+                    provenance_roots=t.roots,
+                    provenance_candidates=t.candidates,
+                    provenance_break=t.break_,
+                )
+                if t.root:
+                    art["source_evidence"] = t.root["path"]
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1407-1424`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1407-L1424)
+
+[16] 보고서는 서명 원장 대조 결과와 저장된 출처 필드만 쓴다: [`packages/report-mcp/src/report_mcp/server.py:738-742`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L738-L742), [`src/vhir_cli/provenance_view.py:1-7`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/provenance_view.py#L1-L7), [`src/vhir_cli/ledger_verify.py:1659-1726`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/ledger_verify.py#L1659-L1726).
+
+```python
+    # Approved means verified: vhir's verify_case is the one verdict source.
+    # Every other APPROVED item is listed in verification.not_verified.
+    view = approved_view(case_dir)
+    approved_findings = view["findings"]
+    approved_timeline = view["timeline"]
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:738-742`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L738-L742)
+
+[17] 조회 도구는 돌려주는 승인 항목마다 `mark_approvals`를 부른다: [`packages/forensic-mcp/src/forensic_mcp/server.py:432-434`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L432-L434), [`packages/forensic-mcp/src/forensic_mcp/server.py:501-503`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L501-L503), [`packages/case-mcp/src/case_mcp/server.py:468-471`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L468-L471), [`packages/case-mcp/src/case_mcp/server.py:566-570`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L566-L570).
+
+[18] 보관 표준 출력을 먼저, 줄이 남을 때만 출력 파일을 읽는다.
+
+```python
+def _run_missing(case: Case, e: dict, quote: list[str]) -> tuple[list[str], list[str]]:
+    """The quoted lines a run's saved output and recorded output files don't
+    hold, each file only while it has its recorded hash; and the files too
+    large to check. The saved stdout is searched first, then each output file
+    (up to the size cap) only while lines are still missing."""
+    rs = e.get("result_summary") if isinstance(e.get("result_summary"), dict) else {}
+    missing, skipped = list(quote), []
+    sources = [
+        (relocated(case, e, rs.get("output_file")), rs.get("output_sha256"), None)
+    ]
+    sources += [(p, h, _QUOTE_FILE_CAP) for p, h in _outputs(case, e)]
+    for path, sha256, cap in sources:
+        if not missing:
+            break
+        if not path:
+            continue
+        if isinstance(sha256, str) and sha256.startswith("pending:"):
+            sha256, got = _job(case, os.path.realpath(path), sha256.split(":", 1)[1])
+            if not sha256:  # the job is still running or failed: not checkable yet
+                skipped.append(got.reason)
+                continue
+        found, why = _found_in(path, sha256, missing, cap)
+        if why:
+            skipped.append(why)
+        missing = [q for q in missing if q not in found]
+    return missing, skipped
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:819-844`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L819-L844)
+
+[19] 파일을 조각으로 읽으며 해시하고 기록된 해시와 같을 때만 찾은 줄을 돌려준다.
+
+```python
+def _found_in(path, sha256, lines: list[str], cap: int | None) -> tuple[set, str]:
+    """Which quoted lines a saved file holds, read in bounded chunks with an
+    overlap (whitespace normalized across them), the file counted only when it
+    still has its recorded SHA-256. Returns (found, why skipped): a file over
+    `cap` isn't read at all, and says so."""
+    try:
+        size = os.path.getsize(path)
+    except (OSError, TypeError):
+        return set(), ""
+    if cap is not None and size > cap:
+        return set(), f"output too large to check ({path})"
+    if not sha256:
+        return set(), ""
+    digest = hashlib.sha256()
+    decode = codecs.getincrementaldecoder("utf-8")(errors="replace").decode
+    keep = max((len(q) for q in lines), default=0)
+    found, carry = set(), ""
+    try:
+        with open_regular(path) as f:
+            for chunk in iter(lambda: f.read(_CHUNK), b""):
+                digest.update(chunk)
+                text = re.sub(r"\s+", " ", decode(chunk))
+                if carry.endswith(" ") and text.startswith(" "):
+                    text = text[1:]
+                window = carry + text
+                found |= {q for q in lines if q in window}
+                carry = window[-keep:] if keep else ""
+    except (OSError, NotRegularFile):
+        return set(), ""
+    return (found if digest.hexdigest() == sha256 else set()), ""
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:714-743`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L714-L743)
+
+[20] 응답 사본은 해시가 기록과 같을 때만 값으로 쓴다.
+
+```python
+def _saved_values(path, sha256, pairs=None, shown=None) -> tuple[list[str] | None, str]:
+    """A saved response's values as returned: the JSON decoded, every value
+    normalized; the text itself when it isn't JSON. None when it's missing or
+    no longer has its recorded SHA-256, or too large to check, with why.
+    Never the JSON-escaped text. Given a set, `pairs` also gets each
+    `"field": value` line the decoded JSON holds (see `_pairs`), and `shown`
+    each line of the reply as the AI was shown it (see `_rendered`)."""
+    try:
+        if os.path.getsize(path) > _QUOTE_FILE_CAP:
+            return None, f"saved response too large to check ({path})"
+        data = read_regular(path)
+    except (OSError, TypeError, NotRegularFile):
+        return None, ""
+    if not sha256 or hashlib.sha256(data).hexdigest() != sha256:
+        return None, ""
+    text = data.decode("utf-8", errors="replace")
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        return [_norm(text)], ""
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:746-765`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L746-L765)
+
+[21] (실행 확인) `faketool` 호출의 보관 표준 출력에 줄을 덧붙인 뒤 같은 호출을 인용하자 `record_finding`은 `STAGED`와 `provenance_grade: CITED-UNVERIFIED`를 돌려주었다.
+바꾸기 전에 같은 인용으로 기록한 발견사항은 `FULL`이었다.
+
+[22] `verify_case`는 승인 항목의 현재 내용 해시를 원장 줄의 `content_sha256`과 대조하고 다르면 `ALTERED_AFTER_APPROVAL`로 판정한다: [`src/vhir_cli/ledger_verify.py:1243-1251`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/ledger_verify.py#L1243-L1251).
+
+[23] `mark_approvals`는 검증된 기록과 내용 해시가 같은 승인 항목만 검증 표시를 붙이고 나머지 항목은 `warning` 문구에 적는다.
+
+```python
+    bad = []
+    for item, item_kind in approved:
+        iid = item.get("id")
+        mark = (
+            marks.get((item_kind, iid), marks.get(iid, "UNVERIFIED"))
+            if _an_id(iid)
+            else "UNVERIFIED"
+        )
+        ok = False
+        if isinstance(mark, tuple):  # verified: only if this is that record
+            verified, sha, view_n, label = mark
+            ok = _record_sha(item, item_kind, view_n) == sha and all(
+                item.get(k) == verified.get(k) for k in ("approved_by", "approved_at"))  # fmt: skip
+            mark = label if ok else "UNVERIFIED"
+        item["approval_verification"] = mark
+        if not ok:
+            bad.append(f"{item.get('id')} {mark}")
+    if not bad:
+        return ""
+    return (
+        f"Not approved as recorded{why}: {', '.join(bad)}. The examiner must "
+        "review these again; don't build on them as approved."
+    )
+```
+
+[`packages/sift-common/src/sift_common/approvals.py:56-78`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/approvals.py#L56-L78)
+
+[24] 백업 대조는 사용자 CLI의 `--verify`에 있다: [`src/vhir_cli/commands/backup.py:679-757`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L679-L757).
+
+[25] 찾지 못한 인용 줄이 있으면 `CITED-UNVERIFIED`와 고정 문구의 이유를 만든다.
+
+```python
+    missing, skipped = _run_missing(case, e, quote)
+    if missing and (said := _declared_summary(e)) is not None:
+        missing = [q for q in missing if q not in said]
+    if missing:
+        return _unverified(f"{missing[0]!r} isn't in {audit_id}'s saved output or its "
+                           "recorded output files, as they were recorded"
+                           + "".join(f"; {why}" for why in skipped))  # fmt: skip
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:953-959`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L953-L959)
+
+```python
+def _unverified(why: str, links=()) -> Trace:
+    return Trace("CITED-UNVERIFIED", links=list(links), reason=why,
+                 break_={"kind": "cited-unverified", "detail": why,
+                         "fix": "quote the output the cited operation produced"})  # fmt: skip
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:813-816`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L813-L816)
+
+[26] `FULL`이 아니면 응답에 판정과 첫 이유를 싣는다.
+
+```python
+        result = {
+            "status": "STAGED",
+            "finding_id": finding_id,
+            "provenance_grade": finding_prov_grade,
+            "source_evidence": sanitized.get("source_evidence", ""),
+        }
+        if finding_prov_grade != "FULL":
+            reasons = [a["provenance_reason"] for a in validated_artifacts
+                       if a.get("provenance_reason")]  # fmt: skip
+            result["message"] = f"Finding staged as {finding_prov_grade}" + (
+                f": {reasons[0]}" if reasons else "."
+            )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1628-1639`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1628-L1639)
+
+[27] 발견사항의 등급은 인용 판정 가운데 가장 낮은 값이다.
+
+```python
+def finding_grade(artifacts: list[Trace]) -> str:
+    """A finding's grade: the worst of its evidence artifacts. Reference
+    artifacts (threat intel, baselines, enrichment) are left out when there's
+    evidence; a finding with no artifacts is DECLARED. Never PARTIAL."""
+    evidence = [t for t in artifacts if (t.break_ or {}).get("kind") != "reference"]
+    graded = evidence or artifacts
+    if not graded:
+        return "DECLARED"
+    return min((t.grade for t in graded), key=ARTIFACT_GRADES.index)
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:1255-1263`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L1255-L1263)
+
+[28] 출처 목록은 저장된 판정과 이유를 적는다: [`src/vhir_cli/provenance_view.py:64-91`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/provenance_view.py#L64-L91), [`src/vhir_cli/provenance_view.py:221-252`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/provenance_view.py#L221-L252).
+
+[29] `generate_report`는 검증되지 않은 승인 항목이 있으면 `integrity_warning`을 싣는다.
+
+```python
+    result["verification"] = verification_json(view)
+    if view["not_verified"] or view["result"].failures:
+        result["integrity_warning"] = (
+            "Some APPROVED items didn't verify and are left out of report_data "
+            "(see verification.not_verified and verification.case_failures). "
+            "Run `vhir review --verify` at the SIFT terminal for each one's fix."
+        )
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:876-882`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L876-L882)
+
+[30] 검증 블록은 검증되지 않은 항목의 ID와 상태를 싣고 출처 블록은 승인하고 검증된 발견사항만 싣는다: [`src/vhir_cli/ledger_verify.py:1612-1614`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/ledger_verify.py#L1612-L1614), [`src/vhir_cli/provenance_view.py:242-252`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/provenance_view.py#L242-L252).
+
+[31] (실행 확인) 시험용 서명 키와 사용자 CLI의 서명 함수로 발견사항을 승인한 뒤 그 관찰을 바꾸고 `generate_report`와 `get_findings`를 실행했다.
+
+[32] (실행 확인) 두 `run_command` 호출에 같은 `-o` 경로를 주자 둘 다 성공했고 그 파일의 해시가 둘째 호출의 `outputs`에 새 값으로 기록되었다.
+첫 호출을 인용한 발견사항은 `CITED-UNVERIFIED`, 둘째 호출을 인용한 발견사항은 `FULL`로 저장되었다.

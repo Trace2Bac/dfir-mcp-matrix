@@ -1,0 +1,449 @@
+---
+cell: L01
+details:
+- id: L01.01
+- id: L01.02
+---
+
+# L01 기록 방식
+
+### L01.01 공통 요청 처리 단계에서 기록
+
+**구현.** 이 방식은 저수준 `Server`로 만든 `windows-triage-mcp`·`rag-mcp`·`opencti-mcp`의 모든 도구와 게이트웨이의 도구 호출 경로에 적용된다 [1][2][3][4].
+세 백엔드의 `call_tool` 처리기는 도구를 고르기 전에 호출 ID를 만들고 처리가 끝나면 성공과 오류를 가리지 않고 `_wrap_response`를 부른다 [1][2][3].
+`_wrap_response`는 공통 기록기 `AuditWriter.log`로 사건 폴더 `audit/`의 백엔드별 JSONL 파일에 항목 하나를 쓴다 [1][5].
+등록되지 않은 도구 이름으로 부른 호출도 오류 결과로 이 자리를 지난다 [2][3].
+`lookup_ioc`를 두 번 부르자 `opencti-mcp.jsonl`에 호출마다 항목이 하나씩 남았다 [6].
+
+게이트웨이는 모아서 내놓는 끝점(`/mcp`, REST `/api/v1/tools/{name}`)의 `Gateway.call_tool`과 백엔드별 끝점(`/mcp/<백엔드>`)의 `_call_tool` 두 곳에서 항목을 쓴다 [4][7].
+두 곳 모두 HTTP 백엔드로 보낸 호출에만 `source`가 `gateway_proxy`인 항목을 쓰고 stdio 백엔드는 백엔드가 스스로 쓴다고 보고 쓰지 않는다 [4][7].
+`wintools-mcp`의 상태 조회 도구 `get_windows_run`은 HTTP 백엔드여도 항목을 쓰지 않는다 [8].
+보내기 전에 거부한 호출(인자에 UTF-8로 보낼 수 없는 문자가 있는 경우)은 백엔드 종류와 관계없이 `audit_refusal`로 항목을 쓴다 [9].
+`opencti-mcp`의 `lookup_ioc`와 `windows-triage-mcp`의 `check_*` 도구는 오류가 아닌 응답이면 stdio 백엔드여도 게이트웨이가 참조 조회 항목을 따로 쓴다 [10].
+게이트웨이에 `sift-mcp`와 위협 정보 백엔드를 stdio로 붙여 `run_command`와 `lookup_ioc`를 부르자 `sift-gateway.jsonl`에는 `lookup_ioc` 두 건만 남았다 [6].
+게이트웨이는 호출마다 운영 로그에 도구 이름, 백엔드, 검토자 이름을 적고 인자는 적지 않는다 [4][6].
+
+**한계.** 사건 폴더를 찾지 못하면 `AuditWriter.log`는 항목을 쓰지 않고 `None`을 돌려준다 [5].
+게이트웨이의 `Gateway.call_tool`은 시간 제한 말고 백엔드 호출이 예외로 끝나면 항목을 쓰기 전에 예외를 올린다 [4].
+백엔드별 끝점은 백엔드 시작 실패와 백엔드 호출 예외를 항목 없이 오류로 돌려준다 [7].
+그래서 HTTP 백엔드 호출이 연결 오류로 끝나면 게이트웨이 항목이 남지 않는다.
+stdio 백엔드 호출이 300초 시간 제한에 닿으면 게이트웨이는 항목을 쓰지 않고 백엔드 쪽 항목은 백엔드가 처리를 마친 뒤에야 쓴다 [4][1].
+
+### L01.02 도구별 기록 호출
+
+**구현.** 이 방식은 FastMCP로 만든 `forensic-mcp`·`sift-mcp`·`case-mcp`·`report-mcp`의 도구에 적용된다 [11][12][13][14].
+네 백엔드에는 모든 호출이 지나는 기록 단계가 없고 도구 본문이 처리를 마친 뒤 `audit.log`를 직접 부른다 [11][12][13][14].
+`run_command`·`add_todo`·`case_init`·`log_reasoning`을 부르자 백엔드별 JSONL 파일에 호출마다 항목이 하나씩 남았다 [15].
+`forensic-mcp`의 `record_finding`은 도구 항목 말고도 `supporting_commands`의 셸 명령마다 `supporting_command` 항목을 쓴다 [16].
+`sift-mcp`의 `run_command`와 `case-mcp`의 `log_external_action`이 입력 파일 해시를 백그라운드로 계산하면 그 작업이 끝날 때 `file-identity.jsonl`에 `hash_complete` 항목을 더 쓴다 [17].
+
+다음 도구는 사건 기록에 항목을 쓰지 않는다.
+- `forensic-mcp`의 `get_findings`·`get_timeline`·`get_actions`·`list_todos` [18].
+- `case-mcp`의 `case_list`·`case_status`·`evidence_list`·`evidence_verify`·`audit_summary` [19].
+- `report-mcp`의 `get_case_metadata`·`list_profiles`·`list_reports` [20].
+- `sift-mcp`의 `list_available_tools`·`check_tools`와 `forensic-mcp`의 `get_procedure`, `--deferred-tools`로 내놓는 규율 자료 도구 가운데 `get_investigation_framework`를 뺀 13개 [12][21].
+
+마지막 줄의 도구는 사건 밖 파일 `~/.vhir/logs/lookups.jsonl`에 `log_lookup`으로 한 줄을 쓴다 [21][22].
+이 줄에는 시각, 백엔드, 도구 이름, 사건 이름과 문자열·정수·참·거짓 값의 인자만 들어가고 문자열은 120자에서 자른다 [22].
+`check_tools`를 `tool_names` 목록과 함께 부르자 `args`가 빈 줄이 남았다 [15].
+
+같은 저장소의 Claude Code 훅 `forensic-audit.sh`는 클라이언트의 Bash 명령과 그 출력 해시를 사건 폴더의 `claude-code.jsonl`에 남긴다 [23].
+이 훅은 MCP 도구 호출을 기록하지 않고 MCP 도구에 대응하는 Bash 명령에 `mcp_route` 표시만 붙인다 [23].
+Codex용 훅 설정도 `Bash`와 `apply_patch`에만 이 훅을 등록한다 [24].
+
+**한계.** 사건 폴더를 찾지 못하면 항목을 쓰지 않는다 [5].
+사건이 없을 때 `run_command`를 부르자 명령은 실행되었고 응답의 `audit_id`는 `null`이었다 [15].
+`report-mcp`는 `AuditWriter`에 사건 폴더 확인 함수를 넘기지 않아 `generate_report`가 `case_id`로 다른 사건을 고르면 항목은 지금 활성 사건의 `audit/`에 들어간다 [14][25].
+
+### 근거
+
+[1] `windows-triage-mcp`는 `call_tool`에서 호출 ID를 만들고 결과마다 `_wrap_response`가 `AuditWriter.log`로 항목을 쓴다.
+
+```python
+    def _wrap_response(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: dict,
+        audit_id: str | None = None,
+        elapsed_ms: float | None = None,
+    ) -> dict:
+        """Wrap tool result with evidence ID, caveats, and audit trail.
+
+        Always generates audit_id and writes audit — including for errors.
+        """
+        summary = result if "error" not in result else {"error": result["error"]}
+        audit_id = self._audit.log(
+            tool=tool_name,
+            params=arguments,
+            result_summary=summary,
+            audit_id=audit_id,
+            elapsed_ms=elapsed_ms,
+        )
+        if audit_id is None:
+            result["warning"] = "Audit write failed — action not recorded"
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:432-453`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L432-L453)
+
+[`packages/windows-triage/src/windows_triage/server.py:733-735`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L733-L735)
+
+[2] `rag-mcp`의 `call_tool`은 알 수 없는 도구, 검사 오류, 내부 오류를 모두 `_wrap_response`로 기록한다: [`packages/forensic-rag/src/rag_mcp/server.py:192-256`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L192-L256), [`packages/forensic-rag/src/rag_mcp/server.py:84-115`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L84-L115).
+
+[3] `opencti-mcp`의 `call_tool`은 처리 결과와 예외마다 `_wrap_response`를 부르고 알 수 없는 도구는 `ValidationError`로 처리한다: [`packages/opencti/src/opencti_mcp/server.py:511-631`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L511-L631), [`packages/opencti/src/opencti_mcp/server.py:686-707`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L686-L707), [`packages/opencti/src/opencti_mcp/server.py:974-975`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L974-L975).
+
+[4] `Gateway.call_tool`은 운영 로그를 적고 HTTP 백엔드 호출에만 항목을 쓰며 시간 제한이 아닌 예외는 그대로 올린다: [`packages/sift-gateway/src/sift_gateway/server.py:733-845`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L733-L845).
+
+[5] `AuditWriter.log`는 사건 폴더를 정하지 못하면 `None`을 돌려주고 정하면 항목을 만들어 쓴다.
+
+```python
+        audit_dir = self._get_audit_dir(case_dir)
+        if not audit_dir:
+            return None
+        if not case_id and case_dir:
+            case_id = _case_id_of(case_dir)
+        if audit_id is None:
+            audit_id = self._next_audit_id(audit_dir)
+
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "mcp": self.mcp_name,
+            "tool": tool,
+            "audit_id": audit_id,
+            "examiner": self.examiner,
+            "case_id": case_id
+            or os.environ.get("VHIR_ACTIVE_CASE", "")
+            or self._read_active_case_id(),
+            "source": source,
+            "params": params,
+            "result_summary": _summarize(result_summary),
+        }
+```
+
+[`packages/sift-common/src/sift_common/audit.py:183-203`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L183-L203)
+
+```python
+        if not self._write_entry(entry, audit_dir):
+            logger.warning(
+                "Audit write failed for audit_id=%s — returning None",
+                audit_id,
+            )
+            return None
+        return audit_id
+```
+
+[`packages/sift-common/src/sift_common/audit.py:216-222`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L216-L222)
+
+[6] (실행 확인) 컨테이너 안 `127.0.0.1`에 게이트웨이를 실행하고 stdio 백엔드 `sift-mcp`·`threatintel-mcp`에 MCP SDK 클라이언트로 `run_command` 1건과 `lookup_ioc` 2건을 보내 사건 폴더 `audit/`의 파일과 운영 로그를 확인했다.
+
+[7] 백엔드별 끝점은 시작 실패와 호출 예외를 바로 돌려주고 HTTP 백엔드 호출에만 항목을 쓴다: [`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:351-462`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L351-L462).
+
+[8] 항목을 쓰지 않는 상태 조회 도구 목록이다.
+
+```python
+# Status lookups on a run wintools already audits once: each poll gets no
+# gateway_proxy entry of its own
+POLL_TOOLS = frozenset({"get_windows_run"})
+```
+
+[`packages/sift-gateway/src/sift_gateway/audit_helpers.py:21-23`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/audit_helpers.py#L21-L23)
+
+[9] `audit_refusal`은 보내지 않은 호출의 항목을 쓴다.
+
+```python
+    async def audit_refusal(
+        self,
+        backend_name: str,
+        tool: str,
+        arguments: dict,
+        exc: Exception,
+        examiner=None,
+    ) -> None:
+        """An audit entry for a call the gateway refused before sending it."""
+        try:
+            await asyncio.to_thread(
+                self._audit.log,
+                tool=tool,
+                params=_truncate_params(arguments or {}),
+                result_summary=f"refused, not sent: {exc}",
+                source="gateway_proxy",
+                elapsed_ms=0.0,
+                extra={"backend": backend_name, "examiner": examiner},
+            )
+        except Exception as audit_exc:
+            logger.warning("Gateway audit failed for %s: %s", tool, audit_exc)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:349-369`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L349-L369)
+
+[10] 참조 조회로 보는 도구와 그 항목을 쓰는 조건이다: [`packages/sift-gateway/src/sift_gateway/reference.py:23-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L23-L27), [`packages/sift-gateway/src/sift_gateway/reference.py:59-72`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L59-L72), [`packages/sift-gateway/src/sift_gateway/server.py:840-844`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L840-L844).
+
+[11] `forensic-mcp`의 `add_todo`는 처리를 마친 뒤 본문에서 `audit.log`를 부른다.
+
+```python
+        try:
+            result = manager.add_todo(
+                description,
+                assignee,
+                priority,
+                related_findings,
+                examiner_override=analyst_override,
+            )
+        except Exception as e:
+            logger.error("add_todo failed: %s", e)
+            return {"error": str(e)}
+        logged_id = audit.log(
+            tool="add_todo",
+            params={"description": description, "assignee": assignee},
+            result_summary=result,
+        )
+        if logged_id is None:
+            result["warning"] = "Audit write failed — action not recorded"
+        return result
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:537-555`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L537-L555)
+
+[12] `sift-mcp`의 `get_tool_help`는 본문에서 항목을 쓰고 `check_tools`는 `log_lookup`만 부른다.
+
+```python
+        logged_id = audit.log(
+            tool="get_tool_help", params=params, result_summary=summary
+        )
+        if logged_id is None:
+            result["warning"] = "Audit write failed — action not recorded"
+        return result
+
+    @server.tool()
+    def check_tools(tool_names: list[str] | None = None) -> dict:
+        """Check which tools are installed and available on this system."""
+        from sift_mcp.tools.discovery import check_tools as _check
+
+        # a list isn't a scalar argument: logged with none
+        log_lookup("sift-mcp", "check_tools", {"tool_names": tool_names})
+
+        return _check(tool_names=tool_names)
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:152-167`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L152-L167)
+
+[13] `case-mcp`의 `log_reasoning`은 본문에서 항목을 쓴다.
+
+```python
+    @server.tool()
+    def log_reasoning(text: str, analyst_override: str = "") -> dict:
+        """Record analytical reasoning to the audit trail (no approval
+        needed). Call when choosing what to examine next, forming a
+        hypothesis, revising an interpretation, or ruling something out.
+        Unrecorded reasoning is lost during context compaction."""
+        _validate_str_length(text, "text", _MAX_TEXT, free_text=True)
+        _validate_str_length(analyst_override, "analyst_override", _MAX_SHORT)
+        result = {"status": "logged"}
+        logged_id = audit.log(
+            tool="log_reasoning",
+            params={"text": text, "analyst_override": analyst_override},
+            result_summary=result,
+            source="orchestrator",
+        )
+        if logged_id is None:
+            result["status"] = "write_failed"
+            result["warning"] = "Audit write failed — reasoning not recorded"
+        return result
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:705-723`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L705-L723)
+
+[14] `report-mcp`는 사건 폴더 확인 함수 없이 `AuditWriter`를 만들고 `generate_report` 본문에서 항목을 쓴다: [`packages/report-mcp/src/report_mcp/server.py:903-960`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L903-L960).
+
+[15] (실행 확인) 컨테이너에서 네 백엔드의 서버 객체를 만들고 사건이 없을 때와 사건을 만든 뒤 도구를 불러 `audit/`의 JSONL 파일과 `lookups.jsonl`을 확인했다.
+
+[16] `supporting_commands`의 명령마다 `supporting_command` 항목을 쓴다.
+
+```python
+                # Write audit entry for this shell command
+                if audit:
+                    logged_id = audit.log(
+                        tool="supporting_command",
+                        params={"command": command, "purpose": purpose},
+                        result_summary={"output_excerpt": output_excerpt[:200]},
+                        source="shell_self_report",
+                        audit_id=shell_eid,
+                    )
+                    if logged_id is None:
+                        audit_warnings.append(
+                            f"Audit write failed for shell evidence {shell_eid}"
+                        )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1293-1305`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1293-L1305)
+
+[17] 백그라운드 해시 작업은 끝날 때 `file-identity` 기록기로 `hash_complete`나 `hash_failed` 항목을 쓴다.
+
+```python
+    tool = "hash_complete" if any("sha256" in f for f in files) else "hash_failed"
+    writer = AuditWriter("file-identity", audit_dir=str(Path(case_dir) / "audit"))
+    job = {"job_id": job_id, "requested_by": requested_by, "started": started,
+           "finished": _now()}  # fmt: skip
+    for part in parts:
+        logged = writer.log(
+            tool=tool,
+            params={"path": paths} if isinstance(paths, str) else {"files": len(paths)},
+            result_summary={"files": len(files)},
+            extra={**job, **part},
+        )
+        if logged is None:
+            logger.warning("%s (%s) was not recorded", tool, job_id)
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:405-417`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L405-L417)
+
+[18] `get_findings`는 결과를 돌려주기만 하고 항목을 쓰지 않는다.
+
+```python
+        try:
+            case_dir = manager._require_active_case()  # one case for both reads
+            all_findings = manager.get_findings(status or None, case_dir)
+            total = len(all_findings)
+            paginated, _ = _page(all_findings, limit, offset)
+            out = {
+                "findings": paginated,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+            # an APPROVED finding is shown as approved only if it verifies
+            warning = mark_approvals(case_dir, paginated)
+            if warning:
+                out["warning"] = warning
+            return out
+        except Exception as e:
+            logger.error("get_findings failed: %s", e)
+            return {
+                "error": str(e),
+                "findings": [],
+                "limit": limit,
+                "offset": offset,
+            }
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:420-443`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L420-L443)
+
+[19] `case_status`·`evidence_list`·`evidence_verify`·`audit_summary`는 `audit.log`를 부르지 않는다: [`packages/case-mcp/src/case_mcp/server.py:440-477`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L440-L477), [`packages/case-mcp/src/case_mcp/server.py:524-549`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L524-L549), [`packages/case-mcp/src/case_mcp/server.py:637-646`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L637-L646).
+
+[20] `get_case_metadata`·`list_profiles`·`list_reports`는 `audit.log`를 부르지 않는다.
+
+```python
+    @server.tool()
+    def list_reports() -> dict:
+        """List saved reports in the case reports/ directory."""
+        try:
+            case_dir = _resolve_case_dir()
+            reports_dir = case_dir / "reports"
+
+            if not reports_dir.exists():
+                return {"reports": []}
+
+            reports = []
+            for p in sorted(reports_dir.iterdir()):
+                if p.is_file():
+                    stat = p.stat()
+                    reports.append(
+                        {
+                            "filename": p.name,
+                            "size_bytes": stat.st_size,
+                            "created_at": datetime.fromtimestamp(
+                                stat.st_ctime, tz=timezone.utc
+                            ).isoformat(),
+                        }
+                    )
+            return {"reports": reports}
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1184-1209`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1184-L1209)
+
+[`packages/report-mcp/src/report_mcp/server.py:1053-1087`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1053-L1087)
+
+[21] `forensic-mcp`의 `get_procedure`와 규율 자료 도구는 `_lookup`으로 `log_lookup`을 부르고 `get_investigation_framework`만 `audit.log`를 부른다.
+
+```python
+    def _lookup(name: str, args: dict | None = None) -> None:
+        """A lookup with no case audit entry, in ~/.vhir/logs/lookups.jsonl,
+        naming the case this server's audit would go to."""
+        log_lookup("forensic-mcp", name, args, manager.audit_case_dir)
+
+    # --- Procedures, for a client without skills ---
+
+    @server.tool(description=PROCEDURE_DESCRIPTION)
+    def get_procedure(name: str = "", file: str = "") -> dict:
+        _lookup("get_procedure", {"name": name, "file": file})
+        return procedures.get(name, file)
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:156-166`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L156-L166)
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:762-940`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L762-L940)
+
+[22] `log_lookup`은 스칼라 인자만 남기고 문자열을 120자로 자른다.
+
+```python
+    try:
+        from sift_common import resolve_case_dir
+
+        case_dir = (case_dir_resolver and case_dir_resolver()) or resolve_case_dir()
+        case = Path(case_dir).name or None
+        kept = {
+            k: v[:_ARG_CHARS] if isinstance(v, str) else v
+            for k, v in (args or {}).items()
+            if isinstance(v, (str, int, bool))
+        }
+        line = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": source,
+            "lookup": lookup,
+            "case": case,
+            "args": kept,
+        }
+        path = Path.home() / ".vhir" / "logs" / "lookups.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(line) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception as e:
+        # the writer's own oplog (setup_logging's logger for the service)
+        logging.getLogger(source.replace("-", "_")).warning(
+            "lookups log not written: %s: %s", type(e).__name__, e
+        )
+```
+
+[`packages/sift-common/src/sift_common/oplog.py:136-164`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/oplog.py#L136-L164)
+
+[23] `forensic-audit.sh`는 `tool_input.command`가 있는 호출만 기록하고 MCP 경로는 표시로만 붙인다: [`claude-code/shared/hooks/forensic-audit.sh:1-12`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/forensic-audit.sh#L1-L12), [`claude-code/shared/hooks/forensic-audit.sh:103-106`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/forensic-audit.sh#L103-L106), [`claude-code/shared/hooks/forensic-audit.sh:157-188`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/forensic-audit.sh#L157-L188), [`claude-code/full/settings.json:36-77`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/full/settings.json#L36-L77).
+
+[24] Codex 훅 설정의 `PostToolUse` 대상이다.
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "^(Bash|apply_patch)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "{hooks}/forensic-audit.sh --client codex"
+timeout = 30
+```
+
+[`codex/requirements.toml:53-58`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/codex/requirements.toml#L53-L58)
+
+[25] `generate_report`는 `case_id`로 사건 폴더를 고르고 `AuditWriter`는 확인 함수가 없으면 환경변수와 활성 사건 파일로 기록 폴더를 정한다.
+
+```python
+            case_dir = _resolve_case_dir(case_id)
+            result = _generate(profile, case_dir, finding_ids, start_date, end_date)
+            logged_id = audit.log(
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:944-946`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L944-L946)
+
+[`packages/sift-common/src/sift_common/audit.py:81-132`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L81-L132)

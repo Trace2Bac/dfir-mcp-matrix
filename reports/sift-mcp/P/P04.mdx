@@ -1,0 +1,453 @@
+---
+cell: P04
+details:
+- id: P04.01
+- id: P04.03
+- id: P04.04
+---
+
+# P04 조사 단위 관리
+
+### P04.01 사건 시작 시 ID 확정
+
+**구현.** 이 방식은 `case-mcp`의 `case_init`과 `case_activate`, 그리고 열린 사건을 읽는 모든 백엔드 도구에 적용된다 [1][2][3].
+`case_init`은 사건 ID를 받지 않으면 `INC-<연도>-<월일시분초>`로 정하고 받으면 첫 글자가 영문자나 숫자이고 영문자·숫자·`-`·`_`로 된 2~64자인지 검사한다 [1].
+같은 이름의 사건 폴더가 있거나 그 ID의 서명 원장이 이미 있으면 사건을 만들지 않는다 [1].
+만든 사건의 폴더 경로를 열린 사건 표시 파일 `~/.vhir/active_case`에 쓰고 응답의 `activation`에 앞서 열려 있던 사건을 적는다 [1].
+`case_activate`는 `/`, `\`, `..`가 없고 폴더가 있는 사건 ID만 받아 표시 파일을 그 사건으로 바꾼다 [2].
+상위 폴더를 가리키는 ID와 공백이 들어간 ID는 거부되었고 없는 사건 ID로 `case_activate`를 부르자 `Case not found`가 돌아왔다 [4].
+
+뒤의 호출은 이 표시 파일로 사건에 묶인다.
+`case-mcp`와 `forensic-mcp`는 호출마다 표시 파일을 다시 읽어 사건 폴더를 정한다 [3][5].
+`forensic-mcp`는 `CASE.yaml`의 상태가 `closed`인 사건이면 기록 도구를 거부한다 [5].
+`sift-mcp`의 `run_command`는 호출을 시작할 때 사건을 한 번 정하고 그 사건으로 호출 기록 ID와 작업 폴더 `extractions/<호출 기록 ID>`를 만든다 [6].
+명령이 끝날 때 열린 사건이 바뀌어 있어도 출력과 호출 기록 항목은 시작할 때의 사건에 남는다 [6].
+
+**한계.** 표시 파일은 운영체제 사용자 홈에 하나뿐이어서 같은 사용자로 실행된 모든 세션과 게이트웨이의 모든 API 키가 한 사건을 같이 쓴다 [1][7].
+한 세션이 사건을 바꾸면 다른 세션의 다음 호출도 바뀐 사건에 기록된다 [7].
+백엔드마다 열린 사건을 정하는 차례가 다르다 [3][5][8].
+`sift-mcp`와 `sift-common`의 공통 함수는 환경변수 `VHIR_CASE_DIR`를 먼저 보고 `case-mcp`는 표시 파일을 먼저 보며 `forensic-mcp`는 표시 파일만 본다 [3][5][8].
+`forensic-mcp`는 표시 파일이 없거나 사건 폴더를 가리키지 않으면 그 프로세스가 마지막으로 읽은 사건에 계속 기록한다 [5].
+표시 파일을 지운 뒤 `forensic-mcp`의 `add_todo`는 앞 사건에 할 일을 더했고 `case-mcp`의 `record_action`은 열린 사건이 없다는 오류를 돌려주었다 [9].
+게이트웨이 설정 예시는 게이트웨이 프로세스에 `VHIR_CASE_DIR`가 있으면 그 값을 백엔드마다 넘기고 없으면 넘기지 않는다 [10][11].
+사용자가 `VHIR_CASE_DIR`를 정해 두어 그 값이 사건 B를, 표시 파일이 사건 A를 가리킬 때 `run_command`의 출력과 호출 기록은 B에 쓰였고 `case-mcp`와 `forensic-mcp`는 A를 썼다 [4].
+닫힌 사건을 거부하는 것은 `forensic-mcp`뿐이다 [5].
+`case_activate`는 닫힌 사건도 열린 사건으로 바꾸었고 그 뒤 `case-mcp`의 `record_action`과 `sift-mcp`의 `run_command`는 기록을 남겼다 [4].
+사건을 닫는 일은 MCP 도구가 아니라 사용자 CLI `vhir case close`가 `CASE.yaml`의 상태를 `closed`로 바꾸고 표시 파일이 그 사건을 가리키면 지우는 방식으로 한다 [12].
+이 명령으로 표시 파일이 지워진 경우에는 `forensic-mcp`가 메모리에 둔 사건의 상태가 `closed`이므로 기록 도구가 거부된다 [5][12].
+
+### P04.03 폴더·DB·manifest에 사건 ID 연결
+
+**구현.** 이 방식은 사건 폴더 이름, `CASE.yaml`, 호출 기록 항목, 사건 밖 조회 기록에 적용된다 [1][13][14].
+사건 폴더는 사건 ID를 이름으로 `VHIR_CASES_DIR` 아래에 만들고 `CASE.yaml`에 `case_id`, 상태, 만든 검토자, 만든 시각과 사건 고유값 `case_uuid`를 적는다 [1][4].
+호출 기록 항목의 `case_id`는 도구가 넘긴 사건 폴더가 있으면 그 폴더의 `CASE.yaml` 값이고 없으면 환경변수 `VHIR_ACTIVE_CASE`나 표시 파일이 가리키는 폴더의 이름이다 [13].
+`run_command`의 작업 폴더 이름인 호출 기록 ID에는 사건 ID가 들어가지 않고 그 폴더는 사건 폴더 안에 만들어진다 [6].
+호출 기록을 남기지 않는 조회 도구(`list_available_tools`, `check_tools`, `get_procedure` 등)는 사건 폴더 밖 `~/.vhir/logs/lookups.jsonl`에 줄마다 사건 폴더 이름을 `case`로 적는다 [14].
+
+**한계.** `case_id`를 정하는 기준과 항목을 쓸 폴더를 정하는 기준이 달라 두 값이 어긋날 수 있다 [13].
+`VHIR_CASE_DIR`가 사건 B를, 표시 파일이 사건 A를 가리킬 때 `suggest_tools`의 호출 기록 항목은 B의 `audit/`에 쓰였고 `case_id`는 `CASE-A`였다 [15].
+
+### P04.04 사건별 폴더·DB 분리
+
+**구현.** 이 방식은 사건 자료 파일, `run_command`의 출력, `case_activate`의 사건 폴더 확인에 적용된다 [1][6][16][17].
+`case_init`은 사건마다 `evidence/`, `extractions/`, `reports/`, `audit/` 폴더와 `findings.json`, `timeline.json`, `todos.json`, `evidence.json`을 사건 폴더 안에 만든다 [1].
+백엔드마다 쓰는 호출 기록 파일 `audit/<백엔드>.jsonl`, 큰 파일의 해시 결과 `audit/file-identity.jsonl`, 증거 목록, 할 일, 발견사항이 모두 그 사건 폴더 안에 있다 [1][13].
+`run_command`는 열린 사건이 있으면 출력 경로 인자가 그 사건 폴더 밖을 가리킬 때 실행하지 않는다 [16].
+`evidence_register`도 사건 폴더 밖의 파일을 등록하지 않는다 [4].
+`case_activate`는 `CASE.yaml`의 사건 고유값 `case_uuid`마다 그 사건을 둔 폴더를 `~/.vhir/case-paths.json`에 적는다 [17].
+적어 둔 폴더가 아직 같은 고유값을 가지고 있으면 같은 고유값을 가진 다른 폴더는 열린 사건으로 바꾸지 않는다 [17].
+사건 폴더 전체를 복사한 폴더를 `case_activate`로 열자 원래 사건의 사본이라는 오류가 돌아왔고 표시 파일은 원래 사건을 가리킨 채였다 [9].
+
+**한계.** 사건 폴더 밖에 사건마다 나뉘지 않은 상태가 있다.
+열린 사건 표시 파일과 조회 기록 `lookups.jsonl`은 모든 사건이 같이 쓴다 [7][14].
+서명 원장과 사건 잠금 파일은 `/var/lib/vhir/ledger/` 아래에 사건 ID로 이름을 짓는다 [18].
+그래서 이전에 같은 ID로 원장을 만든 사건이 있으면 그 ID로 새 사건을 만들 수 없다 [1].
+`run_command` 응답의 참조 지식 횟수는 프로세스 하나에 하나뿐이어서 사건을 바꿔도 나뉘지 않는다 [19].
+`run_command`의 출력 경로 검사는 출력 옵션의 값에만 적용되고 위치 인자로 준 경로에는 적용되지 않는다 [20].
+`validate_case_data_targets`는 모든 사건의 기존 증거와 기록을 지우거나 덮어쓰는 명령만 거부하므로 위치 인자로 다른 사건 폴더에 새 파일을 쓰는 명령은 실행된다 [20].
+열린 사건에서 다른 사건의 `evidence/`에 새 파일을 복사하는 명령은 실행되었고 같은 경로를 출력 옵션 값으로 준 명령은 거부되었다 [21].
+
+### 근거
+
+[1] `case_init`의 ID 확정, 폴더 생성, 표시 파일 쓰기: [`packages/case-mcp/src/case_mcp/server.py:296-318`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L296-L318), [`src/vhir_cli/main.py:1092-1148`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1092-L1148), [`src/vhir_cli/main.py:1180-1204`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1180-L1204).
+
+```python
+        try:
+            _validate_str_length(name, "name", _MAX_NAME)
+            _validate_str_length(description, "description", _MAX_TEXT, free_text=True)
+            _validate_str_length(cases_dir, "cases_dir", _MAX_NAME)
+            if case_id:
+                _validate_str_length(case_id, "case_id", 64)
+                import re
+
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,63}$", case_id):
+                    return {
+                        "error": "case_id must be alphanumeric with hyphens/underscores, "
+                        "start with letter/digit, 2-64 chars"
+                    }
+            examiner = resolve_examiner()
+            result = _case_init_data(
+                name=name,
+                examiner=examiner,
+                description=description,
+                cases_dir=cases_dir or None,
+                case_id=case_id or None,
+            )
+            # The case's identity and host logs, before anything else writes
+            ensure_case_uuid(result["case_dir"], naming_version=2)
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:296-318`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L296-L318)
+
+[2] `case_activate`는 ID를 검사하고 표시 파일을 바꾼다: [`src/vhir_cli/main.py:1554-1573`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1554-L1573).
+
+[3] `case-mcp`는 사건 ID 인자, 표시 파일, `VHIR_CASE_DIR` 차례로 사건을 정한다.
+
+```python
+    # Read active_case file first (detects case switches without restart)
+    active_file = _ACTIVE_CASE_FILE
+    if active_file.exists():
+        try:
+            content = active_file.read_text().strip()
+        except OSError:
+            content = ""
+        if content:
+            if os.path.isabs(content):
+                case_dir = Path(content)
+            else:
+                if ".." in content or "/" in content or "\\" in content:
+                    raise ValueError(f"Invalid case ID in active_case: {content}")
+                cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+                case_dir = cases_dir / content
+            if case_dir.is_dir():
+                return case_dir
+
+    # Fallback: env var (containers, tests, non-standard deployments)
+    env_dir = os.environ.get("VHIR_CASE_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if not p.is_dir():
+            raise ValueError(f"VHIR_CASE_DIR does not exist: {env_dir}")
+        return p
+
+    raise ValueError("No active case. Use case_init or case_activate first.")
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:227-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L227-L253)
+
+[4] (실행 확인) 컨테이너에서 `case_init`(자동 ID, 잘못된 ID, 같은 ID), `case_activate`, `case_list`, `evidence_register`, `VHIR_CASE_DIR`를 다른 사건으로 둔 `run_command`, 닫힌 사건의 `case_activate`·`record_action`·`run_command`·`add_todo`를 부르고 사건 폴더와 표시 파일을 읽었다.
+
+[5] `forensic-mcp`는 호출마다 표시 파일을 읽고 닫힌 사건을 거부한다.
+
+```python
+    def _require_active_case(self) -> Path:
+        # Re-read active_case file on every call to detect case switches
+        active_file = _ACTIVE_CASE_FILE
+        if active_file.exists():
+            try:
+                content = active_file.read_text().strip()
+            except OSError:
+                content = ""
+            if content:
+                if os.path.isabs(content):
+                    case_dir = Path(content)
+                    new_id = case_dir.name
+                else:
+                    _validate_case_id(content)
+                    case_dir = self.cases_dir / content
+                    new_id = content
+                if case_dir.is_dir() and (case_dir / "CASE.yaml").exists():
+                    if (
+                        new_id != self._active_case_id
+                        and self._active_case_id is not None
+                    ):
+                        logger.info(
+                            "Case switched: %s → %s", self._active_case_id, new_id
+                        )
+                    self._active_case_id = new_id
+                    self._active_case_path = case_dir
+        d = self.active_case_dir
+        if d is None or not d.exists():
+            raise ValueError("No active case. Run 'vhir case activate <id>' first.")
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:966-994`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L966-L994)
+
+```python
+        # Safety belt: refuse closed cases
+        meta_file = d / "CASE.yaml"
+        if meta_file.exists():
+            try:
+                meta = yaml.safe_load(meta_file.read_text()) or {}
+                if meta.get("status") == "closed":
+                    raise ValueError(
+                        f"Case {self._active_case_id} is closed. "
+                        f"Run 'vhir case reopen {self._active_case_id}' or "
+                        f"'vhir case activate <id>' to work on a different case."
+                    )
+            except yaml.YAMLError:
+                pass
+        return d
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:995-1008`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L995-L1008)
+
+[6] `run_command`는 시작할 때 사건을 정하고 그 사건에 작업 폴더를 만든다.
+
+```python
+        # One case per call, resolved as it starts: the audit id is minted for
+        # it, and the output and the entry are kept in it, whatever case is
+        # active when the command ends
+        case_dir = resolve_case_dir()
+        audit_dir = audit._get_audit_dir(case_dir)
+        op_id = audit._next_audit_id(audit_dir) if audit_dir else None
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:249-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L249-L267)
+
+[7] 표시 파일을 바꾸면 그 파일을 쓰는 모든 세션이 바뀐다는 주석과 표시 파일 쓰기: [`src/vhir_cli/main.py:1180-1204`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1180-L1204).
+
+[8] `sift-common`의 공통 함수는 `VHIR_CASE_DIR`를 먼저 본다.
+
+```python
+def resolve_case_dir() -> str:
+    """Resolve the active case directory.
+
+    Resolution order: VHIR_CASE_DIR env var → ~/.vhir/active_case file → "".
+    VHIR_CASE_DIR must be a directory containing CASE.yaml to be valid.
+    If set but invalid, falls through to active_case.
+    """
+    case_dir = os.environ.get("VHIR_CASE_DIR", "").strip()
+    if case_dir:
+        p = Path(case_dir)
+        if p.is_dir() and (p / "CASE.yaml").exists():
+            return case_dir
+        # Set but invalid — fall through to active_case
+    active_file = Path.home() / ".vhir" / "active_case"
+    if active_file.is_file():
+        try:
+            content = active_file.read_text().strip()
+        except OSError:
+            return ""
+        if content:
+            p = Path(content)
+            if p.is_dir() and (p / "CASE.yaml").exists():
+                return content
+    return ""
+```
+
+[`packages/sift-common/src/sift_common/__init__.py:13-36`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/__init__.py#L13-L36)
+
+[9] (실행 확인) 컨테이너에서 사건 폴더를 복사한 폴더로 `case_activate`를 부르고 표시 파일을 지운 뒤 `forensic-mcp`의 `add_todo`와 `case-mcp`의 `record_action`·`case_status`를 불렀다.
+
+[10] 게이트웨이 설정 예시가 넘기는 환경변수.
+
+```text
+  sift-mcp:
+    type: stdio
+    command: "python"
+    args: ["-m", "sift_mcp"]
+    env:
+      VHIR_CASE_DIR: "${VHIR_CASE_DIR}"
+      VHIR_ACTIVE_CASE: "${VHIR_ACTIVE_CASE}"
+      VHIR_EXAMINER: "${VHIR_EXAMINER}"
+    enabled: true
+```
+
+[`config/gateway.yaml.example:38-46`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L38-L46)
+
+[11] 게이트웨이는 설정의 `${...}` 값을 환경변수로 바꾸고 없는 변수는 빈 문자열로 둔 뒤 빈 값을 백엔드에 넘기지 않는다.
+
+```python
+def _interpolate_env(value: str) -> str:
+    """Replace ${VAR} patterns with environment variable values.
+
+    If a referenced variable is not set, the placeholder is replaced with
+    an empty string to prevent literal '${VAR}' from leaking into configs.
+    """
+
+    def _replace(match: re.Match) -> str:
+        var_name = match.group(1)
+        return os.environ.get(var_name, "")
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+```
+
+[`packages/sift-gateway/src/sift_gateway/config.py:16-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/config.py#L16-L27)
+
+```python
+        # When config provides explicit env vars, merge VHIR_* from parent
+        # so examiner identity and case dir propagate to backend subprocesses.
+        if env is not None:
+            for key, val in os.environ.items():
+                if key.startswith("VHIR_") and key not in env:
+                    env[key] = val
+            # Remove empty values (from unset ${VAR} interpolation)
+            env = {k: v for k, v in env.items() if v}
+```
+
+[`packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py:128-135`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py#L128-L135)
+
+[12] 사용자 CLI `vhir case close`는 상태를 바꾸고 표시 파일을 지운다: [`src/vhir_cli/main.py:1692-1700`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1692-L1700), [`src/vhir_cli/main.py:1731-1739`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1731-L1739).
+
+[13] 호출 기록 항목을 쓸 폴더와 `case_id`를 정하는 곳: [`packages/sift-common/src/sift_common/audit.py:81-132`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L81-L132), [`packages/sift-common/src/sift_common/audit.py:183-200`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L183-L200).
+
+```python
+        audit_dir = self._get_audit_dir(case_dir)
+        if not audit_dir:
+            return None
+        if not case_id and case_dir:
+            case_id = _case_id_of(case_dir)
+        if audit_id is None:
+            audit_id = self._next_audit_id(audit_dir)
+
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "mcp": self.mcp_name,
+            "tool": tool,
+            "audit_id": audit_id,
+            "examiner": self.examiner,
+            "case_id": case_id
+            or os.environ.get("VHIR_ACTIVE_CASE", "")
+            or self._read_active_case_id(),
+            "source": source,
+```
+
+[`packages/sift-common/src/sift_common/audit.py:183-200`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L183-L200)
+
+[14] 조회 기록은 사건 폴더 밖 한 파일에 사건 이름과 함께 쓴다.
+
+```python
+    try:
+        from sift_common import resolve_case_dir
+
+        case_dir = (case_dir_resolver and case_dir_resolver()) or resolve_case_dir()
+        case = Path(case_dir).name or None
+        kept = {
+            k: v[:_ARG_CHARS] if isinstance(v, str) else v
+            for k, v in (args or {}).items()
+            if isinstance(v, (str, int, bool))
+        }
+        line = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": source,
+            "lookup": lookup,
+            "case": case,
+            "args": kept,
+        }
+        path = Path.home() / ".vhir" / "logs" / "lookups.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(line) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+```
+
+[`packages/sift-common/src/sift_common/oplog.py:136-159`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/oplog.py#L136-L159)
+
+[15] (실행 확인) `VHIR_CASE_DIR`를 사건 B로, 표시 파일을 사건 A로 두고 `suggest_tools`와 `run_command`를 부른 뒤 두 사건의 `audit/sift-mcp.jsonl`에서 항목의 위치와 `case_id`를 읽었다.
+
+[16] 출력 경로는 열린 사건 폴더 안이어야 한다.
+
+```python
+    resolved = str(Path(_at(path, base)).resolve())
+
+    # Case-dir containment: if inside case dir, it's allowed
+    case_dir = resolve_case_dir()
+    if case_dir:
+        case_resolved = str(Path(case_dir).resolve())
+        if resolved == case_resolved or resolved.startswith(case_resolved + "/"):
+            return resolved
+        raise ValueError(
+            f"Output path '{path}' resolves to '{resolved}' which is "
+            f"outside the case directory '{case_resolved}'"
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:305-316`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L305-L316)
+
+[17] `case_activate`는 사건 고유값마다 폴더를 적고 다른 폴더는 거부한다: [`src/vhir_cli/main.py:1563-1573`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1563-L1573), [`src/vhir_cli/case_identity.py:188-210`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/case_identity.py#L188-L210).
+
+[18] 사건 잠금 파일은 사건 ID로 이름을 짓는다.
+
+```python
+LEDGER_DIR = Path("/var/lib/vhir/ledger")
+CASE_LOCK_SECONDS = 30
+
+
+class CaseLockError(Exception):
+    """The case lock couldn't be taken; nothing was recorded."""
+
+
+def case_lock_path(case_id: str) -> Path:
+    if (
+        not case_id
+        or case_id in (".", "..")
+        or ".." in case_id
+        or "/" in case_id
+        or "\\" in case_id
+        or any(ord(c) < 32 or ord(c) == 127 for c in case_id)
+    ):
+        raise CaseLockError(f"Invalid case ID: {case_id!r}")
+    return LEDGER_DIR / f"{case_id}.lock"
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:134-152`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L134-L152)
+
+[19] 참조 지식 횟수는 모듈 변수다.
+
+```python
+# --- Enrichment Token Budget: FK delivery decay counters ---
+_fk_delivery_counts: dict[str, int] = defaultdict(int)
+_related_delivery_counts: dict[str, int] = defaultdict(int)
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:23-25`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L23-L25)
+
+[20] 위치 인자는 입력 경로 검사만 거치고 복사 대상의 새 파일은 사건 자료 검사를 통과한다.
+
+```python
+        if arg.startswith("/") or arg.startswith("..") or "/" in arg:
+            if arg.startswith("/dev/") and binary in _DEV_PATH_TOOLS:
+                pass  # Device path for disk forensics
+            elif prev_was_output_flag:
+                validate_output_path(arg, base=cwd)
+            else:
+                validate_input_path(arg, base=cwd)
+        elif arg:
+            # a bare name (.ssh, .claude.json), resolved against the working folder
+            validate_input_path(arg, base=cwd)
+        prev_was_output_flag = False
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:140-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L140-L150)
+
+```python
+    elif name in ("mv", "cp", "install", "ln") and len(args) >= 2:
+        dst = args[-1]
+        into = not no_t and os.path.isdir(dst)
+        for s in args[:-1]:
+            if name == "mv" and _harms_case_data(s):
+                bad.append(s)
+            tgt = os.path.join(dst, os.path.basename(s)) if into else dst
+            if _harms_case_data(tgt, new_ok=True):
+                bad.append(tgt)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:239-247`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L239-L247)
+
+[21] (실행 확인) 컨테이너에서 사건 A를 연 채 `run_command`로 사건 B의 `evidence/`에 새 파일을 쓰는 명령을 위치 인자와 출력 옵션 값으로 각각 실행하고 B의 폴더를 읽었다.

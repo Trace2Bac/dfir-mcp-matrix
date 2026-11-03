@@ -1,0 +1,418 @@
+---
+cell: I01
+details:
+- id: I01.01
+- id: I01.02
+- id: I01.06
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.01 명시적 설정으로 활성화
+
+**구현.** 이 방식은 `opencti-mcp`의 MISP 조회, 게이트웨이의 HTTP 백엔드 연결, `case-mcp`가 부르는 `wintools-mcp` 사건 알림에 적용된다 [1][2][3].
+`opencti-mcp`는 환경변수 `THREATINTEL_PROVIDERS`에 적힌 조회처만 만들고 이 값이 없으면 OpenCTI 하나만 쓴다 [1].
+그래서 MISP는 사용자가 `THREATINTEL_PROVIDERS`에 `misp`를 적어야 `lookup_ioc`의 조회처가 된다 [1][4].
+게이트웨이는 설정 파일 `gateway.yaml`의 `backends`에서 `type: http`이고 `enabled`가 거짓이 아닌 항목만 연결한다 [2][5].
+설정 예시는 원격 HTTP 백엔드 4개를 모두 `enabled: false`로 둔다 [5].
+`case-mcp`의 `case_init`·`case_activate`는 `~/.vhir/samba.yaml`에 공유 이름이 있을 때만 `vhir_cli`의 `notify_wintools_case_activated`를 부른다 [3][6].
+이 함수는 `gateway.yaml`에 `wintools-mcp`의 주소와 토큰이 없으면 연결하지 않는다 [7].
+게이트웨이는 시작할 때 연결된 HTTP 백엔드마다, 주기 점검에서는 `wintools-mcp`에만 활성 사건 ID를 보낸다 [8][9].
+
+### I01.02 자격증명 존재로 활성화
+
+**구현.** 이 방식은 `opencti-mcp`의 OpenCTI 조회와 MISP 조회에 적용된다 [10][4].
+OpenCTI는 조회처 목록의 기본값이지만 토큰을 읽지 못하면 설정이 없는 것으로 처리하고 연결하지 않는다 [10][11].
+그때 `lookup_ioc`는 OpenCTI를 `UNAVAILABLE`로 돌려주고 OpenCTI 전용 도구 7개는 `opencti_not_configured` 오류를 돌려준다 [12][13].
+토큰 없이 `opencti-mcp`를 게이트웨이에 붙여 `lookup_ioc`를 부르자 연결 없이 `UNAVAILABLE`과 토큰이 없다는 이유를 돌려줬다 [14].
+토큰이 있으면 시작할 때 연결을 확인하는 기능 `FF_STARTUP_VALIDATION`이 기본으로 켜져 있어 첫 호출 전에도 OpenCTI에 연결한다 [15].
+MISP는 `MISP_URL`과 `MISP_KEY`가 모두 있어야 조회처가 되고 하나라도 없으면 그 이유를 담은 `UNAVAILABLE` 조회처로 남는다 [4][16].
+
+### I01.06 설정으로 목적지 지정
+
+**구현.** 이 방식은 서버 코드가 여는 외부 연결 모두에 적용된다 [10][4][2][7].
+OpenCTI 주소는 환경변수 `OPENCTI_URL`에서 읽고 없으면 `http://localhost:8080`을 쓴다 [10].
+서버는 주소의 스킴이 `http`·`https`이고 호스트가 있는지만 검사하고 호스트를 목록과 대조하지 않는다 [17].
+MISP 주소는 `MISP_URL`에서 읽고 같은 스킴 검사만 한다 [4].
+게이트웨이의 HTTP 백엔드 주소는 `gateway.yaml`의 `url`이고 설정 파일의 `${VAR}`는 환경변수 값으로 바꾼다 [2][18].
+`wintools-mcp`는 일회용 가입 코드를 가진 Windows 쪽 프로그램이 가입 API로 보낸 주소와 토큰을 게이트웨이가 `gateway.yaml`에 저장해 붙인다 [19].
+`case-mcp`의 사건 알림은 `gateway.yaml`의 `wintools-mcp` 주소에서 경로만 `/cases/activate`로 바꿔 보낸다 [7].
+어느 도구도 접속할 호스트나 URL을 인자로 받지 않는다 [12].
+
+인증서 검증은 연결마다 다르다.
+- OpenCTI는 `OPENCTI_SSL_VERIFY`, MISP는 `MISP_SSL_VERIFY`로 끌 수 있고 기본은 검증한다 [20][4].
+- 게이트웨이의 HTTP 백엔드 연결은 `tls_cert`가 있으면 그 인증서로만 검증한다 [21].
+- 게이트웨이가 HTTP 백엔드에 사건 ID를 보내는 요청은 `verify=False`로 보낸다 [8].
+
+### 근거
+
+[1] 조회처 목록은 `THREATINTEL_PROVIDERS`에서 읽고 없으면 OpenCTI만 쓴다.
+
+```python
+def configured_names() -> list[str]:
+    """The providers named in THREATINTEL_PROVIDERS, in order; unset means
+    OpenCTI alone, so an existing configuration keeps working."""
+    raw = os.getenv("THREATINTEL_PROVIDERS", "")
+    names: list[str] = []
+    for name in raw.split(","):
+        name = name.strip().lower()
+        if name and name not in names:
+            names.append(name)
+    return names or ["opencti"]
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:111-120`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L111-L120)
+
+[2] 게이트웨이는 `enabled`가 거짓인 백엔드를 만들지 않는다.
+
+```python
+        # Create backend instances from config
+        backends_config = config.get("backends", {})
+        for name, backend_conf in backends_config.items():
+            if not backend_conf.get("enabled", True):
+                logger.info("Backend %s is disabled, skipping", name)
+                continue
+            try:
+                backend = create_backend(name, backend_conf)
+                self.backends[name] = backend
+            except (Exception, asyncio.CancelledError, BaseExceptionGroup) as exc:
+                logger.error("Failed to create backend %s: %s", name, exc)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:142-152`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L142-L152)
+
+[3] `case_init`은 공유 설정이 있을 때만 `wintools-mcp`에 알린다.
+
+```python
+            # Auto-detect wintools when share_wintools is None
+            if share_wintools is None:
+                share_wintools = _wintools_configured()
+            if share_wintools and _wintools_configured():
+                try:
+                    perm_warning = _set_case_wintools_permissions(
+                        Path(result["case_dir"])
+                    )
+                    _repoint_samba_share(Path(result["case_dir"]))
+                    ok = notify_wintools_case_activated(result["case_id"])
+                    result["wintools_shared"] = True
+                    if perm_warning:
+                        result.setdefault("warnings", []).append(perm_warning)
+                    if not ok:
+                        result.setdefault("warnings", []).append(
+                            "Could not notify wintools-mcp of case activation. "
+                            "Windows tools may not have access to this case."
+                        )
+                except Exception as e:
+                    result["wintools_warning"] = (
+                        f"Failed to set up wintools sharing: {e}"
+                    )
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:320-341`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L320-L341)
+
+[4] MISP 조회처는 `MISP_URL`·`MISP_KEY`가 있어야 만들어지고 주소 스킴만 검사한다.
+
+```python
+def create() -> MispAdapter:
+    url = os.getenv("MISP_URL", "").strip().rstrip("/")
+    key = os.getenv("MISP_KEY", "").strip()
+    if not url:
+        raise ProviderConfigError("MISP_URL is not set")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ProviderConfigError(f"MISP_URL is not an http(s) URL: {url}")
+    if not key:
+        raise ProviderConfigError("MISP_KEY is not set")
+    raw_timeout = os.getenv("MISP_TIMEOUT", "30")
+    try:
+        timeout = float(raw_timeout)
+    except ValueError as e:
+        raise ProviderConfigError(f"MISP_TIMEOUT is not a number: {raw_timeout}") from e
+    if timeout <= 0:
+        raise ProviderConfigError(f"MISP_TIMEOUT must be positive: {raw_timeout}")
+    return MispAdapter(url, key, _verify(os.getenv("MISP_SSL_VERIFY", "true")), timeout)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:306-323`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L306-L323)
+
+[5] 설정 예시의 원격 HTTP 백엔드는 모두 꺼져 있다.
+
+```text
+  # --- Remote HTTP backends ---
+
+  # Windows forensic workstation running wintools-mcp
+  wintools-mcp:
+    type: http
+    url: "http://windows-workstation:4624/mcp"
+    bearer_token: "${WINTOOLS_TOKEN}"
+    enabled: false
+
+  remnux-mcp:
+    type: http
+    url: "https://remnux.example.com/mcp"
+    bearer_token: "${REMNUX_TOKEN}"
+    enabled: false
+
+  microsoft-learn:
+    type: http
+    url: "https://learn.example.com/mcp"
+    enabled: false
+
+  zeltser-ir-writing:
+    type: http
+    url: "https://zeltser.example.com/mcp"
+    enabled: false
+```
+
+[`config/gateway.yaml.example:102-125`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L102-L125)
+
+[6] 공유 설정이 있는지는 `samba.yaml`의 `share_name`으로 정한다.
+
+```python
+def _wintools_configured() -> bool:
+    """Check if Samba sharing is set up (samba.yaml exists with share_name)."""
+    import yaml
+
+    p = Path.home() / ".vhir" / "samba.yaml"
+    if not p.is_file():
+        return False
+    try:
+        doc = yaml.safe_load(p.read_text())
+        return bool(doc and doc.get("share_name"))
+    except Exception:
+        return False
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:66-77`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L66-L77)
+
+[7] `notify_wintools_case_activated`는 `gateway.yaml`의 `wintools-mcp` 주소와 토큰이 있을 때만 사건 ID를 보낸다: [`src/vhir_cli/commands/join.py:1349-1394`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/join.py#L1349-L1394).
+
+[8] 게이트웨이는 HTTP 백엔드에 활성 사건 ID를 인증서 검증 없이 보낸다.
+
+```python
+    async def _notify_backend_case(self, backend) -> None:
+        """Send case activation to an HTTP backend after reconnect."""
+        from sift_gateway.backends.http_backend import HttpMCPBackend
+
+        if not isinstance(backend, HttpMCPBackend):
+            return
+        active_case = self._get_active_case()
+        if not active_case:
+            return
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.post(
+                    f"{backend.base_url}/cases/activate",
+                    json={"case_id": active_case},
+                    headers={"Authorization": f"Bearer {backend.bearer_token}"},
+                    timeout=5,
+                )
+            # Only log at INFO on actual state change, DEBUG for heartbeat no-ops
+            body = resp.json() if resp.status_code == 200 else {}
+            if body.get("status") == "already_active":
+                logger.debug("Case %s already active on %s", active_case, backend.name)
+            else:
+                logger.info(
+                    "Case %s activated on backend %s", active_case, backend.name
+                )
+        except Exception as e:
+            logger.debug("Case activation to %s failed: %s", backend.name, e)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:431-459`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L431-L459)
+
+[9] 시작할 때는 모든 HTTP 백엔드에, 주기 점검에서는 `wintools-mcp`에만 보낸다.
+
+```python
+        # Push active case to all started HTTP backends on startup
+        for _name, backend in self.backends.items():
+            if backend.started:
+                await self._notify_backend_case(backend)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:207-210`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L207-L210)
+
+```python
+                    # Re-sync case on wintools only (/cases/activate is wintools-specific)
+                    if name == "wintools-mcp":
+                        await self._notify_backend_case(backend)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:415-417`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L415-L417)
+
+[10] OpenCTI 주소와 토큰을 읽고 토큰이 없으면 설정 오류를 낸다.
+
+```python
+        # Load URL
+        url = os.getenv("OPENCTI_URL", "http://localhost:8080")
+
+        # Load token
+        token = _load_token()
+        if not token:
+            raise ConfigurationError(
+                "OpenCTI API token not found. Set OPENCTI_TOKEN environment variable "
+                "or create ~/.config/opencti-mcp/token file."
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:235-244`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L235-L244)
+
+[11] 토큰을 읽지 못하면 설정 없이 시작하고 그 이유를 남긴다.
+
+```python
+        # OpenCTI's settings are needed only when it is a listed provider.
+        # When they are missing, the backend still starts: lookup_ioc
+        # reports OpenCTI UNAVAILABLE with the reason.
+        names = configured_names()
+        config: Config | None = None
+        opencti_reason = ""
+        if "opencti" in names:
+            try:
+                config = Config.load()
+            except ConfigurationError as e:
+                opencti_reason = str(e)
+                logger.error(f"OpenCTI is listed but not configured: {e}")
+        logger.info(f"Starting threat-intel backend: providers={names} {config}")
+```
+
+[`packages/opencti/src/opencti_mcp/__main__.py:49-61`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L49-L61)
+
+[12] OpenCTI 설정이 없으면 OpenCTI 전용 도구는 오류를 돌려준다.
+
+```python
+    async def _dispatch_tool(self, name: str, arguments: dict) -> dict[str, Any]:
+        """Dispatch tool call to appropriate handler."""
+
+        if name in _OPENCTI_TOOLS and self.client is None:
+            return {
+                "error": "opencti_not_configured",
+                "message": self._opencti_reason,
+            }
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:851-858`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L851-L858)
+
+[`packages/opencti/src/opencti_mcp/server.py:118-129`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L118-L129)
+
+[13] 설정이 없는 조회처는 이유를 담은 `Unavailable`로 둔다.
+
+```python
+        prebuilt: dict[str, Any] = {}
+        if "opencti" in self.provider_names:
+            prebuilt["opencti"] = (
+                opencti_provider.create(config)
+                if config is not None
+                else providers.Unavailable(
+                    f"opencti is not configured: {self._opencti_reason}"
+                )
+            )
+        self.providers = providers.load(self.provider_names, prebuilt)
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:249-258`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L249-L258)
+
+[14] (실행 확인) 컨테이너 안 게이트웨이에 토큰 없이 stdio 백엔드 `threatintel-mcp`를 붙여 `lookup_ioc`를 부르고 응답과 호출 기록을 확인했다.
+
+[15] 시작할 때 연결 확인은 설정이 있고 기능이 켜져 있을 때 실행한다.
+
+```python
+        client: OpenCTIClient | None = None
+        if flags.startup_validation and config is not None:
+            logger.info("Running startup validation...")
+            client = OpenCTIClient(config)
+            validation = client.validate_startup()
+```
+
+[`packages/opencti/src/opencti_mcp/__main__.py:73-77`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L73-L77)
+
+[`packages/opencti/src/opencti_mcp/__main__.py:16-17`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L16-L17)
+
+[16] 조회처 모듈이 설정 오류를 내면 그 이유를 담은 `Unavailable`로 둔다.
+
+```python
+        try:
+            adapters[name] = module.create()
+        except ProviderConfigError as e:
+            adapters[name] = Unavailable(f"{name} is not configured: {e}")
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:161-164`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L161-L164)
+
+[17] OpenCTI 주소는 스킴과 호스트만 검사한다.
+
+```python
+def _validate_url(url: str) -> str:
+    """Validate and normalize OpenCTI URL.
+
+    Security: Prevents SSRF by restricting URL schemes.
+    """
+    url = url.strip().rstrip("/")
+
+    if not url:
+        raise ConfigurationError("OpenCTI URL cannot be empty")
+
+    parsed = urlparse(url)
+
+    # Only allow http/https
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigurationError(
+            f"Invalid URL scheme: {parsed.scheme}. Use http or https."
+        )
+
+    # Must have a host
+    if not parsed.netloc:
+        raise ConfigurationError("Invalid URL: missing host")
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:417-437`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L417-L437)
+
+[18] 게이트웨이 설정의 `${VAR}`는 환경변수 값으로 바뀐다.
+
+```python
+def _interpolate_env(value: str) -> str:
+    """Replace ${VAR} patterns with environment variable values.
+
+    If a referenced variable is not set, the placeholder is replaced with
+    an empty string to prevent literal '${VAR}' from leaking into configs.
+    """
+
+    def _replace(match: re.Match) -> str:
+        var_name = match.group(1)
+        return os.environ.get(var_name, "")
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+```
+
+[`packages/sift-gateway/src/sift_gateway/config.py:16-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/config.py#L16-L27)
+
+[19] 가입 API는 가입 코드를 확인한 뒤 요청에 담긴 `wintools_url`과 토큰으로 백엔드 설정을 만든다: [`packages/sift-gateway/src/sift_gateway/rest.py:542-680`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L542-L680).
+
+[20] OpenCTI 인증서 검증 설정이다.
+
+```python
+        ssl_verify = os.getenv("OPENCTI_SSL_VERIFY", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:260-264`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L260-L264)
+
+[21] HTTP 백엔드는 `tls_cert`가 있으면 고정한 인증서로 검증한다.
+
+```python
+        try:
+            client_factory_kwargs = {}
+            tls_cert = self.config.get("tls_cert")
+            if tls_cert:
+                client_factory_kwargs["httpx_client_factory"] = (
+                    _make_pinned_tls_factory(
+                        os.path.expanduser(tls_cert), self._pinned_pem
+                    )
+                )
+```
+
+[`packages/sift-gateway/src/sift_gateway/backends/http_backend.py:242-250`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/backends/http_backend.py#L242-L250)

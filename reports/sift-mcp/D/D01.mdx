@@ -1,0 +1,394 @@
+---
+cell: D01
+details:
+- id: D01.01
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`, 게이트웨이의 참조 조회 기록, `forensic-mcp`의 발견사항·타임라인·IOC 기록, `report-mcp`의 `save_report`, `case-mcp`의 `backup_case`에 적용된다 [1][2][3][4][5].
+활성 사건이 있으면 `run_command`는 호출마다 사건 폴더 아래 `extractions/<audit_id>/` 폴더를 먼저 만들고 그 폴더를 작업 폴더로 삼아 분석 도구를 실행한다 [1].
+`audit_id`는 그 호출의 호출 기록 항목 ID다 [1].
+표준 출력과 표준 오류는 `save_output` 값과 출력 크기에 관계없이 이 폴더에 `_stdout.txt`·`_stderr.txt`로 끝나는 파일로 남는다 [6].
+두 파이프는 합쳐서 `max_output_bytes`(기본 50 MiB)까지만 읽으므로 보관한 파일은 읽은 부분만 담는다 [7].
+분석 도구가 작업 폴더에 쓴 파일과 출력 인자(`-o`, `--csv` 등)로 받은 경로에 새로 생기거나 바뀐 파일도 지우지 않고 남는다 [8].
+호출 기록 항목에는 표준 출력의 앞 500자 `stdout_head`만 들어간다 [9].
+시험용 실행 파일로 `run_command`를 부르자 `extractions/<audit_id>/`에 표준 출력 파일과 도구가 작업 폴더에 쓴 파일이 남았다 [10].
+
+게이트웨이는 `opencti-mcp`의 `lookup_ioc`와 `windows-triage-mcp`의 `check_*` 도구 응답을 사건 폴더의 `extractions/<audit_id>/response.json`에 백엔드가 돌려준 글 그대로 남긴다 [2].
+이 `audit_id`는 게이트웨이가 그 조회에 따로 매긴 호출 기록 항목 ID다 [2].
+시험용 응답으로 이 기록 함수를 부르자 `response.json`이 생겼고 조회 도구가 아닌 `search_threat_intel`에는 파일이 생기지 않았다 [11].
+
+`forensic-mcp`는 발견사항, 타임라인 사건, IOC를 사건 폴더의 `findings.json`·`timeline.json`·`iocs.json`에 JSON 배열로 남긴다 [3].
+세 파일은 임시 파일에 전체를 쓴 뒤 이름을 바꾸고 쓰기 권한을 뺀 `0444` 모드로 둔다 [12].
+발견사항에 붙은 인용 `content`는 앞 5,000자까지만 저장하고 자른 사실을 그 뒤에 적는다 [13].
+
+`save_report`는 모델이 보낸 보고서 글 뒤에 서버가 만든 검증 결과와 출처 목록을 붙여 사건 폴더의 `reports/`에 쓴다 [4].
+`backup_case`는 사건 기록 파일, 호출 기록, 보고서를 받은 목적지 아래 새 폴더로 복사하고 파일마다 SHA-256을 적은 `backup-manifest.json`을 함께 둔다 [5].
+MCP 도구 `backup_case`는 `evidence/`와 `extractions/`를 복사하지 않으므로 `run_command`의 보관 출력과 참조 응답 사본은 이 복사본에 들어가지 않는다 [5].
+
+`windows-triage-mcp`, `rag-mcp`, `opencti-mcp`와 `sift-mcp`의 다른 4개 도구는 결과를 응답으로만 돌려주고 파일을 쓰지 않는다 [14].
+보관 기간이나 보관 대상을 정하는 설정과 코드는 없다.
+보관한 파생물을 지우는 MCP 도구는 없다 [15].
+
+**한계.** 활성 사건이 없으면 `run_command`는 출력을 보관하지 않는다 [16].
+작업 폴더를 정하지 않으므로 `save_output`을 참으로 주어도 저장할 폴더가 없어 아무 파일도 쓰지 않는다 [16].
+도구 설명은 `save_output`이 표준 출력과 표준 오류를 SHA-256과 함께 파일로 저장한다고 적는다 [17].
+사건 없이 `save_output=True`로 부르자 응답에 `full_output_path`가 없었고 분석 도구가 쓴 파일만 서버 프로세스의 현재 폴더에 남았다 [18].
+게이트웨이를 거치지 않고 `opencti-mcp`나 `windows-triage-mcp`를 직접 붙이면 참조 응답 사본은 생기지 않는다 [19].
+게이트웨이는 백엔드가 오류로 표시한 응답의 사본도 남기지 않는다 [19].
+
+### 근거
+
+[1] 사건이 있으면 호출 기록 ID로 이름 지은 폴더를 먼저 만들고 그 폴더에서 실행한다.
+
+```python
+        # One case per call, resolved as it starts: the audit id is minted for
+        # it, and the output and the entry are kept in it, whatever case is
+        # active when the command ends
+        case_dir = resolve_case_dir()
+        audit_dir = audit._get_audit_dir(case_dir)
+        op_id = audit._next_audit_id(audit_dir) if audit_dir else None
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:249-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L249-L267)
+
+[2] 참조 조회 응답을 `extractions/<audit_id>/response.json`에 쓰고 경로와 해시를 기록 항목에 넣는다.
+
+```python
+    if not case_dir or not is_reference(backend_name, tool):
+        return None
+    try:
+        from sift_gateway.audit_helpers import _extract_audit_id, _truncate_params
+
+        audit_dir = audit._get_audit_dir(case_dir) if case_dir else None
+        if not audit_dir:
+            return None
+        op_id = audit._next_audit_id(audit_dir)
+        folder = os.path.join(case_dir, "extractions", op_id)
+        os.makedirs(folder)
+        data = _raw(result)
+        path = os.path.join(folder, "response.json")
+        with open(path, "xb") as f:
+            f.write(data)
+        source = _ALIASES.get(backend_name, backend_name)
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:65-80`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L65-L80)
+
+[3] `forensic-mcp`는 사건 폴더의 정해진 JSON 파일에 기록을 쓴다.
+
+```python
+    def _load_findings(self, case_dir: Path) -> list[dict]:
+        return self._load_json_file(case_dir / "findings.json", [])
+
+    def _save_findings(self, case_dir: Path, findings: list[dict]) -> None:
+        _protected_write(
+            case_dir / "findings.json", json.dumps(findings, indent=2, default=str)
+        )
+
+    def _load_timeline(self, case_dir: Path) -> list[dict]:
+        return self._load_json_file(case_dir / "timeline.json", [])
+
+    def _save_timeline(self, case_dir: Path, timeline: list[dict]) -> None:
+        _protected_write(
+            case_dir / "timeline.json", json.dumps(timeline, indent=2, default=str)
+        )
+
+    def _load_iocs(self, case_dir: Path) -> list[dict]:
+        return self._load_json_file(case_dir / "iocs.json", [])
+
+    def _save_iocs(self, case_dir: Path, iocs: list[dict]) -> None:
+        _protected_write(
+            case_dir / "iocs.json", json.dumps(iocs, indent=2, default=str)
+        )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:2111-2133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L2111-L2133)
+
+[4] `save_report`는 서버가 만든 블록을 덧붙여 `reports/` 아래에 쓴다: [`packages/report-mcp/src/report_mcp/server.py:1112-1116`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1112-L1116).
+
+```python
+            view = approved_view(case_dir)
+            # every IOC of the case is written defanged, the block too: it's a
+            # display copy, and nothing reads its text back
+            iocs = _report_iocs(case_dir, view)
+            content = _defang_iocs(content, iocs)
+            block = [
+                _defang_iocs(line, iocs)
+                for line in verification_block(view) + [""] + provenance_block(view)
+            ]
+            runs = [len(r) for r in re.findall(r"`+", "\n".join(block))]
+            fence = "`" * max(3, max(runs, default=0) + 1)
+            saved = (
+                content.rstrip("\n")
+                + f"\n\n{fence}\n"
+                + "\n".join(block)
+                + f"\n{fence}\n"
+            )
+            _atomic_write(report_path, saved)
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1139-1156`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1139-L1156)
+
+[5] `backup_case`는 `evidence/`·`extractions/`를 뺀 사건 자료를 복사하고 manifest를 쓴다: [`packages/case-mcp/src/case_mcp/server.py:848-881`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L848-L881), [`src/vhir_cli/commands/backup.py:428-433`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L428-L433), [`src/vhir_cli/commands/backup.py:534-599`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L534-L599).
+
+[6] 사건이 있으면 `save_output`과 관계없이 출력을 그 호출의 폴더에 저장하고 이름에 시각·명령·난수를 넣는다.
+
+```python
+        # In a case every output is kept, whatever its size or save_output:
+        # those are the bytes a finding cites. Without a case, when asked.
+        if case_dir is None:
+            case_dir = resolve_case_dir()
+        elif case_dir and not os.path.isfile(os.path.join(case_dir, "CASE.yaml")):
+            case_dir = ""  # moved away since the call started: never recreated
+
+        if case_dir and (stdout_raw or stderr_raw):
+            folder = os.path.join(case_dir, "extractions")
+            if op_id and not save_dir:  # each operation's output in its own folder
+                response["op_id"] = op_id()
+                folder = os.path.join(folder, response["op_id"])
+            _save_output(
+                cmd_list, stdout_raw, stderr_raw, save_dir or folder, response, case_dir
+            )
+        elif save_output and (stdout_raw or stderr_raw):
+            _save_output(
+                cmd_list,
+                stdout_raw,
+                stderr_raw,
+                save_dir or (str(Path(cwd) / "extracted") if cwd else None),
+                response,
+                case_dir,
+            )
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:157-180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L157-L180)
+
+```python
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_cmd = "".join(c if c.isalnum() or c in "-_" else "_" for c in cmd_list[0])[:40]
+    # unique, and created exclusively: a saved output is never replaced, so its
+    # recorded hash always describes it
+    prefix = f"{ts}_{safe_cmd}_{uuid.uuid4().hex[:8]}"
+
+    if stdout:
+        try:
+            stdout_path = out_dir / f"{prefix}_stdout.txt"
+            with open(stdout_path, "xb") as f:
+                f.write(stdout)
+                f.flush()
+                os.fsync(f.fileno())
+            response["output_file"] = str(stdout_path)
+            response["output_sha256"] = hashlib.sha256(stdout).hexdigest()
+        except OSError as e:
+            logger.warning("Failed to save stdout to %s: %s", stdout_path, e)
+
+    if stderr:
+        try:
+            stderr_path = out_dir / f"{prefix}_stderr.txt"
+            with open(stderr_path, "xb") as f:
+                f.write(stderr)
+                f.flush()
+                os.fsync(f.fileno())
+            response["stderr_file"] = str(stderr_path)
+            response["stderr_sha256"] = hashlib.sha256(stderr).hexdigest()
+        except OSError as e:
+            logger.warning("Failed to save stderr to %s: %s", stderr_path, e)
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:257-285`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L257-L285)
+
+[7] 두 파이프를 함께 센 바이트가 `max_output_bytes`에 이르면 읽기를 멈추고 프로세스를 끝낸다: [`packages/sift-mcp/src/sift_mcp/executor.py:26-36`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L26-L36), [`packages/sift-mcp/src/sift_mcp/executor.py:101-116`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L101-L116), [`packages/sift-mcp/src/sift_mcp/config.py:28-29`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/config.py#L28-L29).
+
+[8] 출력은 작업 폴더의 모든 파일과 출력 인자 경로에서 새로 생기거나 바뀐 파일이다.
+
+```python
+            if op_dir:
+                _share_readable(op_dir)
+            # Its outputs: every file in its own folder (but the saved stdout,
+            # recorded as output_file) and every file new or changed under an
+            # output flag's value, each hashed
+            saved = os.path.realpath(exec_result.get("output_file") or "")
+            made = [
+                p
+                for p in (command_files.files_at([op_dir]) if op_dir else {})
+                if os.path.realpath(p) != saved
+            ]
+            made += [
+                p
+                for p, key in command_files.files_at(flagged).items()
+                if before.get(p) != key and p not in made
+            ]
+            outputs = file_place.output_records(case_dir, made, "run_command")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:368-384`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L368-L384)
+
+[9] 호출 기록 항목의 `result_summary`에는 보관 파일 경로·해시와 표준 출력 앞 500자가 들어간다.
+
+```python
+            logged_id = audit.log(
+                tool="run_command",
+                audit_id=op_id,
+                case_dir=case_dir,
+                params={"command": command, "purpose": purpose},
+                result_summary={
+                    "exit_code": exec_result["exit_code"],
+                    "output_file": exec_result.get("output_file", ""),
+                    "output_sha256": exec_result.get("output_sha256", ""),
+                    "output_sha256_scope": exec_result.get("output_sha256_scope", ""),
+                    "stdout_bytes": exec_result.get("stdout_total_bytes", 0),
+                    "stdout_head": (exec_result.get("stdout") or "")[:500],
+                    **({"truncated": True} if exec_result.get("truncated") else {}),
+                    **({"stopped": stopped} if stopped else {}),
+                    **version_summary,
+                },
+                elapsed_ms=elapsed * 1000,
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:405-421`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L405-L421)
+
+[10] (실행 확인) 시험용 실행 파일 `faketool`로 사건 안에서 `run_command`를 부르자 `extractions/<audit_id>/`에 `_stdout.txt` 파일과 `made.txt`가 남았다.
+
+[11] (실행 확인) `reference.record`에 시험용 `lookup_ioc` 응답을 주자 `extractions/<audit_id>/response.json`이 생겼고 `search_threat_intel`에는 `None`을 돌려주고 파일을 만들지 않았다.
+
+[12] `_protected_write`는 임시 파일에 쓰고 이름을 바꾼 뒤 `0444`로 둔다.
+
+```python
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename to prevent data loss on crash."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:38-52`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L38-L52)
+
+```python
+def _protected_write(path: Path, content: str) -> None:
+    """Write to a chmod-444-protected case data file.
+
+    Uses atomic write (tempfile + rename), then locks (0o444).
+    The temp file is created writable, so we only need to unlock the
+    existing file for _atomic_write's rename to succeed on the same inode.
+    """
+    try:
+        if path.exists():
+            os.chmod(path, 0o644)
+    except OSError:
+        pass  # May already be writable or on non-POSIX fs
+    try:
+        _atomic_write(path, content)
+    finally:
+        # Always re-lock, even if the write failed partway
+        try:
+            if path.exists():
+                os.chmod(path, 0o444)
+        except OSError:
+            pass  # Non-POSIX filesystem
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:55-75`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L55-L75)
+
+[13] 인용은 앞 5,000자만 저장하고 자른 사실을 적는다.
+
+```python
+_MAX_CONTENT = 5000  # an artifact's content stored; the whole quote is checked
+_MAX_QUOTE = 64 << 10  # chars of a quote checked; a longer one is refused
+
+
+def _stored_content(content: str) -> str:
+    """An artifact's content as stored: whole, or its first `_MAX_CONTENT`
+    chars with a marker saying how much of how much is kept."""
+    if len(content) <= _MAX_CONTENT:
+        return content
+    return f"{content[:_MAX_CONTENT]}\n[cut: {_MAX_CONTENT} of {len(content)} chars stored]"
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:276-285`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L276-L285)
+
+[14] 참조 사본은 두 백엔드의 조회 도구만 대상으로 하고 `sift-mcp`의 탐색 도구 4개는 응답만 돌려준다: [`packages/sift-gateway/src/sift_gateway/reference.py:23-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L23-L27), [`packages/sift-mcp/src/sift_mcp/server.py:109-182`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L109-L182).
+
+```python
+def is_reference(backend_name: str, tool: str) -> bool:
+    source = _ALIASES.get(backend_name, backend_name)
+    if source == "opencti-mcp":
+        return tool == "lookup_ioc"
+    return source == "windows-triage-mcp" and tool.startswith("check_")
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:23-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L23-L27)
+
+[15] 저장한 파생물을 고치는 MCP 도구는 할 일 수정과 묶음 가져오기뿐이고 지우는 도구는 없다: [`packages/forensic-mcp/src/forensic_mcp/server.py:525-611`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L525-L611), [`packages/case-mcp/src/case_mcp/server.py:592-632`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L592-L632).
+
+[16] 사건이 없으면 작업 폴더와 저장 폴더가 정해지지 않아 `_save_output`이 바로 돌아간다.
+
+```python
+    """Save stdout/stderr, as the bytes the tool wrote, with their SHA-256.
+    `case_dir`: the operation's case, as resolved for it ("" for none)."""
+    if not save_dir:
+        return
+
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:211-215`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L211-L215)
+
+[17] 도구 설명의 `save_output` 문구다.
+
+```python
+            save_output: Save stdout/stderr to files with SHA-256 hashes.
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:213-213`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L213-L213)
+
+[18] (실행 확인) 활성 사건이 없는 홈 폴더에서 `save_output=True`로 `run_command`를 부르자 `full_output_path`는 `null`이었고 파일은 서버 프로세스의 현재 폴더에 도구가 쓴 `made.txt` 하나만 생겼다.
+
+[19] 게이트웨이는 오류가 아닌 응답에만 참조 기록 함수를 부른다.
+
+```python
+        if not getattr(result, "is_error", False):
+            await asyncio.to_thread(
+                reference.record, self._audit, backend_name, backend, actual_name,
+                arguments, result, examiner, ref_case,
+            )  # fmt: skip
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:840-844`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L840-L844)
+
+```python
+        if getattr(result, "is_error", False):
+            return CallToolResult(content=contents, isError=True)
+        if isinstance(backend, HttpMCPBackend):  # an error reply records nothing
+            await gateway.record_pending_hashes(backend_name, result, case_at_start)
+        await asyncio.to_thread(
+            reference.record, gateway._audit, backend_name, backend, name,
+            arguments, result, examiner, ref_case,
+        )  # fmt: skip
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:455-462`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L455-L462)

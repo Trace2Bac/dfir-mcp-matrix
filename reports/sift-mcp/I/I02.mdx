@@ -1,0 +1,289 @@
+---
+cell: I02
+details: [{id: not_implemented}]
+---
+
+# I02 분석 도구 통신 차단
+
+### 미구현
+
+**판단.** 서버가 실행하는 분석 도구와 부르는 라이브러리의 통신을 끊거나 끄는 장치가 서버 코드와 저장소의 실행 구성에 없다.
+
+`sift-mcp`의 `run_command`는 모델이 준 인자 배열을 셸 없이 하위 프로세스로 실행한다 [1][2].
+서버는 실행 파일 경로를 바꾸고 인자를 검사하지만 오프라인 옵션이나 이름 해석을 끄는 옵션을 더하지 않는다 [2][3].
+하위 프로세스는 서버 프로세스와 같은 네트워크에서 실행되고 서버는 네트워크를 나누는 설정을 하지 않는다 [1].
+같은 저장소의 Claude Code 설정은 sandbox를 켜고 설치 스크립트는 이 sandbox가 클라이언트의 Bash 명령을 분리된 네트워크에서 실행한다고 적는다 [4].
+게이트웨이는 systemd 사용자 서비스로 실행되므로 게이트웨이와 백엔드가 실행하는 분석 도구에는 이 sandbox가 적용되지 않는다 [4].
+`run_command`의 도구 설명은 `curl`·`wget`도 실행할 수 있다고 적는다 [5].
+
+`rag-mcp`는 색인을 처음 쓰는 호출에서 sentence-transformers로 임베딩 모델을 이름으로 불러온다 [6].
+모델 이름은 코드에 적은 허용 목록 5개 가운데 하나여야 한다 [7].
+sentence-transformers 6.1.0의 `SentenceTransformer`는 `local_files_only`가 기본으로 거짓이고 서버는 이 값을 넘기지 않는다 [8][6].
+게이트웨이 설정 예시와 설치 스크립트가 만드는 설정은 `forensic-rag-mcp`에 내려받기를 끄는 환경변수를 주지 않는다 [9][10].
+설치 스크립트 `setup-sift.sh`가 만드는 `gateway.yaml`과 Lite 구성의 클라이언트 설정 예시는 `rag-mcp`에 `ANONYMIZED_TELEMETRY`를 `False`로 넘긴다 [10][11].
+chromadb 1.5.9의 제품 사용 통계 클라이언트 `Posthog.capture`는 아무것도 보내지 않는 함수라 이 값과 관계없이 통계 전송은 없다 [12].
+저장소의 설정 예시 `gateway.yaml.example`에는 이 값이 없다 [9].
+
+`windows-triage-mcp`는 내려받아 둔 SQLite 정상 기준 DB만 읽고 외부 분석 도구를 실행하지 않는다 [13].
+
+### 근거
+
+[1] 실행기는 인자 배열을 `subprocess.Popen`에 그대로 넘기고 실행 환경을 따로 정하지 않는다.
+
+```python
+    try:
+        proc = subprocess.Popen(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:76-82`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L76-L82)
+
+[2] `run_command`는 실행 파일을 찾은 경로로 바꾸고 인자를 검사한 뒤 실행한다.
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+
+    # Sanitize any args after the binary
+    sanitize_extra_args(command[1:], tool_name=binary)
+    # SIFT's EZ-tool wrappers expand their arguments unquoted (a path with a
+    # space splits): run the tool's .dll with dotnet directly when it is there
+    command = _ez_launcher(binary, resolved) + command[1:]
+
+    if before_run is not None:  # the command passed every check: about to run
+        before_run()
+
+    exec_result = execute(
+        command,
+        timeout=timeout,
+        cwd=cwd,
+        save_output=save_output,
+        save_dir=save_dir,
+        op_id=op_id,
+        case_dir=case_dir,
+    )
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-175`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L175)
+
+[3] 인자 검사는 거부 목록, 삭제·덮어쓰기 대상, 경로를 본다: [`packages/sift-mcp/src/sift_mcp/tools/generic.py:95-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L95-L150).
+
+[4] Claude Code 설정은 sandbox를 켜고 설치 스크립트는 이 sandbox가 Bash 명령을 network namespace로 나눈다고 적으며 게이트웨이는 systemd 사용자 서비스로 실행된다.
+
+게이트웨이 서비스 정의는 [`setup-sift.sh:2155-2169`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L2155-L2169)에 있다.
+
+```json
+  "sandbox": {
+    "enabled": true,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true,
+```
+
+[`claude-code/full/settings.json:144-147`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/full/settings.json#L144-L147)
+
+```bash
+# Claude Code's kernel sandbox (L9) uses bubblewrap to isolate Bash commands
+# in network and PID namespaces. On non-setuid bwrap (all Ubuntu 18.10+),
+# this requires unprivileged user namespace support in the kernel.
+```
+
+[`setup-sift.sh:670-672`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L670-L672)
+
+[5] `run_command`의 도구 설명이다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-201`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L201)
+
+[6] `RAGIndex.load`는 모델 이름만 넘겨 `SentenceTransformer`를 만든다.
+
+```python
+    def load(self) -> None:
+        """Load the embedding model and ChromaDB index into memory."""
+        with self._lock:
+            if self._loaded:
+                return
+
+            # Security: validate model name against allowlist
+            if self.model_name not in ALLOWED_MODELS:
+                raise ValueError(
+                    f"Model '{self.model_name}' is not allowed. "
+                    "Use one of the approved embedding models."
+                )
+
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+            self._open_stores()
+            self._loaded = True
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:124-140`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L124-L140)
+
+[`packages/forensic-rag/src/rag_mcp/index.py:95-97`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L95-L97), [`packages/forensic-rag/src/rag_mcp/index.py:512-513`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L512-L513)
+
+[7] 허용하는 임베딩 모델 목록이다.
+
+```python
+# Allowed embedding models (security: prevent arbitrary model loading)
+ALLOWED_MODELS = frozenset(
+    {
+        "BAAI/bge-base-en-v1.5",
+        "BAAI/bge-small-en-v1.5",
+        "BAAI/bge-large-en-v1.5",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+    }
+)
+
+# Default embedding model
+DEFAULT_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+```
+
+[`packages/forensic-rag/src/rag_mcp/utils.py:28-40`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/utils.py#L28-L40)
+
+[8] sentence-transformers 6.1.0의 `SentenceTransformer` 생성자 인자 `local_files_only`의 기본값과 설명이다: [`sentence_transformers/sentence_transformer/model.py:67-68`](https://github.com/UKPLab/sentence-transformers/blob/b0bf39968ba461c34b29372144794eff1be06f6d/sentence_transformers/sentence_transformer/model.py#L67-L68), [`sentence_transformers/sentence_transformer/model.py:166-166`](https://github.com/UKPLab/sentence-transformers/blob/b0bf39968ba461c34b29372144794eff1be06f6d/sentence_transformers/sentence_transformer/model.py#L166-L166).
+
+[9] 게이트웨이 설정 예시의 `forensic-rag-mcp` 항목이다.
+
+```text
+  forensic-rag-mcp:
+    type: stdio
+    command: "python"
+    args: ["-m", "rag_mcp"]
+    env:
+      VHIR_CASE_DIR: "${VHIR_CASE_DIR}"
+      VHIR_EXAMINER: "${VHIR_EXAMINER}"
+    enabled: true
+```
+
+[`config/gateway.yaml.example:68-75`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L68-L75)
+
+[10] 설치 스크립트가 만드는 `gateway.yaml`의 백엔드 `env`에는 `forensic-rag-mcp`에만 `ANONYMIZED_TELEMETRY`가 더해진다.
+
+```bash
+for name, module in core_backends + optional:
+    entry = {
+        "type": "stdio",
+        "command": venv_python,
+        "args": ["-m", module],
+        "env": {
+            "VHIR_CASE_DIR": "\${VHIR_CASE_DIR}",
+            "VHIR_ACTIVE_CASE": "\${VHIR_ACTIVE_CASE}",
+            "VHIR_EXAMINER": "\${VHIR_EXAMINER}",
+        },
+        "enabled": True,
+    }
+    if name == 'forensic-mcp':
+        entry['args'].append('--deferred-tools')
+    if name in ('case-mcp', 'report-mcp', 'forensic-mcp'):
+        entry['env']['VHIR_CASES_DIR'] = '\${VHIR_CASES_DIR}'
+    if name == "threatintel-mcp":
+        octi_url = "$OPENCTI_URL"
+        octi_token = "$OPENCTI_TOKEN"
+        entry["env"]["OPENCTI_URL"] = octi_url if octi_url else "\${OPENCTI_URL}"
+        entry["env"]["OPENCTI_TOKEN"] = octi_token if octi_token else "\${OPENCTI_TOKEN}"
+    if name == "forensic-rag-mcp":
+        entry["env"]["ANONYMIZED_TELEMETRY"] = "False"
+    if name == "opensearch-mcp":
+        entry["env"]["OPENSEARCH_CONFIG"] = os.path.expanduser("~/.vhir/opensearch.yaml")
+    config["backends"][name] = entry
+```
+
+[`setup-sift.sh:1885-1910`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1885-L1910)
+
+```bash
+        if name == "forensic-rag-mcp":
+            entry["env"]["ANONYMIZED_TELEMETRY"] = "False"
+```
+
+[`setup-sift.sh:1816-1817`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1816-L1817)
+
+[11] Lite 구성의 클라이언트 설정 예시다.
+
+```text
+{
+  "mcpServers": {
+    "forensic-rag": {
+      "command": "__VENV__/bin/python",
+      "args": ["-I", "-m", "rag_mcp.server"],
+      "env": {
+        "PYTHONPATH": "__SRC__/packages/forensic-rag/src",
+        "RAG_INDEX_DIR": "__INDEX_DIR__",
+        "VHIR_CASE_DIR": "__CASE_DIR__",
+        "ANONYMIZED_TELEMETRY": "False"
+      }
+    },
+    "windows-triage": {
+      "command": "__VENV__/bin/python",
+      "args": ["-I", "-m", "windows_triage.server"],
+      "env": {
+        "PYTHONPATH": "__SRC__/packages/windows-triage/src",
+        "WT_DATA_DIR": "__DB_DIR__",
+        "VHIR_CASE_DIR": "__CASE_DIR__"
+      }
+    }
+  }
+}
+```
+
+[`claude-code/lite/mcp.json.example:1-23`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/lite/mcp.json.example#L1-L23)
+
+[12] chromadb 1.5.9의 기본 제품 사용 통계 구현과 `Posthog.capture`다: [`chromadb/config.py:223-227`](https://github.com/chroma-core/chroma/blob/11f3c7435e71024aa0a2b53710a28d3289d922d1/chromadb/config.py#L223-L227), [`chromadb/telemetry/product/posthog.py:8-11`](https://github.com/chroma-core/chroma/blob/11f3c7435e71024aa0a2b53710a28d3289d922d1/chromadb/telemetry/product/posthog.py#L8-L11).
+
+[13] `windows-triage-mcp`는 오프라인 정상 기준 대조 서버라고 적고 SQLite DB만 연다.
+
+```python
+"""
+Windows Triage MCP Server
+
+A Model Context Protocol (MCP) server for OFFLINE forensic file and indicator
+triage. Enables AI assistants to validate files, processes, and persistence
+against curated Windows baselines - all running locally without external
+API dependencies.
+
+Architecture:
+    - known_good.db: Ground truth baselines from clean Windows installations
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1-10`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1-L10)
+
+```python
+        read_only = not self.config.skip_db_validation
+        cache_size = self.config.cache_size
+
+        try:
+            self.known_good_db = KnownGoodDB(
+                kg_path, read_only=read_only, cache_size=cache_size
+            )
+            self.context_db = ContextDB(
+                ctx_path, read_only=read_only, cache_size=cache_size
+            )
+            # Registry DB is optional - initialize but don't fail if missing
+            self.registry_db: RegistryDB | None = None
+            if reg_path.exists():
+                self.registry_db = RegistryDB(
+                    reg_path,
+                    read_only=True,  # Always read-only
+                    cache_size=cache_size,
+                )
+
+            # Startup validation: verify databases are accessible
+            if not self.config.skip_db_validation:
+                self._validate_databases()
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:379-400`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L379-L400)

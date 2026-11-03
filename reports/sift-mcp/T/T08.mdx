@@ -1,0 +1,778 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.02
+- id: T08.03
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 마운트 도구(`ewfmount`, `mount`, `qemu-nbd`, `xmount`, `losetup`)를 실행했을 때 마운트를 기록하는 단계에 적용된다 [1][2].
+`run_command`는 마운트 도구가 종료 코드 0으로 끝났을 때만 호출 기록에 `mount` 항목을 남긴다 [1].
+
+다른 실행에서는 종료 코드로 성공과 실패를 정하지 않는다 [1][3].
+`run_command` 응답의 `success`는 서버가 실행을 멈추지 않았으면 참이고 종료 코드는 `metadata.exit_code`에 그대로 싣는다 [1][3].
+코드 주석은 종료 코드의 뜻이 도구와 버전마다 달라 바꾸지 않고 실행 결과는 모델이 출력과 파일로 판단한다고 적는다 [3].
+실행 확인에서 Sleuth Kit 4.11.1의 `fls`가 종료 코드 1과 `Cannot determine file system type`으로 끝나자 응답의 `success`는 참, `metadata.exit_code`는 1이었다 [4].
+`get_tool_help`도 도움말 실행의 종료 코드를 `help_exit_code`로 싣기만 한다 [5].
+
+### T08.02 시간 제한·종료 신호 처리
+
+**구현.** 이 방식은 `sift-mcp`의 실행기와 버전·도움말 실행, 게이트웨이의 백엔드 호출, `opencti-mcp`의 플랫폼 조회에 적용된다 [6][7][8][9].
+`sift-mcp`의 실행기는 호출 인자 `timeout`이 없으면 설정의 `default_timeout`(기본 600초, 환경변수 `SIFT_TIMEOUT`)을 쓴다 [6][10].
+제한 시각이 지나면 프로세스를 끝내고 `ExecutionTimeoutError`를 낸다 [6].
+`run_command`는 이 예외를 응답과 호출 기록의 `stopped` 값 `timeout`으로 구별하고 응답의 `success`를 거짓으로 둔다 [11].
+실행 확인에서 `sleep 5`를 `timeout` 1로 실행하자 응답의 `stopped`는 `timeout`, `error`는 `Command timed out after 1s: /usr/bin/sleep 5`였다 [4].
+
+실행기는 표준 출력과 표준 오류를 합쳐 `max_output_bytes`(기본 50MB, 환경변수 `SIFT_MAX_OUTPUT`)까지 읽고 그 양에 이르면 프로세스를 끝낸다 [6][10].
+프로세스의 종료 코드가 `-SIGKILL`이면 서버가 멈춘 것으로 보고 `stopped`를 `output limit`으로 둔다 [6].
+`run_command`는 이때 `success`를 거짓으로 두고 종료 코드가 도구의 것이 아니라는 문구를 `error`에 싣는다 [1].
+실행 확인에서 `SIFT_MAX_OUTPUT`을 2000으로 두고 `yes`를 실행하자 `stopped`는 `output limit`, `metadata.exit_code`는 -9, `output_sha256_scope`는 `prefix`였다 [4].
+
+버전과 도움말을 묻는 실행은 한 번에 10초와 64KiB까지만 기다리고 읽는다 [7].
+도움말 실행이 10초 안에 끝나지 않으면 그때까지 나온 출력을 싣고 멈췄다는 사실을 `help_note`에 적는다 [7].
+
+게이트웨이는 백엔드 호출의 응답을 300초까지 기다린다 [8][12].
+묶음 끝점은 300초가 지나면 `Tool call <도구> timed out after 300s` 오류를 돌려준다 [8].
+게이트웨이는 기다리기만 끊고 백엔드에 취소를 보내지 않는다 [8][13].
+실행 확인에서 게이트웨이를 거쳐 `run_command`로 `sleep 330`을 `timeout` 400으로 실행하자 300.2초 뒤 오류가 왔다 [14].
+같은 실행의 `sift-mcp` 호출 기록에는 330.5초 걸려 종료 코드 0으로 끝난 항목이 남았다 [14].
+
+`opencti-mcp`의 `lookup_ioc`는 플랫폼마다 설정한 시간 제한과 12초 가운데 작은 값을 쓴다 [9].
+그 시간에 1초를 더해도 답이 없으면 그 플랫폼을 `UNAVAILABLE`과 `timed out after <초>s`로 둔다 [9].
+코드 주석은 이때 대기열에 있던 조회만 버린다고 적는다 [9].
+OpenCTI 어댑터는 남은 시간을 HTTP 요청의 시간 제한으로 주고 시간이 다 되면 관계 조회를 하지 않는다 [15].
+
+`windows-triage-mcp`와 `rag-mcp`는 서버 프로세스 안에서 대조와 검색을 하고 시간 제한을 두지 않는다 [16][17].
+
+**한계.** 카탈로그는 도구마다 `timeout_seconds`(60초에서 7200초)를 적고 `get_tool_help`가 이 값을 보여 주지만 실행기는 이 값을 쓰지 않는다 [18][6].
+실행 확인에서 카탈로그의 `timeout_seconds`는 60, 120, 300, 600, 1200, 1800, 3600, 7200초였고 `hayabusa`의 `get_tool_help`는 1800을 보였지만 실행기의 기본값은 600초였다 [4].
+시간 제한으로 끊긴 실행은 그때까지 읽은 출력을 응답에도 사건 폴더에도 남기지 않는다 [6][11].
+게이트웨이의 300초 대기는 `sift-mcp`의 기본 시간 제한 600초보다 짧고 호출 인자 `timeout`에는 상한이 없다 [8][10].
+그래서 게이트웨이를 거친 실행이 300초를 넘으면 모델은 시간 초과 오류를 받고 백엔드의 실행과 호출 기록은 그대로 이어진다 [14].
+백엔드별 끝점은 게이트웨이의 300초 대기를 거치지 않고 백엔드 연결의 300초 대기만 쓴다 [12][19].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 `opencti-mcp`의 `lookup_ioc`, `sift-mcp`의 출력 상한 처리, `rag-mcp`의 출처 필터, 게이트웨이의 백엔드 응답 처리에 적용된다 [20][21][22][23].
+OpenCTI 어댑터는 다음 경우에 그 플랫폼을 `UNAVAILABLE`로 둔다 [20].
+
+- HTTP 상태가 200이 아니다 [20].
+- 답이 JSON이 아니다 [20].
+- 답에 `errors`가 있거나 `data`가 없다 [20].
+
+`errors`의 코드가 `AUTH_REQUIRED`·`FORBIDDEN_ACCESS`면 토큰 거부로, `DATABASE_ERROR`면 저장소 오류로 사유를 나눈다 [24].
+답의 지표 가운데 IOC와 같은 값이 없으면 `NO_MATCH`이다 [25].
+후보가 100개를 넘는데 읽은 100개 안에 같은 값이 없으면 없다고 보지 않고 `UNAVAILABLE`로 둔다 [25].
+일치가 있는데 관계 조회가 실패하거나 시간이 모자라면 관계 목록을 비우고 `relationships_unavailable`에 목록이 불완전하다고 적는다 [15].
+MISP 어댑터도 경고 목록 확인이 실패하면 `warninglists_unavailable`을 싣는다 [26].
+어댑터의 답이 정해 둔 모양이 아니면 `UNAVAILABLE`로 바꾼다 [27].
+`lookup_ioc`의 `found`는 `UNAVAILABLE`이면 `null`이다 [28].
+
+`sift-mcp`의 실행기는 읽은 양이 출력 상한에 이르면 `truncated`를 참으로, 출력 해시의 범위 `output_sha256_scope`를 `prefix`로 둔다 [21].
+`rag-mcp`는 출처 필터에 맞는 출처가 없으면 결과가 빈 까닭을 `warning`에 적는다 [22].
+게이트웨이는 백엔드 응답의 MCP `isError`가 참이면 오류 응답으로 넘기고 참조 조회 기록을 남기지 않는다 [23][29].
+
+`sift-mcp`는 출력 내용으로 실패를 정하지 않는다 [1][3].
+큰 출력은 카탈로그의 `output_format`으로 파싱하고 JSON으로 읽히지 않으면 JSONL로 다시 읽으며 읽히지 않는 줄은 `_raw`로 싣는다 [30][31].
+
+**한계.** `windows-triage-mcp`, `rag-mcp`, `opencti-mcp`는 오류를 응답 본문의 `error`로만 알리고 MCP `isError`를 쓰지 않는다 [16][17][32].
+게이트웨이는 `isError`만 보므로 `windows-triage-mcp`의 `check_*`나 `lookup_ioc`가 오류 본문을 돌려줘도 참조 응답으로 저장하고 기록한다 [23][29].
+실행 확인에서 OpenCTI 설정 없이 게이트웨이를 거쳐 부른 `get_entity`와 `search_threat_intel`은 본문의 `error`가 `opencti_not_configured`였고 `isError`는 거짓이었다 [33].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 `windows-triage-mcp`의 도구 13개, `rag-mcp`의 도구 3개, `opencti-mcp`의 `lookup_ioc` 어댑터에 적용된다 [16][17][27].
+`windows-triage-mcp`의 처리기는 입력 검사 오류를 `validation_error`, DB 오류를 `database_error`, 서버 오류를 `server_error`, 그 밖의 예외를 `internal_error`로 나눠 돌려준다 [16].
+네 경우 모두 호출 기록에 `error` 값과 호출 기록 ID를 남긴다 [16][34].
+`rag-mcp`의 처리기는 `ValueError`를 `validation_error`로, 그 밖의 예외를 `internal_error`와 예외 문구로 돌려준다 [17].
+`lookup_ioc`는 플랫폼 어댑터가 예외를 내면 그 플랫폼을 `UNAVAILABLE`과 예외 종류 이름으로 둔다 [27].
+`sift-mcp`의 응답에 `forensic-knowledge` 해석 자료를 붙이다 예외가 나면 해석 자료 없이 응답을 만든다 [35].
+
+**한계.** `windows-triage-mcp`의 `database_error`와 `internal_error`, `opencti-mcp`의 `internal_error`는 예외 내용 없이 서버 로그를 보라는 문구만 돌려준다 [16][32].
+
+### 근거
+
+[1] `run_command`는 마운트 도구가 0으로 끝났을 때만 마운트를 기록하고 서버가 멈춘 실행만 실패로 둔다.
+
+```python
+            # a mount is recorded only when the mount tool succeeded (exit 0)
+            ok = exec_result["exit_code"] == 0
+            # the run completed unless this server stopped it; its exit code is
+            # reported, not judged
+            stopped = exec_result.get("stopped")
+            stop_error = (
+                f"{binary} was stopped by sift-mcp at its output limit "
+                f"({exec_result.get('output_limit')} bytes): the exit code is the "
+                "stop's, not the tool's"
+                if stopped == "output limit"
+                else None
+            )
+            mount = None
+            if pre_mounts is not None and ok:
+                mount = mounts.mount_record(
+                    command, pre_mounts, inputs, registered, op_dir
+                )
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:385-401`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L385-L401)
+
+[2] 마운트 도구 목록이다.
+
+```python
+MOUNT_TOOLS = frozenset({"ewfmount", "mount", "qemu-nbd", "xmount", "losetup"})
+```
+
+[`packages/sift-mcp/src/sift_mcp/mounts.py:19-19`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/mounts.py#L19-L19)
+
+[3] 응답은 종료 코드를 바꾸지 않고 싣는다: [`packages/sift-mcp/src/sift_mcp/server.py:439-458`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L439-L458).
+
+```python
+    # Metadata
+    metadata: dict[str, Any] = {}
+    if elapsed_seconds is not None:
+        metadata["elapsed_seconds"] = round(elapsed_seconds, 2)
+    if exit_code is not None:
+        # the raw code: what it means differs by tool and version, so it isn't
+        # translated; the AI judges the run from its output and files
+        metadata["exit_code"] = exit_code
+    if metadata:
+        response["metadata"] = metadata
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:215-224`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L215-L224)
+
+[4] (실행 확인) 사건을 연 컨테이너에서 `sift-mcp`의 도구를 같은 프로세스로 불렀다.
+`fls`를 이미지가 아닌 파일에, `sleep 5`를 `timeout` 1로, `yes`를 `SIFT_MAX_OUTPUT` 2000으로 실행해 응답과 호출 기록을 읽고 카탈로그의 `timeout_seconds` 값을 모았다.
+
+[5] 도움말 실행은 출력과 종료 코드만 싣고 판정하지 않는다.
+
+```python
+def help_text(td, subcommand: str = "") -> dict:
+    """{help, help_exit_code, help_cut, help_note} from the installed tool, or
+    {error}. The help is what the tool printed, stdout then stderr under
+    STDERR_LABEL, with its exit code: nothing here judges whether it is help
+    (TSK's usage comes after "invalid option", exit 1; Hayabusa 3.9.0 answers
+    dfir-timeline with "unrecognized subcommand", exit 2). The next way of
+    asking is tried only when the tool printed nothing at all and answered
+    in time."""
+    if subcommand and (why := subcommand_error(td, subcommand)):
+        return {"error": why}
+    found = launch(td)
+    if not found:
+        return {"error": f"{td.binary} isn't installed"}
+    prefix, _ = found
+    if subcommand:
+        tries = [[a.replace("{subcommand}", subcommand) for a in td.subcommand_help]]
+    else:
+        tries = [td.help_argv] if td.help_argv else [["--help"], ["-h"]]
+    for argv in tries:
+        code, out, err, cut, late = _run(prefix + argv, max(READ_CAP, HELP_INLINE + 1))
+        if code is None and not late:  # it didn't run at all
+            return {"error": f"{td.binary} couldn't be run: {err}"}
+        if out.strip() or err.strip():
+            break
+        if late:
+            return {"error": f"{td.binary} gave no answer within {PROBE_TIMEOUT}s"}
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:183-208`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L183-L208)
+
+[6] 실행기의 시간 제한과 출력 상한 처리다: [`packages/sift-mcp/src/sift_mcp/executor.py:139-193`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L139-L193).
+
+```python
+        # Poll for completion, checking byte limit periodically
+        deadline = start + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise subprocess.TimeoutExpired(cmd_list, timeout)
+            if total[0] >= max_bytes:
+                truncated = True
+                proc.kill()
+                proc.wait(timeout=5)
+                # Stopped here only if the kill ended it: a child that had
+                # already exited keeps its own exit code.
+                killed = proc.returncode == -signal.SIGKILL
+                break
+            try:
+                proc.wait(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:101-122`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L101-L122)
+
+[7] 버전·도움말 실행은 10초와 64KiB까지 기다리고 읽는다: [`packages/sift-mcp/src/sift_mcp/tool_version.py:99-143`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L99-L143), [`packages/sift-mcp/src/sift_mcp/tool_version.py:201-228`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L201-L228).
+
+```python
+PROBE_TIMEOUT = 10  # seconds, for each version or help run
+HELP_INLINE = 8192  # bytes of help shown in a reply
+READ_CAP = 1 << 16  # bytes read from a version or help run, both streams together
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:19-21`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L19-L21)
+
+[8] 게이트웨이는 백엔드 호출을 300초까지 기다리고 넘으면 오류로 바꾼다.
+
+```python
+        try:
+            result = await asyncio.wait_for(
+                backend.call_tool(actual_name, arguments), timeout=300.0
+            )
+        except asyncio.TimeoutError as exc:
+            logger.error(
+                "Tool call %s on backend %s timed out after 300s",
+                actual_name,
+                backend_name,
+            )
+            if isinstance(backend, HttpMCPBackend):
+                elapsed_ms = (time.monotonic() - _start) * 1000
+                try:
+                    await asyncio.to_thread(
+                        self._audit.log,
+                        tool=actual_name,
+                        params=_truncate_params(arguments),
+                        result_summary="timeout after 300s",
+                        source="gateway_proxy",
+                        elapsed_ms=round(elapsed_ms, 1),
+                        extra={"backend": backend_name, "examiner": examiner},
+                    )
+                except Exception:
+                    pass
+            raise RuntimeError(f"Tool call {actual_name} timed out after 300s") from exc
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:792-816`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L792-L816)
+
+[9] `lookup_ioc`는 플랫폼마다 시간을 정하고 넘으면 `UNAVAILABLE`로 둔다: [`packages/opencti/src/opencti_mcp/providers/__init__.py:49-51`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L49-L51), [`packages/opencti/src/opencti_mcp/providers/__init__.py:77-79`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L77-L79).
+
+```python
+def lookup_all(adapters: dict[str, Any], ioc: str, ioc_type: str) -> dict[str, dict]:
+    """Ask every provider at once, each on its own pool of MAX_IN_FLIGHT
+    threads. Each answers within its budget (plus a second's grace) or is
+    UNAVAILABLE ("timed out"), so a lookup never takes longer than that, and
+    a stuck provider holds only its own threads."""
+    start = time.monotonic()
+    answers: dict[str, dict] = {}
+    running: dict[str, tuple[float, Future]] = {}
+    for name, adapter in adapters.items():
+        if isinstance(adapter, Unavailable):
+            answers[name] = adapter.lookup(ioc, ioc_type)  # nothing to wait for
+            continue
+        limit = budget(getattr(adapter, "timeout", LOOKUP_BUDGET_SECONDS))
+        running[name] = (limit, _pool_for(adapter).submit(_ask, adapter, ioc, ioc_type))
+    for name, (limit, future) in running.items():
+        # A second's grace: the adapter's own deadline passes first.
+        wait = max(0.0, start + limit + GRACE_SECONDS - time.monotonic())
+        try:
+            answers[name] = future.result(timeout=wait)
+        except FutureTimeout:
+            future.cancel()  # dropped if it was still queued
+            answers[name] = unavailable(f"timed out after {limit:g}s")
+    return {name: answers[name] for name in adapters}
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:219-241`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L219-L241)
+
+[10] 실행 설정의 기본값과 환경변수다: [`packages/sift-mcp/src/sift_mcp/config.py:53-71`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/config.py#L53-L71).
+
+```python
+    # Default execution timeout (seconds)
+    default_timeout: int = 600
+
+    # Max bytes captured from subprocess (safety limit for runaway processes)
+    max_output_bytes: int = 52_428_800  # 50MB
+
+    # Max bytes of tool output returned in MCP response (~2,500 tokens)
+    response_byte_budget: int = 10_240  # 10KB
+```
+
+[`packages/sift-mcp/src/sift_mcp/config.py:25-32`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/config.py#L25-L32)
+
+[11] `run_command`는 시간 초과 예외를 `stopped` `timeout`으로 구별한다.
+
+```python
+        except SiftError as e:
+            elapsed = time.monotonic() - start
+            # a timeout: this server stopped the run at its deadline
+            stopped = "timeout" if isinstance(e, ExecutionTimeoutError) else None
+            logged_id = audit.log(
+                tool="run_command",
+                params={"command": command, "purpose": purpose},
+                result_summary={
+                    "error": str(e),
+                    **({"stopped": stopped} if stopped else {}),
+                    **version_summary,
+                },
+                elapsed_ms=elapsed * 1000,
+                audit_id=op_id,
+                case_dir=case_dir,
+            )
+            response = build_response(
+                tool_name="run_command",
+                success=False,
+                data=None,
+                audit_id=logged_id,
+                error=str(e),
+                stopped=stopped,
+                **version_keys,
+            )
+            if logged_id is None:
+                response["warning"] = "Audit write failed — action not recorded"
+            return response
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:506-533`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L506-L533)
+
+[12] 백엔드 연결도 도구 호출을 300초까지 기다린다: [`packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py:35-45`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py#L35-L45).
+
+```python
+    async def call_tool(self, name: str, arguments: dict) -> list:
+        if not self._started or not self._session:
+            raise RuntimeError(f"Backend {self.name} is not started")
+
+        generation = self._generation
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool(name, arguments), timeout=_TOOL_CALL_TIMEOUT
+            )
+            return ToolResult(result.content, is_error=bool(result.isError))
+        except Exception as exc:
+            if _gone(exc):  # restarted lazily by the gateway's next call
+                await self._reset_if_current(
+                    generation, context="call_tool cleanup after error"
+                )
+            raise
+```
+
+[`packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py:223-238`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/backends/stdio_backend.py#L223-L238)
+
+[13] MCP Python SDK 1.30.0의 `send_request`는 응답을 기다리다 끊길 때 취소 알림을 보내지 않는다: [`src/mcp/shared/session.py:240-313`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/shared/session.py#L240-L313).
+
+[14] (실행 확인) 컨테이너 안 `127.0.0.1`의 게이트웨이에 `sift-mcp`를 붙이고 묶음 끝점으로 `run_command`에 `sleep 330`과 `timeout` 400을 주었다.
+게이트웨이의 응답 시각과 문구, 그 뒤 `audit/sift-mcp.jsonl`의 항목을 읽었다.
+
+[15] OpenCTI 어댑터는 남은 시간으로 요청하고 관계 조회가 실패하면 목록이 불완전하다고 적는다: [`packages/opencti/src/opencti_mcp/providers/opencti.py:119-137`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L119-L137).
+
+```python
+        if matches and deadline - time.monotonic() < RELATIONSHIPS_MIN_SECONDS:
+            answer["relationships"] = []
+            answer["relationships_unavailable"] = (
+                "Relationships were not read: the lookup's time ran out. "
+                "The related lists are incomplete."
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:214-219`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L214-L219)
+
+```python
+            except _Failure as e:
+                answer["relationships"] = []
+                reason = str(e)
+                answer["relationships_unavailable"] = (
+                    f"Relationships query failed ({reason}): the related lists are "
+                    "incomplete."
+                )
+        return answer
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:238-245`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L238-L245)
+
+[16] `windows-triage-mcp`의 처리기는 예외 종류마다 오류 값을 나눈다: [`packages/windows-triage/src/windows_triage/server.py:905-958`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L905-L958).
+
+[17] `rag-mcp`의 처리기는 예외를 `validation_error`와 `internal_error`로 나눈다: [`packages/forensic-rag/src/rag_mcp/server.py:192-256`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L192-L256).
+
+[18] 카탈로그 항목의 `timeout_seconds`는 `get_tool_help`의 결과에만 쓰인다: [`packages/sift-mcp/src/sift_mcp/catalog.py:138`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/catalog.py#L138), [`packages/sift-mcp/src/sift_mcp/tools/discovery.py:148-157`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L148-L157), [`packages/sift-mcp/src/sift_mcp/server.py:336-347`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L336-L347).
+
+[19] 백엔드별 끝점은 백엔드 연결의 `call_tool`을 바로 부른다.
+
+```python
+        _start = time.monotonic()
+        try:
+            result = await backend.call_tool(name, arguments)
+        except (RuntimeError, ConnectionError, OSError) as e:
+            logger.error(
+                "Per-backend call_tool error for %s/%s: %s", backend_name, name, e
+            )
+            return _error(f"Error: {name} failed: {e}")
+        except (Exception, asyncio.CancelledError, BaseExceptionGroup) as e:
+            logger.error(
+                "Per-backend call_tool unexpected error for %s/%s: %s: %s",
+                backend_name,
+                name,
+                type(e).__name__,
+                e,
+            )
+            return _error(
+                f"Error: unexpected failure for {name} ({type(e).__name__}) — "
+                "if this persists, report to examiner"
+            )
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:392-411`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L392-L411)
+
+[20] OpenCTI 어댑터는 HTTP 상태, JSON, `errors`, `data`를 차례로 본다.
+
+```python
+        except httpx.TimeoutException as e:
+            raise _Failure(f"timed out after {self.timeout:g}s") from e
+        except httpx.HTTPError as e:
+            raise _Failure(transport_reason("OpenCTI", e)) from e
+        if response.status_code != 200:
+            raise _Failure(http_reason("OpenCTI", response.status_code, "token"))
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise _Failure("OpenCTI's reply is not JSON") from e
+        if not isinstance(body, dict):
+            raise _Failure("OpenCTI's reply has an unexpected shape")
+        if body.get("errors"):
+            failure = _Failure(_describe(body["errors"]))
+            if isinstance(body.get("data"), dict):
+                failure.data = body["data"]
+            raise failure
+        if not isinstance(body.get("data"), dict):
+            raise _Failure("OpenCTI's reply has no data")
+        return body["data"]
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:134-153`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L134-L153)
+
+[21] 실행기는 출력 상한에 이른 출력을 `truncated`와 `prefix`로 표시한다.
+
+```python
+        response: dict[str, Any] = {
+            "exit_code": proc.returncode,
+            "stdout": stdout,
+            "stderr": _truncate(stderr, config.max_output_bytes // 10),
+            "elapsed_seconds": round(elapsed, 2),
+            "command": cmd_list,
+            "stdout_total_bytes": stdout_byte_count,
+            # the bytes the tool wrote, whether or not they're saved
+            "output_sha256": hashlib.sha256(stdout_raw).hexdigest(),
+            # cut at max_output_bytes: the hash covers only what was read
+            "output_sha256_scope": "prefix" if truncated else "full",
+        }
+        if truncated:
+            response["truncated"] = True  # the capture was cut
+        if killed:  # the process didn't end on its own: this server stopped it
+            response["stopped"] = "output limit"
+            response["output_limit"] = max_bytes
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:139-155`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L139-L155)
+
+[22] `rag-mcp`는 맞는 출처가 없으면 `warning`을 단다.
+
+```python
+        response = {"status": "ok", "query": query, "results": search_result["results"]}
+        warnings = []
+
+        # Add context about filters
+        if search_result["source_filter"]:
+            if search_result["matched_sources"]:
+                response["matched_sources"] = search_result["matched_sources"]
+            else:
+                warnings.append(
+                    f"No sources match filter '{source}'. "
+                    "Use list_knowledge_sources tool to see available sources."
+                )
+        if search_result.get("warning"):
+            warnings.append(search_result["warning"])
+        if warnings:
+            response["warning"] = " | ".join(warnings)
+        if search_result.get("notice"):
+            response["notice"] = search_result["notice"]
+
+        return response
+```
+
+[`packages/forensic-rag/src/rag_mcp/server.py:313-332`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L313-L332)
+
+[23] 게이트웨이는 `isError`가 거짓인 응답만 참조 조회로 기록한다.
+
+```python
+        if not getattr(result, "is_error", False):
+            await asyncio.to_thread(
+                reference.record, self._audit, backend_name, backend, actual_name,
+                arguments, result, examiner, ref_case,
+            )  # fmt: skip
+        return result
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:840-845`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L840-L845)
+
+[24] GraphQL `errors`의 코드로 사유를 나눈다.
+
+```python
+    if not isinstance(errors, list) or not errors:
+        return "OpenCTI rejected the query (no code)"
+    first = errors[0] if isinstance(errors[0], dict) else {}
+    code = str((first.get("extensions") or {}).get("code") or first.get("name") or "")
+    if code in ("AUTH_REQUIRED", "FORBIDDEN_ACCESS"):
+        return f"OpenCTI refused the token ({code})"
+    if is_rate_limited(str(first.get("message", ""))):
+        return f"OpenCTI rate-limited the lookup: {RATE_LIMITED}"
+    if code == "DATABASE_ERROR":
+        return "OpenCTI reported a storage error (DATABASE_ERROR)"
+    shown = code if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) else "no code"
+    return f"OpenCTI rejected the query ({shown})"
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:95-106`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L95-L106)
+
+[25] 일치 여부와 후보가 넘치는 경우를 나눈다.
+
+```python
+        # The server's `eq` ignores case; fuzzy hashes are compared as given.
+        matches = [node for node in nodes if same_value(node.get("name"), ioc)]
+        truncated = len(nodes) > MAX_MATCHES or (
+            isinstance(total, int) and total > MAX_MATCHES
+        )
+        if truncated and not matches:
+            # The exact record may be past the ones read: not an absence.
+            return unavailable(
+                f"too many candidate matches: {total} indicators are named like "
+                f"{ioc}, and none of the first {len(nodes)} is exactly it",
+                version,
+            )
+        answer: dict[str, Any] = {
+            "outcome": MATCH if matches else NO_MATCH,
+            "version": version,
+            "queried_at": queried_at,
+            "matches": matches[:MAX_MATCHES],
+        }
+        if truncated:
+            answer["truncated"] = True
+            answer["note"] = (
+                f"{total if isinstance(total, int) else 'More than ' + str(MAX_MATCHES)}"
+                f" indicators are named {ioc}; only the first {MAX_MATCHES} are listed."
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:190-213`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L190-L213)
+
+[26] MISP 어댑터는 경고 목록 확인이 실패하면 그 사실을 싣는다.
+
+```python
+        if deadline - time.monotonic() < FOLLOW_UP_MIN_SECONDS:
+            answer["warninglist_hits"] = None
+            answer["warninglists_unavailable"] = (
+                "Warninglists were not checked: the lookup's time ran out."
+            )
+        else:
+            try:
+                hits, late = follow_up(
+                    self._follow_ups,
+                    lambda: self._request(
+                        "POST", "/warninglists/checkValue", {"value": ioc}, deadline
+                    ),
+                    deadline,
+                )
+                if late:
+                    raise _Failure(f"{late} after {self.timeout:g}s")
+                answer["warninglist_hits"] = hits
+            except _Failure as e:
+                answer["warninglist_hits"] = None
+                answer["warninglists_unavailable"] = f"Warninglist check failed ({e})."
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:264-283`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L264-L283)
+
+[27] 어댑터의 답과 예외를 `UNAVAILABLE`로 바꾼다.
+
+```python
+def _checked(answer: Any) -> dict:
+    """An adapter's answer, or UNAVAILABLE when its shape isn't the contract's."""
+    if (
+        not isinstance(answer, dict)
+        or answer.get("outcome") not in OUTCOMES
+        or not isinstance(answer.get("matches"), list)
+    ):
+        return unavailable("the provider gave an answer of an unexpected shape")
+    if answer["outcome"] == UNAVAILABLE and not answer.get("reason"):
+        answer["reason"] = "no reason given"
+    return answer
+
+
+def _ask(adapter: Any, ioc: str, ioc_type: str) -> dict:
+    try:
+        return _checked(adapter.lookup(ioc, ioc_type))
+    except Exception as e:
+        logger.warning("Threat-intel provider failed: %s: %s", type(e).__name__, e)
+        return unavailable(
+            f"the provider failed ({type(e).__name__}); the server log has the details"
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:174-194`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L174-L194)
+
+[28] `lookup_ioc`는 `UNAVAILABLE`이면 `found`를 `null`로 둔다.
+
+```python
+        answers = providers.lookup_all(self.providers, ioc, ioc_type)
+        outcome = providers.aggregate(answers)
+        result: dict[str, Any] = {
+            "ioc": ioc,
+            "outcome": outcome,
+            # Not found is a claim no one could make when no one answered
+            "found": None
+            if outcome == providers.UNAVAILABLE
+            else outcome == providers.MATCH,
+        }
+        if outcome == providers.UNAVAILABLE:
+            # A "note" also marks the answer unconfirmed to callers that
+            # predate "outcome".
+            result["reason"] = "; ".join(
+                f"{name}: {answer['reason']}"
+                for name, answer in answers.items()
+                if answer["outcome"] == providers.UNAVAILABLE
+            )
+            result["note"] = f"Not answered: {result['reason']}"
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:827-845`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L827-L845)
+
+[29] 백엔드별 끝점도 `isError`가 거짓인 응답만 참조 조회로 기록한다.
+
+```python
+        if getattr(result, "is_error", False):
+            return CallToolResult(content=contents, isError=True)
+        if isinstance(backend, HttpMCPBackend):  # an error reply records nothing
+            await gateway.record_pending_hashes(backend_name, result, case_at_start)
+        await asyncio.to_thread(
+            reference.record, gateway._audit, backend_name, backend, name,
+            arguments, result, examiner, ref_case,
+        )  # fmt: skip
+        return contents
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:455-463`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L455-L463)
+
+[30] 큰 출력은 카탈로그의 형식으로 파싱한다.
+
+```python
+    if output_format == "csv":
+        csv_kwargs = {"byte_budget": budget}
+        if preview_lines:
+            csv_kwargs["max_rows"] = ml
+        parsed = csv_parser.parse_csv(stdout, **csv_kwargs)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_csv"
+    elif output_format == "json":
+        json_kwargs = {"byte_budget": budget}
+        if preview_lines:
+            json_kwargs["max_entries"] = ml
+        parsed = json_parser.parse_json(stdout, **json_kwargs)
+        if parsed.get("parse_error"):
+            parsed = json_parser.parse_jsonl(stdout, **json_kwargs)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_json"
+    else:
+        parsed = text_parser.parse_text(stdout, byte_budget=budget, max_lines=ml)
+        exec_result["_parsed"] = parsed
+        exec_result["_output_format"] = "parsed_text"
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:201-220`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L201-L220)
+
+[31] JSONL로 읽을 때 읽히지 않는 줄은 `_raw`로 남긴다.
+
+```python
+    for line in text.strip().split("\n"):
+        if not line.strip():
+            continue
+        total += 1
+        if budget_hit or (max_entries and len(entries) >= max_entries):
+            continue  # keep counting total
+        if byte_budget:
+            line_bytes = len(line.encode("utf-8"))
+            if used_bytes + line_bytes > byte_budget and entries:
+                budget_hit = True
+                continue
+            used_bytes += line_bytes
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            entries.append({"_raw": line})
+
+    return {
+        "data": entries,
+        "total_entries": total,
+        "preview_entries": len(entries),
+        "preview_bytes": used_bytes,
+        "truncated": total > len(entries),
+    }
+```
+
+[`packages/sift-common/src/sift_common/parsers/json_parser.py:97-120`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/parsers/json_parser.py#L97-L120)
+
+[32] `opencti-mcp`의 처리기는 오류를 본문의 `error`로 돌려준다: [`packages/opencti/src/opencti_mcp/server.py:511-631`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L511-L631).
+
+[33] (실행 확인) 컨테이너 안 `127.0.0.1`의 게이트웨이에 `opencti-mcp`만 붙이고 OpenCTI 설정 없이 `get_entity`와 `search_threat_intel`을 불러 `isError`와 본문을 읽었다.
+
+[34] `windows-triage-mcp`는 오류 결과도 호출 기록에 남긴다.
+
+```python
+    def _wrap_response(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: dict,
+        audit_id: str | None = None,
+        elapsed_ms: float | None = None,
+    ) -> dict:
+        """Wrap tool result with evidence ID, caveats, and audit trail.
+
+        Always generates audit_id and writes audit — including for errors.
+        """
+        summary = result if "error" not in result else {"error": result["error"]}
+        audit_id = self._audit.log(
+            tool=tool_name,
+            params=arguments,
+            result_summary=summary,
+            audit_id=audit_id,
+            elapsed_ms=elapsed_ms,
+        )
+        if audit_id is None:
+            result["warning"] = "Audit write failed — action not recorded"
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:432-453`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L432-L453)
+
+[35] 해석 자료를 붙이다 예외가 나면 빈 값으로 이어 간다.
+
+```python
+    # Load forensic-knowledge context (skip on repeat calls to same tool)
+    if not skip_enrichment:
+        try:
+            (
+                corroboration,
+                caveats,
+                advisories,
+                field_notes,
+                field_meanings,
+                cross_mcp_checks,
+            ) = _build_knowledge_context(fk_name, artifact_context=artifact_context)
+        except Exception as e:
+            logger.warning("FK knowledge context unavailable for %s: %s", fk_name, e)
+            (
+                corroboration,
+                caveats,
+                advisories,
+                field_notes,
+                field_meanings,
+                cross_mcp_checks,
+            ) = {}, [], [], {}, {}, []
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:161-181`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L161-L181)

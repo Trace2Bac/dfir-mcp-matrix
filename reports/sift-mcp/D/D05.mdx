@@ -1,0 +1,280 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 `forensic-mcp`의 발견사항·타임라인 기록, `report-mcp`의 `save_report`, `case-mcp`의 `backup_case`, 검토 포털 `case-dashboard`의 서명 커밋에 적용된다 [1][2][3][4].
+`forensic-mcp`의 기록 도구는 저장 중 난 예외를 처리해 `error` 필드에 예외 문구를 담은 응답을 돌려준다 [1].
+`record_finding`은 `findings.json`을 먼저 저장하고 자동 타임라인 사건과 IOC 기록은 그 뒤에 저장한다 [5].
+뒤의 두 저장이 실패하면 발견사항은 남기고 응답의 `warning`에 `Timeline auto-creation failed`나 `IOC processing failed`를 싣는다 [5].
+`save_report`는 쓰기에서 난 `OSError`를 `error` 응답으로 돌려준다 [2].
+`backup_case`도 폴더를 만들거나 파일을 복사하다 난 `OSError`를 `error` 응답으로 돌려준다 [3].
+`forensic-mcp`와 `report-mcp`는 임시 파일에 다 쓴 뒤 이름을 바꾸고 실패하면 임시 파일을 지우므로 정한 이름의 파일이 반쯤 쓰인 채 남지 않는다 [6][7].
+검토 포털은 서명한 결정을 원장에 쓴 뒤 `findings.json`·`timeline.json`·`iocs.json` 저장이 실패하면 한 번 다시 저장한다 [4].
+다시 저장해도 실패하면 결정은 기록되었고 사건 자료는 저장되지 않았다는 문구와 다시 커밋할 항목 ID를 `SAVE_FAILED` 오류에 싣는다 [8].
+사건 폴더를 읽기 전용으로 바꾸고 `record_finding`을, `reports/`를 읽기 전용으로 바꾸고 `save_report`를, 읽기 전용 목적지로 `backup_case`를 부르자 셋 다 `Permission denied`를 담은 `error` 응답이 왔다 [9].
+
+**한계.** 자동 타임라인 사건 저장이 실패해도 이미 저장한 발견사항에는 그 사건의 ID `timeline_event_id`가 남는다 [5].
+`backup_case`가 복사 도중 실패하면 `.incomplete` 이름의 폴더와 진행 중 표시 파일 `.backup-in-progress`가 목적지에 남고 서버는 지우지 않는다 [10].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 보관하는 표준 출력·표준 오류와 작업 폴더, 게이트웨이의 참조 응답 사본에 적용된다 [11][12][13].
+`run_command`는 표준 출력이나 표준 오류 파일을 쓰다 난 `OSError`를 경고 로그에만 남기고 성공 응답을 돌려준다 [11].
+이때 응답에는 `full_output_path`가 없고 호출 기록 항목의 `output_file`은 빈 값이며 저장 실패를 알리는 필드는 없다 [11][14].
+분석 도구가 작업 폴더의 쓰기 권한을 없애게 하자 응답은 `success: true`, `full_output_path: null`, `warning: null`이었고 폴더에는 도구가 쓴 파일만 남았다 [15].
+작업 폴더를 만들지 못하면 경고 로그만 남기고 서버 프로세스의 현재 폴더에서 분석 도구를 실행한다 [12].
+게이트웨이는 참조 응답 사본을 쓰거나 그 항목을 기록하다 난 예외를 경고 로그에만 남기고 조회 응답은 그대로 돌려준다 [13].
+`extractions/`를 읽기 전용으로 두고 참조 기록 함수를 부르자 `None`을 돌려주었고 사본은 생기지 않았다 [16].
+
+### 근거
+
+[1] `forensic-mcp`의 기록 도구는 예외를 `error` 응답으로 바꾼다: [`packages/forensic-mcp/src/forensic_mcp/server.py:380-386`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L380-L386).
+
+```python
+        try:
+            result = manager.record_finding(
+                finding,
+                examiner_override=analyst_override,
+                supporting_commands=supporting_commands,
+                artifacts=artifacts,
+                audit=audit,
+            )
+        except Exception as e:
+            logger.error("record_finding failed: %s", e)
+            return {"error": str(e)}
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:305-315`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L305-L315)
+
+[2] `save_report`는 `OSError`를 `error`로 돌려준다.
+
+```python
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1178-1179`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1178-L1179)
+
+[3] `backup_case`는 `OSError`를 `error`로 돌려준다.
+
+```python
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:912-913`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L912-L913)
+
+[4] 검토 포털의 커밋은 서명한 결정을 원장에 쓴 뒤 사건 파일 저장이 실패하면 한 번 다시 저장한다: [`src/vhir_cli/decide.py:675-689`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/decide.py#L675-L689).
+
+```python
+            head = ledger.commit(
+                lock, plan.bodies, lines, public,
+                before_write=lambda: decide.record_folder(case_dir),  # once they verify
+            )  # fmt: skip
+        except ledger.BadSignature as e:
+            raise _Refused(
+                _error("BAD_SIGNATURE", f"{e}; nothing was signed.", 401)
+            ) from e
+        except ledger.LedgerTorn as e:
+            raise _Refused(_error(
+                "LEDGER_TORN",
+                f"{e} Some of these decisions may already be signed: `vhir review "
+                "--verify` at the SIFT terminal lists each one as a failure, with its fix.",
+                500,
+            )) from e  # fmt: skip
+        for d, item, body in zip(plan.every, plan.items, plan.bodies, strict=True):
+            set_status(item, d.decision, d.status_after, body["examiner"], body["at"],
+                       reason=d.reason)  # fmt: skip
+        save_error = decide._save_twice(case_dir, lists, {d.type for d in plan.every})
+```
+
+[`packages/case-dashboard/src/case_dashboard/signing.py:871-889`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/signing.py#L871-L889)
+
+[5] 발견사항을 먼저 저장하고 타임라인·IOC 저장 실패는 경고로 싣는다: [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1536-1594`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1536-L1594).
+
+```python
+        if finding_type == "finding" and event_ts:
+            timeline = self._load_timeline(case_dir)
+            tl_seq = _next_seq(timeline, "id", "T", exam)
+            timeline_event_id = f"T-{exam}-{tl_seq:03d}"
+            finding_record["timeline_event_id"] = timeline_event_id
+        # Warning for missing event_timestamp handled by validation.py
+        # (validation_warnings already added to warnings list)
+
+        # Compute content hash at staging
+        finding_record["content_hash"] = _compute_content_hash(finding_record)
+
+        findings.append(finding_record)
+        self._save_findings(case_dir, findings)
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1540-1552`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1540-L1552)
+
+```python
+                tl_event["content_hash"] = _compute_content_hash(tl_event)
+                timeline.append(tl_event)
+                self._save_timeline(case_dir, timeline)
+            except Exception as exc:
+                logger.warning("Auto-timeline creation failed: %s", exc)
+                warnings.append(f"Timeline auto-creation failed: {exc}")
+
+        # IOC auto-extraction (try/except — never blocks finding save)
+        stored_iocs: list[str] = []
+        cut_iocs: list[str] = []
+        try:
+            stored_iocs, cut_iocs = self._process_iocs(finding_record, case_dir)
+        except Exception as exc:
+            logger.warning("IOC processing failed: %s", exc)
+            warnings.append(f"IOC processing failed: {exc}")
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1580-1594`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1580-L1594)
+
+[6] `forensic-mcp`의 원자적 쓰기는 실패하면 임시 파일을 지운다.
+
+```python
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename to prevent data loss on crash."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:38-52`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L38-L52)
+
+[7] `report-mcp`의 원자적 쓰기도 같다.
+
+```python
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename."""
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:267-281`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L267-L281)
+
+[8] 다시 저장도 실패하면 `SAVE_FAILED` 오류에 다시 커밋할 항목 ID를 싣는다.
+
+```python
+    if out["save_error"] is not None:
+        return _error(
+            "SAVE_FAILED",
+            f"Signed decisions were recorded; case data was not saved ({out['save_error']}). "
+            f"Commit the same reviews again for: {', '.join(d.id for d in plan.every)}",
+            500,
+            **result,
+        )
+```
+
+[`packages/case-dashboard/src/case_dashboard/signing.py:980-987`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/signing.py#L980-L987)
+
+[9] (실행 확인) 사건 폴더를 `chmod 555`로 두고 `record_finding`을 부르자 `{"error": "[Errno 13] Permission denied: …tmp…"}`가 왔다.
+`reports/`를 `chmod 555`로 두고 부른 `save_report`와 `chmod 555` 목적지로 부른 `backup_case`도 같은 `error`를 돌려주었다.
+
+[10] 백업은 `.incomplete` 폴더와 표시 파일을 먼저 만들고 마지막에 표시를 지우고 이름을 바꾼다: [`src/vhir_cli/commands/backup.py:408-413`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L408-L413), [`src/vhir_cli/commands/backup.py:601-608`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L601-L608).
+
+[11] 표준 출력·표준 오류 쓰기 실패는 경고 로그만 남긴다.
+
+```python
+    if stdout:
+        try:
+            stdout_path = out_dir / f"{prefix}_stdout.txt"
+            with open(stdout_path, "xb") as f:
+                f.write(stdout)
+                f.flush()
+                os.fsync(f.fileno())
+            response["output_file"] = str(stdout_path)
+            response["output_sha256"] = hashlib.sha256(stdout).hexdigest()
+        except OSError as e:
+            logger.warning("Failed to save stdout to %s: %s", stdout_path, e)
+
+    if stderr:
+        try:
+            stderr_path = out_dir / f"{prefix}_stderr.txt"
+            with open(stderr_path, "xb") as f:
+                f.write(stderr)
+                f.flush()
+                os.fsync(f.fileno())
+            response["stderr_file"] = str(stderr_path)
+            response["stderr_sha256"] = hashlib.sha256(stderr).hexdigest()
+        except OSError as e:
+            logger.warning("Failed to save stderr to %s: %s", stderr_path, e)
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:263-285`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L263-L285)
+
+[12] 작업 폴더를 만들지 못하면 경고 로그만 남기고 폴더 없이 실행한다.
+
+```python
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:259-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L259-L267)
+
+[13] 참조 기록 함수는 예외를 경고 로그로만 남기고 `None`을 돌려준다.
+
+```python
+    except Exception as e:  # noqa: BLE001 -- the lookup still answers
+        logger.warning("reference call %s not recorded: %s", tool, e)
+        return None
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:102-104`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L102-L104)
+
+[14] 응답의 `full_output_path`는 `output_file`이 있을 때만 붙는다.
+
+```python
+            response["output_sha256"] = exec_result.get("output_sha256", "")
+            response["output_sha256_scope"] = exec_result.get("output_sha256_scope", "")
+            # Add full output metadata if file was saved
+            if exec_result.get("output_file"):
+                response["full_output_path"] = exec_result["output_file"]
+                response["full_output_sha256"] = exec_result.get("output_sha256")
+                response["full_output_bytes"] = exec_result.get("stdout_total_bytes")
+
+            if logged_id is None:
+                response["warning"] = "Audit write failed — action not recorded"
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:460-469`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L460-L469)
+
+[15] (실행 확인) `faketool --lockcwd`(작업 폴더를 `chmod 555`로 바꾸는 시험 동작)로 `run_command`를 부르자 응답은 `success: true`, `full_output_path: null`, `warning: null`이었다.
+호출 기록의 `output_file`은 `""`, `output_sha256`은 값이 있었고 서버 로그에는 `Failed to save stdout` 경고만 남았다.
+
+[16] (실행 확인) `extractions/`를 `chmod 555`로 두고 `reference.record`에 `lookup_ioc` 응답을 주자 `None`을 돌려주었고 로그에 `reference call lookup_ioc not recorded` 경고가 남았다.

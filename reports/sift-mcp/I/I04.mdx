@@ -1,0 +1,280 @@
+---
+cell: I04
+details:
+- id: I04.01
+- id: I04.02
+- id: I04.03
+- id: I04.04
+---
+
+# I04 서버 자격증명 처리
+
+### I04.01 환경변수·설정 파일에 분리 보관
+
+**구현.** 이 방식은 `opencti-mcp`의 OpenCTI 토큰과 MISP 키, 게이트웨이와 `case-mcp`가 HTTP 백엔드에 보내는 Bearer 토큰에 적용된다 [1][2][3][4].
+OpenCTI 토큰은 환경변수 `OPENCTI_TOKEN`, `~/.config/opencti-mcp/token`, 옛 위치 `~/.config/rag/opencti_token`, 작업 폴더의 `.env` 차례로 찾는다 [1].
+`OPENCTI_TOKEN`이 공백만 담고 있으면 다음 위치를 찾지 않고 토큰이 없는 것으로 처리한다 [1].
+MISP 키는 환경변수 `MISP_KEY`에서 읽는다 [2].
+게이트웨이 설정 예시는 위협 정보 백엔드의 토큰과 HTTP 백엔드의 `bearer_token`을 `${VAR}`로 적고 게이트웨이가 시작할 때 환경변수 값으로 바꾼다 [5][6].
+설치 스크립트 `setup-sift.sh`는 설치 때 받은 OpenCTI 주소와 토큰을 `gateway.yaml`의 백엔드 `env`에 값으로 적고 이 파일을 새로 만들 때 권한을 600으로 둔다 [7].
+`wintools-mcp`의 토큰은 가입 API가 받은 값을 게이트웨이가 `gateway.yaml`에 그대로 써 둔다 [8].
+`case-mcp`의 사건 알림은 `gateway.yaml`에서 그 토큰을 읽어 보낸다 [4].
+
+### I04.02 도구 인자 수신 금지
+
+**구현.** 이 방식은 `opencti-mcp`와 게이트웨이의 외부 연결 전체에 적용된다 [9][3].
+어느 도구도 토큰이나 키를 인자로 받지 않고 서버가 환경변수와 설정 파일에서 읽는다 [9][1][2].
+토큰과 키는 요청의 `Authorization` 헤더에만 넣는다 [10][11][3].
+MISP 조회를 부른 호출의 응답과 `opencti-mcp.jsonl`에 키 값이 들어가지 않았다 [12].
+
+### I04.03 설정 파일 권한 검사
+
+**구현.** 이 방식은 `opencti-mcp`가 OpenCTI 토큰을 읽는 토큰 파일과 `.env`에 적용된다 [1][13][14].
+토큰 파일은 그룹이나 다른 사용자가 읽거나 쓸 수 있으면 읽지 않고 설정 오류를 낸다 [13].
+권한 644의 토큰 파일은 거부되었고 600으로 바꾸자 읽혔다 [12].
+`.env`는 다른 사용자가 읽거나 쓸 수 있으면 운영 로그에 경고를 남긴다 [14].
+
+**한계.** `.env`는 경고만 남기고 토큰을 읽는다 [14].
+권한 644의 `.env`는 경고와 함께 읽혔다 [12].
+두 검사는 권한 비트만 보고 파일 소유자는 검사하지 않는다 [13][14].
+MISP 키는 환경변수 `MISP_KEY`에서만 읽고 이 검사를 거치지 않는다 [2].
+게이트웨이는 위협 정보 백엔드의 토큰과 `bearer_token`을 담는 `gateway.yaml`을 읽을 때 권한을 검사하지 않는다 [15][7].
+
+### I04.04 응답·기록·오류에서 비밀값 제거
+
+**구현.** 이 방식은 `opencti-mcp`의 OpenCTI 토큰에 적용된다 [16].
+OpenCTI 토큰은 `SecretStr`에 담아 문자열로 바꾸면 `***`가 되고 설정 객체의 `repr`도 토큰을 `***`로 적는다 [16].
+`opencti-mcp`는 시작할 때 이 설정 객체를 운영 로그에 적는다 [17].
+
+**한계.** MISP 키는 이런 처리 없이 일반 문자열로 보관한다 [2].
+
+### 근거
+
+[1] OpenCTI 토큰을 찾는 차례다: [`packages/opencti/src/opencti_mcp/config.py:295-334`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L295-L334).
+
+[2] MISP 주소와 키는 환경변수에서 읽는다.
+
+```python
+def create() -> MispAdapter:
+    url = os.getenv("MISP_URL", "").strip().rstrip("/")
+    key = os.getenv("MISP_KEY", "").strip()
+    if not url:
+        raise ProviderConfigError("MISP_URL is not set")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ProviderConfigError(f"MISP_URL is not an http(s) URL: {url}")
+    if not key:
+        raise ProviderConfigError("MISP_KEY is not set")
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:306-315`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L306-L315)
+
+[3] 게이트웨이는 설정의 `bearer_token`을 HTTP 백엔드 요청 헤더에 넣는다.
+
+```python
+        headers = {}
+        bearer_token = self.config.get("bearer_token")
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+        extra_headers = self.config.get("headers") or {}
+        headers.update(extra_headers)
+```
+
+[`packages/sift-gateway/src/sift_gateway/backends/http_backend.py:200-205`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/backends/http_backend.py#L200-L205)
+
+[4] `notify_wintools_case_activated`는 `gateway.yaml`의 토큰을 헤더에 넣어 보낸다: [`src/vhir_cli/commands/join.py:1358-1382`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/join.py#L1358-L1382).
+
+[5] 설정 예시는 토큰을 환경변수 참조로 적는다.
+
+```text
+  threatintel-mcp:
+    type: stdio
+    command: "python"
+    args: ["-m", "opencti_mcp"]
+    env:
+      VHIR_CASE_DIR: "${VHIR_CASE_DIR}"
+      VHIR_EXAMINER: "${VHIR_EXAMINER}"
+      OPENCTI_URL: "${OPENCTI_URL}"
+      OPENCTI_TOKEN: "${OPENCTI_TOKEN}"
+      # Threat-intel platforms lookup_ioc asks (unset means opencti). To add
+      # MISP, list it here and set its address and key in this same block:
+      # THREATINTEL_PROVIDERS: "opencti,misp"
+      # MISP_URL: "${MISP_URL}"
+      # MISP_KEY: "${MISP_KEY}"
+    enabled: true
+
+  # --- Remote HTTP backends ---
+
+  # Windows forensic workstation running wintools-mcp
+  wintools-mcp:
+    type: http
+    url: "http://windows-workstation:4624/mcp"
+    bearer_token: "${WINTOOLS_TOKEN}"
+    enabled: false
+```
+
+[`config/gateway.yaml.example:86-109`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L86-L109)
+
+[6] 게이트웨이 설정을 읽을 때 `${VAR}`를 환경변수 값으로 바꾼다.
+
+```python
+def _interpolate_env(value: str) -> str:
+    """Replace ${VAR} patterns with environment variable values.
+
+    If a referenced variable is not set, the placeholder is replaced with
+    an empty string to prevent literal '${VAR}' from leaking into configs.
+    """
+
+    def _replace(match: re.Match) -> str:
+        var_name = match.group(1)
+        return os.environ.get(var_name, "")
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+```
+
+[`packages/sift-gateway/src/sift_gateway/config.py:16-27`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/config.py#L16-L27)
+
+[7] 설치 스크립트는 받은 OpenCTI 주소와 토큰이 있으면 그 값을, 없으면 `${VAR}`를 `gateway.yaml`에 적고 새로 만든 파일의 권한을 600으로 둔다.
+
+기존 설정에 백엔드를 더할 때도 같은 값을 적는다: [`setup-sift.sh:1812-1815`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1812-L1815).
+
+```bash
+    if name == "threatintel-mcp":
+        octi_url = "$OPENCTI_URL"
+        octi_token = "$OPENCTI_TOKEN"
+        entry["env"]["OPENCTI_URL"] = octi_url if octi_url else "\${OPENCTI_URL}"
+        entry["env"]["OPENCTI_TOKEN"] = octi_token if octi_token else "\${OPENCTI_TOKEN}"
+```
+
+[`setup-sift.sh:1901-1905`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1901-L1905)
+
+```bash
+with open("$GATEWAY_CONFIG", "w") as f:
+    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+PYEOF
+
+    chmod 600 "$GATEWAY_CONFIG"
+```
+
+[`setup-sift.sh:1912-1916`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1912-L1916)
+
+[8] 가입 API는 받은 `wintools_token`을 백엔드 설정의 `bearer_token`으로 둔다: [`packages/sift-gateway/src/sift_gateway/rest.py:638-680`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L638-L680).
+
+[9] `opencti-mcp` 도구의 입력 schema에는 자격증명 인자가 없다: [`packages/opencti/src/opencti_mcp/server.py:274-509`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L274-L509).
+
+[10] OpenCTI 조회처는 토큰을 `Authorization` 헤더에 넣는다.
+
+```python
+            response = _http_post(
+                f"{self.config.opencti_url}/graphql",
+                json={"query": query, "variables": variables},
+                headers={
+                    "Authorization": "Bearer "
+                    + self.config.opencti_token.get_secret_value()
+                },
+                timeout=remaining,
+                verify=self.config.ssl_verify,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:124-133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L124-L133)
+
+[11] MISP 조회처는 키를 `Authorization` 헤더에 넣는다.
+
+```python
+            response = _http_request(
+                method,
+                f"{self.url}{path}",
+                json=body,
+                headers={
+                    "Authorization": self.key,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                timeout=remaining,
+                verify=self.verify,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:134-145`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L134-L145)
+
+[12] (실행 확인) 컨테이너에서 권한을 바꾼 토큰 파일과 `.env`로 `Config.load`를 부른 다음 MISP 전송 함수를 요청을 적어 두는 함수로 바꾼 뒤 `lookup_ioc`를 불러 응답과 호출 기록에서 키 값을 찾았다.
+
+[13] 토큰 파일 권한이 넓으면 설정 오류를 낸다.
+
+```python
+    # Check file permissions on POSIX systems
+    if hasattr(os, "stat"):
+        mode = path.stat().st_mode
+        # Check if group or other can read/write (requires 600 or 400)
+        if mode & (stat.S_IRGRP | stat.S_IROTH | stat.S_IWGRP | stat.S_IWOTH):
+            logger.warning(
+                "Token file has insecure permissions",
+                extra={"path": str(path), "mode": oct(mode)},
+            )
+            raise ConfigurationError(
+                f"Token file {path} has insecure permissions. Run: chmod 600 {path}"
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:345-356`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L345-L356)
+
+[14] `.env`는 다른 사용자가 읽을 수 있으면 경고만 남긴다.
+
+```python
+    # Check file permissions on POSIX systems
+    if hasattr(os, "stat"):
+        mode = path.stat().st_mode
+        # Warn if world (other) can read/write (group access OK for dev, 640)
+        if mode & (stat.S_IROTH | stat.S_IWOTH):
+            logger.warning(
+                ".env file has insecure permissions (world-readable)",
+                extra={"path": str(path), "mode": oct(mode)},
+            )
+            # Don't fail, but warn - .env files are often shared in dev
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:376-385`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L376-L385)
+
+[15] 게이트웨이는 설정 파일이 있는지만 보고 권한을 검사하지 않고 연다.
+
+```python
+    config_path = Path(path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    try:
+        with open(config_path) as f:
+            raw = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        logger.error("Invalid YAML in config file %s: %s", path, e)
+        raise
+    except OSError as e:
+        logger.error("Cannot read config file %s: %s", path, e)
+        raise
+```
+
+[`packages/sift-gateway/src/sift_gateway/config.py:54-66`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/config.py#L54-L66)
+
+[16] `SecretStr`과 설정 객체의 `repr`은 토큰을 가린다.
+
+```python
+    def __repr__(self) -> str:
+        """Safe repr that never includes token."""
+        return (
+            f"Config(opencti_url={self.opencti_url!r}, "
+            f"token=***, timeout={self.timeout_seconds}s)"
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:202-207`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L202-L207)
+
+[`packages/opencti/src/opencti_mcp/config.py:93-125`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L93-L125)
+
+[17] 시작할 때 설정 객체를 운영 로그에 적는다.
+
+```python
+        logger.info(f"Starting threat-intel backend: providers={names} {config}")
+```
+
+[`packages/opencti/src/opencti_mcp/__main__.py:61-61`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L61-L61)

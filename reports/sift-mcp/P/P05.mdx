@@ -1,0 +1,388 @@
+---
+cell: P05
+details:
+- id: P05.01
+- id: P05.02
+- id: P05.03
+- id: P05.05
+- id: P05.09
+---
+
+# P05 사건 자료 정리
+
+### P05.01 모델 도구로 삭제·초기화
+
+**구현.** 이 방식은 `sift-mcp`의 명령 실행 도구 `run_command`에 적용된다 [1].
+백엔드 7개에는 사건 자료를 지우거나 사건을 초기화하는 전용 도구가 없다.
+모델은 `run_command`로 `rm`, `shred`, `truncate` 같은 명령을 실행할 수 있다 [1].
+`rm`은 사건 폴더 상위 폴더 `VHIR_CASES_DIR`, 열린 사건 폴더, `/cases`, `/evidence` 아래나 그 상위를 가리키면 거부된다 [2].
+`rm`, `shred`, `unlink`, `truncate`, `tee`, `mv`, `cp`, `install`, `ln`은 사건 기록 파일(`findings.json`, `CASE.yaml` 등 10개), `audit/` 아래, `evidence/` 아래의 기존 파일을 지우거나 덮어쓰는 경우에만 거부된다 [3].
+그 밖의 사건 폴더 파일은 `rm`이 아닌 명령으로 지우거나 비울 수 있다 [3].
+`extractions/` 아래 파생물을 `rm`으로 지우는 명령은 거부되었고 같은 파일을 `truncate -s 0`으로 비우는 명령과 `shred -u`로 지우는 명령은 실행되었다 [4][5].
+거부 문구는 사건 폴더의 파일 삭제는 사용자가 AI 세션 밖에서 하라고 적고 다른 파일은 사건의 `DELETE/` 폴더로 옮기라고 적는다 [2][3].
+
+**한계.** 도구 설명은 `bash -c`, `python -c`, `dd`와 분석 도구의 출력 옵션을 검사하지 않는다고 적는다 [1].
+이 검사는 실행하는 명령의 이름이 위 목록에 있을 때만 적용된다 [2][3].
+
+### P05.02 사용자 명령으로 삭제·초기화
+
+**구현.** 이 방식은 사용자 CLI `vhir case close`와 `vhir restore`, 게이트웨이가 `/portal`로 내놓는 검토 포털의 호스트 목록 초안 버리기 `draft_dismiss`에 적용된다 [6][7][8].
+`vhir case close`는 사건 폴더의 파일을 지우지 않고 `CASE.yaml`의 상태를 `closed`로 바꾸며 열린 사건 표시 파일이 그 사건을 가리키면 그 표시 파일을 지운다 [6].
+`vhir restore`는 복원할 대상 폴더에 앞 복원이 중단되었다는 표시 파일 `.restore-in-progress`가 있으면 터미널에서 검토자가 `y`로 답했을 때만 그 폴더를 지우고 다시 복원한다 [7].
+터미널에서 실행하지 않았으면 그 폴더를 지우지 않고 오류로 끝낸다 [7].
+검토자가 호스트 탭에서 `draft_dismiss`를 고르면 서버는 사건 폴더의 `host-list-draft.json`을 지운다 [8][9].
+이 초안은 모델이 `prepare_host_list`로 만든 파일이고 새 초안을 만들면 앞 초안을 바꿔 쓴다 [10][11].
+
+중단된 복원 폴더를 빼면 사건 폴더나 호출 기록을 지우는 사용자 명령은 없다.
+
+### P05.03 자동 정리
+
+**구현.** 이 방식은 검토 포털의 호스트 목록 올리기와 게이트웨이의 유휴 백엔드 정지에 적용된다 [8][12].
+검토자가 호스트 목록을 올리면 서버는 그 목록을 적용한 뒤 호스트 목록 초안 파일을 지운다 [8].
+게이트웨이 설정 `idle_timeout_seconds`가 0보다 크면 게이트웨이는 60초마다 stdio 백엔드의 마지막 호출 시각을 보고 그 시간을 넘긴 백엔드 프로세스를 멈춘다 [12].
+멈춘 백엔드의 프로세스 메모리에 있던 상태(위협 정보 조회 캐시, 참조 지식 횟수, 실행 중인 백그라운드 해시 작업)는 이때 사라진다 [12][13].
+게이트웨이 프로세스는 계속 실행되고 다음 호출이 오면 그 백엔드를 다시 시작한다 [12].
+
+**한계.** `idle_timeout_seconds`의 기본값은 0이라 유휴 정지는 기본으로 꺼져 있고 설정 예시에도 이 값이 없다 [12][14].
+마지막 호출 시각은 호출을 시작할 때 적으므로 시간 제한보다 오래 실행되는 호출이나 호출이 끝난 뒤 이어지는 백그라운드 해시 작업은 진행 중에도 멈출 수 있다 [12][13].
+이 경로는 코드로만 확인했다.
+
+### P05.05 원본 증거를 삭제 대상에서 제외
+
+**구현.** 이 방식은 `run_command`의 삭제 검사와 포털의 호스트 목록 초안 삭제에 적용된다 [2][3][8].
+`run_command`의 검사는 `evidence/` 아래의 기존 파일과 비어 있지 않은 `evidence/` 폴더를 지우거나 덮어쓰는 명령을 거부한다 [3].
+`rm`은 사건 폴더 전체와 `/evidence` 아래를 대상으로 하면 거부된다 [2].
+`evidence/`의 파일을 `rm`, `truncate`, `cp`로 지우거나 덮어쓰는 명령은 모두 거부되었다 [5].
+포털이 지우는 것은 서버가 사건 폴더에 정한 이름의 초안 파일 하나다 [9].
+
+**한계.** 이 검사는 `evidence/` 폴더 안의 경로와 `/evidence`만 원본으로 본다 [2][3].
+검사는 등록 목록 `evidence.json`을 읽지 않으므로 사건 폴더 안 `evidence/` 밖에 등록한 증거는 `rm`이 아닌 명령으로 지우거나 비울 수 있다 [3][15].
+사건의 다른 폴더에 등록한 증거를 `truncate`로 비우는 명령은 실행되었다 [16].
+도구 설명대로 `bash -c`, `python -c`, `dd`, 분석 도구의 출력 옵션은 검사를 거치지 않는다 [1].
+검사 함수의 주석은 값을 받는 감싸기 명령 옵션, 붙여 쓴 `-t`, 사건 폴더 밖 파일을 가리키는 증거 링크도 검사하지 않는다고 적는다 [3].
+
+### P05.09 삭제 사실 기록
+
+**구현.** 이 방식은 `run_command`의 호출 기록 항목과 포털의 호스트 목록 동작 기록에 적용된다 [17][8].
+`run_command`는 실행 전에 명령이 가리키는 기존 파일마다 경로와 SHA-256을 `inputs`에 적고 명령, 검토자, 시각과 함께 사건의 `audit/sift-mcp.jsonl`에 남긴다 [17].
+`truncate -s 0`으로 파생물을 비운 호출의 항목에는 비우기 전 내용의 해시가 `inputs`에 남았다 [4].
+포털은 초안을 버리면 `case-dashboard` 호출 기록에 검토자 이름, 동작 이름, `draft host list dismissed`를 적는다 [8][18].
+`run_command`는 `audit/` 아래 파일을 지우거나 덮어쓰는 명령을 거부한다 [3].
+
+**한계.** `run_command`의 항목은 파일을 지웠다는 사실을 따로 적지 않고 명령 인자와 입력 기록으로만 남긴다 [17].
+1,000,000,000바이트보다 큰 파일은 실행 전에 해시하지 않고 `pending:<작업 ID>`만 적은 뒤 백그라운드 작업에 맡긴다 [17][19].
+그 작업은 파일이 그대로일 때만 해시하므로 해시가 끝나기 전에 명령이 그 파일을 지우거나 비우면 지운 내용의 해시가 남지 않는다 [19].
+폴더 입력은 사건 폴더나 등록된 폴더 증거 안에 있고 파일 10,000개, 크기 합 2,000,000,000바이트 이하일 때만 안의 파일 해시를 묶은 값 `folder`를 남긴다 [20].
+큰 파일과 폴더 입력의 처리는 코드로만 확인했다.
+호스트 목록을 올릴 때 초안을 지운 일은 호출 기록에 적지 않는다 [8].
+게이트웨이가 유휴 백엔드를 멈춘 일은 서버 운영 로그에만 남는다 [12].
+
+### 근거
+
+[1] `run_command`의 설명은 삭제 검사와 검사하지 않는 경로를 적는다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+        In a case the command runs in its own empty folder,
+        extractions/<audit_id>/, so a relative path means a path there.
+        Give parallel runs distinct output folders: files new in a folder two
+        runs share are recorded as both runs' outputs, and trace as ambiguous.
+        Deleting or overwriting case records, audit/ or evidence files is refused;
+        bash -c, python -c, dd and a tool's own output options are not checked.
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-207`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L207)
+
+[2] `rm`은 사건 폴더와 증거 폴더를 대상으로 하면 거부된다.
+
+```python
+    path_args = [a for a in args if not a.startswith("-")]
+    for arg in path_args:
+        resolved = str(Path(_at(arg, base)).resolve())
+        if resolved == "/":
+            raise ValueError("Blocked: rm targeting filesystem root")
+        for protected in _get_protected_dirs():
+            if (
+                resolved == protected
+                or resolved.startswith(protected + "/")
+                or protected.startswith(resolved.rstrip("/") + "/")
+            ):
+                raise ValueError(
+                    f"Blocked: rm in protected directory '{protected}'." + _RM_GUIDANCE
+                )
+        case_dir = resolve_case_dir()
+        if case_dir:
+            case_resolved = str(Path(case_dir).resolve())
+            if (
+                resolved == case_resolved
+                or resolved.startswith(case_resolved + "/")
+                or case_resolved.startswith(resolved.rstrip("/") + "/")
+            ):
+                raise ValueError("Blocked: rm in case directory." + _RM_GUIDANCE)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:109-131`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L109-L131)
+
+보호 폴더 목록: [`packages/sift-mcp/src/sift_mcp/security.py:83-90`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L83-L90).
+
+[3] 사건 기록, `audit/`, `evidence/`를 지우거나 덮어쓰는 명령을 거부한다.
+
+```python
+def _harms_under(real: str, root: str, lead: list[str], new_ok: bool) -> bool:
+    if real == "/" or root.startswith(real.rstrip("/") + "/"):
+        return True  # an ancestor of a protected root
+    if real != root and not real.startswith(root + "/"):
+        return False
+    parts = lead + [x for x in real[len(root) :].split("/") if x]
+    if not parts:  # the cases root
+        return True
+    if len(parts) == 1:  # a case root, while it holds anything
+        return os.path.isdir(real) and bool(os.listdir(real))
+    top = parts[1]
+    if top == "audit" or (top in _CASE_RECORDS and len(parts) == 2):
+        return True
+    if top == "evidence":
+        if len(parts) == 2:  # evidence/ itself, while it holds anything
+            return os.path.isdir(real) and bool(os.listdir(real))
+        return os.path.lexists(real) or not new_ok
+    return False
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:171-188`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L171-L188)
+
+```python
+    bad = []
+    if name in ("rm", "shred", "unlink", "truncate", "tee"):
+        bad = [a for a in args if _harms_case_data(a, new_ok=name == "tee")]
+    elif name in ("mv", "cp", "install", "ln") and len(args) >= 2:
+        dst = args[-1]
+        into = not no_t and os.path.isdir(dst)
+        for s in args[:-1]:
+            if name == "mv" and _harms_case_data(s):
+                bad.append(s)
+            tgt = os.path.join(dst, os.path.basename(s)) if into else dst
+            if _harms_case_data(tgt, new_ok=True):
+                bad.append(tgt)
+    if bad:
+        raise ValueError(
+            f"Blocked: {name} would delete or overwrite case data at '{bad[0]}'. "
+            "Case records, audit/ and evidence files are protected; move other "
+            "files to the case's DELETE/ directory instead."
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:236-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L236-L253)
+
+함수 설명과 사건 기록 목록: [`packages/sift-mcp/src/sift_mcp/security.py:136-149`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L136-L149), [`packages/sift-mcp/src/sift_mcp/security.py:191-203`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L191-L203).
+
+[4] (실행 확인) 컨테이너에서 사건 `extractions/`의 파일을 `run_command`로 `truncate -s 0`과 `shred -u`로 처리하고 파일 크기, 존재 여부, `truncate` 호출의 호출 기록 항목을 읽었다.
+
+[5] (실행 확인) 컨테이너에서 `run_command`로 `evidence/`와 `extractions/`의 파일에 `rm`, `truncate`, `cp`를 실행하고 응답의 거부 문구를 확인했다.
+
+[6] 사용자 CLI `vhir case close`의 상태 변경과 표시 파일 삭제: [`src/vhir_cli/main.py:1692-1700`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1692-L1700), [`src/vhir_cli/main.py:1731-1739`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1731-L1739).
+
+[7] 사용자 CLI `vhir restore`는 중단된 복원 폴더를 검토자가 답했을 때만 지운다: [`src/vhir_cli/commands/backup.py:1924-1950`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L1924-L1950).
+
+[8] 포털의 호스트 목록 올리기와 초안 버리기.
+
+```python
+            with contextlib.suppress(hi.HostLogError):  # left showing, to dismiss
+                hp.clear_host_list_draft(case_dir)
+            _audit(
+                case_dir,
+                examiner,
+                action,
+                {"sha256": result.get("sha256", "")},
+                summary,
+            )
+            return JSONResponse({"ok": True, "summary": summary, **result})
+        if action == "draft_dismiss":
+            summary = (
+                "draft host list dismissed"
+                if hp.clear_host_list_draft(case_dir)
+                else "no draft host list"
+            )
+            _audit(case_dir, examiner, action, {}, summary)
+            return JSONResponse({"ok": True, "summary": summary})
+```
+
+[`packages/case-dashboard/src/case_dashboard/hosts.py:614-631`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/hosts.py#L614-L631)
+
+[9] 초안 파일을 지우는 함수.
+
+```python
+def clear_host_list_draft(case_dir) -> bool:
+    """Drop the case's draft host list; whether there was one."""
+    from pathlib import Path
+
+    root = Path(case_dir)
+    with hi._log_lock(root):
+        try:
+            (root / DRAFT).unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as e:  # a folder, no permission: named
+            raise hi.HostLogError(
+                f"{DRAFT}: can't be removed ({e.strerror or e})"
+            ) from e
+    return True
+```
+
+[`packages/sift-common/src/sift_common/host_proposal.py:954-968`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/host_proposal.py#L954-L968)
+
+[10] `prepare_host_list`는 새 초안이 앞 초안을 바꾼다고 적는다.
+
+```python
+    def prepare_host_list(text: str, source: str = "") -> dict:
+        """Prepare a host list for the examiner from any inventory they give
+        you (a PDF, spreadsheet, email, text or screenshot). Write it as one
+        name per line with an optional FQDN, or keep a CSV or TSV export's
+        header row. `source` names where it came from.
+
+        It is a draft: it confirms nothing and changes no host. The examiner
+        reviews it in the Portal's Hosts tab and uploads it there; a new draft
+        replaces the last. Never say a list was uploaded or applied.
+        """
+        try:
+            _validate_str_length(source, "source", _MAX_SHORT)
+            out = hp.stage_host_list_draft(_resolve_case_dir(), text, source)
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:986-998`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L986-L998)
+
+[11] (실행 확인) 컨테이너에서 `prepare_host_list`를 두 번 부른 뒤 초안 파일에 두 번째 초안만 남은 것을 확인하고 `clear_host_list_draft`로 지웠다.
+
+[12] 게이트웨이의 유휴 백엔드 정지.
+
+```python
+    async def _idle_reaper(self) -> None:
+        """Background task that stops backends idle longer than the timeout."""
+        timeout = self.idle_timeout
+        if timeout <= 0:
+            return
+        logger.info("Idle reaper started (timeout=%ds)", timeout)
+        while True:
+            await asyncio.sleep(60)
+            now = time.monotonic()
+            reaped = False
+            for name, backend in list(self.backends.items()):
+                # Skip HTTP backends — they're remote servers, disconnecting
+                # just drops our session for no benefit (server keeps running)
+                if isinstance(backend, HttpMCPBackend):
+                    continue
+                if backend.started and backend.last_tool_call > 0:
+                    idle = now - backend.last_tool_call
+                    if idle > timeout:
+                        logger.info(
+                            "Stopping idle backend: %s (idle %.0fs)", name, idle
+                        )
+                        try:
+                            await backend.stop()
+                            reaped = True
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:314-337`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L314-L337)
+
+설정값과 시작: [`packages/sift-gateway/src/sift_gateway/server.py:170-174`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L170-L174), [`packages/sift-gateway/src/sift_gateway/server.py:885-886`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L885-L886), [`packages/sift-gateway/src/sift_gateway/server.py:288-312`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L288-L312).
+
+[13] 백그라운드 해시 작업은 그 프로세스의 daemon 스레드로 실행된다.
+
+```python
+def _start(key: tuple, paths, case_dir: str, requested_by: str) -> str:
+    """The id of the job hashing `paths` (one path, or a list) for this case in
+    this process: the running one for the same key, else a new daemon thread."""
+    key = (os.path.realpath(case_dir), key)
+    with _jobs_lock:
+        if key in _jobs:
+            return _jobs[key]
+        job_id = _jobs[key] = f"hash-{uuid.uuid4().hex[:16]}"
+    threading.Thread(
+        target=_job,
+        args=(key, job_id, paths, case_dir, requested_by),
+        name=f"file-identity-{job_id}",
+        daemon=True,
+    ).start()
+    return job_id
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:329-343`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L329-L343)
+
+[14] 설정 예시의 `gateway` 항목.
+
+```text
+gateway:
+  host: "127.0.0.1"
+  port: 4508
+  log_level: "INFO"
+```
+
+[`config/gateway.yaml.example:5-8`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L5-L8)
+
+[15] 등록 함수는 사건 폴더 안이면 어느 폴더의 파일이든 등록한다: [`src/vhir_cli/commands/evidence.py:178-205`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L178-L205).
+
+[16] (실행 확인) 컨테이너에서 사건의 `raw/` 폴더에 둔 파일을 `evidence_register`로 등록한 뒤 `run_command`로 `truncate`를 실행하고 파일 크기와 `evidence_verify` 결과를 읽었다.
+
+[17] `run_command`는 실행 전 입력 기록과 함께 항목을 남긴다: [`packages/sift-mcp/src/sift_mcp/server.py:276-283`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L276-L283), [`packages/sift-mcp/src/sift_mcp/server.py:405-438`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L405-L438), [`packages/sift-common/src/sift_common/file_place.py:174-194`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_place.py#L174-L194).
+
+[18] 포털의 호스트 동작 기록.
+
+```python
+def _audit(
+    case_dir: Path, examiner: str, action: str, params: dict, result: str
+) -> None:
+    from sift_common.audit import AuditWriter
+
+    AuditWriter("case-dashboard", audit_dir=str(Path(case_dir) / "audit")).log(
+        tool=f"host_{action}",
+        params=params,
+        result_summary=result,
+        source="portal",
+        extra={"examiner": examiner, "origin": "portal"},
+    )
+```
+
+[`packages/case-dashboard/src/case_dashboard/hosts.py:295-306`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/hosts.py#L295-L306)
+
+[19] 큰 파일은 백그라운드 작업에 맡기고 그 작업은 파일이 그대로일 때만 해시한다.
+
+```python
+def hash_for_call(
+    path, *, case_dir, requested_by: str = "", inline_limit: int = INLINE_LIMIT
+) -> HashResult | Pending | None:
+    """A hash for a tool call that must answer in time: a file of up to
+    `inline_limit` bytes is hashed in the call; a larger one by a thread of
+    this process, whose result goes to the case's `audit/file-identity.jsonl`.
+    Callers asking for the same file while its thread runs share its job.
+    Without a case there's nowhere to record that result: None, and nothing
+    starts."""
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise NotRegularFile(f"{path} is not a regular file")
+    if st.st_size <= inline_limit:
+        return hash_file(path)
+    if not case_dir:
+        return None
+    # the job hashes the file only while it is still as it is now
+    key = (os.path.realpath(path), *_stat_key(st))
+    return Pending(str(path), _start(key, str(path), str(case_dir), requested_by))
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:264-282`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L264-L282)
+
+[20] 폴더 입력은 파일 수와 크기 합이 정한 값 이하일 때만 해시를 묶은 값을 남긴다.
+
+```python
+INLINE_LIMIT = 1_000_000_000  # bytes a tool call may hash before it answers
+# a folder input's members, hashed in the call before the tool runs
+FOLDER_BYTES = 2_000_000_000
+FOLDER_FILES = 10_000
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:22-25`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L22-L25)
+
+폴더 입력의 조건: [`packages/sift-common/src/sift_common/file_place.py:118-171`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_place.py#L118-L171).

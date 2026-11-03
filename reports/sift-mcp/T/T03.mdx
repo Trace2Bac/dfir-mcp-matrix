@@ -1,0 +1,945 @@
+---
+cell: T03
+details:
+- id: T03.01
+- id: T03.08
+- id: T03.12
+- id: T03.13
+---
+
+# T03 실행 조건 확인
+
+### T03.01 선행 결과 대조
+
+**구현.** 이 방식은 사건 기록을 다루는 `forensic-mcp`, `case-mcp`, `report-mcp`의 도구에 적용된다 [1][2][3].
+세 백엔드는 도구를 실행하기 전에 지금 사건을 찾고 찾지 못하면 기록을 읽거나 쓰지 않고 오류를 돌려준다 [1][2][3].
+`forensic-mcp`의 `_require_active_case`는 `~/.vhir/active_case`가 가리키는 폴더에 `CASE.yaml`이 있는지 보고 없으면 `No active case` 오류를 낸다 [1].
+같은 함수는 `CASE.yaml`의 `status`가 `closed`이면 닫힌 사건이라는 오류를 내고 발견사항, 타임라인 사건, 할 일을 기록하지 않는다 [1].
+`case-mcp`와 `report-mcp`의 `_resolve_case_dir`는 `active_case`가 가리키는 폴더가 없으면 환경변수 `VHIR_CASE_DIR`의 폴더를 쓰고 둘 다 없으면 오류를 낸다 [2][3].
+사건이 없는 상태에서 `evidence_register`, `get_findings`, `record_timeline_event`를 부르자 모두 사건이 없다는 오류로 끝났다 [4].
+닫힌 사건에서 `record_timeline_event`를 부르자 거부되었다 [4].
+
+`sift-mcp`의 `run_command`는 사건이 없어도 명령을 실행한다 [5].
+사건이 없으면 실행별 폴더를 만들지 않고 호출 기록 ID도 정하지 않은 채 서버 프로세스의 작업 폴더에서 실행한다 [5][4].
+
+**한계.** 닫힌 사건 검사는 `forensic-mcp`에만 있다 [1][2][3].
+`case-mcp`와 `report-mcp`는 `CASE.yaml`의 `status`를 보지 않으므로 닫힌 사건에도 증거 등록과 보고서 저장을 받는다 [2][3].
+`forensic-mcp`는 한 번 찾은 사건을 프로세스 안에 기억하고 `active_case` 파일이 없어지면 기억한 사건을 그대로 쓴다 [1].
+같은 프로세스에서 `active_case` 파일을 치운 뒤 `get_findings`를 부르자 오류 없이 응답했다 [4].
+
+### T03.08 원격 호출자 인증
+
+**구현.** 이 방식은 게이트웨이 `sift-gateway`의 HTTP 끝점에 적용된다 [6][7].
+모든 백엔드의 도구를 모은 `/mcp`와 백엔드마다 둔 `/mcp/<백엔드>`는 같은 API 키 목록으로 요청을 검사한다 [7][8].
+REST 경로(`/api/v1/tools/<도구>` 등)는 Starlette 미들웨어 `AuthMiddleware`가 같은 목록으로 검사한다 [6].
+API 키 목록은 설정 파일의 `api_keys`이고 키마다 검토자 이름 `examiner`와 역할 `role`을 둔다 [9].
+요청의 `Authorization` 헤더가 `Bearer <키>` 꼴이 아니면 401을 돌려준다 [6][8].
+키가 1024자를 넘거나 목록의 어느 키와도 맞지 않으면 403을 돌려준다 [6][8].
+키 대조는 `hmac.compare_digest`로 목록의 모든 키와 한 번씩 한다 [8].
+맞은 키의 `examiner`를 요청 상태에 두고 `analyst_override`를 받는 도구 8개를 부를 때 그 값을 `analyst_override`에 덮어써 넘긴다 [10][11].
+헤더 없는 요청은 401, 틀린 키는 403으로 거부되었고 맞는 키로는 도구 목록과 MCP 초기화가 성공했다 [12].
+`analyst_override`에 다른 이름을 준 `record_action`은 키의 `examiner`로 기록되었다 [12].
+
+원격 기계를 붙일 때 쓰는 join 코드는 설정 파일의 첫 번째 키로만 만들 수 있다 [13].
+join 코드는 임의의 8자 문자열이고 bcrypt 해시로만 저장되며 1~48시간 뒤 만료되고 한 번 쓰면 다시 쓰지 못한다 [13][14].
+`/api/v1/setup/join`은 인증하지 않는 경로이고 IP마다 15분 안에 틀린 코드가 3번 쌓이면 다음 요청을 429로 거부한다 [15].
+join이 성공하면 서버가 새 키를 만들어 역할 `examiner`로 설정 파일에 더한다 [16].
+첫 번째가 아닌 키로 join 코드를 요청하자 403이 돌아왔다 [12].
+틀린 코드를 네 번 보내자 세 번은 403, 네 번째는 429가 돌아왔다 [12].
+
+게이트웨이를 거치지 않고 클라이언트가 백엔드를 stdio로 직접 실행하는 구성에는 이 검사가 없다.
+이때 `forensic-mcp`와 `case-mcp`는 `analyst_override`에 모델이 준 이름을 그대로 검토자로 기록한다 [17].
+
+**한계.** 설정 파일에 `api_keys`가 없거나 비어 있으면 인증을 하지 않고 모든 요청을 `anonymous` 검토자로 처리한다 [6][8].
+`--host`로 `127.0.0.1` 밖의 주소에 열어도 이 동작은 같고 키가 없다는 이유로 시작을 거부하지 않는다 [18].
+키 없는 설정으로 게이트웨이를 실행하자 헤더 없는 요청으로 도구 목록 조회와 `run_command` 실행이 성공했다 [12].
+`role`은 요청 상태에 넣기만 하고 도구 호출을 허용하거나 거부하는 데 쓰지 않는다 [10].
+역할이 `readonly`인 키로 `run_command`를 부르자 실행되었다 [12].
+백엔드 시작·중지 같은 서비스 관리 REST 경로는 첫 번째 키인지 보지 않고 어느 키로도 부를 수 있다 [19].
+첫 번째가 아닌 키로 `case-mcp` 중지를 요청하자 200이 돌아왔다 [12].
+`/health`, 검토 포털 `/portal`의 HTML, `/api/v1/setup/join`은 인증하지 않는 경로다 [6].
+
+### T03.12 외부 서비스 요청 빈도 제한
+
+**구현.** 이 방식은 `opencti-mcp`가 OpenCTI에 보내는 조회와 `lookup_ioc`의 조회처 요청에 적용된다 [20][21].
+OpenCTI 조회는 60초 창 안에 보낸 질의 수가 `rate_limit_queries`에 이르면 OpenCTI에 묻지 않고 `RateLimitError`를 낸다 [20][22].
+`rate_limit_queries`의 기본값은 600이고 사용자가 환경변수 `OPENCTI_RATE_LIMIT_QUERIES`로 바꾼다 [23].
+`lookup_ioc`는 OpenCTI를 설정했으면 이 질의 상한을 함께 쓰고 설정하지 않았으면 60초 창 600회의 상한을 따로 둔다 [21].
+상한에 이르면 기다리지 않고 `rate_limit_exceeded` 오류와 다음 요청까지 남은 초 `wait_seconds`를 돌려준다 [24][22].
+캐시에 있는 응답을 돌려주는 조회는 이 수에 넣지 않는다 [25].
+이 상한은 실행으로 확인하지 않았고 코드로만 확인했다.
+
+### T03.13 원격 호출자별 요청 수 제한
+
+**구현.** 이 방식은 게이트웨이의 MCP 끝점 `/mcp`·`/mcp/<백엔드>`와 REST 도구 호출 경로 `/api/v1/tools/<도구>`에 적용된다 [26][27].
+게이트웨이는 호출자 주소마다 60초 창 안의 요청 수를 세어 60회에 이르면 다음 요청을 429로 거부한다 [28][26][27].
+이 검사는 인증과 요청 크기 검사보다 먼저 실행된다 [26].
+모든 끝점은 프로세스에 하나인 상한 객체를 코드에 정한 기본값으로 함께 쓰고 설정으로 바꾸는 값은 없다 [29].
+로컬 주소에서 온 요청에 `X-Forwarded-For` 헤더가 있으면 그 첫 주소를 호출자 주소로 본다 [26][27].
+호출자 주소가 `127.0.0.1`·`::1`·`localhost`이면 요청을 세지 않는다 [29].
+이 상한은 실행으로 확인하지 않았고 코드로만 확인했다.
+
+**한계.** REST 경로 가운데 도구 목록 조회, 백엔드·서비스 관리, join 경로에는 이 상한이 적용되지 않는다 [27][30].
+
+### 근거
+
+[1] `forensic-mcp`는 `active_case`를 읽어 사건을 기억하고 사건이 없거나 닫혔으면 오류를 낸다.
+
+```python
+    def _require_active_case(self) -> Path:
+        # Re-read active_case file on every call to detect case switches
+        active_file = _ACTIVE_CASE_FILE
+        if active_file.exists():
+            try:
+                content = active_file.read_text().strip()
+            except OSError:
+                content = ""
+            if content:
+                if os.path.isabs(content):
+                    case_dir = Path(content)
+                    new_id = case_dir.name
+                else:
+                    _validate_case_id(content)
+                    case_dir = self.cases_dir / content
+                    new_id = content
+                if case_dir.is_dir() and (case_dir / "CASE.yaml").exists():
+                    if (
+                        new_id != self._active_case_id
+                        and self._active_case_id is not None
+                    ):
+                        logger.info(
+                            "Case switched: %s → %s", self._active_case_id, new_id
+                        )
+                    self._active_case_id = new_id
+                    self._active_case_path = case_dir
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:966-991`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L966-L991)
+
+```python
+        d = self.active_case_dir
+        if d is None or not d.exists():
+            raise ValueError("No active case. Run 'vhir case activate <id>' first.")
+        # Safety belt: refuse closed cases
+        meta_file = d / "CASE.yaml"
+        if meta_file.exists():
+            try:
+                meta = yaml.safe_load(meta_file.read_text()) or {}
+                if meta.get("status") == "closed":
+                    raise ValueError(
+                        f"Case {self._active_case_id} is closed. "
+                        f"Run 'vhir case reopen {self._active_case_id}' or "
+                        f"'vhir case activate <id>' to work on a different case."
+                    )
+            except yaml.YAMLError:
+                pass
+        return d
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:992-1008`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L992-L1008)
+
+[2] `case-mcp`는 `active_case`, 그다음 `VHIR_CASE_DIR`로 사건 폴더를 찾고 없으면 오류를 내며 `status`는 보지 않는다.
+
+```python
+    # Read active_case file first (detects case switches without restart)
+    active_file = _ACTIVE_CASE_FILE
+    if active_file.exists():
+        try:
+            content = active_file.read_text().strip()
+        except OSError:
+            content = ""
+        if content:
+            if os.path.isabs(content):
+                case_dir = Path(content)
+            else:
+                if ".." in content or "/" in content or "\\" in content:
+                    raise ValueError(f"Invalid case ID in active_case: {content}")
+                cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+                case_dir = cases_dir / content
+            if case_dir.is_dir():
+                return case_dir
+
+    # Fallback: env var (containers, tests, non-standard deployments)
+    env_dir = os.environ.get("VHIR_CASE_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if not p.is_dir():
+            raise ValueError(f"VHIR_CASE_DIR does not exist: {env_dir}")
+        return p
+
+    raise ValueError("No active case. Use case_init or case_activate first.")
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:227-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L227-L253)
+
+[3] `report-mcp`도 같은 차례로 사건 폴더를 찾고 `status`는 보지 않는다.
+
+```python
+    # Read active_case file first (detects case switches without restart)
+    active_file = _ACTIVE_CASE_FILE
+    if active_file.exists():
+        try:
+            content = active_file.read_text().strip()
+        except OSError:
+            content = ""
+        if content:
+            if os.path.isabs(content):
+                case_dir = Path(content)
+            else:
+                if ".." in content or "/" in content or "\\" in content:
+                    raise ValueError(f"Invalid case ID in active_case: {content}")
+                cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+                case_dir = cases_dir / content
+            if case_dir.is_dir():
+                return case_dir
+
+    # Fallback: env var (containers, tests, non-standard deployments)
+    env_dir = os.environ.get("VHIR_CASE_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if not p.is_dir():
+            raise ValueError(f"VHIR_CASE_DIR does not exist: {env_dir}")
+        return p
+
+    raise ValueError("No active case. Use case_init or case_activate first.")
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:238-264`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L238-L264)
+
+[4] (실행 확인) 컨테이너에서 사건이 없는 `case-mcp`·`forensic-mcp`에 증거 등록과 발견사항 조회·타임라인 기록을 요청하자 사건이 없다는 오류가 돌아왔다.
+닫힌 사건의 타임라인 기록은 거부되었다.
+사건을 기억한 `forensic-mcp` 프로세스는 `active_case` 파일을 치운 뒤에도 `get_findings`에 오류 없이 응답했다.
+사건 없이 실행한 `run_command`의 작업 폴더는 서버 프로세스의 폴더였고 응답의 `audit_id`는 비어 있었다.
+
+[5] `run_command`는 사건이 있을 때만 호출 기록 ID를 정하고 실행별 폴더를 만든다.
+
+```python
+        # One case per call, resolved as it starts: the audit id is minted for
+        # it, and the output and the entry are kept in it, whatever case is
+        # active when the command ends
+        case_dir = resolve_case_dir()
+        audit_dir = audit._get_audit_dir(case_dir)
+        op_id = audit._next_audit_id(audit_dir) if audit_dir else None
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:249-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L249-L267)
+
+[6] REST 경로의 미들웨어는 공개 경로를 빼고 키가 없으면 `anonymous`로 통과시키며 헤더와 키를 검사한다.
+
+```python
+# Paths exempt from authentication.
+# /mcp is handled by its own ASGI-level auth (MCPAuthASGIApp) because
+# BaseHTTPMiddleware buffers responses and breaks SSE streaming.
+_PUBLIC_PATHS = {
+    "/health",
+    "/health/",
+    "/mcp",
+    "/api/v1/setup/join",
+    # Examiner Portal HTML only — API endpoints require auth
+    "/portal",
+    "/portal/",
+    # The retired legacy dashboard: its paths only redirect to /portal/
+    "/dashboard",
+    # The one static asset the portal pages load
+    "/portal/valhuntir-icon.png",
+}
+
+# Paths matched by prefix (all sub-paths are public)
+_PUBLIC_PREFIXES: tuple[str, ...] = ("/dashboard/",)  # each one only redirects
+```
+
+[`packages/sift-gateway/src/sift_gateway/auth.py:12-30`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/auth.py#L12-L30)
+
+```python
+        # If no api_keys configured, auth is disabled (single-user mode)
+        if not self.api_keys:
+            request.state.examiner = "anonymous"
+            request.state.role = "examiner"
+            return await call_next(request)
+
+        # Extract bearer token
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return JSONResponse(
+                {"error": "Missing or invalid Authorization header"},
+                status_code=401,
+            )
+
+        token = auth_header[7:].strip()
+
+        # Length check: reject excessively long tokens before timing-safe comparison
+        if len(token) > _MAX_TOKEN_LENGTH:
+            logger.warning("Rejected oversized bearer token (%d bytes)", len(token))
+            return JSONResponse(
+                {"error": "Invalid API key"},
+                status_code=403,
+            )
+
+        # Timing-safe key lookup: iterate ALL keys to prevent timing leaks
+        matched_key = None
+        for candidate in self.api_keys:
+            if hmac.compare_digest(token, candidate) and matched_key is None:
+                matched_key = candidate
+
+```
+
+[`packages/sift-gateway/src/sift_gateway/auth.py:62-91`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/auth.py#L62-L91)
+
+[7] 모은 끝점과 백엔드별 끝점에 같은 `api_keys`로 만든 인증 래퍼를 둔다.
+
+```python
+        gateway = self
+        api_keys = self.config.get("api_keys", {})
+        self._api_keys = api_keys
+
+        # Build aggregate MCP endpoint components
+        mcp_server = create_mcp_server(gateway)
+        session_manager = create_session_manager(mcp_server)
+        mcp_asgi_app = MCPAuthASGIApp(session_manager, api_keys=api_keys)
+
+        # Build per-backend MCP endpoints
+        backend_session_managers = []
+        per_backend_routes = []
+        for name in [*self.backends, *(n for n in JOINABLE if n not in self.backends)]:
+            b_server = create_backend_mcp_server(gateway, name)
+            b_sm = create_session_manager(b_server)
+            b_asgi = MCPAuthASGIApp(b_sm, api_keys=api_keys)
+            backend_session_managers.append(b_sm)
+            per_backend_routes.append(Mount(f"/mcp/{name}", app=b_asgi))
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:856-873`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L856-L873)
+
+[8] MCP 끝점의 인증 래퍼는 키가 없으면 `anonymous`로 넘기고 헤더, 길이, 키를 검사한다.
+
+```python
+        if not self.api_keys:
+            # No keys configured — single-user / anonymous mode
+            scope["state"]["examiner"] = "anonymous"
+            scope["state"]["role"] = "examiner"
+            await self.session_manager.handle_request(scope, receive, send)
+            return
+
+        # Extract Authorization header from raw ASGI headers
+        token = _extract_bearer_token(scope)
+
+        if token is None:
+            resp = JSONResponse(
+                {"error": "Missing or invalid Authorization header"},
+                status_code=401,
+            )
+            await resp(scope, receive, send)
+            return
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:144-160`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L144-L160)
+
+```python
+        # Length check: reject excessively long tokens before timing-safe comparison
+        if len(token) > _MAX_TOKEN_LENGTH:
+            logger.warning(
+                "MCP endpoint: rejected oversized bearer token (%d bytes)", len(token)
+            )
+            resp = JSONResponse(
+                {"error": "Invalid API key"},
+                status_code=403,
+            )
+            await resp(scope, receive, send)
+            return
+
+        # Timing-safe key lookup: iterate ALL keys to prevent timing leaks
+        matched_key = None
+        for candidate in self.api_keys:
+            if hmac.compare_digest(token, candidate) and matched_key is None:
+                matched_key = candidate
+
+        if matched_key is None:
+            resp = JSONResponse(
+                {"error": "Invalid API key"},
+                status_code=403,
+            )
+            await resp(scope, receive, send)
+            return
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:162-186`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L162-L186)
+
+[9] 설정 예시는 키마다 `examiner`와 `role`을 두고 이 절이 없으면 인증을 끈다고 적는다.
+
+```text
+# API key authentication
+# Each key maps to an examiner identity and role.
+# If this section is empty or missing, auth is disabled (single-user mode).
+api_keys:
+  vhir_gw_abc123:
+    examiner: "steve"
+    role: "lead"
+  vhir_gw_def456:
+    examiner: "jane"
+    role: "examiner"
+```
+
+[`config/gateway.yaml.example:10-19`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L10-L19)
+
+[10] 게이트웨이는 역할로 도구를 거르지 않고 `analyst_override`를 받는 도구에 키의 `examiner`를 덮어써 넘긴다.
+
+```python
+        # Inject examiner identity into tools that accept analyst_override.
+        # Always overwrite to prevent identity spoofing.
+        # Role-based filtering (e.g., restricting certain tools by role) is
+        # deferred — currently all authenticated users can call any tool.
+        if examiner:
+            if actual_name in ANALYST_TOOLS:
+                arguments = {**arguments, "analyst_override": examiner}
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:771-777`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L771-L777)
+
+[11] `analyst_override`를 받는 도구 목록과 백엔드별 끝점의 덮어쓰기다.
+
+```python
+# Tools that accept analyst_override for identity injection.
+ANALYST_TOOLS: frozenset[str] = frozenset(
+    {
+        "record_action",
+        "record_finding",
+        "record_timeline_event",
+        "add_todo",
+        "update_todo",
+        "complete_todo",
+        "log_reasoning",
+        "log_external_action",
+    }
+)
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:61-73`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L61-L73)
+
+```python
+        # Inject examiner identity for analyst tools
+        if examiner and name in ANALYST_TOOLS:
+            arguments = {**arguments, "analyst_override": examiner}
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:384-386`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L384-L386)
+
+[12] (실행 확인) 컨테이너 안 `127.0.0.1`에 연 게이트웨이에 키 없이, 틀린 키로, 맞는 키로 REST·MCP 요청을 보내 401·403·200을 확인했다.
+역할이 `readonly`인 키의 `run_command`는 실행되었고 `analyst_override`를 바꾼 `record_action`은 키의 검토자로 기록되었다.
+첫 번째가 아닌 키의 join 코드 요청은 403, 같은 키의 `case-mcp` 중지 요청은 200이었다.
+틀린 join 코드 네 번은 403, 403, 403, 429였다.
+`api_keys`가 없는 설정에서는 헤더 없는 요청으로 도구 목록 조회와 `run_command` 실행이 성공했다.
+
+[13] join 코드 요청은 첫 번째 키만 받고 만료 시간을 1~48시간으로 제한한다.
+
+```python
+    api_keys = getattr(request.app.state.gateway, "_api_keys", None) or {}
+    token = request.headers.get("authorization", "")[7:].strip()
+    if api_keys and not hmac.compare_digest(token, next(iter(api_keys))):
+        return JSONResponse(
+            {"error": "Only the gateway owner can create join codes"},
+            status_code=403,
+        )
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:400-406`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L400-L406)
+
+```python
+    if (
+        not isinstance(expires_hours, (int, float))
+        or expires_hours < 1
+        or expires_hours > 48
+    ):
+        return JSONResponse(
+            {"error": "expires_hours must be between 1 and 48"},
+            status_code=400,
+        )
+
+    code = generate_join_code()
+    store_join_code(code, expires_hours=expires_hours, bound_name=bound_name)
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:440-451`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L440-L451)
+
+[14] join 코드는 bcrypt 해시와 만료 시각으로 저장되고 쓰지 않은 만료 전 코드만 맞는다.
+
+```python
+def generate_join_code() -> str:
+    """Generate an 8-character join code in XXXX-XXXX format."""
+    chars = [secrets.choice(_JOIN_CHARSET) for _ in range(8)]
+    return "".join(chars[:4]) + "-" + "".join(chars[4:])
+
+
+def store_join_code(
+    code: str, expires_hours: int = 2, bound_name: str | None = None
+) -> None:
+    """Hash and store a join code with expiry. A code bound to a name
+    (`vhir setup join-code --name NAME`) joins as that name only."""
+    state = _load_state()
+    # bcrypt hash of the code
+    code_bytes = code.encode("utf-8")
+    hashed = bcrypt.hashpw(code_bytes, bcrypt.gensalt()).decode("utf-8")
+    now_ts = time.time()
+    expires_ts = now_ts + (expires_hours * 3600)
+    state["codes"][hashed] = {
+        "created": datetime.now(timezone.utc).isoformat(),
+        "expires_ts": expires_ts,
+        "used": False,
+    }
+    if bound_name is not None:
+        state["codes"][hashed]["bound_name"] = bound_name
+    _save_state(state)
+```
+
+[`packages/sift-gateway/src/sift_gateway/join.py:83-107`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/join.py#L83-L107)
+
+```python
+def find_join_code(code: str) -> tuple[str, dict] | None:
+    """The valid code's hash and its entry (with any `bound_name`), from the
+    one state read that checked it; None when no unused, unexpired code
+    matches."""
+    state = _load_state()
+    code_bytes = code.encode("utf-8")
+    now = time.time()
+
+    for hashed, info in state["codes"].items():
+        if info.get("used", False):
+            continue
+        if now > info.get("expires_ts", 0):
+            continue
+        try:
+            if bcrypt.checkpw(code_bytes, hashed.encode("utf-8")):
+                return hashed, dict(info)
+        except (ValueError, TypeError):
+            continue
+    return None
+```
+
+[`packages/sift-gateway/src/sift_gateway/join.py:134-152`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/join.py#L134-L152)
+
+[15] join 경로는 IP마다 틀린 코드를 기록하고 15분 안에 3번이면 429로 거부한다.
+기준 값은 [`packages/sift-gateway/src/sift_gateway/join.py:31-33`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/join.py#L31-L33)에, 실패 기록은 [`packages/sift-gateway/src/sift_gateway/rest.py:579-586`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L579-L586)에 있다.
+
+```python
+async def join_gateway(request: Request) -> JSONResponse:
+    """POST /api/v1/setup/join — exchange join code for gateway credentials.
+
+    Unauthenticated — the join code is the auth mechanism.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_join_rate_limit(client_ip):
+        return JSONResponse(
+            {"error": "Too many failed attempts. Try again later."},
+            status_code=429,
+        )
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:542-552`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L542-L552)
+
+```python
+_join_failures: dict[str, list[float]] = {}
+_join_failures_lock = threading.Lock()
+
+
+def check_join_rate_limit(client_ip: str) -> bool:
+    """Return True if the client is allowed to attempt. In-memory, thread-safe."""
+    with _join_failures_lock:
+        now = time.monotonic()
+        timestamps = _join_failures.get(client_ip, [])
+        recent = [t for t in timestamps if now - t < _FAILURE_WINDOW_SECONDS]
+        if recent:
+            _join_failures[client_ip] = recent
+        elif client_ip in _join_failures:
+            del _join_failures[client_ip]
+        return len(recent) < _MAX_FAILURES
+
+
+_MAX_TRACKED_IPS = 10_000
+
+
+def record_join_failure(client_ip: str) -> None:
+    """Record a failed join attempt. In-memory, thread-safe."""
+    with _join_failures_lock:
+        if len(_join_failures) >= _MAX_TRACKED_IPS and client_ip not in _join_failures:
+            return
+        if client_ip not in _join_failures:
+            _join_failures[client_ip] = []
+        _join_failures[client_ip].append(time.monotonic())
+```
+
+[`packages/sift-gateway/src/sift_gateway/join.py:204-231`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/join.py#L204-L231)
+
+[16] join으로 만든 키는 역할 `examiner`로 설정에 더한다.
+
+```python
+        earlier = (
+            [t for t, v in config["api_keys"].items() if (v or {}).get("examiner") == examiner]
+            if replace
+            else []
+        )  # fmt: skip
+        for t in earlier:
+            del config["api_keys"][t]
+
+        config["api_keys"][token] = {
+            "examiner": examiner,
+            "role": "examiner",
+        }
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:800-811`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L800-L811)
+
+[17] `forensic-mcp`와 `case-mcp`는 `analyst_override`가 비어 있지 않으면 그 값을 검토자로 쓴다.
+
+```python
+    def _effective_examiner(self, override: str = "") -> str:
+        """Return override if non-empty, otherwise self.examiner.
+
+        Used by gateway to propagate per-request examiner identity.
+        """
+        return (
+            override.strip().lower() if override and override.strip() else self.examiner
+        )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1010-1017`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1010-L1017)
+
+```python
+            case_dir = _resolve_case_dir()
+            examiner = analyst_override or resolve_examiner()
+            ts = datetime.now(timezone.utc).isoformat()
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:666-668`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L666-L668)
+
+[18] 게이트웨이는 설정이나 인자의 주소로 열고 키 유무를 보지 않는다.
+
+```python
+    host = args.host or gw_config.get("host", "127.0.0.1")
+    port = args.port or gw_config.get("port", 4508)
+    if not isinstance(port, int):
+        logger.error("Config 'gateway.port' must be an integer, got %r", port)
+        print(
+            f"ERROR: Config 'gateway.port' must be an integer, got {port!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    prepend_local_bin()
+    gateway = Gateway(config)
+    app = gateway.create_app()
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=gw_config.get("log_level", "info").lower(),
+        **ssl_kwargs,
+    )
+```
+
+[`packages/sift-gateway/src/sift_gateway/__main__.py:104-123`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/__main__.py#L104-L123)
+
+[19] 서비스 중지 경로는 첫 번째 키인지 보지 않는다.
+
+```python
+async def stop_service(request: Request) -> JSONResponse:
+    """POST /api/v1/services/{name}/stop — stop a backend and rebuild tool map."""
+    gateway = request.app.state.gateway
+    name = _served_name(gateway, request.path_params["name"])
+
+    if name not in gateway.backends:
+        return JSONResponse({"error": f"Unknown backend: {name}"}, status_code=404)
+
+    backend = gateway.backends[name]
+    if not backend.started:
+        return JSONResponse({"status": "already_stopped", "name": name})
+    if name in gateway._hot:  # started by the loader: only its task stops it
+        await gateway.reload_backend(name, None)
+    if not gateway.backends[name].started:
+        await gateway._build_tool_map()
+        return JSONResponse({"status": "stopped", "name": name})
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:289-304`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L289-L304)
+
+[20] OpenCTI 질의 상한은 60초 창의 `rate_limit_queries`로 만들고 넘으면 `RateLimitError`를 낸다.
+
+```python
+        self._query_limiter = RateLimiter(
+            max_calls=config.rate_limit_queries, window_seconds=60
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:305-307`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L305-L307)
+
+```python
+    def _check_rate_limit(self, limiter: RateLimiter, limit_type: str) -> None:
+        """Check rate limit and raise if exceeded (thread-safe)."""
+        if not limiter.check_and_record():
+            wait = limiter.wait_time()
+            raise RateLimitError(wait, limit_type)
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:456-460`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L456-L460)
+
+[21] `lookup_ioc`는 OpenCTI의 질의 상한을 함께 쓰거나 같은 크기의 상한을 따로 두고 조회 전에 센다.
+
+```python
+        # lookup_ioc shares OpenCTI's query limit when OpenCTI is configured.
+        self._lookup_limiter = (
+            self.client._query_limiter
+            if self.client is not None
+            else RateLimiter(max_calls=600, window_seconds=60)
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:259-264`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L259-L264)
+
+```python
+        if not self._lookup_limiter.check_and_record():
+            raise RateLimitError(self._lookup_limiter.wait_time(), "query")
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:825-826`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L825-L826)
+
+[22] 상한 객체는 시간 창 안의 호출 시각을 세어 상한에 이르면 거부하고 남은 시간을 계산한다.
+
+```python
+    def check_and_record(self) -> bool:
+        """Atomically check and record if allowed (thread-safe).
+
+        Returns True if call was allowed and recorded, False if rate limited.
+        """
+        with self._lock:
+            now = monotonic()
+            self._cleanup_unlocked(now)
+            if len(self.calls) < self.max_calls:
+                self.calls.append(now)
+                return True
+            return False
+
+    def wait_time(self) -> float:
+        """Return seconds to wait before next call allowed (thread-safe)."""
+        with self._lock:
+            if self.max_calls <= 0:
+                return float(self.window)
+            now = monotonic()
+            self._cleanup_unlocked(now)
+            if len(self.calls) < self.max_calls:
+                return 0.0
+            if not self.calls:
+                return 0.0
+            oldest = self.calls[0]
+            return max(0.0, oldest + self.window - now)
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:233-258`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L233-L258)
+
+[23] 질의 상한의 기본값과 환경변수다.
+
+```python
+        # Rate limits — operator-tunable for varying OpenCTI capacities.
+        # Defaults sized for a dedicated instance; shared/SaaS operators
+        # should tune down.
+        rate_limit_queries = _parse_int_env("OPENCTI_RATE_LIMIT_QUERIES", 600)
+        rate_limit_enrichment = _parse_int_env("OPENCTI_RATE_LIMIT_ENRICHMENT", 100)
+```
+
+[`packages/opencti/src/opencti_mcp/config.py:250-254`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L250-L254)
+
+[24] 상한에 이르면 `rate_limit_exceeded`와 `wait_seconds`를 돌려준다.
+
+```python
+            except RateLimitError as e:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.warning(
+                    "Rate limit exceeded",
+                    extra={
+                        "tool": name,
+                        "wait_seconds": e.wait_seconds,
+                        "limit_type": e.limit_type,
+                    },
+                )
+                error_result = {
+                    "error": "rate_limit_exceeded",
+                    "message": e.safe_message,
+                    "wait_seconds": e.wait_seconds,
+                }
+                error_result = self._wrap_response(
+                    name,
+                    arguments,
+                    error_result,
+                    audit_id=audit_id,
+                    elapsed_ms=elapsed_ms,
+                )
+                return [TextContent(type="text", text=json.dumps(error_result))]
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:551-573`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L551-L573)
+
+[25] 조회는 캐시를 먼저 보고 캐시에 없을 때만 상한을 센다.
+
+```python
+        # Check cache first (if caching enabled)
+        if hasattr(self, "_search_cache"):
+            found, cached = self._get_cached(self._search_cache, cache_key)
+            if found and cached is not NOT_FOUND:
+                self._last_response_from_cache = True
+                return cached
+
+        # Check if circuit breaker allows request
+        if not self._circuit_breaker.allow_request():
+            # Try graceful degradation - return cached result if available
+            if hasattr(self, "_search_cache"):
+                found, cached, degraded = self._get_fallback(
+                    self._search_cache, cache_key
+                )
+                if found:
+                    self._last_response_from_cache = True
+                    self._last_response_degraded = True
+                    return cached
+            # No cached data available
+            raise ConnectionError("OpenCTI unavailable (circuit breaker open)")
+
+        if not _skip_rate_limit:
+            self._check_rate_limit(self._query_limiter, "query")
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:1161-1183`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1161-L1183)
+
+[26] MCP 끝점은 인증보다 먼저 호출자 주소로 요청 수를 검사하고 넘으면 429를 돌려준다.
+
+```python
+        # Rate limit check (before auth or any processing).
+        # Extract real client IP — check X-Forwarded-For for reverse proxy setups.
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
+        # Trust X-Forwarded-For only from localhost (proxy on same machine)
+        if client_ip in ("127.0.0.1", "::1"):
+            headers = dict(scope.get("headers", []))
+            forwarded = headers.get(b"x-forwarded-for", b"").decode()
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+        if not check_rate_limit(client_ip):
+            resp = JSONResponse(
+                {"error": "Rate limit exceeded"},
+                status_code=429,
+            )
+            await resp(scope, receive, send)
+            return
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:109-125`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L109-L125)
+
+[27] REST 도구 호출 경로도 같은 검사를 한다.
+
+```python
+    # Rate limit check (before any body processing)
+    # Trust X-Forwarded-For only from localhost (proxy on same machine)
+    client_ip = request.client.host if request.client else "unknown"
+    if client_ip in ("127.0.0.1", "::1"):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+    if not check_rate_limit(client_ip):
+        return JSONResponse(
+            {"error": "Rate limit exceeded"},
+            status_code=429,
+        )
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:92-103`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L92-L103)
+
+[28] 주소마다 60초 창 안의 요청 시각을 모아 60회에 이르면 거부한다.
+
+```python
+# Default: 60 requests per 60-second window.
+DEFAULT_LIMIT = 60
+DEFAULT_WINDOW_SECONDS = 60.0
+```
+
+[`packages/sift-gateway/src/sift_gateway/rate_limit.py:12-14`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rate_limit.py#L12-L14)
+
+```python
+            timestamps = self._store.get(ip)
+            if timestamps is None:
+                self._store[ip] = deque([now], maxlen=self.limit + 1)
+                return True
+
+            # Trim timestamps outside the sliding window
+            cutoff = now - self.window
+            while timestamps and timestamps[0] < cutoff:
+                timestamps.popleft()
+
+            if len(timestamps) >= self.limit:
+                return False
+
+            timestamps.append(now)
+            return True
+```
+
+[`packages/sift-gateway/src/sift_gateway/rate_limit.py:64-78`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rate_limit.py#L64-L78)
+
+[29] 상한 객체는 프로세스에 하나이고 기본값으로 만들며 로컬 주소는 세지 않는다.
+
+```python
+def get_rate_limiter(
+    limit: int = DEFAULT_LIMIT,
+    window: float = DEFAULT_WINDOW_SECONDS,
+) -> RateLimiter:
+    """Return the module-level rate limiter singleton, creating it on first call.
+
+    Subsequent calls return the existing instance (limit/window args are
+    ignored after creation). Call ``reset_rate_limiter()`` to replace it.
+    """
+    global _limiter
+    if _limiter is None:
+        _limiter = RateLimiter(limit=limit, window=window)
+    return _limiter
+```
+
+[`packages/sift-gateway/src/sift_gateway/rate_limit.py:96-108`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rate_limit.py#L96-L108)
+
+```python
+def check_rate_limit(ip: str) -> bool:
+    """Convenience: check the singleton limiter. Returns True if allowed.
+
+    Localhost connections are always allowed — rate limiting protects
+    against remote abuse, not local Claude Code connections.
+    """
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return True
+    return get_rate_limiter().is_allowed(ip)
+```
+
+[`packages/sift-gateway/src/sift_gateway/rate_limit.py:117-125`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rate_limit.py#L117-L125)
+
+[30] REST 경로 목록이다.
+
+```python
+        Route("/api/v1/tools", list_tools, methods=["GET"]),
+        Route("/api/v1/tools/{tool_name}", call_tool, methods=["POST"]),
+        Route("/api/v1/backends", list_backends, methods=["GET"]),
+        Route("/api/v1/backends/reload", reload_backends, methods=["POST"]),
+        Route("/api/v1/services", list_services, methods=["GET"]),
+        Route("/api/v1/services/{name}/start", start_service, methods=["POST"]),
+        Route("/api/v1/services/{name}/stop", stop_service, methods=["POST"]),
+        Route("/api/v1/services/{name}/restart", restart_service, methods=["POST"]),
+        Route("/api/v1/setup/join-code", create_join_code, methods=["POST"]),
+        Route("/api/v1/setup/join-code", revoke_join_codes, methods=["DELETE"]),
+        Route("/api/v1/setup/join", join_gateway, methods=["POST"]),
+        Route("/api/v1/setup/join-status", join_status, methods=["GET"]),
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:989-1000`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L989-L1000)

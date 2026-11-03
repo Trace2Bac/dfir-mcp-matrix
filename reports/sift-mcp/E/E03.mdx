@@ -1,0 +1,290 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 실행 전에 하는 대상 검사와 서버 코드가 증거를 해시할 때 여는 방식에 적용된다 [1][2][3].
+`run_command`는 `rm`, `shred`, `unlink`, `truncate`, `tee`, `mv`, `cp`, `install`, `ln`의 대상이 사건 `evidence/` 아래의 기존 파일이나 비어 있지 않은 `evidence/` 폴더이면 실행하지 않는다 [2].
+`mv`는 증거 파일을 옮겨 내는 경우도 거부한다 [2].
+`rm`은 사건 폴더 전체와 `/cases`, `/evidence` 아래를 대상으로 하면 실행하지 않는다 [3].
+`evidence/`의 파일을 `rm`, `truncate`, `cp`로 지우거나 덮어쓰는 명령은 거부되었다 [4].
+`evidence/`에 새 파일을 복사해 넣는 명령은 실행되었다 [4].
+증거를 등록하거나 검증하며 해시할 때는 파일을 읽기 전용으로 연다 [5][6].
+
+원본을 지키는 장치가 없는 다른 경로도 있다.
+모델은 `run_command`로 `mount`, `ewfmount`, `losetup` 같은 마운트 도구를 원하는 옵션으로 실행할 수 있고 서버는 마운트된 지점을 호출 기록에 적기만 한다 [7].
+사용자 CLI `vhir evidence lock`은 증거 폴더의 파일을 444, 폴더를 555로 바꾸지만 서버는 이 명령을 실행하지 않는다 [8].
+Claude Code 설정의 셸 명령 검사 훅 `case-data-guard.sh`는 같은 사건 기록 목록을 클라이언트 쪽에서 검사한다 [9].
+
+**한계.** 출력 경로 검사는 출력 인자가 열린 사건 폴더 안이면 통과시키고 `evidence/`도 사건 폴더 안이다 [10].
+도구 설명은 분석 도구의 출력 옵션, `bash -c`, `python -c`, `dd`를 이 검사가 보지 않는다고 적는다 [1].
+등록한 증거 파일을 `sort`의 출력 옵션 `-o` 값으로 준 명령은 거부되지 않았고 그 뒤 `evidence_verify`는 그 파일을 `MODIFIED`로 돌려주었다 [4].
+검사 함수의 주석은 사건 폴더 밖 파일을 가리키는 증거 링크와 값을 받는 감싸기 명령 옵션도 검사하지 않는다고 적는다 [2].
+검사는 등록 목록이 아니라 `evidence/` 폴더 이름으로 원본을 정하므로 사건 폴더 안 다른 폴더에 등록한 증거는 `truncate` 같은 명령으로 바꿀 수 있다 [2][11].
+사건의 다른 폴더에 등록한 증거를 `truncate`로 비우는 명령은 실행되었고 `evidence_verify`는 그 파일을 `MODIFIED`로 돌려주었다 [12].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 `run_command`로 실행하는 분석 도구가 증거를 읽는 경로에 적용된다 [1][13].
+`run_command`는 모델이 만든 명령 목록의 실행 파일만 정해 둔 경로에서 찾아 바꾸고 나머지 인자는 검사를 통과하면 그대로 넘긴다 [13].
+Sleuth Kit의 `fls`, `icat`, `mmls`처럼 이미지를 읽는 도구에서 원본을 지키는 것은 그 도구가 이미지를 읽기 모드로 연다는 동작이다 [14].
+Sleuth Kit 4.11.1은 원시 이미지를 `O_RDONLY`로, EWF 이미지를 libewf의 `LIBEWF_OPEN_READ`로 연다 [14].
+
+**한계.** Volatility 3, Zimmerman 도구, Plaso, RegRipper, Hayabusa, `ewfmount`가 원본을 읽기 모드로 여는지는 서버 개요의 버전 기준 소스로 확인하지 못해 실제 보호 미확인이다 [13].
+마운트 도구는 모델이 준 옵션으로 실행되므로 읽기 전용 마운트인지는 그 호출의 인자에 따른다 [7][13].
+
+### 근거
+
+[1] `run_command`의 설명은 검사 대상과 검사하지 않는 경로를 적는다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+        In a case the command runs in its own empty folder,
+        extractions/<audit_id>/, so a relative path means a path there.
+        Give parallel runs distinct output folders: files new in a folder two
+        runs share are recorded as both runs' outputs, and trace as ambiguous.
+        Deleting or overwriting case records, audit/ or evidence files is refused;
+        bash -c, python -c, dd and a tool's own output options are not checked.
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-207`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L207)
+
+[2] 사건 기록, `audit/`, `evidence/`를 지우거나 덮어쓰는 명령을 거부한다.
+
+```python
+def _harms_under(real: str, root: str, lead: list[str], new_ok: bool) -> bool:
+    if real == "/" or root.startswith(real.rstrip("/") + "/"):
+        return True  # an ancestor of a protected root
+    if real != root and not real.startswith(root + "/"):
+        return False
+    parts = lead + [x for x in real[len(root) :].split("/") if x]
+    if not parts:  # the cases root
+        return True
+    if len(parts) == 1:  # a case root, while it holds anything
+        return os.path.isdir(real) and bool(os.listdir(real))
+    top = parts[1]
+    if top == "audit" or (top in _CASE_RECORDS and len(parts) == 2):
+        return True
+    if top == "evidence":
+        if len(parts) == 2:  # evidence/ itself, while it holds anything
+            return os.path.isdir(real) and bool(os.listdir(real))
+        return os.path.lexists(real) or not new_ok
+    return False
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:171-188`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L171-L188)
+
+```python
+    bad = []
+    if name in ("rm", "shred", "unlink", "truncate", "tee"):
+        bad = [a for a in args if _harms_case_data(a, new_ok=name == "tee")]
+    elif name in ("mv", "cp", "install", "ln") and len(args) >= 2:
+        dst = args[-1]
+        into = not no_t and os.path.isdir(dst)
+        for s in args[:-1]:
+            if name == "mv" and _harms_case_data(s):
+                bad.append(s)
+            tgt = os.path.join(dst, os.path.basename(s)) if into else dst
+            if _harms_case_data(tgt, new_ok=True):
+                bad.append(tgt)
+    if bad:
+        raise ValueError(
+            f"Blocked: {name} would delete or overwrite case data at '{bad[0]}'. "
+            "Case records, audit/ and evidence files are protected; move other "
+            "files to the case's DELETE/ directory instead."
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:236-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L236-L253)
+
+함수 설명: [`packages/sift-mcp/src/sift_mcp/security.py:191-203`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L191-L203).
+
+[3] `rm`은 사건 폴더와 증거 폴더를 대상으로 하면 거부된다.
+
+```python
+    path_args = [a for a in args if not a.startswith("-")]
+    for arg in path_args:
+        resolved = str(Path(_at(arg, base)).resolve())
+        if resolved == "/":
+            raise ValueError("Blocked: rm targeting filesystem root")
+        for protected in _get_protected_dirs():
+            if (
+                resolved == protected
+                or resolved.startswith(protected + "/")
+                or protected.startswith(resolved.rstrip("/") + "/")
+            ):
+                raise ValueError(
+                    f"Blocked: rm in protected directory '{protected}'." + _RM_GUIDANCE
+                )
+        case_dir = resolve_case_dir()
+        if case_dir:
+            case_resolved = str(Path(case_dir).resolve())
+            if (
+                resolved == case_resolved
+                or resolved.startswith(case_resolved + "/")
+                or case_resolved.startswith(resolved.rstrip("/") + "/")
+            ):
+                raise ValueError("Blocked: rm in case directory." + _RM_GUIDANCE)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:109-131`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L109-L131)
+
+[4] (실행 확인) 컨테이너에서 등록한 증거에 `run_command`로 `rm`, `truncate`, `cp`(기존 파일 덮어쓰기와 새 파일 넣기), 출력 옵션 `-o`를 쓴 `sort`를 실행하고 응답과 `evidence_verify` 결과를 확인했다.
+
+[5] 해시는 파일을 읽기 전용으로 열어 계산한다.
+
+```python
+def hash_file(path) -> HashResult:
+    """The SHA-256 of the whole file, however large. The file is opened
+    non-blocking and checked before any read, so a FIFO never blocks."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise NotRegularFile(f"{path} is not a regular file")
+    with os.fdopen(fd, "rb") as f:
+        h, read = hashlib.sha256(), 0
+        while chunk := f.read(_CHUNK):
+            h.update(chunk)
+            read += len(chunk)
+        # the bytes hashed are the file's only if nothing changed while they were read
+        fields = _changed(_stat_key(st), _stat_key(os.fstat(f.fileno())))
+    if fields or read != st.st_size:
+        raise FileChanged(path, fields or ["size"])
+    return HashResult(str(path), h.hexdigest(), st.st_size, st.st_dev, st.st_ino,
+                      st.st_mtime_ns, st.st_ctime_ns)  # fmt: skip
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:222-240`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L222-L240)
+
+[6] 등록 때의 해시도 읽기 모드로 연다: [`src/vhir_cli/commands/evidence.py:319-334`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L319-L334).
+
+[7] 마운트 도구의 실행은 마운트 지점을 기록만 한다.
+
+```python
+"""The mount and umount records of a run_command call.
+
+A mount tool's run records the image it mounted and every mount point that
+appeared while it ran, each as ``/proc/self/mountinfo`` shows it:
+``mount: {image, points: [{target, realpath, st_dev, mnt_id}]}``. An umount's
+run records the mount it is about to remove, read before it runs:
+``umount: {realpath, mnt_id}``. A reader pairs the two by realpath and mount
+id. Mount points are never hashed.
+"""
+
+from __future__ import annotations
+
+import os
+
+from sift_common import file_place
+
+from sift_mcp import command_files
+
+MOUNT_TOOLS = frozenset({"ewfmount", "mount", "qemu-nbd", "xmount", "losetup"})
+```
+
+[`packages/sift-mcp/src/sift_mcp/mounts.py:1-19`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/mounts.py#L1-L19)
+
+[8] 사용자 CLI `vhir evidence lock`의 권한 변경: [`src/vhir_cli/commands/evidence.py:58-96`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L58-L96).
+
+[9] 서버의 사건 기록 목록은 클라이언트 훅과 같게 둔다.
+
+```python
+# Case records, as protected by the Bash case-data guard hook
+# (claude-code/shared/hooks/case-data-guard.sh). Keep the two lists the same.
+_CASE_RECORDS = frozenset(
+    {
+        "findings.json",
+        "timeline.json",
+        "approvals.jsonl",
+        "iocs.json",
+        "evidence.json",
+        "evidence-verified.json",
+        "todos.json",
+        "CASE.yaml",
+        "actions.jsonl",
+        "pending-reviews.json",
+    }
+)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:134-149`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L134-L149)
+
+클라이언트 훅: [`claude-code/shared/hooks/case-data-guard.sh`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/case-data-guard.sh).
+
+[10] 출력 경로는 열린 사건 폴더 안이면 허용된다.
+
+```python
+def validate_output_path(path: str, base: str | None = None) -> str:
+    """Validate that an output path is safe to write to.
+
+    Stricter than validate_input_path. When VHIR_CASE_DIR is set, the
+    output path must be inside the case directory. When not set, only
+    /tmp and the current working directory are allowed.
+
+    Case-dir containment is checked first so that case directories
+    under /home are allowed.
+    """
+    resolved = str(Path(_at(path, base)).resolve())
+
+    # Case-dir containment: if inside case dir, it's allowed
+    case_dir = resolve_case_dir()
+    if case_dir:
+        case_resolved = str(Path(case_dir).resolve())
+        if resolved == case_resolved or resolved.startswith(case_resolved + "/"):
+            return resolved
+        raise ValueError(
+            f"Output path '{path}' resolves to '{resolved}' which is "
+            f"outside the case directory '{case_resolved}'"
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:295-316`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L295-L316)
+
+[11] 등록 함수는 사건 폴더 안이면 어느 폴더의 파일이든 등록한다: [`src/vhir_cli/commands/evidence.py:178-205`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L178-L205).
+
+[12] (실행 확인) 컨테이너에서 사건의 `raw/` 폴더에 둔 파일을 `evidence_register`로 등록한 뒤 `run_command`로 `truncate`를 실행하고 파일 크기와 `evidence_verify` 결과를 읽었다.
+
+[13] 실행 파일만 찾아 바꾸고 인자는 그대로 넘긴다.
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+
+    # Sanitize any args after the binary
+    sanitize_extra_args(command[1:], tool_name=binary)
+    # SIFT's EZ-tool wrappers expand their arguments unquoted (a path with a
+    # space splits): run the tool's .dll with dotnet directly when it is there
+    command = _ez_launcher(binary, resolved) + command[1:]
+
+    if before_run is not None:  # the command passed every check: about to run
+        before_run()
+
+    exec_result = execute(
+        command,
+        timeout=timeout,
+        cwd=cwd,
+        save_output=save_output,
+        save_dir=save_dir,
+        op_id=op_id,
+        case_dir=case_dir,
+    )
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-175`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L175)
+
+[14] Sleuth Kit 4.11.1의 원시 이미지와 EWF 이미지 열기: [`tsk/img/raw.c:116-117`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tsk/img/raw.c#L116-L117), [`tsk/img/ewf.cpp:350-353`](https://github.com/sleuthkit/sleuthkit/blob/16f14f39bc1c22da823e1fa53ca451da808244f5/tsk/img/ewf.cpp#L350-L353).

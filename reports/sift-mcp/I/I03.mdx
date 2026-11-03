@@ -1,0 +1,212 @@
+---
+cell: I03
+details:
+- id: I03.01
+- id: I03.02
+- id: I03.05
+---
+
+# I03 외부 전송 범위 구성
+
+### I03.01 해시 전송
+
+**구현.** 이 방식은 `opencti-mcp`의 `lookup_ioc`에 적용된다 [1].
+`lookup_ioc`는 받은 IOC의 종류를 `validate_ioc`로 나누고 MD5·SHA-1·SHA-256 등 해시 형식이면 그 해시 문자열을 조회처에 보낸다 [2][1].
+OpenCTI에는 지표 이름이 그 값과 같은지 묻는 GraphQL 필터로 보내고 MISP에는 속성 검색 요청의 `value`로 보낸다 [3][4].
+파일 내용은 올리지 않는다 [3][4].
+MD5 해시로 `lookup_ioc`를 부르자 MISP 속성 검색과 경고 목록 확인 요청에 그 해시만 들어갔다 [5].
+
+### I03.02 메타데이터·추출 값 전송
+
+**구현.** 이 방식은 `opencti-mcp`의 `lookup_ioc`에 적용된다 [1].
+IP 주소, CIDR, URL, 도메인, CVE, MITRE ID로 나뉜 값은 해시와 같은 요청으로 조회처에 보낸다 [2][3][4].
+보낼 값은 모델이 `ioc` 인자로 고른다 [1].
+
+`opencti-mcp`의 `search_threat_intel`·`search_entity`·`search_reports`는 모델이 쓴 검색어를 그대로 OpenCTI에 보낸다 [6].
+`get_entity`·`get_relationships`는 UUID 형식으로 검사한 OpenCTI 개체 ID를 보낸다 [6].
+`case-mcp`의 사건 알림과 게이트웨이의 사건 활성화 요청은 사건 ID만 `wintools-mcp`에 보낸다 [7][8].
+게이트웨이는 사용자가 켠 HTTP 백엔드에 도구 호출의 인자를 `analyst_override` 말고는 모델이 준 그대로 보낸다 [9].
+
+**한계.** `validate_ioc`는 어느 종류에도 맞지 않는 값을 `unknown`으로 두고 거부하지 않는다 [2].
+그래서 IOC 형식이 아닌 글도 조회처로 나간다 [1].
+`free text value`로 부르자 그 글이 MISP 속성 검색 요청에 그대로 들어갔다 [5].
+
+### I03.05 민감 값 빼기·가림 후 전송
+
+**구현.** 이 방식은 `opencti-mcp`의 `lookup_ioc`에 적용된다 [10].
+`lookup_ioc`는 Python `ipaddress`가 사설·루프백·링크 로컬로 보는 IP 주소면 어느 조회처에도 묻지 않고 내부 주소라는 이유와 함께 `UNAVAILABLE`을 돌려준다 [10].
+`192.168.1.5`와 `::1`로 부르자 조회처 요청이 하나도 나가지 않았다 [5].
+`search_threat_intel`·`search_entity`·`search_reports`의 검색어에는 내부 주소를 빼는 처리가 없다 [6].
+
+**한계.** 내부 주소를 빼는 처리는 IP 주소 하나로 해석되는 값에만 적용되고 내부 호스트 이름은 그대로 보낸다 [10].
+`fileserver.corp.local`로 부르자 도메인으로 나뉘어 MISP로 나갔다 [5].
+CIDR로 나뉜 값과 URL 안의 IP 주소는 이 처리를 거치지 않아 내부 대역도 조회처로 나간다 [10][2].
+
+### 근거
+
+[1] `lookup_ioc`는 받은 `ioc`의 길이를 검사하고 종류를 정한 뒤 조회처에 묻는다.
+
+```python
+        elif name == "lookup_ioc":
+            ioc = arguments.get("ioc", "")
+            validate_length(ioc, MAX_IOC_LENGTH, "ioc")
+            is_valid, ioc_type = validate_ioc(ioc)
+            result = await asyncio.to_thread(self._lookup_ioc, ioc.strip(), ioc_type)
+            result["ioc_type"] = ioc_type
+            return result
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:894-900`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L894-L900)
+
+[2] `validate_ioc`는 종류를 나누고 맞는 종류가 없으면 `unknown`으로 둔다: [`packages/opencti/src/opencti_mcp/validation.py:151-204`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L151-L204).
+
+[3] OpenCTI 조회처는 IOC 값을 이름 필터로 넣어 GraphQL로 보낸다.
+
+```python
+    def lookup(self, ioc: str, ioc_type: str) -> dict:
+        queried_at = now_utc()
+        deadline = time.monotonic() + self.timeout
+        version = None
+        try:
+            data = self._query(
+                LOOKUP_QUERY,
+                {"filters": _name_eq(ioc), "first": MAX_MATCHES + 1},
+                deadline,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:171-180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L171-L180)
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:84-88`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L84-L88)
+
+[4] MISP 조회처는 IOC 값을 속성 검색과 경고 목록 확인 요청에 넣는다.
+
+```python
+    def lookup(self, ioc: str, ioc_type: str) -> dict:
+        queried_at = now_utc()
+        deadline = time.monotonic() + self.timeout
+        try:
+            reply = self._request(
+                "POST",
+                "/attributes/restSearch",
+                {
+                    "returnFormat": "json",
+                    "value": ioc,
+                    "includeContext": 1,
+                    "includeDecayScore": 1,
+                    "limit": MAX_MATCHES + 1,
+                },
+                deadline,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:214-229`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L214-L229)
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:270-277`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L270-L277)
+
+[5] (실행 확인) 컨테이너에서 MISP 조회처의 전송 함수를 요청을 적어 두는 함수로 바꾸고 `opencti-mcp`의 `lookup_ioc`에 IP 주소, 도메인, MD5, 일반 글을 주어 나가는 요청의 주소와 `value`를 확인했다.
+
+[6] 검색 도구는 검색어 길이와 필터만 검사하고 개체 조회는 UUID 형식을 검사한다.
+
+```python
+        elif name == "search_threat_intel":
+            query = arguments.get("query", "")
+            confidence_min = arguments.get("confidence_min")
+            validate_length(query, MAX_QUERY_LENGTH, "query")
+            limit = validate_limit(arguments.get("limit", 5), max_value=20)
+            offset, labels, created_after, created_before = (
+                self._validate_search_filters(
+                    arguments.get("offset"),
+                    arguments.get("labels"),
+                    arguments.get("created_after"),
+                    arguments.get("created_before"),
+                )
+            )
+            return await asyncio.to_thread(
+                self.client.unified_search,
+                query,
+                limit,
+                offset,
+                labels,
+                confidence_min,
+                created_after,
+                created_before,
+            )
+
+        elif name == "search_entity":
+            return await self._dispatch_search_entity(arguments)
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:867-892`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L867-L892)
+
+[`packages/opencti/src/opencti_mcp/server.py:913-972`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L913-L972)
+
+[7] `notify_wintools_case_activated`가 보내는 본문은 사건 ID다: [`src/vhir_cli/commands/join.py:1371-1382`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/join.py#L1371-L1382).
+
+[8] 게이트웨이의 사건 활성화 요청 본문이다.
+
+```python
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.post(
+                    f"{backend.base_url}/cases/activate",
+                    json={"case_id": active_case},
+                    headers={"Authorization": f"Bearer {backend.bearer_token}"},
+                    timeout=5,
+                )
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:443-449`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L443-L449)
+
+[9] 게이트웨이는 `analyst_override`를 받는 도구에만 그 값을 바꿔 넣고 나머지 인자는 그대로 백엔드에 넘긴다.
+
+```python
+        # Inject examiner identity into tools that accept analyst_override.
+        # Always overwrite to prevent identity spoofing.
+        # Role-based filtering (e.g., restricting certain tools by role) is
+        # deferred — currently all authenticated users can call any tool.
+        if examiner:
+            if actual_name in ANALYST_TOOLS:
+                arguments = {**arguments, "analyst_override": examiner}
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:771-777`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L771-L777)
+
+```python
+        try:
+            result = await asyncio.wait_for(
+                backend.call_tool(actual_name, arguments), timeout=300.0
+            )
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:792-795`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L792-L795)
+
+[10] 사설·루프백·링크 로컬 IP 주소는 조회처에 묻지 않는다.
+
+```python
+def _internal_address(ioc: str) -> str:
+    """The reason an IP address isn't looked up, or "" for anything else."""
+    try:
+        ip = ipaddress.ip_address(ioc)
+    except ValueError:
+        return ""
+    if ip.is_private or ip.is_loopback or ip.is_link_local:
+        return f"Internal address ({ioc}) — not in threat intelligence scope."
+    return ""
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:132-140`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L132-L140)
+
+```python
+        internal = _internal_address(ioc)
+        if internal:
+            return {
+                "found": None,
+                "ioc": ioc,
+                "outcome": providers.UNAVAILABLE,
+                "reason": internal,
+                "note": internal,
+                "providers": {},
+            }
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:815-824`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L815-L824)

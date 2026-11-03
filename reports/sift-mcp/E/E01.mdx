@@ -1,0 +1,253 @@
+---
+cell: E01
+details:
+- id: E01.01
+- id: E01.02
+- id: E01.03
+- id: E01.04
+---
+
+# E01 증거 등록 관리
+
+### E01.01 증거 ID·등록 목록
+
+**구현.** 이 방식은 `case-mcp`의 `evidence_register`와 `evidence_list`, 검토 포털의 증거 화면에 적용된다 [1][2][3].
+`evidence_register`는 열린 사건의 `evidence.json` 목록 `files`에 증거 항목을 더하고 항목은 실제 경로로 구별한다 [1][4].
+같은 실제 경로와 같은 해시로 다시 등록하면 새 항목을 만들지 않고 `already registered`를 돌려준다 [4][5].
+폴더를 주면 폴더 하나를 항목 하나(`kind: folder`)로 등록하고 안의 일반 파일마다 사건 기준 경로, SHA-256, 상태 값을 적은 manifest를 `evidence-manifests/<번호>.json`에 쓴다 [6].
+링크, FIFO, 장치 파일은 읽지 않고 manifest의 `skipped`에 적고 읽지 못한 파일은 `unreadable`에 사유와 함께 적는다 [6].
+KAPE 수집물 형태의 시험 폴더를 등록하자 일반 파일 2개가 manifest에 실렸고 FIFO와 링크는 `skipped`에 실렸다 [5].
+`evidence_list`는 `evidence.json`의 항목을 그대로 돌려주고 포털의 증거 화면은 항목마다 그 증거를 근원으로 둔 발견사항 ID를 붙여 보여 준다 [2][3].
+
+**한계.** 폴더 안 파일의 크기 합이 1,000,000,000바이트를 넘어 백그라운드 해시가 필요하면 `status: hashing`과 작업 ID만 돌려주고 아무것도 등록하지 않는다 [1][7].
+모델이 같은 요청을 다시 해야 등록된다 [1].
+폴더 등록 응답은 파일 수만 싣고 `skipped`와 `unreadable`은 manifest 파일에만 있다 [6][5].
+
+### E01.02 수집 위치와 저장 위치 기록
+
+**구현.** 이 방식은 `evidence_register`가 쓰는 항목의 `path`와 수집 도구 출력의 표시에 적용된다 [4][8].
+`path`는 증거 파일의 실제 경로이고 증거는 사건 폴더 안에 있거나 사건 폴더 안의 링크로 가리켜야 한다 [4].
+사건 폴더 안의 링크로 등록하면 링크가 가리키는 사건 밖의 실제 경로가 `path`에 적힌다 [4].
+`run_command`가 수집 도구(카탈로그에서 `acquisition`으로 표시한 도구)를 실행해 만든 파일을 등록하면 그 실행의 호출 기록 ID를 `acquired_by`에, 도구 이름을 `acquisition_tool`에 적는다 [8][9].
+
+**한계.** 사건 폴더 밖의 파일은 등록하지 않는다 [4].
+사건 폴더 밖 파일을 주자 사건의 `evidence/`로 복사하거나 링크를 만들라는 오류가 돌아왔다 [5].
+복사해 넣은 증거는 원래 있던 곳을 적는 칸이 없어 사건 폴더 안 경로만 남는다 [4].
+
+### E01.03 크기·등록 시각·등록자 기록
+
+**구현.** 이 방식은 `evidence_register`가 쓰는 파일 항목과 폴더 항목에 적용된다 [4][6].
+파일 항목에는 SHA-256, 설명, 등록 시각 `registered_at`, 등록자 `registered_by`, 크기, 수정 시각, 변경 시각, 장치, inode가 들어간다 [4][10].
+MCP 도구로 등록한 항목에는 `registered_via: mcp`가 붙어 모델이 등록했다는 것을 나타낸다 [1].
+폴더 항목에는 manifest 경로와 해시, 파일 수, 등록 시각, 등록자가 들어가고 크기는 manifest의 파일마다 적힌다 [6].
+`evidence_register`는 등록하거나 해시 작업을 시작한 호출의 경로와 결과를 `case-mcp`의 호출 기록에 남기고 오류로 끝난 호출은 남기지 않는다 [1].
+`extractions/` 아래 파일의 등록이 거부된 뒤 `audit/case-mcp.jsonl`의 줄 수는 늘지 않았다 [11].
+
+**한계.** `registered_by`는 `case-mcp` 프로세스의 환경변수 `VHIR_EXAMINER`로 정한 이름이다 [1].
+게이트웨이는 API 키의 검토자 이름을 정해 둔 기록 도구에만 넣고 `evidence_register`는 그 목록에 없다 [12].
+그래서 여러 검토자가 게이트웨이 하나를 같이 쓰면 누가 등록했는지가 `registered_by`에 남지 않는다 [1][12].
+해시하는 동안 파일이 바뀌어 상태 값이 맞지 않으면 상태 값 대신 `hash_note`만 적는다 [10].
+
+### E01.04 호출 기록과 대조한 등록 대상 판별
+
+**구현.** 이 방식은 `evidence_register`가 등록하는 파일과 등록하는 폴더 안의 파일에 적용된다 [1][8][13].
+`evidence_register`는 이 사건 `audit/`의 호출 기록 파일만 읽어 출력으로 적힌 파일의 실제 경로와 해시를 모은다 [14].
+등록할 파일의 실제 경로와 해시가 기록된 출력과 같으면 그 파일을 만든 원본을 등록하라는 오류로 거부한다 [8][15].
+사건의 `extractions/` 아래 파일도 서버 도구가 만든 파일로 보고 거부한다 [8].
+폴더 안에 이런 파일이 하나라도 있으면 폴더 전체를 등록하지 않는다 [13].
+출력을 만든 실행이 모두 수집 도구 실행이면 거부하지 않고 수집 표시를 붙여 등록한다 [8].
+`extractions/` 아래 파일을 등록하자 그 파일이 만든 원본을 등록하라는 오류가 돌아왔다 [5].
+`run_command`가 작업 폴더에 만든 출력은 등록이 거부되었다 [16].
+
+**한계.** 이 판별은 호출 기록에 적힌 출력과 실제 경로와 해시가 모두 같은 파일만 거부한다 [8][15].
+`run_command`는 작업 폴더의 파일과 출력 옵션 값 아래에 새로 생기거나 바뀐 파일만 출력으로 적는다 [17].
+그래서 출력 파일을 출력 옵션이 아닌 방법으로 `extractions/` 밖에 복사한 파일은 원본 증거로 등록된다 [8][17].
+`run_command`가 만든 출력을 `run_command`로 `evidence/`에 복사한 파일은 등록되었다 [16].
+내용이 빈 파일은 기록된 출력과 대조하지 않으므로 `extractions/` 밖에 있으면 등록된다 [15].
+호출 기록 일부를 읽지 못하면 읽은 기록으로 거부되지 않은 파일에 `derivation_note`를 붙여 등록한다 [8].
+
+### 근거
+
+[1] `evidence_register`는 열린 사건에 `registered_via="mcp"`로 등록한 뒤 호출 기록을 남기고 오류는 기록 없이 돌려준다.
+
+```python
+        try:
+            _validate_str_length(description, "description", _MAX_TEXT, free_text=True)
+            case_dir = _resolve_case_dir()
+            examiner = resolve_examiner()
+            result = register_evidence_data(
+                case_dir=case_dir,
+                path=path,
+                examiner=examiner,
+                description=description,
+                registered_via="mcp",  # the AI's: its host names never confirm a machine
+                folder_hasher=_folder_hashes,
+            )
+            logged_id = audit.log(
+                tool="evidence_register",
+                params={"path": path, "description": description},
+                result_summary=result,
+            )
+            if logged_id is None:
+                result["warning"] = "Audit write failed — action not recorded"
+            hint = _host_list_hint(Path(case_dir))
+            if hint:
+                result["host_list_hint"] = hint
+            return result
+        except (ValueError, FileNotFoundError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:495-519`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L495-L519)
+
+[2] `evidence_list`는 증거 목록을 그대로 돌려준다: [`packages/case-mcp/src/case_mcp/server.py:524-533`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L524-L533), [`src/vhir_cli/commands/evidence.py:790-809`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L790-L809).
+
+```python
+    @server.tool()
+    def evidence_list() -> dict:
+        """List all registered evidence files in the active case with
+        their SHA-256 hashes, registration dates, and descriptions."""
+        try:
+            case_dir = _resolve_case_dir()
+            result = list_evidence_data(case_dir)
+            return result
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:524-533`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L524-L533)
+
+[3] 포털은 증거마다 발견사항 ID를 붙인다.
+
+```python
+def get_evidence(request: Request) -> JSONResponse:
+    case_dir = _resolve_case_dir()
+    if not case_dir:
+        return _no_case_response()
+    raw = _load_json(case_dir / "evidence.json")
+    evidence = raw.get("files", []) if isinstance(raw, dict) else (raw or [])
+
+    # Build referenced_by reverse index: evidence path → finding IDs
+    findings = _load_json(case_dir / "findings.json") or []
+    ref_index: dict[str, list[str]] = {}
+    for f in findings:
+        fid = f.get("id", "")
+        if not fid:
+            continue
+        # Link by every root each artifact's chain resolved to (else the
+        # evidence it names), never by the AI-supplied `source`
+        for art in f.get("artifacts") or []:
+            if not isinstance(art, dict):
+                continue
+            roots = roots_of(art)
+            paths = [r["path"] for r in roots] or [art.get("source_evidence")]
+            # a folder member's root is listed under its folder's row too
+            paths += [r["folder"] for r in roots if r.get("folder")]
+            for root in paths:
+                if root and fid not in ref_index.get(root, []):
+                    ref_index.setdefault(root, []).append(fid)
+
+```
+
+[`packages/case-dashboard/src/case_dashboard/routes.py:391-417`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/routes.py#L391-L417)
+
+[4] 사건 폴더 안 경로 검사, 같은 경로 처리, 파일 항목: [`src/vhir_cli/commands/evidence.py:168-205`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L168-L205), [`src/vhir_cli/commands/evidence.py:224-256`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L224-L256), [`src/vhir_cli/commands/evidence.py:289-303`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L289-L303).
+
+[5] (실행 확인) 컨테이너에서 사건을 만들고 `evidence_register`로 파일, 같은 파일 다시, 사건 밖 파일, `extractions/` 아래 파일, 하위 폴더·FIFO·링크가 있는 폴더를 등록하고 `evidence_list`와 manifest 파일을 읽었다.
+
+[6] 폴더는 manifest를 쓰고 항목 하나로 등록한다: [`src/vhir_cli/commands/evidence.py:564-582`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L564-L582), [`src/vhir_cli/commands/evidence.py:594-624`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L594-L624), [`src/vhir_cli/commands/evidence.py:639-668`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L639-L668).
+
+[7] 폴더 해시는 호출 안에서 정한 한도까지 계산하고 나머지는 백그라운드 작업으로 넘긴다.
+
+```python
+def _folder_hashes(case_dir, paths: list[str]) -> tuple[dict[str, str], str, dict]:
+    """A folder's file hashes within a tool call's time limit: what a
+    completed background job recorded for an unchanged file is taken (its
+    hash, or the error it couldn't be read with: used up only by a call that
+    starts no job, so a failure is never lost while another file hashes); the
+    rest are hashed in the call up to the inline limit, else in one background
+    job, whose id means "call again"."""
+    done = fi.completed_hashes(case_dir, paths)
+    hashes = {p: r["sha256"] for p, r in done.items() if "sha256" in r}
+    errors = {p: r["error"] for p, r in done.items() if "error" in r}
+    batch = fi.hash_files_for_call(
+        [p for p in paths if p not in done],
+        case_dir=case_dir,
+        requested_by="evidence_register",
+        inline_limit=fi.INLINE_LIMIT,
+    )
+    hashes.update((p, r.sha256) for p, r in batch.done.items())
+    errors.update((p, "not a regular file") for p in batch.not_regular)
+    if not batch.job_id:  # used now: the next request hashes them again
+        fi.take_failures(done)
+    return hashes, batch.job_id, errors
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:171-191`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L171-L191)
+
+[8] 파생물은 등록하지 않고 수집 도구의 출력은 표시해 등록한다: [`src/vhir_cli/commands/evidence.py:452-503`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L452-L503).
+
+[9] `run_command`는 수집 도구의 실행을 호출 기록에 표시한다.
+
+```python
+        # An acquisition tool's run (also behind sudo): its outputs are
+        # acquired evidence
+        tool_name = mounts.tool_of(command)[0]
+        acquired = tool_name if (t := get_tool_def(tool_name)) and t.acquisition else ""
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:318-321`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L318-L321)
+
+[10] 해시와 상태 값은 한 번 연 파일에서 함께 얻는다: [`src/vhir_cli/commands/evidence.py:307-334`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L307-L334).
+
+[11] (실행 확인) 컨테이너에서 `extractions/` 아래 파일을 `evidence_register`로 등록하고 그 앞뒤로 `audit/case-mcp.jsonl`의 줄 수를 세었다.
+
+[12] 게이트웨이가 검토자 이름을 넣는 도구 목록.
+
+```python
+# Tools that accept analyst_override for identity injection.
+ANALYST_TOOLS: frozenset[str] = frozenset(
+    {
+        "record_action",
+        "record_finding",
+        "record_timeline_event",
+        "add_todo",
+        "update_todo",
+        "complete_todo",
+        "log_reasoning",
+        "log_external_action",
+    }
+)
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:61-73`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L61-L73)
+
+[13] 폴더 등록은 안의 파일마다 같은 판별을 하고 하나라도 걸러지면 폴더를 등록하지 않는다: [`src/vhir_cli/commands/evidence.py:600-611`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L600-L611).
+
+[14] 출력으로 적힌 파일의 실제 경로와 해시는 이 사건 `audit/`의 JSONL 파일만 읽어 모은다: [`src/vhir_cli/commands/evidence.py:392-438`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L392-L438).
+
+[15] 기록된 출력은 경로와 해시가 같을 때만 맞추고 빈 파일의 해시는 맞추지 않는다: [`src/vhir_cli/commands/evidence.py:441-449`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L441-L449).
+
+[16] (실행 확인) 컨테이너에서 `run_command`가 작업 폴더에 쓴 출력과 그 출력을 `run_command`로 `evidence/`에 복사한 파일을 각각 `evidence_register`로 등록했다.
+
+[17] `run_command`는 작업 폴더와 출력 옵션 값 아래에 생긴 파일만 출력으로 적는다.
+
+```python
+            # Its outputs: every file in its own folder (but the saved stdout,
+            # recorded as output_file) and every file new or changed under an
+            # output flag's value, each hashed
+            saved = os.path.realpath(exec_result.get("output_file") or "")
+            made = [
+                p
+                for p in (command_files.files_at([op_dir]) if op_dir else {})
+                if os.path.realpath(p) != saved
+            ]
+            made += [
+                p
+                for p, key in command_files.files_at(flagged).items()
+                if before.get(p) != key and p not in made
+            ]
+            outputs = file_place.output_records(case_dir, made, "run_command")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:370-384`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L370-L384)

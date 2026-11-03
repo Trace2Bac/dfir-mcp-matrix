@@ -1,0 +1,99 @@
+---
+cell: F03
+details:
+- id: not_applicable
+---
+
+# F03 서버 안 모델 입력 구성
+
+### 비적용
+
+**판단.** 게이트웨이와 백엔드 일곱 개, 검토 포털, 서버가 불러 쓰는 `vhir-cli` 모듈은 처리 중에 언어 모델을 부르지 않는다 [1][2].
+설치에 쓰는 잠금 파일 `deps/vhir.lock`에는 모델 API 클라이언트 패키지가 없다 [1].
+기준 커밋의 `packages/` 아래 Python 파일과 `vhir-cli`의 `src/`에서 `anthropic`, `openai`, `create_message`, `messages.create`, `chat.completions`, `sampling`을 찾았고 서버 코드에서는 나오지 않았다 [2].
+MCP sampling으로 클라이언트 모델에게 생성을 요청하는 코드도 나오지 않았다 [2].
+`rag-mcp`는 검색할 때 허용 목록에 있는 문장 임베딩 모델로 질의를 벡터로 바꾸고 가까운 문서를 찾는다 [3].
+이 모델은 질의 벡터를 만들 뿐 발견사항, 판단, 요약, 계획을 만들지 않는다 [3].
+발견사항의 반론 검토는 클라이언트 쪽 별도 에이전트가 하고 서버는 그 결과 `challenged`를 받는다 [4].
+`report-mcp`의 보고서 서술은 클라이언트 모델이 `generate_report`의 자료로 써서 `save_report`로 넘긴다 [5].
+
+### 근거
+
+[1] 잠금 파일에서 모델 관련 패키지를 찾았고 `sentence-transformers`, `transformers`, `torch`는 있지만 `anthropic`·`openai` 같은 모델 API 클라이언트는 없었다: [`deps/vhir.lock`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/deps/vhir.lock).
+
+[2] 기준 커밋의 `packages/` 아래 `.py` 파일(각 패키지의 `tests/` 제외)과 `vhir-cli` `d9ab927`의 `src/` 아래 `.py` 파일에서 위 이름을 대소문자 구분 없이 `git grep`으로 찾았다.
+`packages/`에서는 나오지 않았고 `vhir-cli`에서는 사용자 CLI의 클라이언트 설정 문구 한 곳에만 나왔다: [`src/vhir_cli/commands/client_setup.py:3201`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/client_setup.py#L3201).
+
+[3] `rag-mcp`는 허용한 임베딩 모델만 불러오고 질의를 임베딩해 가까운 문서를 찾는다.
+
+```python
+            # Security: validate model name against allowlist
+            if self.model_name not in ALLOWED_MODELS:
+                raise ValueError(
+                    f"Model '{self.model_name}' is not allowed. "
+                    "Use one of the approved embedding models."
+                )
+
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:130-138`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L130-L138)
+
+```python
+        # Embed query and search
+        query_embedding = self.model.encode(augmented_query).tolist()
+        candidates = self._nearest(query_embedding, retrieve_k)
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:555-557`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L555-L557)
+
+[4] `record_finding`은 클라이언트가 실행한 반론 검토 결과를 `challenged`로 요구한다.
+
+```python
+        case_dir = self._require_active_case()
+        if not isinstance(finding, dict) or finding.get("challenged") is None:
+            return {
+                "status": "REJECTED",
+                "error": (
+                    "challenged is required: challenge the finding with the "
+                    "finding-skeptic skill first (an isolated subagent), and pass "
+                    "its result. If no skeptic can run, send challenged="
+                    + json.dumps(NOT_CHALLENGED_PAYLOAD)
+                    + " with the reason; the examiner sees it at approval."
+                ),
+            }
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1189-1200`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1189-L1200)
+
+[5] `save_report`는 받은 `content`에 서버가 검증·출처 블록만 덧붙여 저장한다.
+
+```python
+            # The server appends the verification block; the content can't
+            # replace it (the saved file is still writable on this box). Its
+            # fence is longer than any backtick run inside it, so no text in
+            # the block can end it early. How a viewer renders the report
+            # still depends on the content above it; the raw file and
+            # `vhir review --findings --verify` are authoritative.
+            view = approved_view(case_dir)
+            # every IOC of the case is written defanged, the block too: it's a
+            # display copy, and nothing reads its text back
+            iocs = _report_iocs(case_dir, view)
+            content = _defang_iocs(content, iocs)
+            block = [
+                _defang_iocs(line, iocs)
+                for line in verification_block(view) + [""] + provenance_block(view)
+            ]
+            runs = [len(r) for r in re.findall(r"`+", "\n".join(block))]
+            fence = "`" * max(3, max(runs, default=0) + 1)
+            saved = (
+                content.rstrip("\n")
+                + f"\n\n{fence}\n"
+                + "\n".join(block)
+                + f"\n{fence}\n"
+            )
+            _atomic_write(report_path, saved)
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1133-1156`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1133-L1156)

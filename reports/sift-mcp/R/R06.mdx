@@ -1,0 +1,249 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 게이트웨이와 백엔드 7개는 증거에서 나온 비밀 값을 응답, 호출 기록, 보고서에 싣고 그 값을 가리거나 빼는 처리를 두지 않는다.
+
+응답에서는 `sift-mcp`의 `run_command`가 실행한 도구의 출력을 그대로 돌려준다 [1].
+표준 출력이 응답 예산 이하이면 `stdout`과 `stderr`를 그대로, 넘으면 파싱한 줄·행·항목을 값의 변경 없이 싣는다 [1][2].
+`run_command`는 정해 둔 몇 가지 실행 파일만 막고 나머지 명령은 실행한다 [3].
+서버가 읽는 FK의 Volatility 3 지식은 비밀번호 해시, LSA secret, 캐시된 도메인 자격증명을 꺼내는 플러그인 `windows.hashdump`·`windows.lsadump`·`windows.cachedump`를 도구의 기능으로 적는다 [4].
+이 플러그인을 `run_command`로 실행한 출력도 위 경로로 응답에 실린다 [1][3].
+
+기록에서는 `run_command`가 표준 출력 앞 500자를 호출 기록의 `stdout_head`에 남기고 사건 안의 실행은 표준 출력과 표준 오류 전체를 `extractions/` 아래 파일로 남긴다 [5][6].
+두 곳 모두 쓰기 전에 값을 바꾸지 않는다 [5][6].
+
+보고서에서는 `forensic-mcp`의 `record_finding`이 모델이 인용한 도구 출력을 발견사항의 `artifacts[].content`에 저장한다 [7].
+`report-mcp`의 `generate_report`는 승인된 발견사항에서 정해 둔 내부 필드만 빼고 `artifacts`와 IOC를 보고서 자료에 싣는다 [8][9].
+
+가림 코드는 `opencti-mcp`에 있지만 이 셀에 해당하지 않는다 [10].
+`sanitize_for_log`는 키 이름에 `token`·`password`·`secret`·`key` 같은 낱말이 들어간 인자 값을 `***REDACTED***`로 바꾼다 [10].
+이 함수는 입력 검사 실패를 서버 운영 로그에 적을 때만 쓰이고 응답, 호출 기록, 보고서에는 쓰이지 않는다 [10][11].
+위협 정보 플랫폼의 오류 문구를 응답에 옮기지 않는 처리도 서버가 외부에 접속할 때 쓰는 토큰이 응답에 들어가지 않게 하는 처리다 [12].
+
+### 근거
+
+[1] `run_command`는 표준 출력이 응답 예산 이하이면 실행 결과를 그대로 `data`로 쓰고 실행 결과에는 디코딩한 `stdout`과 `stderr`가 들어 있다.
+
+```python
+    # Small output — return as-is (no parsing overhead)
+    if stdout_bytes <= cfg.response_byte_budget:
+        exec_result["_output_format"] = output_format
+        return exec_result
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:185-188`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L185-L188)
+
+```python
+        stdout_raw = b"".join(stdout_chunks)
+        stderr_raw = b"".join(stderr_chunks)
+        stdout = stdout_raw.decode("utf-8", errors="replace")
+        stderr = stderr_raw.decode("utf-8", errors="replace")
+        stdout_byte_count = len(stdout_raw)
+
+        response: dict[str, Any] = {
+            "exit_code": proc.returncode,
+            "stdout": stdout,
+            "stderr": _truncate(stderr, config.max_output_bytes // 10),
+            "elapsed_seconds": round(elapsed, 2),
+            "command": cmd_list,
+            "stdout_total_bytes": stdout_byte_count,
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:133-145`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L133-L145)
+
+[2] 큰 출력은 파서가 줄·행·항목을 값의 변경 없이 미리보기로 싣는다: [`packages/sift-common/src/sift_common/parsers/csv_parser.py:53-67`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/parsers/csv_parser.py#L53-L67), [`packages/sift-common/src/sift_common/parsers/text_parser.py:14-35`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/parsers/text_parser.py#L14-L35), [`packages/sift-common/src/sift_common/parsers/json_parser.py:50-119`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/parsers/json_parser.py#L50-L119).
+
+[3] `run_command`의 도구 설명은 정해 둔 몇 가지 실행 파일만 막고 나머지는 실행한다고 적는다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-201`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L201)
+
+[4] FK의 Volatility 3 지식에 적힌 자격증명 플러그인.
+
+```yaml
+    - "windows.hashdump — Dump password hashes (requires SYSTEM and SAM)"
+    - "windows.lsadump — Dump LSA secrets"
+    - "windows.cachedump — Dump cached domain credentials"
+```
+
+[`packages/forensic-knowledge/data/tools/volatility/volatility3.yaml:31-33`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/data/tools/volatility/volatility3.yaml#L31-L33)
+
+[5] 호출 기록의 결과 요약은 표준 출력 앞 500자를 그대로 담는다.
+
+```python
+            logged_id = audit.log(
+                tool="run_command",
+                audit_id=op_id,
+                case_dir=case_dir,
+                params={"command": command, "purpose": purpose},
+                result_summary={
+                    "exit_code": exec_result["exit_code"],
+                    "output_file": exec_result.get("output_file", ""),
+                    "output_sha256": exec_result.get("output_sha256", ""),
+                    "output_sha256_scope": exec_result.get("output_sha256_scope", ""),
+                    "stdout_bytes": exec_result.get("stdout_total_bytes", 0),
+                    "stdout_head": (exec_result.get("stdout") or "")[:500],
+                    **({"truncated": True} if exec_result.get("truncated") else {}),
+                    **({"stopped": stopped} if stopped else {}),
+                    **version_summary,
+                },
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:405-420`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L405-L420)
+
+[6] 출력 파일은 도구가 쓴 바이트를 그대로 담는다.
+
+```python
+    if stdout:
+        try:
+            stdout_path = out_dir / f"{prefix}_stdout.txt"
+            with open(stdout_path, "xb") as f:
+                f.write(stdout)
+                f.flush()
+                os.fsync(f.fileno())
+            response["output_file"] = str(stdout_path)
+            response["output_sha256"] = hashlib.sha256(stdout).hexdigest()
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:263-271`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L263-L271)
+
+[7] `record_finding`은 인용한 내용을 `content`로 저장한다.
+
+```python
+                quotes.append(content)
+                validated_artifacts.append(
+                    {
+                        "source": source[:500],
+                        "extraction": extraction[:2000],
+                        "content": _stored_content(content),
+                        "content_type": str(art.get("content_type", ""))[:50],
+                        "purpose": str(art.get("purpose", ""))[:500],
+                        "audit_id": str(art.get("audit_id", ""))[:100],
+                        "output_ref": str(art.get("output_ref", ""))[:500],
+                    }
+                )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1355-1366`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1355-L1366)
+
+[8] 보고서에서 빼는 발견사항 필드 목록에는 `artifacts`와 `iocs`가 없다.
+
+```python
+STRIPPED_FINDING_FIELDS = {
+    "provenance",
+    "content_hash",
+    "audit_ids",
+    "staged",
+    "modified_at",
+    "approved_by",
+    "approved_at",
+    "rejected_by",
+    "rejected_at",
+    "rejection_reason",
+    "verification",
+    "created_by",
+    "examiner_notes",
+    "examiner_modifications",
+    "provenance_warnings",
+    # The review step's record of the skeptic challenge, with its audit ids
+    "challenged",
+    # How the finding was graded and produced: for review, not for the report
+    "confidence",
+    "confidence_justification",
+    "provenance_detail",
+    "produced_by",
+}
+```
+
+[`packages/report-mcp/src/report_mcp/profiles.py:11-34`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/profiles.py#L11-L34)
+
+[9] `generate_report`는 승인된 발견사항에서 그 필드만 빼서 싣고 IOC를 모아 싣는다: [`packages/report-mcp/src/report_mcp/server.py:796-845`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L796-L845).
+
+[10] `sanitize_for_log`는 민감한 키 이름의 값을 가린다.
+
+```python
+SENSITIVE_FIELDS = {
+    "token",
+    "password",
+    "secret",
+    "key",
+    "auth",
+    "credential",
+    "api_key",
+}
+```
+
+[`packages/opencti/src/opencti_mcp/validation.py:1156-1164`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L1156-L1164)
+
+```python
+def _filter_sensitive(data: dict[str, Any]) -> dict[str, Any]:
+    """Filter sensitive fields from data before logging."""
+    result = {}
+    for key, value in data.items():
+        key_lower = key.lower()
+        if any(s in key_lower for s in SENSITIVE_FIELDS):
+            result[key] = "***REDACTED***"
+        elif isinstance(value, dict):
+            result[key] = _filter_sensitive(value)
+        elif isinstance(value, str):
+            result[key] = sanitize_for_log(value)
+        else:
+            result[key] = value
+    return result
+```
+
+[`packages/opencti/src/opencti_mcp/validation.py:1187-1200`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L1187-L1200)
+
+[11] `sanitize_for_log`는 입력 검사 실패를 운영 로그에 적을 때 쓰인다.
+
+```python
+            except ValidationError as e:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.warning(
+                    "Validation failed",
+                    extra={
+                        "tool": name,
+                        "error": str(e),
+                        "arguments": sanitize_for_log(arguments),
+                    },
+                )
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:531-540`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L531-L540)
+
+[12] 위협 정보 제공자의 실패 이유는 서버가 정한 문구로만 만든다.
+
+```python
+def transport_reason(platform: str, error: BaseException) -> str:
+    """Why `platform` couldn't be reached (refused, name not found, TLS)."""
+    text = str(error)
+    if "CERTIFICATE_VERIFY_FAILED" in text or "SSL" in text or "TLS" in text:
+        return f"can't reach {platform}: its TLS certificate wasn't accepted"
+    return f"can't reach {platform}"
+
+
+def http_reason(platform: str, status: int, credential: str) -> str:
+    """The reason for an HTTP answer other than 200."""
+    if status in (401, 403):
+        return f"{platform} refused the {credential} (HTTP {status})"
+    if status == 429:
+        return f"{platform} rate-limited the lookup: {RATE_LIMITED} (HTTP 429)"
+    return f"{platform} answered HTTP {status}"
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:264-278`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L264-L278)

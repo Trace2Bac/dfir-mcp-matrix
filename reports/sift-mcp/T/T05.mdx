@@ -1,0 +1,630 @@
+---
+cell: T05
+details:
+- id: T05.01
+- id: T05.02
+- id: T05.03
+- id: T05.05
+- id: T05.06
+---
+
+# T05 분석 도구 검증
+
+### T05.01 저장소·의존성 고정
+
+**구현.** 이 방식은 저장소에 함께 넣은 참조 자료 `forensic-knowledge`와 `sift-mcp`의 도구 카탈로그에 적용된다 [1][2].
+`forensic-knowledge`의 YAML은 도구별 주의 사항과 조언, 아티팩트가 보여 주는 것과 보여 주지 않는 것, 분석 규율과 신뢰도 정의를 담고 저장소 커밋으로 내용이 정해진다 [1].
+`sift-mcp`와 `forensic-mcp`는 이 자료를 응답에 싣거나 발견사항 검사의 기준으로 쓴다 [1][3].
+`sift-mcp`의 카탈로그 YAML은 도구 정의, 시험한 명령 예시 `recipes`와 그 예시를 시험한 버전 범위, 실행 검사 목록 `security.yaml`을 담는다 [2].
+
+이 방식은 분석 도구와 다른 참조 자료에는 적용되지 않는다.
+`setup-sift.sh`는 Python 의존성을 잠금 파일 `deps/vhir.lock`의 버전과 해시로 설치하지만 이 파일이 고정하는 서버 범위의 라이브러리는 MCP SDK, chromadb, sentence-transformers 같은 서버 실행·지식 검색용 라이브러리다 [4][5].
+`run_command`가 실행하는 SIFT 분석 도구는 SIFT Workstation에 설치된 것을 쓰고 저장소는 그 버전을 정하지 않는다 [6].
+`windows-triage-mcp`의 기준 DB와 `rag-mcp`의 색인을 받는 스크립트는 기본값으로 이름이 `triage-db-`·`rag-index-`로 시작하는 가장 최근 릴리스를 받는다 [7][8].
+두 스크립트는 받은 파일을 같은 릴리스에 함께 올린 체크섬 파일과 대조하고 체크섬 파일이 없으면 대조를 건너뛴다 [7][8].
+`rag-mcp`의 임베딩 모델은 이름 `BAAI/bge-base-en-v1.5`만 코드에 있고 모델 파일의 리비전이나 해시는 정하지 않는다 [9].
+
+### T05.02 설정·호출 인자로 지정
+
+**구현.** 이 방식은 백엔드마다 도구와 참조 자료의 위치를 정하는 환경변수와 게이트웨이의 `PATH`에 적용된다 [10][11][12][13][14][15].
+- `sift-mcp`는 `SIFT_CATALOG_DIR`가 가리키는 폴더가 있으면 그 폴더의 카탈로그와 `security.yaml`을 읽는다 [10].
+- `sift-mcp`는 실행 파일을 `PATH`에서 먼저 찾고 없으면 `/usr/local/bin`, `/opt/zimmerman`, `/opt/volatility3`, `/opt/hayabusa`에서 찾는다 [11].
+- 게이트웨이는 백엔드를 실행하기 전에 `~/.local/bin`을 `PATH` 앞에 넣어 SIFT가 그 폴더에 설치하는 Hayabusa, capa, floss, chainsaw를 찾게 한다 [12].
+- `forensic-knowledge`는 `FK_DATA_DIR`가 가리키는 폴더가 있으면 그 폴더의 자료를 읽는다 [13].
+- `windows-triage-mcp`는 `WT_DATA_DIR`, `WT_KNOWN_GOOD_DB`, `WT_CONTEXT_DB`, `WT_REGISTRY_DB`로 기준 DB의 위치를 정한다 [14].
+- `rag-mcp`는 `RAG_INDEX_DIR`로 색인 위치를, `RAG_MODEL_NAME`으로 임베딩 모델을 정한다 [15].
+- `rag-mcp`의 `RAG_MODEL_NAME`은 허용 모델 5개 가운데 하나여야 하고 목록 밖이면 모델을 불러오지 않는다 [16][17].
+- `opencti-mcp`는 `OPENCTI_URL`, `MISP_URL`, `THREATINTEL_PROVIDERS`로 조회할 위협 정보 플랫폼의 주소와 목록을 정한다 [18].
+이 값들은 위치나 이름만 정하고 그 내용의 버전은 정하지 않는다.
+
+**한계.** `SIFT_TOOL_PATHS`와 `SIFT_HAYABUSA_DIR`는 설정 객체의 값으로 읽히지만 실행 파일을 찾는 `find_binary`는 이 값을 쓰지 않는다 [19][11].
+
+### T05.03 실행 시 버전 조회
+
+**구현.** 이 방식은 `sift-mcp`의 카탈로그 도구 실행과 `opencti-mcp`의 `lookup_ioc`에 적용된다 [20][21][22].
+`sift-mcp`는 `run_command`가 카탈로그 도구를 실행할 때마다 명령이 가리키는 실행 파일에 버전을 묻고 결과를 저장해 두지 않는다 [20][21].
+버전은 카탈로그의 `version_argv`, `--version`, `-V` 차례로 실행해 출력에서 처음 나오는 버전 꼴 문자열로 읽는다 [21].
+`get_tool_help`와 `check_tools`도 같은 방법으로 실행 파일에 버전을 묻는다 [23].
+Sleuth Kit `fls`의 버전은 4.11.1로 읽혔다 [24].
+
+`opencti-mcp`의 `lookup_ioc`는 조회 질의에 OpenCTI의 `about { version }`을 함께 넣어 조회할 때마다 OpenCTI 버전을 읽는다 [22].
+MISP 버전은 `/servers/getVersion`으로 읽고 앞서 읽은 지 1분이 지나지 않았으면 앞서 읽은 값을 쓴다 [22][25].
+남은 조회 시간이 모자라거나 다른 조회가 읽는 중일 때도 앞서 읽은 값을 쓴다 [25].
+두 버전은 각 플랫폼의 응답에 실린다 [22][25].
+
+**한계.** 카탈로그에 없는 실행 파일은 버전을 묻지 않는다 [20].
+출력에서 버전 꼴 문자열을 찾지 못하면 `unknown`으로 둔다 [21].
+
+### T05.05 사용 전 기대값 대조
+
+**구현.** 이 방식은 `rag-mcp`가 사용자 문서 저장소를 열 때 적용된다 [26].
+사용자가 더한 문서 색인은 `metadata.json`에 적힌 임베딩 모델과 거리 함수(`hnsw:space`)를 기본 색인의 값과 대조하고 다르면 검색에서 빼고 경고를 남긴다 [26].
+RAG 검색 서버는 실행하지 않았고 코드로만 확인했다.
+
+**한계.** 대조하는 값은 메타데이터에 적힌 이름이고 색인 파일의 해시는 대조하지 않는다 [26].
+서버는 `RAG_MODEL_NAME`으로 정한 모델을 기본 색인의 `metadata.json`에 적힌 모델과 대조하지 않는다 [16][26].
+
+### T05.06 시험 버전 범위 대조·표시
+
+**구현.** 이 방식은 `sift-mcp`의 `get_tool_help`와 `check_tools`에 적용된다 [23].
+두 도구는 실행 파일에서 읽은 버전을 카탈로그 `recipes`마다 적힌 시험 버전 범위와 대조한다 [23][2].
+`get_tool_help`는 읽은 버전이 범위에 맞는 `recipes`만 보여 주고 나머지는 시험한 범위만 적어 따로 둔다 [23].
+맞는 범위가 하나도 없으면 `recipe_note`에 그 버전의 예시가 없다는 사실과 시험한 범위를 적는다 [23].
+`check_tools`는 `recipes`가 있는 도구의 버전이 어느 범위에도 맞지 않으면 `outside_tested_ranges`와 `tested_ranges`를 붙인다 [23].
+범위 밖 버전이어도 실행을 막지 않는다 [23][24].
+카탈로그의 시험 범위 밖 버전을 출력하는 시험용 `hayabusa`를 `PATH` 앞에 두자 `check_tools`가 `outside_tested_ranges`를 붙였고 `run_command`는 그 실행 파일을 실행했다 [24].
+`run_command`는 실행할 때 버전을 읽기만 하고 이 범위와 대조하지 않는다 [20].
+
+**한계.** 버전을 읽지 못해 `unknown`이 된 도구에는 어느 `recipes` 범위도 맞지 않는다 [21][23].
+범위가 빈 `recipes`는 어느 버전과도 맞지 않는 것으로 본다 [23].
+
+### 근거
+
+[1] `forensic-knowledge`는 저장소의 `data/` 폴더에서 YAML을 읽는다: [`packages/forensic-knowledge/src/forensic_knowledge/loader.py:23-56`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/src/forensic_knowledge/loader.py#L23-L56), [`packages/forensic-knowledge/src/forensic_knowledge/loader.py:254-257`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/src/forensic_knowledge/loader.py#L254-L257), [`packages/forensic-knowledge/data/`](https://github.com/AppliedIR/sift-mcp/tree/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/data).
+
+```python
+def get_confidence_definitions() -> dict:
+    """Load confidence level definitions."""
+    data = _load_yaml("discipline/confidence.yaml")
+    return data.get("levels", {}) if data else {}
+```
+
+[`packages/forensic-knowledge/src/forensic_knowledge/loader.py:254-257`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/src/forensic_knowledge/loader.py#L254-L257)
+
+[2] 카탈로그 YAML은 도구마다 시험한 명령 예시와 그 버전 범위를 둔다.
+
+```yaml
+  - name: hayabusa
+    binary: hayabusa
+    # 3.8.1 and 3.9.0: the 3.x recipes and `help` measured on the release
+    # binaries, and the 4.x ones on 4.2.0. Each JSON-lines output parses line by line,
+    # one record per line, as many as the CSV (capture: hb-parse-check.txt)
+    recipes:
+      - task: Timeline of Windows event logs as JSON lines
+        versions: ">=3.0,<4"
+        checked_on: "3.8.1, 3.9.0"
+        argv: [hayabusa, json-timeline, -L, -d, <evtx folder>, -o, <output .jsonl>, -w, --min-level, <informational|low|medium|high|critical>]
+        notes: '-L: one record per line (without it, 3.x writes multi-line JSON). -w: no questions (a run has no terminal).'
+      - task: Timeline of Windows event logs as CSV
+        versions: ">=3.0,<4"
+        checked_on: "3.8.1, 3.9.0"
+        argv: [hayabusa, csv-timeline, -d, <evtx folder>, -o, <output .csv>, -w]
+        notes: '-w: no questions (a run has no terminal).'
+      - task: Timeline of Windows event logs as JSON lines
+        versions: ">=4.0,<5"
+        checked_on: "4.2.0"
+        argv: [hayabusa, dfir-timeline, -d, <evtx folder>, -t, jsonl, -o, <output .jsonl>, -w, --min-level, <informational|low|medium|high|critical>]
+        notes: '4.x replaced json-timeline and csv-timeline with dfir-timeline; -t picks the format. -w: no questions (a run has no terminal).'
+      - task: Timeline of Windows event logs as CSV
+        versions: ">=4.0,<5"
+        checked_on: "4.2.0"
+        argv: [hayabusa, dfir-timeline, -d, <evtx folder>, -o, <output .csv>, -w]
+        notes: 'CSV is dfir-timeline''s default. -w: no questions (a run has no terminal).'
+    version_argv: ["help"]  # "Hayabusa vX.Y.Z" on its first line
+```
+
+[`packages/sift-mcp/data/catalog/timeline.yaml:5-31`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/data/catalog/timeline.yaml#L5-L31)
+
+[3] `get_tool_help`는 `forensic-knowledge`의 주의 사항과 조언을 응답에 싣는다.
+
+```python
+    # Add FK knowledge
+    try:
+        fk = loader.get_tool(td.knowledge_name)
+    except Exception as e:
+        logger.debug("FK lookup failed for %s: %s", td.knowledge_name, e)
+        fk = None
+    if fk:
+        result["caveats"] = fk.get("caveats", [])
+        result["advisories"] = fk.get("advisories", [])
+        result["artifacts_parsed"] = fk.get("artifacts_parsed", [])
+        if fk.get("investigation_sequence"):
+            result["investigation_sequence"] = fk["investigation_sequence"]
+        if fk.get("field_meanings"):
+            result["field_meanings"] = fk["field_meanings"]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:178-191`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L178-L191)
+
+[4] 잠금 파일은 버전과 해시를 적고 설치·갱신이 제약으로 쓴다고 적는다.
+
+```text
+# vhir dependency lock: generated by deps/regen-lock.sh; don't edit by hand.
+# Installs and updates use it as a constraint (-c) and build constraint (-b).
+#
+# sift-mcp        f7cf8063eaa454dfe0ee43e7dcd7dc793b22729b
+# vhir            8eeeb2ce10e06968d56fdd54fcf1a12ac2626a91
+# opensearch-mcp  cc2b987fc9b302e9f942090940dd7dd917b8f1dd
+# exclude-newer   2026-10-08  (packages published before this date)
+# uv              0.12.23
+# held            opentelemetry-sdk<1.36 opentelemetry-api<1.36  (otel 1.35.x, as locked before)
+# reproduce       deps/regen-lock.sh --sift f7cf8063eaa454dfe0ee43e7dcd7dc793b22729b --vhir 8eeeb2ce10e06968d56fdd54fcf1a12ac2626a91 --opensearch cc2b987fc9b302e9f942090940dd7dd917b8f1dd --exclude-newer 2026-10-08
+#
+```
+
+[`deps/vhir.lock:1-11`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/deps/vhir.lock#L1-L11)
+
+[5] `setup-sift.sh`는 잠금 파일을 제약과 빌드 제약으로 넘긴다.
+
+```bash
+LOCK="$INSTALL_DIR/deps/vhir.lock"
+if [[ "$TORCH_VARIANT" == cpu ]]; then
+    LOCK="$INSTALL_DIR/deps/vhir-cpu.lock"
+fi
+if [[ ! -f "$LOCK" ]]; then
+    err "Dependency lock not found: $LOCK"
+    exit 1
+fi
+LOCKED=(-c "$LOCK" -b "$LOCK")
+```
+
+[`setup-sift.sh:1080-1088`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1080-L1088)
+
+[6] `setup-sift.sh`는 SIFT Workstation을 설치 대상으로 적고 SIFT 분석 도구를 설치하거나 그 버전을 고르는 단계가 없다.
+
+```bash
+#!/usr/bin/env bash
+#
+# setup-sift.sh — Valhuntir SIFT Platform Installer
+#
+# Installs MCP servers, the gateway, vhir CLI, and all dependencies into a
+# shared virtual environment at ~/.vhir/venv/. Includes examiner identity
+# setup and LLM client configuration.
+#
+# Three install tiers:
+#   Quick        — Core platform only (~3 min)
+#   Recommended  — Adds RAG search + Windows triage (~30 min with index build)
+#   Custom       — Choose individual packages (+ OpenCTI)
+#
+# Usage:
+#   ./setup-sift.sh                      # Interactive (default: Recommended)
+#   ./setup-sift.sh --quick -y           # Unattended quick install
+#   ./setup-sift.sh --custom             # Interactive package picker
+#   ./setup-sift.sh --remote             # Enable TLS + bind 0.0.0.0
+#   ./setup-sift.sh --manual-start       # Skip auto-start/systemd
+#   ./setup-sift.sh -h                   # Help
+```
+
+[`setup-sift.sh:1-20`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1-L20)
+
+```bash
+PLATFORM="$(uname -s)"
+if [[ "$PLATFORM" != "Linux" ]]; then
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        warn "macOS detected. This installer targets Linux (SIFT Workstation)."
+        warn "Homebrew python3 + venv should work, but systemd will not."
+    else
+        err "Unsupported platform: $PLATFORM"
+        exit 1
+    fi
+fi
+```
+
+[`setup-sift.sh:186-195`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L186-L195)
+
+[7] 기준 DB 스크립트는 기본값으로 가장 최근 `triage-db-` 릴리스를 받고 같은 릴리스의 체크섬 파일과 대조한다: [`packages/windows-triage/src/windows_triage/scripts/download_databases.py:59-93`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/scripts/download_databases.py#L59-L93), [`packages/windows-triage/src/windows_triage/scripts/download_databases.py:125-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/scripts/download_databases.py#L125-L150), [`setup-sift.sh:1428-1436`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1428-L1436).
+
+[8] 색인 스크립트도 기본값으로 가장 최근 `rag-index-` 릴리스를 받고 같은 릴리스의 체크섬 파일과 대조한다: [`packages/forensic-rag/src/rag_mcp/scripts/download_index.py:63-95`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/scripts/download_index.py#L63-L95), [`packages/forensic-rag/src/rag_mcp/scripts/download_index.py:130-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/scripts/download_index.py#L130-L150), [`setup-sift.sh:1364-1376`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/setup-sift.sh#L1364-L1376).
+
+[9] 임베딩 모델은 이름으로만 정한다.
+
+```python
+# Allowed embedding models (security: prevent arbitrary model loading)
+ALLOWED_MODELS = frozenset(
+    {
+        "BAAI/bge-base-en-v1.5",
+        "BAAI/bge-small-en-v1.5",
+        "BAAI/bge-large-en-v1.5",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+    }
+)
+
+# Default embedding model
+DEFAULT_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+```
+
+[`packages/forensic-rag/src/rag_mcp/utils.py:28-40`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/utils.py#L28-L40)
+
+[10] 카탈로그 폴더는 `SIFT_CATALOG_DIR`를 먼저 본다.
+
+```python
+def _find_catalog_dir() -> Path:
+    """Locate the data/catalog directory."""
+    global _CATALOG_DIR
+    if _CATALOG_DIR is not None:
+        return _CATALOG_DIR
+
+    env = os.environ.get("SIFT_CATALOG_DIR")
+    if env:
+        p = Path(env)
+        if p.is_dir():
+            _CATALOG_DIR = p
+            return p
+
+    # Relative to this file: src/sift_mcp/catalog.py → ../../data/catalog/
+    source = Path(__file__).resolve().parent.parent.parent / "data" / "catalog"
+    if source.is_dir():
+        _CATALOG_DIR = source
+        return source
+
+    raise FileNotFoundError("Cannot find sift-mcp catalog directory.")
+```
+
+[`packages/sift-mcp/src/sift_mcp/catalog.py:23-42`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/catalog.py#L23-L42)
+
+[11] `find_binary`는 `PATH`를 먼저 보고 정해 둔 폴더를 본다.
+
+```python
+def find_binary(name: str, extra_paths: list[str] | None = None) -> str | None:
+    """Find a binary on PATH or in common forensic tool locations."""
+    # shutil.which checks PATH
+    found = shutil.which(name)
+    if found:
+        return found
+
+    # Check extra paths
+    search_paths = extra_paths or [
+        "/usr/local/bin",
+        "/opt/zimmerman",
+        "/opt/volatility3",
+        "/opt/hayabusa",
+    ]
+    for d in search_paths:
+        candidate = Path(d) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/environment.py:46-65`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/environment.py#L46-L65)
+
+[12] 게이트웨이는 `~/.local/bin`을 `PATH` 앞에 넣는다.
+
+```python
+def prepend_local_bin() -> None:
+    """Put ~/.local/bin on the backends' PATH, where SIFT installs hayabusa,
+    capa, floss and chainsaw; a systemd user unit's PATH doesn't have it."""
+    local_bin = str(Path.home() / ".local" / "bin")
+    path = os.environ.get("PATH", "")
+    if os.path.isdir(local_bin) and local_bin not in path.split(os.pathsep):
+        os.environ["PATH"] = os.pathsep.join(p for p in (local_bin, path) if p)
+```
+
+[`packages/sift-gateway/src/sift_gateway/__main__.py:19-25`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/__main__.py#L19-L25)
+
+[13] `forensic-knowledge`는 `FK_DATA_DIR`를 먼저 본다.
+
+```python
+
+def _find_data_dir() -> Path:
+    """Locate the data/ directory — installed package or source tree."""
+    global _DATA_DIR
+    if _DATA_DIR is not None:
+        return _DATA_DIR
+
+    # 1. Explicit env override (for testing)
+    env_path = os.environ.get("FK_DATA_DIR")
+    if env_path:
+        p = Path(env_path)
+        if p.is_dir():
+            _DATA_DIR = p
+            return _DATA_DIR
+```
+
+[`packages/forensic-knowledge/src/forensic_knowledge/loader.py:23-36`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/src/forensic_knowledge/loader.py#L23-L36)
+
+[14] `windows-triage-mcp`의 DB 위치 환경변수다.
+
+```python
+    # Load paths from environment
+    data_dir_str = os.environ.get("WT_DATA_DIR")
+    known_good_db_str = os.environ.get("WT_KNOWN_GOOD_DB")
+    context_db_str = os.environ.get("WT_CONTEXT_DB")
+    registry_db_str = os.environ.get("WT_REGISTRY_DB")
+
+    # Parse paths
+    data_dir = Path(data_dir_str) if data_dir_str else None
+    known_good_db = Path(known_good_db_str) if known_good_db_str else None
+    context_db = Path(context_db_str) if context_db_str else None
+    registry_db = Path(registry_db_str) if registry_db_str else None
+
+```
+
+[`packages/windows-triage/src/windows_triage/config.py:139-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/config.py#L139-L150)
+
+[15] `rag-mcp`의 색인 위치와 모델 이름 환경변수다.
+
+```python
+        self.index_dir = Path(
+            index_dir or os.environ.get("RAG_INDEX_DIR", DEFAULT_INDEX_DIR)
+        )
+        self.model_name = model_name or os.environ.get(
+            "RAG_MODEL_NAME", DEFAULT_MODEL_NAME
+        )
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:92-97`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L92-L97)
+
+[16] 모델 이름은 허용 목록과 대조하고 기본 색인의 모델과는 대조하지 않은 채 모델을 불러온다.
+
+```python
+    def load(self) -> None:
+        """Load the embedding model and ChromaDB index into memory."""
+        with self._lock:
+            if self._loaded:
+                return
+
+            # Security: validate model name against allowlist
+            if self.model_name not in ALLOWED_MODELS:
+                raise ValueError(
+                    f"Model '{self.model_name}' is not allowed. "
+                    "Use one of the approved embedding models."
+                )
+
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+            self._open_stores()
+            self._loaded = True
+
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:124-141`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L124-L141)
+
+[17] 허용 임베딩 모델은 5개다.
+
+```python
+# Allowed embedding models (security: prevent arbitrary model loading)
+ALLOWED_MODELS = frozenset(
+    {
+        "BAAI/bge-base-en-v1.5",
+        "BAAI/bge-small-en-v1.5",
+        "BAAI/bge-large-en-v1.5",
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+    }
+)
+```
+
+[`packages/forensic-rag/src/rag_mcp/utils.py:28-37`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/utils.py#L28-L37)
+
+[18] 위협 정보 플랫폼의 주소와 목록은 환경변수로 정한다: [`packages/opencti/src/opencti_mcp/config.py:236-236`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L236-L236), [`packages/opencti/src/opencti_mcp/providers/misp.py:307-308`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L307-L308), [`packages/opencti/src/opencti_mcp/providers/__init__.py:111-120`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L111-L120).
+
+[19] `SIFT_TOOL_PATHS`와 `SIFT_HAYABUSA_DIR`는 설정 객체에만 들어간다.
+
+```python
+    @classmethod
+    def from_env(cls) -> SiftConfig:
+        cfg = cls()
+        cfg.case_dir = resolve_case_dir()
+        cfg.share_root = os.environ.get("VHIR_SHARE_ROOT", "")
+
+        extra_paths = os.environ.get("SIFT_TOOL_PATHS", "")
+        if extra_paths:
+            cfg.tool_paths = extra_paths.split(":") + cfg.tool_paths
+
+        timeout = os.environ.get("SIFT_TIMEOUT")
+        if timeout and timeout.isdigit():
+            cfg.default_timeout = int(timeout)
+
+        hayabusa = os.environ.get("SIFT_HAYABUSA_DIR")
+        if hayabusa:
+            cfg.hayabusa_dir = hayabusa
+```
+
+[`packages/sift-mcp/src/sift_mcp/config.py:43-59`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/config.py#L43-L59)
+
+[20] `run_command`는 카탈로그 도구일 때만 명령이 가리키는 실행 파일에 버전을 묻는다.
+
+```python
+        # The catalog tool's version and the path that runs, asked now of the
+        # binary the command names, which is what runs (never cached: an
+        # update shows on the next run)
+        from sift_mcp import tool_version
+
+        probed = tool_version.probe(td, binary) if td else {}
+        version_keys = {
+            "tool_version": probed.get("installed_version"),
+            "resolved_path": probed.get("resolved_path"),
+        }
+        version_summary = {k: v for k, v in version_keys.items() if v}
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:324-334`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L324-L334)
+
+[21] 버전 조회는 정해 둔 인자 차례로 도구를 실행해 처음 나오는 버전 꼴 문자열을 읽는다.
+
+```python
+    found = launch(binary or td)
+    if not found:
+        return {}
+    prefix, path = found
+    # the tool's own way first ([]: run it bare), then the defaults
+    tries = [td.version_argv] if td.version_argv is not None else []
+    tries += [["--version"], ["-V"]]
+    printed = ""
+    for argv in tries:
+        if argv and argv[0] == "{interpreter}":
+            interp = _interpreter(path)
+            if not interp:
+                continue
+            command = interp + argv[1:]
+        else:
+            command = prefix + argv
+        _, out, err, _, _ = _run(command)
+        version = _version(out) or _version(err)
+        if version:
+            return {"installed_version": version, "resolved_path": path}
+        printed = _first_line(err) or _first_line(out) or printed
+    return {
+        "installed_version": "unknown",
+        "resolved_path": path,
+        "version_output": printed,
+    }
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:155-180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L155-L180)
+
+버전 꼴은 [`packages/sift-mcp/src/sift_mcp/tool_version.py:24-42`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L24-L42)에 있다.
+
+[22] `lookup_ioc`는 OpenCTI와 MISP의 플랫폼 버전을 읽는다.
+
+```python
+LOOKUP_QUERY = (
+    "query ThreatIntelLookup($filters: FilterGroup, $first: Int) {"
+    " about { version }"
+    " indicators(first: $first, filters: $filters) {"
+    f" pageInfo {{ globalCount }} edges {{ node {{ {SELECTION} }} }} }} }}"
+)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:42-47`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L42-L47)
+
+```python
+        try:
+            timed_out = False
+            for name, path, read in (
+                ("version", "/servers/getVersion", lambda r: r.get("version")),
+                (
+                    "warninglists_enabled",
+                    "/warninglists/index",
+                    lambda r: _count_enabled(r, "Warninglist"),
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:174-181`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L174-L181)
+
+[23] 읽은 버전을 `recipes`의 범위와 대조해 고르고 맞는 범위가 없으면 표시만 한다.
+
+```python
+    for r in td.recipes:
+        try:  # a blank range is invalid, not "every version"
+            fits = (
+                installed is not None
+                and bool(str(r["versions"]).strip())
+                and installed in SpecifierSet(r["versions"])
+            )
+        except (InvalidSpecifier, KeyError, TypeError):
+            fits = False
+        if fits:
+            mine.append(r)
+        else:
+            others.append(
+                {
+                    "task": r.get("task", ""),
+                    "versions": r.get("versions", ""),
+                    "note": f"tested on {r.get('versions', '?')} only",
+                }  # fmt: skip
+            )
+    out: dict = {"recipes": mine}
+    if others:
+        out["other_recipes"] = others
+    if td.recipes and not mine:
+        tested = ", ".join(sorted({r.get("versions", "?") for r in td.recipes}))
+        out["recipe_note"] = (
+            f"no recipe for {version}; tested on {tested}. Use the tool's own "
+            "help above."
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:106-133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L106-L133)
+
+```python
+    def one(td) -> dict:
+        found = tool_version.probe(td)
+        if not found:
+            return {"available": False, "binary_path": None}
+        out = {"available": True, "binary_path": _installed_path(td), **found}
+        # A tool with recipes, none of them for this version: said here, so a
+        # client (vhir setup test) warns without holding any range logic
+        if td.recipes and not _recipes(td, found["installed_version"])["recipes"]:
+            out["outside_tested_ranges"] = True
+            out["tested_ranges"] = sorted({r.get("versions", "?") for r in td.recipes})
+        return out
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:204-214`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L204-L214)
+
+[24] (실행 확인) 컨테이너에서 `check_tools`와 `run_command`로 Sleuth Kit 4.11.1 `fls`의 버전을 읽었다.
+시험 범위 밖 버전을 출력하는 시험용 `hayabusa`를 `PATH` 앞에 두자 `check_tools`가 `outside_tested_ranges`와 `tested_ranges`를 붙였다.
+같은 실행 파일은 `run_command`로 실행되었다.
+
+[25] MISP 플랫폼 정보는 앞서 읽은 지 60초가 지나지 않았거나 남은 시간이 모자라거나 다른 조회가 읽는 중이면 앞서 읽은 값을 쓴다.
+
+```python
+FACTS_SECONDS = 60.0
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:45-45`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L45-L45)
+
+```python
+    def _platform_facts(self, deadline: float) -> dict[str, Any]:
+        """The facts, re-read when older than a minute and time is left.
+
+        Never waits: while another lookup is re-reading them, or with too
+        little time left, the facts read last are given. A read that timed
+        out is not kept, so the next lookup tries again."""
+        if (
+            time.monotonic() - self._facts_at < FACTS_SECONDS
+            or deadline - time.monotonic() < FOLLOW_UP_MIN_SECONDS
+            or not self._facts_lock.acquire(blocking=False)
+        ):
+            return dict(self._facts)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:162-173`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L162-L173)
+
+읽은 버전을 응답에 싣는 곳은 [`packages/opencti/src/opencti_mcp/providers/misp.py:284-290`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L284-L290)이다.
+
+[26] 사용자 색인은 모델과 거리 함수를 기본 색인과 대조하고 다르면 검색에서 뺀다.
+
+```python
+        refresh = "python -m rag_mcp.refresh --skip-online"
+        if not is_committed(self.index_dir):
+            self._store_notice = (
+                "Your knowledge-folder documents aren't in their own store yet; "
+                f"run `{refresh}` once."
+            )
+            return
+        meta = read_json(user_dir(self.index_dir) / "metadata.json")
+        shipped_model = (
+            read_json(self.index_dir / "metadata.json").get("model")
+            or DEFAULT_MODEL_NAME
+        )
+        shipped_space = (self.collection.metadata or {}).get(
+            "hnsw:space", DEFAULT_SPACE
+        )
+        if (meta.get("model"), meta.get("hnsw:space")) != (
+            shipped_model,
+            shipped_space,
+        ):
+            self._store_warning = (
+                f"Your documents' store ({meta.get('model')}, "
+                f"{meta.get('hnsw:space')}) doesn't match the shipped index "
+                f"({shipped_model}, {shipped_space}), so it is left out of "
+                f"search. Run `{refresh}`."
+            )
+            return
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:186-211`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L186-L211)

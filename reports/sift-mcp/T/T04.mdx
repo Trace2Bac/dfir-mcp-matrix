@@ -1,0 +1,387 @@
+---
+cell: T04
+details:
+- id: T04.01
+- id: T04.02
+- id: T04.05
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 `windows-triage-mcp`, `rag-mcp`, `forensic-mcp`, `case-mcp`의 분석과 `sift-mcp`의 큰 출력 파싱에 적용된다 [1][2][3][4][5].
+`windows-triage-mcp`는 기준 DB를 서버 프로세스 안의 `sqlite3` 연결로 읽기 전용으로 열어 경로·해시·서비스·예약 작업을 조회하고 파일 이름 분석도 서버 코드로 한다 [1].
+`rag-mcp`는 sentence-transformers 모델을 서버 프로세스에 불러 질의를 임베딩하고 chromadb `PersistentClient`로 색인을 검색한다 [2].
+`forensic-mcp`는 `record_finding`의 인용 대조와 출처 추적을 사건 폴더의 호출 기록과 파일을 읽는 서버 코드로 한다 [3].
+`case-mcp`는 증거 해시를 서버 프로세스 안에서 계산하고 큰 파일은 같은 프로세스의 데몬 스레드에서 계산한다 [4].
+`sift-mcp`는 도구의 표준 출력이 응답 상한을 넘으면 서버 안의 CSV·JSON·텍스트 파서로 미리보기를 만든다 [5].
+`opencti-mcp`는 위협 정보 플랫폼에 HTTP로 조회하고 분석 작업을 원격에 맡기지 않는다 [6].
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`와 버전·도움말 실행에 적용된다 [7][8][9].
+`run_command`는 검사를 마친 명령의 첫 인자를 `find_binary`가 `PATH`에서 찾은 실행 파일 경로로 바꾸고 인자 목록 그대로 `subprocess.Popen`에 넘긴다 [7][8].
+`shell=True`는 쓰지 않고 자식 프로세스는 서버와 같은 계정과 환경에서 실행된다 [8].
+EZ Tools는 `.dll`이 설치되어 있으면 `dotnet <도구>.dll`로 실행한다 [7].
+`get_tool_help`, `check_tools`, `run_command`의 버전 조회는 카탈로그의 인자로 도구를 `Popen`에 표준 입력 없이 실행하고 10초 안에 끝나지 않으면 종료시킨다 [9].
+컨테이너에서 `run_command`로 `pwd`와 `fls -V`를 실행하자 분석 도구가 서버와 같은 사용자로 실행되어 결과를 돌려주었다 [10].
+
+모델이 `bash -c`를 명령으로 주면 서버는 셸 해석기를 같은 방식으로 실행하고 셸이 그 문자열을 해석한다 [11][10].
+서버 코드는 `sudo`를 붙여 도구를 실행하지 않고 거부 목록에도 `sudo`가 없다 [7][12].
+모델이 관리자 권한으로 실행하는 명령을 앞에 붙였을 때 권한이 바뀌는지는 서버 계정의 설정에 달려 있고 확인하지 못했다.
+
+### T04.05 실행별 작업 폴더
+
+**구현.** 이 방식은 사건이 있을 때 실행하는 `sift-mcp`의 `run_command`에 적용된다 [13][14].
+서버는 호출마다 호출 기록 ID를 먼저 정하고 사건 폴더 아래 `extractions/<호출 기록 ID>/`를 빈 폴더로 만든다 [13].
+명령의 상대 경로는 이 폴더 기준으로 해석하고 도구는 이 폴더를 작업 위치(`cwd`)로 실행된다 [13][14].
+실행이 끝나면 이 폴더의 파일을 그 실행의 출력으로 기록한다 [15].
+사건이 있을 때 `pwd`를 실행하자 `extractions/<호출 기록 ID>`가 출력되었다 [10].
+폴더는 명령 검사보다 먼저 만들어지므로 거부된 호출의 폴더도 빈 채로 남았다 [10][13].
+
+**한계.** 사건이 없으면 실행별 폴더를 만들지 않고 서버 프로세스의 작업 폴더에서 실행한다 [13].
+사건 없이 `pwd`를 실행하자 서버 프로세스의 폴더가 출력되었다 [10].
+폴더를 만들지 못하면 경고만 남기고 서버 프로세스의 작업 폴더에서 실행하며 같은 이름의 폴더가 이미 있으면 그 폴더를 그대로 쓴다 [13].
+
+### 근거
+
+[1] `windows-triage-mcp`는 기준 DB를 읽기 전용 연결로 열고 조회를 서버 코드로 한다.
+
+```python
+        read_only = not self.config.skip_db_validation
+        cache_size = self.config.cache_size
+
+        try:
+            self.known_good_db = KnownGoodDB(
+                kg_path, read_only=read_only, cache_size=cache_size
+            )
+            self.context_db = ContextDB(
+                ctx_path, read_only=read_only, cache_size=cache_size
+            )
+            # Registry DB is optional - initialize but don't fail if missing
+            self.registry_db: RegistryDB | None = None
+            if reg_path.exists():
+                self.registry_db = RegistryDB(
+                    reg_path,
+                    read_only=True,  # Always read-only
+                    cache_size=cache_size,
+                )
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:379-396`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L379-L396)
+
+```python
+        cursor = conn.execute(
+            """
+            SELECT bf.id, bf.path_normalized, bf.filename_lower, bf.os_versions,
+                   bh.hash_value, bh.hash_type
+            FROM baseline_files bf
+            LEFT JOIN baseline_hashes bh ON bf.id = bh.file_id
+            WHERE bf.path_normalized = ?
+            """,
+            (path_normalized,),
+        )
+```
+
+[`packages/windows-triage/src/windows_triage/db/known_good.py:396-405`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/db/known_good.py#L396-L405)
+
+[2] `rag-mcp`는 임베딩 모델과 chromadb 색인을 서버 프로세스에서 연다.
+
+```python
+            # Security: validate model name against allowlist
+            if self.model_name not in ALLOWED_MODELS:
+                raise ValueError(
+                    f"Model '{self.model_name}' is not allowed. "
+                    "Use one of the approved embedding models."
+                )
+
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+            self._open_stores()
+            self._loaded = True
+
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:130-141`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L130-L141)
+
+```python
+        self._client = chromadb.PersistentClient(path=str(chroma_path))
+        self.collection = self._client.get_collection("ir_knowledge")
+        self._open_user_store()
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:240-242`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L240-L242)
+
+[3] `record_finding`은 사건의 호출 기록을 불러 인용마다 출처를 추적한다.
+
+```python
+            loaded_ids = case.by_id
+            identity_read = not any(
+                s.startswith(f"audit/{_FILE_IDENTITY_LOG} ") for s in case.skipped
+            )
+            for art, quote in zip(validated_artifacts, quotes, strict=True):
+                t = pv.trace_artifact(case, art["audit_id"], quote)
+                artifact_traces.append(t)
+                art.update(
+                    provenance_grade=t.grade,
+                    provenance_reason=t.reason,
+                    provenance_chain=_distinct_links(t.links),
+                    provenance_root=t.root,
+                    provenance_roots=t.roots,
+                    provenance_candidates=t.candidates,
+                    provenance_break=t.break_,
+                )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1407-1422`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1407-L1422)
+
+[4] 큰 파일의 해시는 같은 프로세스의 데몬 스레드에서 계산한다.
+
+```python
+    """The id of the job hashing `paths` (one path, or a list) for this case in
+    this process: the running one for the same key, else a new daemon thread."""
+    key = (os.path.realpath(case_dir), key)
+    with _jobs_lock:
+        if key in _jobs:
+            return _jobs[key]
+        job_id = _jobs[key] = f"hash-{uuid.uuid4().hex[:16]}"
+    threading.Thread(
+        target=_job,
+        args=(key, job_id, paths, case_dir, requested_by),
+        name=f"file-identity-{job_id}",
+        daemon=True,
+    ).start()
+    return job_id
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:330-343`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L330-L343)
+
+[5] 출력이 상한을 넘으면 서버 안의 파서로 미리보기를 만든다: [`packages/sift-mcp/src/sift_mcp/tools/generic.py:177-225`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L177-L225).
+
+[6] `opencti-mcp`의 조회는 GraphQL 요청이다.
+
+```python
+    def query(self, query: str, variables: dict | None = None) -> dict[str, Any]:
+        """Run a GraphQL request; returns the whole reply (``{"data": ...}``)."""
+        try:
+            response = _http_post(
+                self._url,
+                json={"query": query, "variables": variables or {}},
+                headers={"Authorization": f"Bearer {self._token}"},
+```
+
+[`packages/opencti/src/opencti_mcp/graphql.py:246-252`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/graphql.py#L246-L252)
+
+[7] `run_command`는 실행 파일을 `find_binary`로 찾은 경로로 바꾸고 EZ Tools는 `dotnet`으로 실행한다.
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+
+    # Sanitize any args after the binary
+    sanitize_extra_args(command[1:], tool_name=binary)
+    # SIFT's EZ-tool wrappers expand their arguments unquoted (a path with a
+    # space splits): run the tool's .dll with dotnet directly when it is there
+    command = _ez_launcher(binary, resolved) + command[1:]
+
+    if before_run is not None:  # the command passed every check: about to run
+        before_run()
+
+    exec_result = execute(
+        command,
+        timeout=timeout,
+        cwd=cwd,
+        save_output=save_output,
+        save_dir=save_dir,
+        op_id=op_id,
+        case_dir=case_dir,
+    )
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-175`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L175)
+
+`.dll`을 고르는 함수는 [`packages/sift-mcp/src/sift_mcp/tools/generic.py:53-65`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L53-L65)에, `find_binary`는 [`packages/sift-mcp/src/sift_mcp/environment.py:46-65`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/environment.py#L46-L65)에 있다.
+
+[8] 실행기는 셸 없이 인자 목록으로 `Popen`을 부른다.
+
+```python
+    config = get_config()
+    timeout = timeout or config.default_timeout
+    max_bytes = config.max_output_bytes
+
+    start = time.monotonic()
+    truncated = False
+    killed = False  # stopped here at the output limit, not ended on its own
+    try:
+        proc = subprocess.Popen(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:69-82`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L69-L82)
+
+[9] 버전·도움말 실행은 표준 입력 없이 `Popen`을 부르고 10초 뒤 종료시킨다.
+
+```python
+def _run(
+    argv: list[str], cap: int = READ_CAP
+) -> tuple[int | None, str, str, bool, bool]:
+    """(exit code, stdout, stderr, cut, late): at most `cap` bytes are read,
+    both streams together, and a child still writing then is stopped (cut).
+    One with no answer within PROBE_TIMEOUT is stopped too (late, exit code
+    None), and what it printed by then is kept."""
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:99-112`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L99-L112)
+
+```python
+    deadline = time.monotonic() + PROBE_TIMEOUT
+    late = False
+    while proc.poll() is None:
+        late = time.monotonic() >= deadline
+        if late or total[0] >= cap:
+            proc.kill()
+            break
+        time.sleep(0.01)
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:126-133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L126-L133)
+
+[10] (실행 확인) 컨테이너(사용자 `analyst`)에서 `run_command`로 `pwd`, `fls -V`, `bash -c`를 실행해 결과를 받았다.
+사건이 있을 때 `pwd`는 `extractions/<호출 기록 ID>`를, 사건이 없을 때는 서버 프로세스의 폴더를 출력했다.
+거부된 호출의 ID로 된 빈 폴더도 `extractions/` 아래에 남았다.
+
+[11] `run_command`의 도구 설명은 셸 해석기 인자를 검사하지 않는다고 적는다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+        In a case the command runs in its own empty folder,
+        extractions/<audit_id>/, so a relative path means a path there.
+        Give parallel runs distinct output folders: files new in a folder two
+        runs share are recorded as both runs' outputs, and trace as ambiguous.
+        Deleting or overwriting case records, audit/ or evidence files is refused;
+        bash -c, python -c, dd and a tool's own output options are not checked.
+
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-208`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L208)
+
+[12] 거부 목록 실행 파일에 `sudo`가 없다.
+
+```yaml
+denied_binaries:
+  # Filesystem destruction — no forensic use, no unblocked equivalent
+  - "mkfs"
+  - "mkfs.ext4"
+  - "mkfs.xfs"
+  - "mkfs.btrfs"
+  - "mkfs.ntfs"
+  # System state — no forensic use
+  - "shutdown"
+  - "reboot"
+  - "poweroff"
+  - "halt"
+  - "init"
+  # Process termination — timeouts handle hung tools
+  - "kill"
+  - "killall"
+  - "pkill"
+  # Environment leak — dumps gateway tokens
+  - "env"
+  - "printenv"
+  # Raw sockets — no forensic use via run_command
+  - "nc"
+  - "ncat"
+```
+
+[`packages/sift-mcp/data/catalog/security.yaml:96-118`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/data/catalog/security.yaml#L96-L118)
+
+[13] 사건이 있으면 호출 기록 ID로 실행별 폴더를 먼저 만들고 실패하면 경고만 남긴다.
+
+```python
+        # One case per call, resolved as it starts: the audit id is minted for
+        # it, and the output and the entry are kept in it, whatever case is
+        # active when the command ends
+        case_dir = resolve_case_dir()
+        audit_dir = audit._get_audit_dir(case_dir)
+        op_id = audit._next_audit_id(audit_dir) if audit_dir else None
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+        # A relative path in the command is resolved in the run's own folder
+        parsed = command_files.inputs(command, get_output_flags(binary), op_dir)
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:249-269`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L249-L269)
+
+[14] 실행별 폴더를 작업 위치로 넘긴다.
+
+```python
+        try:
+            exec_result = _run(
+                command,
+                purpose=purpose,
+                timeout=timeout or None,
+                save_output=save_output,
+                preview_lines=min(max(preview_lines, 0), 200),
+                op_id=(lambda: op_id) if op_id else None,
+                case_dir=case_dir,
+                cwd=op_dir,
+                before_run=snapshot,
+            )
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:336-347`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L336-L347)
+
+[15] 실행별 폴더의 파일을 출력으로 기록한다.
+
+```python
+            if op_dir:
+                _share_readable(op_dir)
+            # Its outputs: every file in its own folder (but the saved stdout,
+            # recorded as output_file) and every file new or changed under an
+            # output flag's value, each hashed
+            saved = os.path.realpath(exec_result.get("output_file") or "")
+            made = [
+                p
+                for p in (command_files.files_at([op_dir]) if op_dir else {})
+                if os.path.realpath(p) != saved
+            ]
+            made += [
+                p
+                for p, key in command_files.files_at(flagged).items()
+                if before.get(p) != key and p not in made
+            ]
+            outputs = file_place.output_records(case_dir, made, "run_command")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:368-384`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L368-L384)

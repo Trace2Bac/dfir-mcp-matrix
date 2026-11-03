@@ -1,0 +1,847 @@
+---
+cell: T02
+details:
+- id: T02.01
+- id: T02.02
+- id: T02.04
+- id: T02.05
+- id: T02.06
+- id: T02.08
+---
+
+# T02 실행 허용 범위 제한
+
+### T02.01 클라이언트 도구 선택
+
+**구현.** 이 방식은 저장소가 함께 제공하는 Claude Code 설정, finding-skeptic 에이전트 정의, Codex용 훅에 적용된다 [1][2][3][4].
+Full 구성의 Claude Code 설정은 허용 목록 `allow`에 `mcp__forensic-mcp__*`, `mcp__sift-mcp__*`처럼 MCP 서버 13개의 도구 전체를 두어 확인 없이 쓰게 하고 막는 서버 도구는 없다 [1].
+Lite 구성의 설정은 `rag-mcp`, `windows-triage-mcp`, 위협 정보 서버 등 서버 8개의 도구 전체를 허용 목록에 둔다 [2].
+Claude Code용 finding-skeptic 에이전트 정의는 `tools`에 읽기·조회 도구와 `run_command`를 적어 그 에이전트가 쓸 수 있는 도구를 정한다 [3].
+Codex용 `codex-skeptic-tools.sh`는 PreToolUse 훅에서 `agent_type`이 `finding-skeptic`인 호출을 같은 도구 목록 `ALLOWED`와 대조한다 [4].
+목록 밖의 MCP 도구, 셸, `apply_patch`, 다른 에이전트를 시작하거나 메시지를 보내는 도구는 종료 코드 2로 거부한다 [4].
+다른 에이전트의 호출과 입력을 읽지 못한 호출은 각각 통과와 거부로 처리한다 [4].
+finding-skeptic의 두 목록에는 임의 명령을 실행하는 `run_command`가 들어 있다 [3][4].
+게이트웨이는 키의 역할로 도구를 거르지 않으므로 이 목록들은 저장소의 설정을 설치한 Claude Code와 Codex에만 적용되고 다른 MCP 클라이언트로 붙으면 적용되지 않는다 [5].
+
+### T02.02 클라이언트 자체 도구 우회 차단
+
+**구현.** 이 방식은 Full 구성의 Claude Code 설정과 Codex용 관리 설정이 서버가 관리하는 사건 기록과 승인 자료를 지키는 데 적용된다 [6][7][8].
+Claude Code 설정의 거부 목록 `deny`는 사건 기록(`findings.json`, `timeline.json`, `approvals.jsonl`, `evidence.json` 등)과 `audit/*.jsonl`을 `Edit`로 고치는 것을 막는다 [6].
+같은 목록은 승인 자료 폴더 `/var/lib/vhir`와 API 키가 들어 있는 `~/.vhir/gateway.yaml`의 `Read`, 승인·반려 명령 `vhir approve`·`vhir reject`의 `Bash` 실행을 막는다 [6].
+같은 설정은 Claude Code sandbox를 켜고 `~/.vhir`의 설정·훅·`active_case` 쓰기와 `/var/lib/vhir`·`gateway.yaml` 읽기를 막는다 [7].
+`Bash` 실행 전에는 훅 `case-data-guard.sh`가 명령을 토큰으로 나누어 사건 기록, `audit/` 아래 파일, `evidence/`의 기존 파일을 지우거나 덮어쓰는 `rm`·`mv`·`cp`·출력 방향 바꾸기를 찾고 있으면 종료 코드 2로 거부한다 [8].
+이 훅은 읽을 수 없는 입력, 자신의 오류, 5초를 넘긴 검사도 거부로 처리한다 [8].
+Codex용 관리 설정은 셸이 `~/.vhir`를 읽기만 하게 하고 `/var/lib/vhir`와 `gateway.yaml` 읽기를 막으며 `Bash`와 `apply_patch` 앞에 같은 훅을 둔다 [9].
+
+서버가 감싼 분석 도구를 `Bash`로 직접 실행하는 것은 막지 않는다 [6][10].
+`mcp-route.py`는 셸 명령의 첫 실행 파일이 MCP 도구로도 실행할 수 있는 도구이면 그 사실을 호출 기록 훅에 알려 표시하고 안내하게 할 뿐 거부하지 않는다 [10].
+Lite 구성의 설정은 `vhir approve`·`vhir reject` 실행만 막고 사건 기록 쓰기를 막는 항목이나 PreToolUse 훅이 없다 [2].
+이 설정과 훅은 저장소의 Claude Code·Codex 설정을 설치한 세션에만 적용되고 다른 MCP 클라이언트에는 적용되지 않는다 [6][9].
+훅은 실행해 보지 않았고 코드로만 확인했다.
+
+**한계.** 훅 주석은 이 검사가 보안 경계가 아니라고 적고 셸 문자열 안의 명령, `xargs`, 스크립트, 제자리 편집 같은 형태는 보지 않는다고 적는다 [8].
+거부 목록의 쓰기 항목은 `Edit(...)` 규칙으로만 적혀 있고 `Write`를 따로 적은 항목은 없다 [6].
+Claude Code가 편집 도구의 거부 규칙을 파일 쓰기 도구에도 적용하는지는 확인하지 못했다.
+
+### T02.04 고정 명령·템플릿
+
+**구현.** 이 방식은 `opencti-mcp`의 위협 정보 조회, `windows-triage-mcp`의 기준 DB 조회, `sift-mcp`의 버전·도움말 실행에 적용된다 [11][12][13][14].
+`opencti-mcp`의 GraphQL 클라이언트는 질의 문자열을 코드의 루트·선택 필드로 만들고 모델 값은 `search`, `filters`, `first` 같은 변수로만 넘긴다 [11].
+정렬 값 `orderBy`·`orderMode`는 정해 둔 목록에 있을 때만 질의 문자열에 넣는다 [11].
+`lookup_ioc`는 OpenCTI에는 고정 질의 `LOOKUP_QUERY`를, MISP에는 고정 경로 `/attributes/restSearch`를 쓰고 IOC 값만 변수나 본문 필드로 넣는다 [12].
+`windows-triage-mcp`의 DB 조회 함수는 SQL 문을 코드에 두고 경로·이름·해시를 `?` 자리 인자로 넘긴다 [13].
+`sift-mcp`의 `get_tool_help`와 버전 조회는 카탈로그의 `version_argv`·`help_argv`·`subcommand_help` 인자 목록으로 도구를 실행하고 모델 값은 `subcommand` 자리에만 들어간다 [14].
+`subcommand`는 소문자로 시작하는 41자 이하의 영문 소문자·숫자·하이픈이어야 하고 카탈로그에 `subcommand_help`가 없는 도구는 받지 않는다 [14].
+
+`sift-mcp`의 `run_command`는 모델이 명령 전체를 정하므로 이 방식에 해당하지 않는다 [15].
+
+### T02.05 연산·플러그인 허용 목록
+
+**구현.** 이 방식은 `report-mcp`의 `generate_report`, `opencti-mcp`의 `search_entity`·`get_relationships`, `sift-mcp`의 `get_tool_help`에 적용된다 [16][17][18][19].
+`generate_report`는 `profile`을 `PROFILES`의 6개(`full`·`executive`·`timeline`·`ioc`·`findings`·`status`)와 대조하고 목록에 없으면 오류를 돌려준다 [16].
+`search_entity`는 `type`을 `VALID_ENTITY_TYPES`의 16개와 대조하고 목록에 없으면 `ValidationError`로 거부한 뒤 맞는 값은 정해 둔 클라이언트 메서드로 바꾼다 [17].
+`get_relationships`는 `relationship_types`의 각 값을 `VALID_RELATIONSHIP_TYPES`와 대조하고 목록에 없으면 거부한다 [18].
+`get_tool_help`는 카탈로그에 없는 `tool_name`을 받으면 도구를 실행하지 않고 오류를 돌려준다 [19].
+목록에 없는 `profile`을 준 `generate_report`는 유효한 값 목록을 담은 오류로 끝났다 [20].
+
+### T02.06 질의 구조·연산 검사
+
+**구현.** 이 방식은 모델이 명령 전체를 인자 목록으로 넘기는 `sift-mcp`의 `run_command`에 적용된다 [15][21].
+서버는 실행 전에 다음을 차례로 검사하고 하나라도 어긋나면 실행하지 않고 오류를 돌려준다 [21][22].
+- 첫 인자의 경로 앞부분을 뗀 실행 파일 이름이 거부 목록 `denied_binaries`의 17개(`mkfs` 계열, `shutdown`, `kill`, `env`, `printenv`, `nc` 등)에 있으면 거부한다 [21][23].
+- `rm`이면 사건 폴더와 증거 저장 폴더를 지우는 인자를 거부하고 `rm`·`mv`·`cp`·`tee` 등이 사건 기록, `audit/`, `evidence/`의 파일을 지우거나 덮어쓰면 거부한다 [21][24].
+- 인자마다 `=` 앞부분을 소문자로 바꾸어 도구별 거부 플래그(`find`의 `-exec`·`-delete`, `sed`의 `-i`, `tar`의 `-x`·`-c` 등)와 전역 위험 플래그(`-e`, `--exec`, `--command`, `-enc`, `--script` 등)에 있으면 거부한다 [22][25].
+- 전역 위험 플래그는 `grep`·`sed`·`strings`·`tshark` 같은 도구에서는 도구별 허용 목록으로 통과시킨다 [22][25].
+- 인자에 `;`, `&&`, `||`, 백틱, `$(`, `${`가 들어 있으면 거부한다 [22].
+- `awk` 계열 도구의 프로그램 글에 `system(`, `getline`, 파이프·파일 출력 꼴이 있으면 거부한다 [22].
+검사 목록은 카탈로그 폴더의 `security.yaml`에서 읽고 이 파일을 읽지 못하면 빈 목록으로 진행하지 않고 오류를 낸다 [26].
+거부 목록의 `kill`·`env`, `perl -e`, `find -delete`, `&&`가 들어간 인자, `system(`을 쓴 `awk` 프로그램은 모두 실행되지 않고 오류로 끝났다 [20].
+
+**한계.** 거부 목록은 첫 인자의 실행 파일 이름에만 적용된다 [21].
+다른 실행 파일의 인자로 둔 거부 목록 실행 파일은 거부되지 않고 실행되었다 [20].
+도구 설명은 `bash -c`, `python -c`, `dd`와 도구 자체의 출력 옵션을 검사하지 않는다고 적는다 [15].
+같은 설명은 거부하는 실행 파일로 `mkfs`, `shutdown`, `kill`, `nc`·`ncat`만 적고 `env`·`printenv`, `reboot` 같은 나머지 이름은 적지 않는다 [15][23].
+`-c`는 전역 위험 플래그가 아니어서 `bash -c`로 넘긴 셸 문자열은 위 문자 목록에 없는 한 실행되었다 [25][20].
+환경변수 `SIFT_CATALOG_DIR`가 가리키는 다른 카탈로그 폴더가 있으면 그 폴더의 `security.yaml`을 검사 목록으로 쓴다 [26].
+
+### T02.08 설정으로 도구 끄기
+
+**구현.** 이 방식은 게이트웨이가 붙이는 백엔드에 적용된다 [27][28].
+사용자는 게이트웨이 설정 파일의 백엔드 항목에 `enabled: false`를 두어 그 백엔드를 만들지 않게 하고 그 백엔드의 도구는 도구 목록과 호출 대상에서 빠진다 [27].
+설정 예시는 원격 HTTP 백엔드 `wintools-mcp`, `remnux-mcp`, `microsoft-learn`, `zeltser-ir-writing`을 `enabled: false`로 둔다 [28].
+백엔드 하나의 도구 가운데 일부만 끄는 설정은 없다 [27].
+
+### 근거
+
+[1] Full 구성의 Claude Code 설정은 MCP 서버 13개의 도구 전체를 허용 목록에 둔다.
+
+```json
+    "allow": [
+      "mcp__forensic-mcp__*",
+      "mcp__case-mcp__*",
+      "mcp__sift-mcp__*",
+      "mcp__report-mcp__*",
+      "mcp__forensic-rag-mcp__*",
+      "mcp__windows-triage-mcp__*",
+      "mcp__opencti-mcp__*",
+      "mcp__threatintel-mcp__*",
+      "mcp__wintools-mcp__*",
+      "mcp__remnux-mcp__*",
+      "mcp__vhir__*",
+      "mcp__zeltser-ir-writing__*",
+      "mcp__microsoft-learn__*"
+    ],
+```
+
+[`claude-code/full/settings.json:80-94`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/full/settings.json#L80-L94)
+
+[2] Lite 구성의 설정은 서버 8개의 도구를 허용하고 승인·반려 명령만 막는다.
+
+```json
+  "permissions": {
+    "allow": [
+      "mcp__forensic-rag__*",
+      "mcp__windows-triage__*",
+      "mcp__opencti-mcp__*",
+      "mcp__threatintel-mcp__*",
+      "mcp__remnux-mcp__*",
+      "mcp__wintools-mcp__*",
+      "mcp__microsoft-learn__*",
+      "mcp__zeltser-ir-writing__*"
+    ],
+    "deny": [
+      "Bash(vhir approve*)",
+      "Bash(*vhir approve*)",
+      "Bash(vhir reject*)",
+      "Bash(*vhir reject*)"
+    ]
+  },
+```
+
+[`claude-code/lite/settings.json:2-19`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/lite/settings.json#L2-L19)
+
+[3] finding-skeptic 에이전트 정의의 `tools` 목록이다: [`agents/finding-skeptic/claude.md:1-5`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/agents/finding-skeptic/claude.md#L1-L5).
+
+[4] Codex용 훅은 finding-skeptic의 호출만 `ALLOWED`와 대조하고 셸·패치·에이전트 도구를 거부한다.
+
+```bash
+WRITES = {"apply_patch", "Bash", "exec_command", "write_stdin", "shell", "local_shell"}
+# A namespaced tool's name comes prefixed, e.g. collaborationspawn_agent
+HANDS_ON = ("spawn_agent", "send_input", "resume_agent", "followup_task", "send_message", "assign_agent_task")
+
+
+def refuse(why):
+    print(f"BLOCKED: {why}", file=sys.stderr)
+    sys.exit(2)
+
+
+try:
+    payload = json.load(sys.stdin)
+    agent, tool = payload.get("agent_type"), str(payload["tool_name"])
+except Exception:
+    refuse("the skeptic's tool check couldn't read this call, so it was blocked to be safe")
+if agent != "finding-skeptic":
+    sys.exit(0)
+if tool.startswith("mcp__"):
+    server, _, name = tool[5:].partition("__")
+    if name:  # mcp__<server>__<tool>, the server as Codex names it (a "-" made "_"): that pair
+        ok = any(server.replace("-", "_") == s.replace("-", "_") and name in n for s, n in ALLOWED.items())
+    else:  # another shape: the tool's name alone
+        ok = any(tool.rsplit("__", 1)[-1] in n for n in ALLOWED.values())
+    if not ok:
+        refuse(f"the finding-skeptic reads and queries only; {tool} isn't one of its tools")
+elif tool in WRITES or tool.endswith(HANDS_ON):
+    refuse(f"the finding-skeptic reads and queries only; it can't use {tool}")
+sys.exit(0)
+```
+
+[`claude-code/shared/hooks/codex-skeptic-tools.sh:60-87`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/codex-skeptic-tools.sh#L60-L87)
+
+목록 `ALLOWED`는 [`claude-code/shared/hooks/codex-skeptic-tools.sh:16-59`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/codex-skeptic-tools.sh#L16-L59)에 있다.
+
+[5] 게이트웨이는 역할로 도구를 거르지 않는다.
+
+```python
+        # Inject examiner identity into tools that accept analyst_override.
+        # Always overwrite to prevent identity spoofing.
+        # Role-based filtering (e.g., restricting certain tools by role) is
+        # deferred — currently all authenticated users can call any tool.
+        if examiner:
+            if actual_name in ANALYST_TOOLS:
+                arguments = {**arguments, "analyst_override": examiner}
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:771-777`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L771-L777)
+
+[6] Full 구성의 거부 목록은 사건 기록의 `Edit`, 승인 자료와 게이트웨이 설정의 `Read`, 승인·반려 명령을 막는다: [`claude-code/full/settings.json:95-142`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/full/settings.json#L95-L142).
+
+[7] 같은 설정의 sandbox는 `~/.vhir` 설정 파일 쓰기와 승인 자료·게이트웨이 설정 읽기를 막는다.
+
+```json
+  "sandbox": {
+    "enabled": true,
+    "allowUnsandboxedCommands": false,
+    "failIfUnavailable": true,
+    "filesystem": {
+      "denyWrite": [
+        "~/.vhir/gateway.yaml",
+        "~/.vhir/config.yaml",
+        "~/.vhir/active_case",
+        "~/.vhir/hooks",
+        "~/.vhir/.password_lockout",
+        "~/.vhir/.pin_lockout",
+        "~/.claude/settings.json",
+        "~/.claude/CLAUDE.md",
+        "~/.claude/rules",
+        "~/.agents",
+        "~/.codex"
+      ],
+      "denyRead": [
+        "/var/lib/vhir",
+        "~/.vhir/gateway.yaml",
+        "~/.claude.json"
+      ]
+    }
+  }
+```
+
+[`claude-code/full/settings.json:144-168`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/full/settings.json#L144-L168)
+
+[8] `case-data-guard.sh`의 머리 주석은 지키는 기록, 막는 명령, 보지 않는 형태, 거부 방식을 적는다.
+
+```bash
+# PreToolUse hook (Bash, and Codex's apply_patch): refuse commands that would
+# delete or overwrite case records. A best-effort check of the commands listed
+# below, not a security boundary. An apply_patch is checked by the paths its
+# headers name (*** Add File, Update File, Delete File, Move to), never read
+# as shell: a patch's lines are text, not commands.
+#
+# Protected, under ${VHIR_CASES_DIR:-~/cases}: the case records at a case root
+# (findings.json, timeline.json, approvals.jsonl, iocs.json, evidence.json,
+# evidence-verified.json, todos.json, CASE.yaml, actions.jsonl,
+# pending-reviews.json, host-observations.jsonl, host-decisions.jsonl,
+# host-ops.json, host-dictionary.yaml), everything in
+# audit/, every existing file in evidence/ (and evidence/ while non-empty),
+# each non-empty case root and the cases root. Everything else is allowed:
+# other files, reports/, work/, .outputs/, extractions/, filing new files into
+# evidence/, and moving unprotected files into DELETE/. / and every directory
+# above the cases root (such as ~) are protected as wholes: find with -exec or
+# -delete rooted at one is blocked whatever its predicates.
+#
+# Blocked on a protected path: rm, rmdir, shred, unlink, truncate; mv from or
+# onto it; cp, install or ln onto it; > >> >| &> onto it; find rooted at it (or
+# at a case or the cases root) with -delete or -exec. Seen through: sudo, env,
+# VAR=val, nice, nohup, time, timeout, stdbuf, exec, command, if/then/do/{/!,
+# ; && || | & and newlines, $(...), cd, quoting, .., absolute command paths,
+# mv -t, find -H/-L/-P/-O/-D. apply_patch, applypatch or codex
+# --codex-run-as-apply-patch run through the shell is blocked on any path: Codex applies it natively, and only its apply_patch
+# tool is checked by the paths it names.
+```
+
+[`claude-code/shared/hooks/case-data-guard.sh:3-28`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/case-data-guard.sh#L3-L28)
+
+```bash
+# Not seen: bash -c/sh -c, xargs, scripts, tee, in-place editors (sed -i,
+# perl -i), git clean, rsync --delete,
+# tar --remove-files, dd of=, >& redirections, brace expansion, variables,
+# backquotes and a "$(...)" in double quotes; an operand after a $(...) inside
+# an argument (rm x$(true) findings.json); options of timeout -s and env -u;
+# an option value placed after the operands of cp, install or ln
+# (--suffix .bak, -m 0644); a single-operand ln (the link is created in the
+# current folder); a cd inside a subshell or one that fails (it's
+# applied to later commands);
+# anything after a # comment, on later lines too. A quoted '>' is read as a
+# redirection (a false block), and a quoted 'x$' before \( can be misread as
+# a $(.
+#
+# The command is tokenized only: it is never run, evaluated or expanded by a
+# shell. A block exits 2 with the reason on stderr (Claude Code shows it to
+# the model), and appends an "event": "refused" line to the active case's
+# audit file (Claude Code records no other trace of it); anything else exits
+# 0. A payload it can't read, or an error of its own, is blocked too (fail
+# closed): a check that can't reach a verdict mustn't look like one that
+# passed. So is a check still running after 5 s: Codex runs a call whose
+# hook times out.
+```
+
+[`claude-code/shared/hooks/case-data-guard.sh:29-49`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/case-data-guard.sh#L29-L49)
+
+[9] Codex용 관리 설정은 셸 권한 프로필과 읽기 거부, PreToolUse 훅을 정한다.
+
+```toml
+# case, the hooks, the config or the venv
+[permissions.vhir]
+extends = ":workspace"
+
+[permissions.vhir.filesystem]
+"{home}/.vhir" = "read"
+
+# Codex's shell can't read the signing and approval store, the gateway's
+# tokens or the Valhuntir profile (which holds a gateway token)
+[permissions.filesystem]
+deny_read = ["/var/lib/vhir", "{home}/.vhir/gateway.yaml", "{home}/.codex/valhuntir.config.toml"]
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|apply_patch)$"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "{hooks}/case-data-guard.sh"
+timeout = 10
+
+```
+
+[`codex/requirements.toml:26-44`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/codex/requirements.toml#L26-L44)
+
+[10] `mcp-route.py`는 표시하고 안내만 하고 막지 않는다.
+
+```python
+"""Whether a shell command has an MCP route, for the audit hooks.
+
+Reads the command on stdin. When its first executable is in mcp-routes.tsv
+(beside this file), prints one JSON object: {"mcp_route", "tool", "command",
+"advisory"}. Otherwise prints nothing. Exits 0 either way: the hooks mark and
+advise, never block. Run as `python3 -I mcp-route.py`; standard library only.
+
+Only the first command is looked at, by its executable's basename, after
+sudo, env, nohup, nice, time, command, exec and VAR=value prefixes. A routed
+tool later in a pipe or chain, or run through another interpreter or script,
+isn't marked.
+```
+
+[`claude-code/shared/hooks/mcp-route.py:1-11`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/claude-code/shared/hooks/mcp-route.py#L1-L11)
+
+[11] GraphQL 목록 질의는 루트와 선택 필드로 질의 문자열을 만들고 값은 변수로 넘기며 정렬 값은 목록과 대조한다.
+
+```python
+        params = ["$first: Int"]
+        args = ["first: $first"]
+        variables: dict[str, Any] = {"first": int(first)}
+        for name, kind, value in (
+            ("search", "String", search),
+            ("filters", "FilterGroup", filters),
+            ("types", "[String]", types),
+            ("fromId", "[String]", [fromId] if isinstance(fromId, str) else fromId),
+            ("toId", "[String]", [toId] if isinstance(toId, str) else toId),
+            ("relationship_type", "[String]", relationship_type),
+        ):
+            if value is not None:
+                params.append(f"${name}: {kind}")
+                args.append(f"{name}: ${name}")
+                variables[name] = value
+        # Ordering is an enum literal of the root's own type; only known
+        # values are written into the query.
+        if orderBy is not None:
+            if orderBy not in _ORDER_BY:
+                raise ValueError(f"unsupported orderBy: {orderBy}")
+            args.append(f"orderBy: {orderBy}")
+        if orderMode is not None:
+            if orderMode not in _ORDER_MODE:
+                raise ValueError(f"unsupported orderMode: {orderMode}")
+            args.append(f"orderMode: {orderMode}")
+        query = (
+            f"query List({', '.join(params)}) {{ {root}({', '.join(args)}) "
+            f"{{ edges {{ node {{ {selection} }} }} }} }}"
+        )
+        data = self.query(query, variables)["data"]
+```
+
+[`packages/opencti/src/opencti_mcp/graphql.py:296-325`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/graphql.py#L296-L325)
+
+[12] `lookup_ioc`의 OpenCTI 질의와 MISP 요청은 고정 질의와 고정 경로를 쓴다.
+
+```python
+LOOKUP_QUERY = (
+    "query ThreatIntelLookup($filters: FilterGroup, $first: Int) {"
+    " about { version }"
+    " indicators(first: $first, filters: $filters) {"
+    f" pageInfo {{ globalCount }} edges {{ node {{ {SELECTION} }} }} }} }}"
+)
+```
+
+[`packages/opencti/src/opencti_mcp/providers/opencti.py:42-47`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L42-L47)
+
+```python
+            reply = self._request(
+                "POST",
+                "/attributes/restSearch",
+                {
+                    "returnFormat": "json",
+                    "value": ioc,
+                    "includeContext": 1,
+                    "includeDecayScore": 1,
+                    "limit": MAX_MATCHES + 1,
+                },
+                deadline,
+            )
+            attributes = (reply.get("response") or {}).get("Attribute")
+```
+
+[`packages/opencti/src/opencti_mcp/providers/misp.py:218-230`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/misp.py#L218-L230)
+
+[13] `windows-triage-mcp`의 조회 함수는 고정 SQL에 `?` 자리 인자를 쓴다.
+
+```python
+        cursor = conn.execute(
+            """
+            SELECT bf.id, bf.path_normalized, bf.filename_lower, bf.os_versions,
+                   bh.hash_value, bh.hash_type
+            FROM baseline_files bf
+            LEFT JOIN baseline_hashes bh ON bf.id = bh.file_id
+            WHERE bf.path_normalized = ?
+            """,
+            (path_normalized,),
+        )
+```
+
+[`packages/windows-triage/src/windows_triage/db/known_good.py:396-405`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/db/known_good.py#L396-L405)
+
+```python
+    def _check_lolbin_uncached(self, filename_lower: str) -> tuple | None:
+        """Uncached LOLBin lookup (returns tuple for cache compatibility)."""
+        conn = self.connect()
+        cursor = conn.execute(
+            """
+            SELECT * FROM lolbins WHERE filename_lower = ?
+            """,
+            (filename_lower,),
+        )
+```
+
+[`packages/windows-triage/src/windows_triage/db/context.py:149-157`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/db/context.py#L149-L157)
+
+[14] 버전·도움말 실행은 카탈로그의 인자 목록을 쓰고 `subcommand`의 꼴과 카탈로그 정의를 먼저 본다.
+
+```python
+SUBCOMMAND = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+
+
+def subcommand_error(td, subcommand: str) -> str | None:
+    """Why a subcommand's help can't be asked for, before anything runs."""
+    if not SUBCOMMAND.match(subcommand):
+        return (
+            f"subcommand {subcommand!r} isn't a subcommand name "
+            "(lowercase letters, digits and hyphens, starting with a letter)"
+        )
+    if not td.subcommand_help:
+        return (
+            f"{td.name} has no subcommands in the catalog: ask for its help without one"
+        )
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:59-73`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L59-L73)
+
+```python
+    prefix, _ = found
+    if subcommand:
+        tries = [[a.replace("{subcommand}", subcommand) for a in td.subcommand_help]]
+    else:
+        tries = [td.help_argv] if td.help_argv else [["--help"], ["-h"]]
+    for argv in tries:
+        code, out, err, cut, late = _run(prefix + argv, max(READ_CAP, HELP_INLINE + 1))
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:196-202`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L196-L202)
+
+[15] `run_command`의 도구 설명은 모델이 명령 목록을 주고 셸 해석기 인자, `dd`, 도구 자체 출력 옵션은 검사하지 않는다고 적는다.
+
+```python
+    @server.tool()
+    def run_command(
+        command: list[str],
+        purpose: str,
+        timeout: int = 0,
+        save_output: bool = False,
+        input_files: list[str] | None = None,
+        preview_lines: int = 0,
+        skip_enrichment: bool = False,
+    ) -> dict:
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+        In a case the command runs in its own empty folder,
+        extractions/<audit_id>/, so a relative path means a path there.
+        Give parallel runs distinct output folders: files new in a folder two
+        runs share are recorded as both runs' outputs, and trace as ambiguous.
+        Deleting or overwriting case records, audit/ or evidence files is refused;
+        bash -c, python -c, dd and a tool's own output options are not checked.
+
+        Args:
+            command: Command as list of strings (e.g., ["AmcacheParser", "-f", "Amcache.hve", "--csv", "/tmp/out"]).
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:186-210`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L186-L210)
+
+[16] `generate_report`는 `profile`을 `PROFILES`와 대조한다.
+
+```python
+        try:
+            if profile not in PROFILES:
+                return {
+                    "error": f"Unknown profile: {profile}. "
+                    f"Valid profiles: {', '.join(sorted(PROFILES))}"
+                }
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:938-943`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L938-L943)
+
+[17] `search_entity`는 `type`을 목록과 대조하고 메서드 이름으로 바꾼다.
+
+```python
+        """Dispatch search_entity to the appropriate client method."""
+        entity_type = arguments.get("type", "")
+        if entity_type not in VALID_ENTITY_TYPES:
+            raise ValidationError(
+                f"Invalid entity type: '{entity_type}'. "
+                f"Valid types: {', '.join(sorted(VALID_ENTITY_TYPES))}"
+            )
+
+        query = arguments.get("query", "")
+        validate_length(query, MAX_QUERY_LENGTH, "query")
+        limit = validate_limit(arguments.get("limit", 10), max_value=50)
+
+        method_name = _ENTITY_TYPE_METHODS[entity_type]
+        method = getattr(self.client, method_name)
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:742-755`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L742-L755)
+
+[18] `relationship_types`는 값마다 목록과 대조한다.
+
+```python
+    if len(values) > 20:
+        raise ValidationError("Cannot specify more than 20 relationship types")
+
+    validated = []
+    for v in values:
+        if not v or not isinstance(v, str):
+            continue
+        v = v.strip().lower()
+        if len(v) > 50:
+            raise ValidationError(f"Relationship type '{v[:20]}...' is too long")
+        # Security: ASCII-only to prevent homoglyph attacks
+        # Uses explicit ASCII alphanumeric set instead of c.isalnum()
+        if not all(c in _ASCII_ALNUM or c == "-" for c in v):
+            raise ValidationError(
+                f"Relationship type '{v}' contains invalid characters"
+            )
+        if v not in VALID_RELATIONSHIP_TYPES:
+            raise ValidationError(
+                f"Unknown relationship type '{v}'. Valid: {', '.join(sorted(VALID_RELATIONSHIP_TYPES))}"
+            )
+        validated.append(v)
+```
+
+[`packages/opencti/src/opencti_mcp/validation.py:930-950`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L930-L950)
+
+[19] `get_tool_help`는 카탈로그에 없는 도구를 실행하지 않는다.
+
+```python
+def get_tool_help(tool_name: str, subcommand: str = "") -> dict:
+    """The installed tool's version, path and own help, with the catalog's
+    recipes for that version."""
+    from sift_mcp import tool_version
+
+    td = get_tool_def(tool_name)
+    if not td:
+        return {"error": f"Tool '{tool_name}' not in catalog"}
+    if subcommand and (why := tool_version.subcommand_error(td, subcommand)):
+        return {"error": why}  # nothing is run
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:137-146`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L137-L146)
+
+[20] (실행 확인) 컨테이너에서 `run_command`에 거부 목록 실행 파일, 위험 플래그, 거부 플래그, 메타 문자, `awk` 프로그램을 주자 모두 실행되지 않고 오류가 돌아왔다.
+다른 실행 파일의 인자로 둔 거부 목록 실행 파일과 `bash -c` 셸 문자열은 실행되었다.
+`report-mcp`의 `generate_report`에 목록에 없는 `profile`을 주자 유효한 값 목록을 담은 오류가 돌아왔다.
+
+[21] `run_command`는 실행 파일 이름을 거부 목록과 대조하고 `rm`과 사건 자료 대상을 검사한 뒤 인자를 검사한다.
+
+```python
+    if not command:
+        raise ValueError("Empty command")
+
+    binary = command[0].split("/")[-1]  # Strip path prefix
+
+    # Denylist check — hard block on catastrophic binaries
+    if is_denied(binary):
+        raise DeniedBinaryError(
+            f"Binary '{binary}' is blocked by security policy. "
+            f"This restriction cannot be overridden."
+        )
+
+    # rm-specific: allow execution but protect evidence directories
+    if binary == "rm":
+        validate_rm_targets(command[1:], base=cwd)
+    validate_case_data_targets(command, base=cwd)
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:95-110`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L95-L110)
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+
+    # Sanitize any args after the binary
+    sanitize_extra_args(command[1:], tool_name=binary)
+    # SIFT's EZ-tool wrappers expand their arguments unquoted (a path with a
+    # space splits): run the tool's .dll with dotnet directly when it is there
+    command = _ez_launcher(binary, resolved) + command[1:]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-162`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L162)
+
+[22] 인자 검사는 플래그 목록, 메타 문자 목록, `awk` 프로그램 글을 본다.
+
+```python
+    policy = _get_policy()
+    tool_allowed = policy["tool_allowed_flags"].get(tool_name, set())
+    tool_blocked = policy["tool_blocked_flags"].get(tool_name, set())
+
+    sanitized = []
+    for arg in extra_args:
+        if not isinstance(arg, str):
+            raise ValueError(f"Non-string argument in extra_args: {type(arg).__name__}")
+        flag = arg.lower().split("=")[0]
+        if flag in tool_blocked:
+            raise ValueError(f"Blocked dangerous flag '{arg}' for {tool_name}")
+        if flag in policy["dangerous_flags"] and flag not in tool_allowed:
+            raise ValueError(
+                f"Blocked dangerous flag '{arg}' in extra_args for {tool_name}"
+            )
+        for pattern in _DANGEROUS_PATTERNS:
+            if pattern in arg:
+                raise ValueError(
+                    f"Blocked shell metacharacter in extra_args for {tool_name}"
+                )
+        sanitized.append(arg)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:46-66`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L46-L66)
+
+```python
+    # Scan awk program text for dangerous constructs (system(), getline, pipes)
+    if tool_name in _PROGRAM_TEXT_TOOLS:
+        for arg in sanitized:
+            if arg.startswith("-"):
+                continue  # skip flags
+            if _AWK_DANGEROUS_RE.search(arg):
+                raise ValueError(
+                    f"Blocked dangerous awk construct in program text for {tool_name}: "
+                    f"system(), getline, and pipe operators are not allowed"
+                )
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:68-77`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L68-L77)
+
+메타 문자 목록과 `awk` 꼴은 [`packages/sift-mcp/src/sift_mcp/security.py:14-35`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L14-L35)에 있다.
+
+[23] 거부 목록 실행 파일 17개다.
+
+```yaml
+denied_binaries:
+  # Filesystem destruction — no forensic use, no unblocked equivalent
+  - "mkfs"
+  - "mkfs.ext4"
+  - "mkfs.xfs"
+  - "mkfs.btrfs"
+  - "mkfs.ntfs"
+  # System state — no forensic use
+  - "shutdown"
+  - "reboot"
+  - "poweroff"
+  - "halt"
+  - "init"
+  # Process termination — timeouts handle hung tools
+  - "kill"
+  - "killall"
+  - "pkill"
+  # Environment leak — dumps gateway tokens
+  - "env"
+  - "printenv"
+  # Raw sockets — no forensic use via run_command
+  - "nc"
+  - "ncat"
+```
+
+[`packages/sift-mcp/data/catalog/security.yaml:96-118`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/data/catalog/security.yaml#L96-L118)
+
+[24] 사건 자료를 지우거나 덮어쓰는 명령을 거부한다: [`packages/sift-mcp/src/sift_mcp/security.py:98-131`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L98-L131), [`packages/sift-mcp/src/sift_mcp/security.py:191-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L191-L253).
+
+[25] 전역 위험 플래그, 도구별 허용 플래그, 도구별 거부 플래그다.
+
+```yaml
+dangerous_flags:
+  - "-e"
+  - "--exec"
+  - "--command"
+  - "-enc"
+  - "-encodedcommand"
+  - "--script"
+  - "--invoke"
+
+# "-e" (any case) stays dangerous: it runs code for interpreters (perl,
+# ruby, node), and pwsh's -enc/-EncodedCommand ignore case. These tools'
+# -e/-E only select or extract; the check lowercases, so "-e" allows both.
+tool_allowed_flags:
+  bulk_extractor: ["-e", "-x"]  # enable / disable a scanner
+  grep: ["-e"]                  # a pattern; -E extended regex
+  egrep: ["-e"]
+  fgrep: ["-e"]
+  zgrep: ["-e"]
+  sed: ["-e"]                   # a script; -E extended regex
+  strings: ["-e"]               # the encoding (-e l for UTF-16LE)
+  tshark: ["-e"]                # a field (-T fields -e); -E field options
+  binwalk: ["-e"]               # extract; -E entropy
+  ewfacquire: ["-e"]            # examiner name; -E evidence number
+```
+
+[`packages/sift-mcp/data/catalog/security.yaml:4-26`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/data/catalog/security.yaml#L4-L26)
+
+```yaml
+tool_blocked_flags:
+  find:
+    - "-exec"
+    - "-execdir"
+    - "-delete"
+    - "-fls"
+    - "-fprint"
+    - "-fprint0"
+    - "-fprintf"
+  sed:
+    - "-i"
+    - "--in-place"
+  tar:
+    - "-x"
+    - "--extract"
+    - "--get"
+    - "-c"
+    - "--create"
+    - "--delete"
+    - "--append"
+    - "--checkpoint-action"
+    - "--use-compress-program"
+    - "--to-command"
+  unzip:
+    - "-o"
+    - "-n"
+```
+
+[`packages/sift-mcp/data/catalog/security.yaml:28-53`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/data/catalog/security.yaml#L28-L53)
+
+[26] 검사 목록은 카탈로그 폴더의 `security.yaml`에서 읽고 폴더는 `SIFT_CATALOG_DIR`가 먼저 정한다.
+
+```python
+def _find_catalog_dir() -> Path:
+    """Locate the data/catalog directory."""
+    global _CATALOG_DIR
+    if _CATALOG_DIR is not None:
+        return _CATALOG_DIR
+
+    env = os.environ.get("SIFT_CATALOG_DIR")
+    if env:
+        p = Path(env)
+        if p.is_dir():
+            _CATALOG_DIR = p
+            return p
+
+    # Relative to this file: src/sift_mcp/catalog.py → ../../data/catalog/
+    source = Path(__file__).resolve().parent.parent.parent / "data" / "catalog"
+    if source.is_dir():
+        _CATALOG_DIR = source
+        return source
+
+    raise FileNotFoundError("Cannot find sift-mcp catalog directory.")
+```
+
+[`packages/sift-mcp/src/sift_mcp/catalog.py:23-42`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/catalog.py#L23-L42)
+
+```python
+    catalog_dir = _find_catalog_dir()
+    security_file = catalog_dir / "security.yaml"
+    try:
+        with open(security_file, encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as e:
+        raise RuntimeError(
+            f"Failed to load security policy from {security_file}: {e}. "
+            "Security policy is required — cannot start with empty denylists."
+        ) from e
+```
+
+[`packages/sift-mcp/src/sift_mcp/catalog.py:220-229`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/catalog.py#L220-L229)
+
+[27] 게이트웨이는 `enabled`가 거짓인 백엔드를 만들지 않는다.
+
+```python
+        # Create backend instances from config
+        backends_config = config.get("backends", {})
+        for name, backend_conf in backends_config.items():
+            if not backend_conf.get("enabled", True):
+                logger.info("Backend %s is disabled, skipping", name)
+                continue
+            try:
+                backend = create_backend(name, backend_conf)
+                self.backends[name] = backend
+            except (Exception, asyncio.CancelledError, BaseExceptionGroup) as exc:
+                logger.error("Failed to create backend %s: %s", name, exc)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:142-152`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L142-L152)
+
+[28] 설정 예시는 원격 HTTP 백엔드 4개를 끈 채로 둔다.
+
+```text
+  # --- Remote HTTP backends ---
+
+  # Windows forensic workstation running wintools-mcp
+  wintools-mcp:
+    type: http
+    url: "http://windows-workstation:4624/mcp"
+    bearer_token: "${WINTOOLS_TOKEN}"
+    enabled: false
+
+  remnux-mcp:
+    type: http
+    url: "https://remnux.example.com/mcp"
+    bearer_token: "${REMNUX_TOKEN}"
+    enabled: false
+
+  microsoft-learn:
+    type: http
+    url: "https://learn.example.com/mcp"
+    enabled: false
+
+  zeltser-ir-writing:
+    type: http
+    url: "https://zeltser.example.com/mcp"
+    enabled: false
+```
+
+[`config/gateway.yaml.example:102-125`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/config/gateway.yaml.example#L102-L125)

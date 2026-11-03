@@ -1,0 +1,332 @@
+---
+cell: D06
+details:
+- id: D06.01
+- id: D06.02
+- id: D06.03
+- id: D06.04
+---
+
+# D06 산출물 식별·재생성 처리
+
+### D06.01 실행 ID별 위치
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 만드는 작업 폴더와 게이트웨이의 참조 응답 사본에 적용된다 [1][2].
+두 경우 모두 폴더 이름은 그 호출의 호출 기록 항목 ID다 [1][2].
+ID는 `<서버 접두어>-<검토자>-<UTC 날짜>-<ULID>` 형식이고 ULID는 밀리초 시각과 80비트 난수로 만든다 [3].
+`run_command`는 분석 도구를 실행하기 전에 이 폴더를 만들고 그 호출의 보관 출력과 도구가 쓴 파일을 이 폴더에 둔다 [1].
+참조 응답 사본은 `os.makedirs`와 배타 생성 모드 `xb`로 쓰므로 같은 이름의 폴더나 파일이 있으면 쓰지 않는다 [2].
+같은 명령을 두 번 부르자 서로 다른 `extractions/<audit_id>/` 폴더에 각 실행의 표준 출력 파일과 도구가 쓴 파일이 따로 남았다 [4].
+
+**한계.** `run_command`는 폴더가 이미 있으면 `FileExistsError`를 무시하고 그 폴더를 쓴다 [1].
+출력 플래그로 작업 폴더 밖 경로를 주면 그 파일은 호출 ID 폴더로 나뉘지 않고 받은 경로에 그대로 쓰인다 [5].
+활성 사건이 없으면 호출 ID도 작업 폴더도 만들지 않는다 [1].
+
+### D06.02 입력·작업별 고유 이름
+
+**구현.** 이 방식은 `run_command`가 보관하는 표준 출력·표준 오류 파일과 `forensic-mcp`의 기록 ID에 적용된다 [6][7].
+보관 파일 이름은 UTC 초 단위 시각, 실행 파일 경로를 영숫자·`-`·`_`로 바꾼 앞 40자, `uuid4` 앞 8자로 짓는다 [6].
+시각과 난수가 들어가므로 같은 입력으로 다시 실행해도 이름이 다르다 [6].
+파일은 배타 생성 모드 `xb`로 열어 이미 있는 파일을 바꾸지 않는다 [6].
+`forensic-mcp`는 발견사항에 `F-<검토자>-<번호>`, 타임라인 사건에 `T-<검토자>-<번호>`, IOC 기록에 `IOC-<검토자>-<번호>` ID를 매긴다 [7].
+번호는 같은 접두어 ID 가운데 가장 큰 번호에 1을 더한 값이다 [8].
+발견사항과 타임라인 사건은 사건 잠금을 획득한 채 번호를 정하고 저장한다 [9].
+
+### D06.03 버전·이력 보존
+
+**구현.** 이 방식은 `report-mcp`의 `save_report`와 `case-mcp`의 `backup_case`에 적용된다 [10][11].
+`save_report`는 같은 이름의 보고서가 있으면 `<이름>_v2`부터 `_v999`까지 가운데 비어 있는 첫 이름에 새 보고서를 쓰고 앞 보고서는 그대로 둔다 [10].
+999번까지 모두 있으면 `Too many report versions`로 거부한다 [10].
+`backup_case`는 같은 이름의 백업 폴더가 있으면 `-1`, `-2`를 붙인 새 폴더를 만든다 [11].
+`r1.md`를 두 번 저장하자 `r1.md`와 `r1_v2.md`가 남았고 백업을 두 번 만들자 `-1`이 붙은 폴더가 따로 생겼다 [12].
+
+**한계.** `save_report`는 이름이 있는지 본 뒤 임시 파일을 `os.replace`로 그 이름에 옮긴다 [10][13].
+그 사이에 같은 이름의 파일이 생기면 그 파일을 바꾼다 [13].
+
+### D06.04 덮어쓰기 선택·충돌 감지
+
+**구현.** 이 방식은 `record_finding`이 발견사항의 `iocs`로 만드는 IOC 기록에 적용된다 [14].
+IOC 값을 정규화한 키로 `iocs.json`의 기존 기록을 찾고 있으면 새 기록을 만들지 않는다 [14].
+그 대신 기존 기록의 `source_findings`, `sightings`, `mitre_techniques`에 새 발견사항의 값을 더한다 [14].
+새 발견사항의 확신도 `confidence`가 더 높으면 기록의 확신도를 바꾼다 [14][15].
+기존 기록에 값을 더할 때마다 `modified_at`과 `content_hash`를 다시 계산한다 [14].
+두 발견사항에 같은 IP를 IOC로 주자 IOC 기록은 하나였고 `source_findings`에 두 발견사항 ID가 들어갔다 [16].
+
+`record_finding`과 `record_timeline_event`는 같은 내용의 기록이 있는지 보지 않고 새 ID로 기록을 더한다 [7][17].
+`record_timeline_event`의 도구 설명은 `artifact_ref`를 중복 제거 힌트라고 적지만 코드는 그 값을 저장만 하고 대조하지 않는다 [18][17].
+같은 `timestamp`·`description`·`artifact_ref`로 두 번 부르자 `T-tester-001`과 `T-tester-002`가 따로 저장되었다 [16].
+`run_command`는 출력 플래그 경로에 앞 결과가 있는지 보지 않고 분석 도구를 실행하며 덮어쓸지 고르는 인자도 없다 [19].
+서버는 실행 전후 파일의 inode·크기·수정 시각을 비교해 바뀐 파일을 그 호출의 출력으로 새 해시와 함께 기록한다 [19].
+같은 `-o` 경로를 두 번 주자 두 호출 모두 성공했고 파일은 둘째 호출이 쓴 내용으로 바뀌었다 [5].
+
+### 근거
+
+[1] 호출 기록 ID로 작업 폴더를 만들고 이미 있으면 그대로 쓴다.
+
+```python
+        # One case per call, resolved as it starts: the audit id is minted for
+        # it, and the output and the entry are kept in it, whatever case is
+        # active when the command ends
+        case_dir = resolve_case_dir()
+        audit_dir = audit._get_audit_dir(case_dir)
+        op_id = audit._next_audit_id(audit_dir) if audit_dir else None
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:249-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L249-L267)
+
+[2] 참조 응답 사본은 호출 기록 ID 폴더에 배타적으로 만든다.
+
+```python
+        op_id = audit._next_audit_id(audit_dir)
+        folder = os.path.join(case_dir, "extractions", op_id)
+        os.makedirs(folder)
+        data = _raw(result)
+        path = os.path.join(folder, "response.json")
+        with open(path, "xb") as f:
+            f.write(data)
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:73-79`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L73-L79)
+
+[3] 호출 기록 ID는 날짜와 ULID로 만든다.
+
+```python
+    def _next_audit_id(self, audit_dir: Path | None = None) -> str:
+        """Generate the next audit ID: {prefix}-{examiner}-{date}-{ulid}.
+
+        The ULID (48-bit milliseconds, 80 random bits) makes the id unique
+        without a counter, across processes, cases and installations.
+        `audit_dir` is accepted for callers that pass it.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        prefix = self.mcp_name.replace("-mcp", "").replace("-", "")
+        return f"{prefix}-{self.examiner}-{today}-{new_ulid()}"
+```
+
+[`packages/sift-common/src/sift_common/audit.py:134-143`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L134-L143)
+
+[4] (실행 확인) `faketool <등록 증거>`를 두 번 부르자 `extractions/` 아래 ID가 다른 두 폴더에 각각 `_stdout.txt` 파일과 `made.txt`가 생겼다.
+
+[5] (실행 확인) 두 `run_command` 호출에 같은 `-o <사건>/work/out.txt`를 주자 둘 다 성공했고 그 파일은 첫 호출의 `outputs`와 다른 SHA-256으로 둘째 호출의 `outputs`에 기록되었다.
+
+[6] 보관 파일 이름은 시각·명령·난수이고 `xb`로 연다.
+
+```python
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_cmd = "".join(c if c.isalnum() or c in "-_" else "_" for c in cmd_list[0])[:40]
+    # unique, and created exclusively: a saved output is never replaced, so its
+    # recorded hash always describes it
+    prefix = f"{ts}_{safe_cmd}_{uuid.uuid4().hex[:8]}"
+
+    if stdout:
+        try:
+            stdout_path = out_dir / f"{prefix}_stdout.txt"
+            with open(stdout_path, "xb") as f:
+                f.write(stdout)
+                f.flush()
+                os.fsync(f.fileno())
+            response["output_file"] = str(stdout_path)
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:257-270`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L257-L270)
+
+[7] 발견사항·타임라인·IOC ID를 순번으로 매긴다: [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1254-1255`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1254-L1255), [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1800-1803`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1800-L1803), [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:2219-2222`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L2219-L2222).
+
+[8] 번호는 기존 최댓값에 1을 더한다.
+
+```python
+def _next_seq(items: list[dict], id_field: str, prefix: str, examiner: str) -> int:
+    """Find max sequence number for IDs matching {prefix}-{examiner}-NNN."""
+    pattern = f"{prefix}-{examiner}-"
+    max_num = 0
+    for item in items:
+        item_id = item.get(id_field, "")
+        if item_id.startswith(pattern):
+            try:
+                num = int(item_id[len(pattern) :])
+                max_num = max(max_num, num)
+            except ValueError:
+                pass
+    return max_num + 1
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:226-238`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L226-L238)
+
+[9] 발견사항과 타임라인 사건은 사건 잠금 안에서 기록한다: [`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1768-1775`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1768-L1775).
+
+```python
+        with case_lock(self._case_id(case_dir)):
+            return self._record_finding_locked(
+                case_dir,
+                finding,
+                examiner_override,
+                supporting_commands,
+                artifacts,
+                audit,
+                withdrawal_unlogged,
+            )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1201-1210`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1201-L1210)
+
+[10] 같은 이름이 있으면 `_v<번호>`를 붙인 빈 이름을 찾는다.
+
+```python
+            report_path = reports_dir / sanitized
+
+            # Version: never overwrite existing reports
+            if report_path.exists():
+                stem = report_path.stem
+                suffix = report_path.suffix
+                version = 2
+                while True:
+                    versioned = reports_dir / f"{stem}_v{version}{suffix}"
+                    if not versioned.exists():
+                        report_path = versioned
+                        sanitized = versioned.name
+                        break
+                    version += 1
+                    if version > 999:
+                        return {"error": "Too many report versions (max 999)."}
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1116-1131`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1116-L1131)
+
+[11] 백업 폴더 이름이 있으면 번호를 붙여 새로 만든다: [`src/vhir_cli/commands/backup.py:662-671`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L662-L671), [`src/vhir_cli/commands/backup.py:601-608`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/backup.py#L601-L608).
+
+[12] (실행 확인) `save_report(filename="r1.md")`를 두 번 부르자 `reports/r1.md`와 `reports/r1_v2.md`가 생겼다.
+`backup_case(destination="/work/bk")`를 두 번 부르자 `<case_id>-2026-11-02`와 `<case_id>-2026-11-02-1`이 생겼다.
+
+[13] 보고서는 임시 파일에 쓴 뒤 `os.replace`로 옮긴다.
+
+```python
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename."""
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:267-281`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L267-L281)
+
+[14] 같은 IOC 값이면 기존 기록에 더하고 없을 때만 새 기록을 만든다.
+
+```python
+            dedup_key = _normalize_ioc(value)
+            stored.append(dedup_key)
+
+            if dedup_key in ioc_by_value:
+                existing = ioc_by_value[dedup_key]
+                if finding_id not in existing.get("source_findings", []):
+                    existing.setdefault("source_findings", []).append(finding_id)
+                sighting = {"host": host, "finding_id": finding_id}
+                if sighting not in existing.get("sightings", []):
+                    existing.setdefault("sightings", []).append(sighting)
+                if _conf_rank(confidence) < _conf_rank(existing.get("confidence", "")):
+                    existing["confidence"] = confidence
+                for mid in mitre_ids or []:
+                    if mid not in existing.get("mitre_techniques", []):
+                        existing.setdefault("mitre_techniques", []).append(mid)
+                existing["modified_at"] = now
+                existing["content_hash"] = _compute_ioc_hash(existing)
+            else:
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:2202-2219`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L2202-L2219)
+
+[15] 확신도 순위는 `HIGH`가 0이고 `SPECULATIVE`가 3이다.
+
+```python
+_CONF_RANKS = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "SPECULATIVE": 3}
+
+
+def _conf_rank(conf: str) -> int:
+    return _CONF_RANKS.get(conf.upper() if conf else "", 99)
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:693-697`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L693-L697)
+
+[16] (실행 확인) `iocs`에 같은 IP를 넣은 발견사항 두 개를 기록하자 그 값의 IOC 기록은 `IOC-tester-001` 하나였고 `source_findings`는 두 발견사항 ID였다.
+같은 타임라인 사건을 두 번 기록하자 `T-tester-001`과 `T-tester-002`가 저장되었다.
+
+[17] 타임라인 사건은 비교 없이 새 ID로 더한다.
+
+```python
+        exam = self._effective_examiner(examiner_override)
+        timeline = self._load_timeline(case_dir)
+        seq = _next_seq(timeline, "id", "T", exam)
+        event_id = f"T-{exam}-{seq:03d}"
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Strip protected fields from user input for defense-in-depth
+        sanitized = {k: v for k, v in event.items() if k not in _PROTECTED_EVENT_FIELDS}
+        event_record = {
+            **sanitized,
+            "id": event_id,
+            "status": "DRAFT",
+            "staged": now,
+            "modified_at": now,
+            "created_by": exam,
+            "examiner": exam,
+        }
+        event_record["content_hash"] = _compute_content_hash(event_record)
+        timeline.append(event_record)
+        self._save_timeline(case_dir, timeline)
+
+        return {"status": "STAGED", "event_id": event_id}
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1800-1821`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1800-L1821)
+
+[18] 도구 설명의 `artifact_ref` 문구다.
+
+```python
+        - artifact_ref: deduplication hint (e.g. "prefetch:EVIL.EXE-{hash}", "evtx:Security:4624:12345")
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:374-374`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L374-L374)
+
+[19] 출력 플래그 경로의 실행 전 상태를 기록해 두고 실행 뒤 바뀐 파일을 출력으로 기록한다: [`packages/sift-mcp/src/sift_mcp/server.py:298-311`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L298-L311), [`packages/sift-mcp/src/sift_mcp/command_files.py:67-88`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/command_files.py#L67-L88).
+
+```python
+            # Its outputs: every file in its own folder (but the saved stdout,
+            # recorded as output_file) and every file new or changed under an
+            # output flag's value, each hashed
+            saved = os.path.realpath(exec_result.get("output_file") or "")
+            made = [
+                p
+                for p in (command_files.files_at([op_dir]) if op_dir else {})
+                if os.path.realpath(p) != saved
+            ]
+            made += [
+                p
+                for p, key in command_files.files_at(flagged).items()
+                if before.get(p) != key and p not in made
+            ]
+            outputs = file_place.output_records(case_dir, made, "run_command")
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:370-384`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L370-L384)

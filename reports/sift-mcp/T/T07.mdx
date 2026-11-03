@@ -1,0 +1,894 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.03
+- id: T07.04
+- id: T07.08
+- id: T07.09
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`, `windows-triage-mcp`의 정상 기준 DB, `rag-mcp`의 색인, `opencti-mcp`의 위협 정보 플랫폼 설정에 적용된다 [1][2][3][4].
+`run_command`는 인자 검사를 마친 명령의 첫 인자를 `find_binary`로 찾고 찾지 못하면 실행하지 않는다 [1].
+`find_binary`는 `PATH`를 먼저 보고 없으면 정해 둔 폴더 네 곳에서 실행 권한이 있는 파일을 찾는다 [5].
+실행 확인에서 설치되지 않은 이름으로 `run_command`를 부르자 프로그램을 실행하지 않고 오류로 끝났다 [6].
+
+`windows-triage-mcp`는 시작할 때 `known_good.db`와 `context.db`를 읽기 전용으로 열고 두 DB의 통계를 읽어 본다 [2].
+열지 못하거나 통계를 읽지 못하면 `DatabaseError`로 끝나고 서버는 종료 코드 1로 멈춘다 [2][7].
+실행 확인에서 DB가 없는 컨테이너의 `windows-triage-mcp`는 `Database error: SQLite error during validation: unable to open database file`을 남기고 시작하지 않았다 [8].
+레지스트리 기준 DB `known_good_registry.db`는 없어도 시작하고 `check_registry`가 부를 때마다 DB를 쓸 수 있는지 확인한다 [9].
+
+`rag-mcp`는 첫 호출에서 색인을 열기 전에 색인 폴더 아래 `chroma` 폴더가 있는지 확인하고 없으면 열지 않는다 [3].
+
+`opencti-mcp`는 시작할 때 `THREATINTEL_PROVIDERS`에 적힌 플랫폼마다 설정을 읽는다 [10].
+설정이 없거나 모듈을 불러오지 못한 플랫폼은 요청을 보내지 않는 `Unavailable` 객체로 둔다 [4].
+OpenCTI 설정이 없으면 OpenCTI만 읽는 도구 7개는 요청 없이 끝난다 [11].
+시작할 때 OpenCTI 연결 시험이 시간 안에 끝나지 않거나 연결되지 않으면 `_degraded`를 참으로 두고 그 뒤 OpenCTI 클라이언트 호출은 요청 없이 `DegradedError`로 끝낸다 [12].
+
+**한계.** `windows-triage-mcp`는 환경변수 `WT_SKIP_DB_VALIDATION`이 참이면 시작할 때 DB 통계를 읽지 않고 DB를 쓰기 가능으로 연다 [13].
+`opencti-mcp`의 시작 연결 시험은 환경변수 `FF_STARTUP_VALIDATION`으로 끌 수 있다 [14].
+`lookup_ioc`는 이 연결 시험의 결과를 쓰지 않고 플랫폼마다 따로 요청한다 [15].
+`run_command`는 실행 파일만 찾고 그 도구가 읽는 룰, 맵, 심볼 같은 참조 자료는 확인하지 않는다 [1].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`와 `get_tool_help`, `windows-triage-mcp`의 `check_registry`, `rag-mcp`의 색인 부재, `opencti-mcp`의 플랫폼 설정 부재에 적용된다 [1][16][9][17][11].
+`run_command`는 실행 파일을 찾지 못하면 `Binary '<이름>' not found on this system.`을 `error`에 싣고 `success`를 거짓으로 돌려준다 [1][18].
+실행을 시작할 때 실행 파일이 사라졌으면 `Binary not found: <경로>`를 돌려준다 [19].
+`get_tool_help`는 카탈로그 도구가 설치되지 않았으면 `available`을 거짓으로 두고 도움말을 싣지 않는다 [16].
+실행 확인에서 설치되지 않은 이름의 `run_command` 응답은 `Binary 'nosuchtool_t2' not found on this system.`이었고 Hayabusa의 `get_tool_help` 응답은 `available`이 거짓이었다 [6].
+
+`check_registry`는 레지스트리 기준 DB가 없으면 `Registry database not available`과 설치 안내를 돌려주고 `lookup_performed`를 거짓으로 둔다 [9].
+`rag-mcp`는 색인 폴더가 없으면 `Index not found`와 색인을 만드는 명령 `python -m rag_mcp.build`를 담은 문구를 `internal_error`로 돌려준다 [3][17].
+`opencti-mcp`는 OpenCTI 설정이 없으면 OpenCTI만 읽는 도구에서 `opencti_not_configured`와 그 사유를 돌려준다 [11].
+`lookup_ioc`는 쓸 수 없는 플랫폼을 `providers.<이름>`의 `outcome` `UNAVAILABLE`과 사유 `reason`으로 알린다 [4][15].
+`DegradedError` 문구는 플랫폼에 닿지 못한 사유와 백엔드를 다시 시작하는 `vhir service restart` 명령을 적는다 [12].
+실행 확인에서 OpenCTI 설정 없이 부르자 `search_threat_intel`과 `get_entity`는 `opencti_not_configured`를, `lookup_ioc`는 `providers.opencti.reason`에 토큰이 없다는 문구를 돌려줬다 [20].
+
+**한계.** `windows-triage-mcp`는 정상 기준 DB가 없으면 시작하지 않으므로 그 도구를 부른 호출에는 DB가 없다는 문구가 오지 않는다 [2][7].
+
+### T07.03 알림 없는 대체 실행
+
+**구현.** 이 방식은 `opencti-mcp`의 `search_threat_intel`이 지표를 찾는 단계에 적용된다 [21][22].
+`search_threat_intel`이 부르는 `search_indicators`는 회로 차단기가 열렸거나 질의가 실패하면 같은 질의의 만료된 캐시 항목을 찾아 돌려준다 [21].
+이 캐시는 환경변수 `FF_RESPONSE_CACHING`을 켰을 때만 채워진다 [23].
+대체하면 클라이언트 객체의 `_last_response_degraded`를 참으로 두지만 서버는 이 값을 읽지 않고 응답에도 싣지 않는다 [21][24].
+이 경로는 코드로만 확인했고 OpenCTI 서버에 연결하는 실행은 하지 않았다.
+
+### T07.04 실행 환경별 경로 분기
+
+**구현.** 이 방식은 `sift-mcp`가 실행 파일을 찾는 `find_binary`, Zimmerman 도구의 실행 방식, 버전·도움말을 묻는 실행 파일 선택에 적용된다 [5][25][26].
+`find_binary`는 `shutil.which`로 `PATH`를 먼저 보고 없으면 `/usr/local/bin`, `/opt/zimmerman`, `/opt/volatility3`, `/opt/hayabusa` 차례로 실행 권한이 있는 파일을 찾는다 [5].
+`run_command`는 Zimmerman 도구의 래퍼를 찾은 뒤 `dotnet`이 있고 `/opt/zimmermantools` 아래에 `<도구>.dll`이 있으면 래퍼 대신 `dotnet <도구>.dll`로 실행한다 [25][1].
+`get_tool_help`와 `check_tools`는 카탈로그의 `binary`를 먼저 찾고 없으면 다른 버전이 설치하는 이름 `other_binaries`를 차례로 찾는다 [26][27].
+고른 경로는 응답과 호출 기록의 `resolved_path`에 남는다 [28].
+
+**한계.** 설정 객체는 환경변수 `SIFT_TOOL_PATHS`의 폴더를 `tool_paths`에 더하지만 `find_binary`는 이 값을 읽지 않는다 [29][5].
+실행 확인에서 `SIFT_TOOL_PATHS`가 가리키는 폴더에만 둔 실행 파일을 `run_command`로 부르자 찾지 못했다는 오류가 왔다 [6].
+`run_command`는 명령에 적힌 이름 하나만 찾으므로 `other_binaries`의 이름으로 바꿔 실행하지 않는다 [1][26].
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `rag-mcp`의 사용자 문서 저장소와 `opencti-mcp`의 `lookup_ioc`에 적용된다 [30][4].
+`rag-mcp`는 다음 경우에 사용자 문서 저장소를 빼고 기본 색인만 검색한다 [30].
+
+- 사용자 문서 저장소가 아직 만들어지지 않았다 [30].
+- 사용자 문서 저장소의 임베딩 모델이나 거리 방식이 기본 색인과 다르다 [30].
+- 사용자 문서 저장소가 열리지 않는다 [30].
+
+이때 검색 응답의 `notice`나 `warning`에 뺀 사실과 다시 만드는 명령을 싣는다 [30][31].
+`lookup_ioc`는 설정한 플랫폼 가운데 쓸 수 없는 플랫폼을 `UNAVAILABLE`로 두고 나머지 플랫폼의 답을 함께 돌려준다 [4][15].
+최상위 `outcome`은 한 플랫폼이라도 일치하면 `MATCH`이고 일치가 없고 쓸 수 없는 플랫폼이 있으면 `UNAVAILABLE`이다 [32].
+
+### T07.09 별도 점검 도구로 가용성 알림
+
+**구현.** 이 방식은 `sift-mcp`의 `check_tools`·`list_available_tools`, `windows-triage-mcp`의 `get_db_stats`·`get_health`, `opencti-mcp`의 `get_health`에 적용된다 [27][33][34][35][11].
+`check_tools`는 카탈로그 도구마다 `probe`로 실행 파일을 찾아 버전을 묻고 `available`, `binary_path`, `installed_version`, `resolved_path`를 돌려준다 [27].
+설치된 버전이 카탈로그의 시험된 버전 범위 밖이면 `outside_tested_ranges`와 `tested_ranges`를 더한다 [27].
+`list_available_tools`는 카탈로그 도구마다 실행 파일을 찾아 `available`과 `binary_path`를 싣는다 [33].
+`get_db_stats`는 레지스트리 기준 DB가 없으면 `registry_db.available`을 거짓으로 둔다 [34].
+`get_health`는 정상 기준 DB 두 개에 통계 질의를 보내 DB마다 `healthy`나 오류 이름을 돌려준다 [35].
+`opencti-mcp`의 `get_health`는 OpenCTI에 닿는지를 `opencti_available`로 돌려준다 [11].
+실행 확인에서 `check_tools`는 Sleuth Kit의 `fls`와 `mmls`를 `available` 참과 버전 `4.11.1`로, `vol`과 `hayabusa`를 `available` 거짓으로 돌려줬다 [6].
+분석 도구는 이 결과로 막지 않는다.
+
+**한계.** `check_tools`는 카탈로그에 없는 이름이면 설치되었는지 보지 않고 `available`을 거짓으로 두고 실행은 할 수 있다는 `note`를 붙인다 [27].
+`opencti-mcp`의 `get_health`는 OpenCTI 클라이언트만 보고 `lookup_ioc`가 묻는 MISP 같은 다른 플랫폼은 보지 않는다 [11][4].
+`windows-triage-mcp`의 두 점검 도구는 서버가 시작된 뒤에만 부를 수 있고 정상 기준 DB가 없으면 서버가 시작하지 않는다 [2][7].
+`rag-mcp`에는 점검 도구가 없고 `get_knowledge_stats`는 색인이 없으면 색인 부재 오류를 돌려준다 [36][17].
+
+### 근거
+
+[1] `run_command`는 인자 검사 뒤 실행 파일을 찾고 Zimmerman 도구의 실행 방식을 정한다.
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+
+    # Sanitize any args after the binary
+    sanitize_extra_args(command[1:], tool_name=binary)
+    # SIFT's EZ-tool wrappers expand their arguments unquoted (a path with a
+    # space splits): run the tool's .dll with dotnet directly when it is there
+    command = _ez_launcher(binary, resolved) + command[1:]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-162`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L162)
+
+[2] `windows-triage-mcp`는 시작할 때 DB를 열고 통계를 읽어 본다: [`packages/windows-triage/src/windows_triage/server.py:463-491`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L463-L491).
+
+```python
+        try:
+            self.known_good_db = KnownGoodDB(
+                kg_path, read_only=read_only, cache_size=cache_size
+            )
+            self.context_db = ContextDB(
+                ctx_path, read_only=read_only, cache_size=cache_size
+            )
+            # Registry DB is optional - initialize but don't fail if missing
+            self.registry_db: RegistryDB | None = None
+            if reg_path.exists():
+                self.registry_db = RegistryDB(
+                    reg_path,
+                    read_only=True,  # Always read-only
+                    cache_size=cache_size,
+                )
+
+            # Startup validation: verify databases are accessible
+            if not self.config.skip_db_validation:
+                self._validate_databases()
+
+        except DatabaseError:
+            raise  # Re-raise our own errors unchanged
+        except FileNotFoundError as e:
+            raise DatabaseError(f"Database file not found: {e}") from e
+        except PermissionError as e:
+            raise DatabaseError(f"Permission denied accessing database: {e}") from e
+        except Exception as e:
+            raise DatabaseError(f"Failed to initialize databases: {e}") from e
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:382-409`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L382-L409)
+
+[3] `rag-mcp`는 색인을 열기 전에 `chroma` 폴더를 확인한다.
+
+```python
+        marker = self._metadata_marker()
+        logger.info("Loading ChromaDB index...")
+        chroma_path = self.index_dir / "chroma"
+        if not chroma_path.exists():
+            # Security: Log internal path but don't expose in exception
+            logger.error(f"Index not found at: {chroma_path}")
+            raise FileNotFoundError(
+                "Index not found. Run `python -m rag_mcp.build` first "
+                "or check RAG_INDEX_DIR environment variable."
+            )
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:229-238`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L229-L238)
+
+[4] 설정이 없거나 불러오지 못한 플랫폼은 `Unavailable`로 둔다: [`packages/opencti/src/opencti_mcp/providers/__init__.py:123-133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L123-L133).
+
+```python
+        if not _NAME_RE.match(name):
+            adapters[name] = Unavailable(f"unknown provider '{name}'")
+            continue
+        module_name = f"{__name__}.{name}"
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as e:
+            if e.name == module_name:
+                adapters[name] = Unavailable(f"unknown provider '{name}'")
+            else:
+                adapters[name] = Unavailable(f"provider '{name}' can't be loaded: {e}")
+            continue
+        except Exception as e:
+            adapters[name] = Unavailable(
+                f"provider '{name}' can't be loaded: {type(e).__name__}: {e}"
+            )
+            continue
+        try:
+            adapters[name] = module.create()
+        except ProviderConfigError as e:
+            adapters[name] = Unavailable(f"{name} is not configured: {e}")
+        except Exception as e:
+            logger.warning("Threat-intel provider %s can't be set up: %s", name, e)
+            adapters[name] = Unavailable(
+                f"provider '{name}' can't be set up ({type(e).__name__}); "
+                "the server log has the details"
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:144-170`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L144-L170)
+
+[5] `find_binary`가 실행 파일을 찾는 차례다.
+
+```python
+def find_binary(name: str, extra_paths: list[str] | None = None) -> str | None:
+    """Find a binary on PATH or in common forensic tool locations."""
+    # shutil.which checks PATH
+    found = shutil.which(name)
+    if found:
+        return found
+
+    # Check extra paths
+    search_paths = extra_paths or [
+        "/usr/local/bin",
+        "/opt/zimmerman",
+        "/opt/volatility3",
+        "/opt/hayabusa",
+    ]
+    for d in search_paths:
+        candidate = Path(d) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/environment.py:46-65`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/environment.py#L46-L65)
+
+[6] (실행 확인) 사건을 연 컨테이너에서 `sift-mcp`의 도구를 같은 프로세스로 불렀다.
+없는 이름의 `run_command`, `SIFT_TOOL_PATHS`의 폴더에만 둔 실행 파일의 `run_command`, `check_tools`, `list_available_tools`, `get_tool_help`의 응답을 읽었다.
+
+[7] `windows-triage-mcp`는 `DatabaseError`가 나면 종료 코드 1로 멈춘다.
+
+```python
+    try:
+        server = WindowsTriageServer(config=config)
+        atexit.register(server.close_databases)
+        asyncio.run(server.run())
+    except DatabaseError as e:
+        logger.error(f"Database error: {e}")
+        raise SystemExit(1) from e
+    except Exception as e:
+        logger.exception(f"Server failed: {e}")
+        raise SystemExit(1) from e
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1948-1957`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1948-L1957)
+
+[8] (실행 확인) 정상 기준 DB가 없는 컨테이너에서 `python -m windows_triage`를 실행해 출력을 읽었다.
+
+[9] `check_registry`는 레지스트리 기준 DB가 있는지 먼저 본다.
+
+```python
+        # Check if registry database is available
+        if self.registry_db is None or not self.registry_db.is_available():
+            return {
+                "error": "Registry database not available",
+                "message": "The optional known_good_registry.db is not installed. See SETUP.md for installation instructions.",
+                "verdict": None,
+                "lookup_performed": False,
+            }
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1601-1608`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1601-L1608)
+
+[10] 시작할 때 플랫폼 목록과 OpenCTI 설정을 읽는다.
+
+```python
+        names = configured_names()
+        config: Config | None = None
+        opencti_reason = ""
+        if "opencti" in names:
+            try:
+                config = Config.load()
+            except ConfigurationError as e:
+                opencti_reason = str(e)
+                logger.error(f"OpenCTI is listed but not configured: {e}")
+        logger.info(f"Starting threat-intel backend: providers={names} {config}")
+```
+
+[`packages/opencti/src/opencti_mcp/__main__.py:52-61`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L52-L61)
+
+[11] OpenCTI 설정이 없으면 OpenCTI만 읽는 도구는 요청 없이 끝나고 `get_health`는 연결 여부만 돌려준다.
+
+```python
+        if name in _OPENCTI_TOOLS and self.client is None:
+            return {
+                "error": "opencti_not_configured",
+                "message": self._opencti_reason,
+            }
+
+        if name == "get_health":
+            available = await asyncio.to_thread(self.client.is_available)
+            return {
+                "status": "healthy" if available else "unavailable",
+                "opencti_available": available,
+            }
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:854-865`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L854-L865)
+
+[12] 연결 시험이 실패하면 `_degraded`를 두고 그 뒤 호출을 막는다: [`packages/opencti/src/opencti_mcp/client.py:887-903`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L887-L903).
+
+```python
+    def _ensure_not_degraded(self, tool_name: str = "") -> None:
+        """Fail-fast guard for tool entry points.
+
+        When _degraded is set (probe failed during startup), tool calls
+        raise immediately rather than each timing out for the full
+        operator-configured timeout (300s default). Operator restarts
+        the threat-intel backend to clear it.
+        """
+        if self._degraded:
+            label = f"{tool_name}: " if tool_name else ""
+            # DegradedError NOT ConnectionError — the latter is in the
+            # retry-loop's transient list by class name. DegradedError
+            # falls through to the non-retryable branch and raises
+            # immediately (true fail-fast, no backoff).
+            raise DegradedError(
+                f"{label}OpenCTI backend in DEGRADED mode "
+                f"({self._degraded_reason}). Threat-intel queries will "
+                f"fail-fast until the server is reachable. Run "
+                f"`vhir service restart threatintel-mcp` (`opencti-mcp` in "
+                f"configurations from before) after the server returns."
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:669-689`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L669-L689)
+
+[13] `WT_SKIP_DB_VALIDATION`은 시작 확인을 끄고 쓰기 가능으로 연다: [`packages/windows-triage/src/windows_triage/config.py:165-166`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/config.py#L165-L166).
+
+```python
+        if self.config.skip_db_validation:
+            logger.warning(
+                "WT_SKIP_DB_VALIDATION is set — database validation disabled. Not recommended for production."
+            )
+        # Tests use skip_db_validation=True to both skip file-exists checks
+        # and enable writes for populating temporary databases
+        read_only = not self.config.skip_db_validation
+        cache_size = self.config.cache_size
+
+        try:
+            self.known_good_db = KnownGoodDB(
+                kg_path, read_only=read_only, cache_size=cache_size
+            )
+            self.context_db = ContextDB(
+                ctx_path, read_only=read_only, cache_size=cache_size
+            )
+            # Registry DB is optional - initialize but don't fail if missing
+            self.registry_db: RegistryDB | None = None
+            if reg_path.exists():
+                self.registry_db = RegistryDB(
+                    reg_path,
+                    read_only=True,  # Always read-only
+                    cache_size=cache_size,
+                )
+
+            # Startup validation: verify databases are accessible
+            if not self.config.skip_db_validation:
+                self._validate_databases()
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:373-400`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L373-L400)
+
+[14] 시작 연결 시험은 `startup_validation`이 참일 때만 실행한다: [`packages/opencti/src/opencti_mcp/feature_flags.py:61-66`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/feature_flags.py#L61-L66).
+
+```python
+        client: OpenCTIClient | None = None
+        if flags.startup_validation and config is not None:
+            logger.info("Running startup validation...")
+            client = OpenCTIClient(config)
+            validation = client.validate_startup()
+```
+
+[`packages/opencti/src/opencti_mcp/__main__.py:73-77`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/__main__.py#L73-L77)
+
+[15] `lookup_ioc`는 플랫폼마다 따로 묻고 쓸 수 없는 플랫폼의 사유를 모은다.
+OpenCTI 어댑터는 OpenCTI 클라이언트와 따로 HTTP 요청을 보낸다: [`packages/opencti/src/opencti_mcp/providers/opencti.py:119-133`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/opencti.py#L119-L133).
+
+```python
+        if not self._lookup_limiter.check_and_record():
+            raise RateLimitError(self._lookup_limiter.wait_time(), "query")
+        answers = providers.lookup_all(self.providers, ioc, ioc_type)
+        outcome = providers.aggregate(answers)
+        result: dict[str, Any] = {
+            "ioc": ioc,
+            "outcome": outcome,
+            # Not found is a claim no one could make when no one answered
+            "found": None
+            if outcome == providers.UNAVAILABLE
+            else outcome == providers.MATCH,
+        }
+        if outcome == providers.UNAVAILABLE:
+            # A "note" also marks the answer unconfirmed to callers that
+            # predate "outcome".
+            result["reason"] = "; ".join(
+                f"{name}: {answer['reason']}"
+                for name, answer in answers.items()
+                if answer["outcome"] == providers.UNAVAILABLE
+            )
+            result["note"] = f"Not answered: {result['reason']}"
+        if "opencti" in answers:
+            result.update(_opencti_summary(ioc, answers["opencti"]))
+        result["providers"] = answers
+        return result
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:825-849`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L825-L849)
+
+[16] `get_tool_help`는 설치되지 않은 도구에 `available`만 거짓으로 둔다.
+
+```python
+    found = tool_version.probe(td)
+    result["available"] = bool(found)
+    if found:
+        result.update(found)
+        result.update(tool_version.help_text(td, subcommand))
+        result.update(_recipes(td, found["installed_version"]))
+        # Each other copy installed under another version's name (both
+        # plaso's log2timeline.py and pip's log2timeline): a run of that name
+        # runs it, so its version and recipes are shown too
+        others = []
+        for b in td.binaries:
+            other = tool_version.probe(td, b) if find_binary(b) else {}
+            if other and other["resolved_path"] != found["resolved_path"]:
+                v = other["installed_version"]
+                others.append({"binary": b, **other, **_recipes(td, v)})
+        if others:
+            result["other_installs"] = others
+    elif td.recipes:
+        result["other_recipes"] = _recipes(td, "")["other_recipes"]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:158-176`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L158-L176)
+
+[17] `rag-mcp`는 `FileNotFoundError`를 색인 부재 문구로 바꾼다.
+
+```python
+            except Exception as exc:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                logger.exception(f"Tool {name} internal error")
+                # Surface the actual error so LLMs can diagnose
+                msg = str(exc)
+                if isinstance(exc, FileNotFoundError):
+                    msg = f"Index not found: {exc}. Run 'python -m rag_mcp.build' to build the knowledge index."
+                elif isinstance(exc, ImportError):
+                    msg = f"Missing dependency: {exc}"
+                error_result = {
+                    "error": "internal_error",
+                    "message": msg
+                    or "An unexpected error occurred. Check server logs.",
+                }
+                error_result = self._wrap_response(
+                    name,
+                    arguments,
+                    error_result,
+                    audit_id=audit_id,
+                    elapsed_ms=elapsed_ms,
+                )
+                return [TextContent(type="text", text=json.dumps(error_result))]
+```
+
+[`packages/forensic-rag/src/rag_mcp/server.py:235-256`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L235-L256)
+
+[18] `run_command`의 실패 응답이다.
+
+```python
+        except SiftError as e:
+            elapsed = time.monotonic() - start
+            # a timeout: this server stopped the run at its deadline
+            stopped = "timeout" if isinstance(e, ExecutionTimeoutError) else None
+            logged_id = audit.log(
+                tool="run_command",
+                params={"command": command, "purpose": purpose},
+                result_summary={
+                    "error": str(e),
+                    **({"stopped": stopped} if stopped else {}),
+                    **version_summary,
+                },
+                elapsed_ms=elapsed * 1000,
+                audit_id=op_id,
+                case_dir=case_dir,
+            )
+            response = build_response(
+                tool_name="run_command",
+                success=False,
+                data=None,
+                audit_id=logged_id,
+                error=str(e),
+                stopped=stopped,
+                **version_keys,
+            )
+            if logged_id is None:
+                response["warning"] = "Audit write failed — action not recorded"
+            return response
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:506-533`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L506-L533)
+
+[19] 실행기는 실행을 시작하지 못한 예외를 `ExecutionError`로 바꾼다.
+
+```python
+    except subprocess.TimeoutExpired as exc:
+        raise ExecutionTimeoutError(
+            f"Command timed out after {timeout}s: {' '.join(cmd_list)}"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ExecutionError(f"Binary not found: {cmd_list[0]}") from exc
+    except PermissionError as exc:
+        raise ExecutionError(f"Permission denied: {cmd_list[0]}") from exc
+    except OSError as e:
+        raise ExecutionError(f"OS error executing {cmd_list[0]}: {e}") from e
+```
+
+[`packages/sift-mcp/src/sift_mcp/executor.py:184-193`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/executor.py#L184-L193)
+
+[20] (실행 확인) 컨테이너 안 `127.0.0.1`의 게이트웨이에 `opencti-mcp`를 붙이고 OpenCTI 설정 없이 `lookup_ioc`, `search_threat_intel`, `get_entity`를 불렀다.
+
+[21] `search_indicators`는 실패하면 만료된 캐시 항목을 돌려준다: [`packages/opencti/src/opencti_mcp/client.py:1215-1230`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1215-L1230).
+
+```python
+        # Check if circuit breaker allows request
+        if not self._circuit_breaker.allow_request():
+            # Try graceful degradation - return cached result if available
+            if hasattr(self, "_search_cache"):
+                found, cached, degraded = self._get_fallback(
+                    self._search_cache, cache_key
+                )
+                if found:
+                    self._last_response_from_cache = True
+                    self._last_response_degraded = True
+                    return cached
+            # No cached data available
+            raise ConnectionError("OpenCTI unavailable (circuit breaker open)")
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:1168-1180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1168-L1180)
+
+[22] `search_threat_intel`은 `unified_search`를 부르고 `unified_search`는 `search_indicators`를 부른다.
+
+```python
+        elif name == "search_threat_intel":
+            query = arguments.get("query", "")
+            confidence_min = arguments.get("confidence_min")
+            validate_length(query, MAX_QUERY_LENGTH, "query")
+            limit = validate_limit(arguments.get("limit", 5), max_value=20)
+            offset, labels, created_after, created_before = (
+                self._validate_search_filters(
+                    arguments.get("offset"),
+                    arguments.get("labels"),
+                    arguments.get("created_after"),
+                    arguments.get("created_before"),
+                )
+            )
+            return await asyncio.to_thread(
+                self.client.unified_search,
+                query,
+                limit,
+                offset,
+                labels,
+                confidence_min,
+                created_after,
+                created_before,
+            )
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:867-889`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L867-L889)
+
+```python
+        result = {
+            "query": query,
+            "indicators": self.search_indicators(
+                query,
+                limit,
+                offset,
+                labels,
+                confidence_min,
+                created_after,
+                created_before,
+                _skip_rate_limit=True,
+            ),
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:1855-1866`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1855-L1866)
+
+[23] 캐시는 `response_caching`이 참일 때만 채운다: [`packages/opencti/src/opencti_mcp/feature_flags.py:32-36`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/feature_flags.py#L32-L36).
+
+```python
+    def _cache_response(self, cache: TTLCache[Any], key: str, value: Any) -> None:
+        """Store response in cache."""
+        if not self._feature_flags.response_caching:
+            return
+        cache.set(key, value)
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:396-400`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L396-L400)
+
+[24] 대체 여부를 알려 주는 `get_last_response_metadata`는 클라이언트에만 있고 서버 코드는 부르지 않는다.
+
+```python
+    def get_last_response_metadata(self) -> dict[str, Any]:
+        """Get metadata about the last response.
+
+        Returns:
+            dict with:
+                - from_cache: True if last response was from cache
+                - degraded: True if last response was degraded (stale cache)
+        """
+        return {
+            "from_cache": self._last_response_from_cache,
+            "degraded": self._last_response_degraded,
+        }
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:438-449`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L438-L449)
+
+[25] Zimmerman 도구의 DLL이 있으면 `dotnet`으로 실행한다.
+
+```python
+_EZ_TOOLS_DIR = Path("/opt/zimmermantools")
+
+
+def _ez_launcher(binary: str, resolved: str) -> list[str]:
+    """`dotnet <Tool>.dll` for an EZ tool whose .dll is installed, else the tool."""
+    dotnet = shutil.which("dotnet")
+    dlls = [_EZ_TOOLS_DIR / f"{binary}.dll"]
+    try:  # its own folder, whatever its case (SIFT has EvtxeCmd/EvtxECmd.dll)
+        dlls += [d / f"{binary}.dll" for d in sorted(_EZ_TOOLS_DIR.iterdir())
+                 if d.is_dir() and d.name.lower() == binary.lower()]  # fmt: skip
+    except OSError:
+        pass
+    for dll in dlls:
+        if dotnet and dll.is_file():
+            return [dotnet, str(dll)]
+    return [resolved]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:50-65`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L50-L65)
+
+[26] 버전·도움말을 물을 실행 파일은 `binary`와 `other_binaries` 차례로 찾는다: [`packages/sift-mcp/src/sift_mcp/catalog.py:72-81`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/catalog.py#L72-L81).
+
+```python
+def launch(tool) -> tuple[list[str], str] | None:
+    """(the argv prefix that runs it, the path that runs) or None when it
+    isn't installed. `tool` is the binary a run names, or a catalog entry:
+    its binary, then the names other versions install under (plaso
+    20260720's log2timeline for 20240308's log2timeline.py). An EZ tool
+    whose .dll is installed runs as `dotnet X.dll`, as run_command runs it:
+    the .dll is what runs."""
+    from sift_mcp.tools.generic import _ez_launcher
+
+    names = [tool] if isinstance(tool, str) else tool.binaries
+    for binary in names:
+        resolved = find_binary(binary)
+        if resolved:
+            prefix = _ez_launcher(binary, resolved)
+            return prefix, prefix[-1] if len(prefix) > 1 else resolved
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/tool_version.py:81-96`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tool_version.py#L81-L96)
+
+[27] `check_tools`가 도구마다 돌려주는 값이다: [`packages/sift-mcp/src/sift_mcp/tools/discovery.py:228-232`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L228-L232).
+
+```python
+    def one(td) -> dict:
+        found = tool_version.probe(td)
+        if not found:
+            return {"available": False, "binary_path": None}
+        out = {"available": True, "binary_path": _installed_path(td), **found}
+        # A tool with recipes, none of them for this version: said here, so a
+        # client (vhir setup test) warns without holding any range logic
+        if td.recipes and not _recipes(td, found["installed_version"])["recipes"]:
+            out["outside_tested_ranges"] = True
+            out["tested_ranges"] = sorted({r.get("versions", "?") for r in td.recipes})
+        return out
+
+    if tool_names:
+        results = {}
+        for name in tool_names:
+            td = get_tool_def(name)
+            if td:
+                results[name] = one(td)
+            else:
+                results[name] = {
+                    "available": False,
+                    "note": "not in catalog — can execute but without FK enrichment",
+                }
+        return results
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:204-227`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L204-L227)
+
+[28] `run_command`는 고른 경로를 응답과 호출 기록에 싣는다.
+
+```python
+        # The catalog tool's version and the path that runs, asked now of the
+        # binary the command names, which is what runs (never cached: an
+        # update shows on the next run)
+        from sift_mcp import tool_version
+
+        probed = tool_version.probe(td, binary) if td else {}
+        version_keys = {
+            "tool_version": probed.get("installed_version"),
+            "resolved_path": probed.get("resolved_path"),
+        }
+        version_summary = {k: v for k, v in version_keys.items() if v}
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:324-334`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L324-L334)
+
+[29] 설정 객체는 `SIFT_TOOL_PATHS`를 `tool_paths`에 더한다.
+
+```python
+        extra_paths = os.environ.get("SIFT_TOOL_PATHS", "")
+        if extra_paths:
+            cfg.tool_paths = extra_paths.split(":") + cfg.tool_paths
+```
+
+[`packages/sift-mcp/src/sift_mcp/config.py:49-51`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/config.py#L49-L51)
+
+[30] 사용자 문서 저장소를 뺄 때 `notice`와 `warning`을 정한다: [`packages/forensic-rag/src/rag_mcp/index.py:212-223`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L212-L223).
+
+```python
+        refresh = "python -m rag_mcp.refresh --skip-online"
+        if not is_committed(self.index_dir):
+            self._store_notice = (
+                "Your knowledge-folder documents aren't in their own store yet; "
+                f"run `{refresh}` once."
+            )
+            return
+        meta = read_json(user_dir(self.index_dir) / "metadata.json")
+        shipped_model = (
+            read_json(self.index_dir / "metadata.json").get("model")
+            or DEFAULT_MODEL_NAME
+        )
+        shipped_space = (self.collection.metadata or {}).get(
+            "hnsw:space", DEFAULT_SPACE
+        )
+        if (meta.get("model"), meta.get("hnsw:space")) != (
+            shipped_model,
+            shipped_space,
+        ):
+            self._store_warning = (
+                f"Your documents' store ({meta.get('model')}, "
+                f"{meta.get('hnsw:space')}) doesn't match the shipped index "
+                f"({shipped_model}, {shipped_space}), so it is left out of "
+                f"search. Run `{refresh}`."
+            )
+            return
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:186-211`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L186-L211)
+
+[31] 검색 응답은 `notice`와 `warning`을 싣는다.
+
+```python
+        response = {"status": "ok", "query": query, "results": search_result["results"]}
+        warnings = []
+
+        # Add context about filters
+        if search_result["source_filter"]:
+            if search_result["matched_sources"]:
+                response["matched_sources"] = search_result["matched_sources"]
+            else:
+                warnings.append(
+                    f"No sources match filter '{source}'. "
+                    "Use list_knowledge_sources tool to see available sources."
+                )
+        if search_result.get("warning"):
+            warnings.append(search_result["warning"])
+        if warnings:
+            response["warning"] = " | ".join(warnings)
+        if search_result.get("notice"):
+            response["notice"] = search_result["notice"]
+
+        return response
+```
+
+[`packages/forensic-rag/src/rag_mcp/server.py:313-332`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L313-L332)
+
+[32] 플랫폼 답을 모아 최상위 `outcome`을 정한다.
+
+```python
+def aggregate(answers: dict[str, dict]) -> str:
+    """MATCH when any provider matched; otherwise UNAVAILABLE when any
+    couldn't be asked; otherwise NO_MATCH."""
+    outcomes = {answer["outcome"] for answer in answers.values()}
+    if MATCH in outcomes:
+        return MATCH
+    if UNAVAILABLE in outcomes or not outcomes:
+        return UNAVAILABLE
+    return NO_MATCH
+```
+
+[`packages/opencti/src/opencti_mcp/providers/__init__.py:244-252`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/providers/__init__.py#L244-L252)
+
+[33] `list_available_tools`는 카탈로그 도구마다 설치 경로를 찾는다.
+
+```python
+def list_available_tools(category: str | None = None) -> list[dict]:
+    """List cataloged tools with availability and FK enrichment status.
+
+    Note: tools not in the catalog can also be executed via run_command.
+    Cataloged tools get enriched responses (caveats, corroboration, field meanings).
+    """
+    tools = list_tools_in_catalog(category=category)
+    results = []
+    for t in tools:
+        td = get_tool_def(t["name"])
+        path = _installed_path(td) if td else None
+        entry = {**t, "available": path is not None, "enriched": True}
+        if path:
+            entry["binary_path"] = path
+        results.append(entry)
+    return results
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:76-91`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L76-L91)
+
+[34] `get_db_stats`는 레지스트리 기준 DB의 유무를 싣는다.
+
+```python
+    async def _get_db_stats(self) -> dict[str, Any]:
+        """Get database statistics."""
+        known_good_stats = self.known_good_db.get_stats()
+        context_stats = self.context_db.get_stats()
+
+        result = {
+            "known_good_db": known_good_stats,
+            "context_db": context_stats,
+            "note": "For threat intelligence, use lookup_ioc (threat intel) separately",
+        }
+
+        # Add registry stats if available
+        if self.registry_db and self.registry_db.is_available():
+            result["registry_db"] = self.registry_db.get_stats()
+        else:
+            result["registry_db"] = {
+                "available": False,
+                "note": "Optional 12GB database not installed",
+            }
+
+        return result
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1820-1840`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1820-L1840)
+
+[35] `get_health`는 DB마다 통계 질의의 성공 여부를 싣는다.
+
+```python
+        uptime_seconds = time.time() - self._start_time
+
+        # Check database connectivity
+        db_status = {"known_good": "unknown", "context": "unknown"}
+        try:
+            self.known_good_db.get_stats()
+            db_status["known_good"] = "healthy"
+        except Exception as e:
+            logger.error(f"known_good health check failed: {e}")
+            db_status["known_good"] = f"error: {type(e).__name__}"
+
+        try:
+            self.context_db.get_stats()
+            db_status["context"] = "healthy"
+        except Exception as e:
+            logger.error(f"context health check failed: {e}")
+            db_status["context"] = f"error: {type(e).__name__}"
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1851-1867`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1851-L1867)
+
+[36] `get_knowledge_stats`는 색인을 열어 통계를 돌려준다.
+
+```python
+    def get_stats(self) -> dict[str, Any]:
+        """Get index statistics (excludes internal paths for security)."""
+        if not self._loaded:
+            self.load()
+        with self._lock:
+            self._reload_if_changed()
+            return self._stats()
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:804-810`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L804-L810)

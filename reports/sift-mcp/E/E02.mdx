@@ -1,0 +1,281 @@
+---
+cell: E02
+details:
+- id: E02.01
+- id: E02.03
+- id: E02.04
+- id: E02.05
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 `case-mcp`의 `evidence_register`에 적용된다 [1].
+파일을 등록하면 파일 내용 전체의 SHA-256과 상태 값(크기, 수정 시각, 변경 시각, 장치, inode)을 한 번 연 파일에서 함께 얻는다 [2].
+해시 전후의 상태 값이 다르면 다시 해시하고 세 번 모두 다르면 상태 값 없이 `hash_note: changed while hashing`을 적는다 [2].
+기준값은 사건 폴더의 `evidence.json` 항목에 `sha256`과 상태 값으로 남는다 [3].
+폴더를 등록하면 안의 일반 파일마다 SHA-256과 상태 값을 manifest에 적고 manifest 파일의 SHA-256을 `evidence.json`의 `manifest_sha256`에 남긴다 [4].
+시험 파일을 등록하자 응답과 `evidence.json`에 SHA-256, 크기, 수정·변경 시각, 장치, inode가 실렸다 [5].
+같은 경로의 파일이 바뀐 뒤 다시 등록하면 기준값을 바꾸지 않고 오류를 돌려준다 [3].
+내용을 바꾼 파일을 다시 등록하자 등록된 해시와 지금 해시를 함께 적은 오류가 돌아왔다 [5].
+
+**한계.** 기준값을 바꾸는 `--force-reregister`는 사용자 CLI `vhir evidence register`에만 있고 앞 해시는 `previous_hashes`에 남는다 [3].
+
+### E02.03 도구 호출 중 자동 검증
+
+**구현.** 이 방식은 검토 포털에서 검토자가 발견사항을 승인할 때 서버가 실행하는 승인 검사에 적용된다 [6][7].
+이 검사는 MCP 도구가 아니라 게이트웨이가 `/portal`로 내놓는 승인 요청에서 실행되고 모델이 검증을 따로 요청하지 않는다 [7].
+승인 검사 `check_item`은 발견사항의 근거 항목이 이어지는 증거 근원마다 `evidence.json`에 같은 해시로 등록되어 있는지 본다 [6][8].
+등록된 상태 값과 지금 상태 값이 같으면 바뀌지 않은 것으로 보고 해시하지 않는다 [8].
+상태 값이 다르면 `evidence-verified.json`에 같은 상태 값으로 남긴 앞의 해시를 쓰고 그것도 없으면 파일 전체를 다시 해시해 등록 해시와 대조한다 [8].
+포털에서는 1,000,000,000바이트보다 큰 파일을 백그라운드에서 해시하고 그동안은 `not yet verified (hashing)` 실패로 둔다 [8][7].
+등록한 증거를 바꾸기 전에는 이 검사가 `unchanged (stat fields equal)`로 통과했고 바꾼 뒤에는 `ROOT_CHANGED` 실패가 돌아왔다 [5].
+사용자 CLI `vhir approve`도 같은 검사 함수를 쓴다 [6].
+
+증거를 읽는 다른 도구는 증거를 기준값과 대조하지 않는다.
+`run_command`는 명령이 가리키는 파일이 등록된 증거이면 파일을 읽지 않고 `evidence.json`의 해시를 그대로 호출 기록에 적는다 [9].
+`report-mcp`의 보고서 생성은 증거 목록을 읽어 싣고 증거 파일을 다시 해시하지 않는다 [10].
+
+**한계.** 이 검사는 상태 값이 같으면 내용을 해시하지 않으므로 내용이 바뀌어도 상태 값이 같으면 알아채지 못한다 [8].
+발견사항에만 적용되고 타임라인 사건, 다른 사건에서 가져온 항목, 근거 형식 `provenance_schema: 2`가 아닌 발견사항은 `not-applicable`로 둔다 [6].
+검토자가 실패한 검사의 이유를 적으면 승인은 진행된다 [7].
+
+### E02.04 도구를 요청해 검증
+
+**구현.** 이 방식은 `case-mcp`의 `evidence_verify`에 적용된다 [11].
+`evidence_verify`는 `evidence.json`의 파일 항목마다 파일 전체를 다시 해시해 등록된 `sha256`과 대조하고 `OK`, `MODIFIED`, `MISSING`, `ERROR`로 적는다 [12].
+폴더 항목은 manifest 파일의 해시가 등록 때와 같은지 먼저 보고 manifest의 파일마다 같은 방식으로 대조한다 [13].
+파일 항목은 크기와 상관없이 호출 안에서 파일 전체를 해시한다 [12].
+폴더 안 파일은 크기 합 1,000,000,000바이트까지 호출 안에서 해시하고 나머지는 백그라운드 작업으로 해시하며 끝날 때까지 `PENDING`과 작업 ID를 돌려준다 [13][14].
+내용을 바꾼 파일은 `MODIFIED`, 지운 폴더 안 파일은 `MISSING`, 그대로인 파일은 `OK`로 돌아왔다 [5].
+
+검토자는 포털에서 등록 항목 하나의 검증을 요청할 수 있다 [15].
+서버는 그 항목을 폴더 안 파일과 같은 방식으로 해시해 `verified`, `failed`, `pending`을 돌려준다 [15][14].
+
+**한계.** 도구 설명은 큰 파일을 해시하는 동안 `PENDING`을 돌려준다고 적지만 파일 항목은 백그라운드 작업으로 넘기지 않는다 [11][12].
+폴더 안 파일은 앞서 끝난 백그라운드 해시 결과가 있고 장치, inode, 크기, 수정 시각, 변경 시각이 그때와 같으면 다시 해시하지 않고 그 결과를 쓴다 [14][16].
+그래서 이 경로에서는 내용이 바뀌어도 상태 값이 같으면 알아채지 못한다 [16].
+
+### E02.05 불일치 시 중단·경고
+
+**구현.** 이 방식은 포털의 승인 검사에 적용된다 [7].
+증거 근원 검사가 실패한 발견사항의 승인은 `CHECKS_FAILED`와 실패한 검사 내용을 담아 거부된다 [7].
+검토자가 실패한 검사 묶음의 해시와 함께 이유를 적어야 승인이 진행되고 그 이유는 검사 결과와 함께 서명된다 [7][6].
+
+`evidence_verify`는 파일마다의 결과(`OK`, `MODIFIED` 등)와 건수만 돌려주고 경고 문구나 이후 호출 차단을 더하지 않는다 [11][12].
+바뀐 증거로 `evidence_verify`를 부르자 `MODIFIED` 상태와 `modified: 1`만 돌아왔다 [5].
+경고 문구와 종료 코드 2로 알리는 것은 사용자 CLI `vhir evidence verify`다 [17].
+
+**한계.** 승인 검사가 실패해도 그 증거를 읽는 `run_command`와 보고서 생성은 그대로 실행된다 [9][10].
+
+### 근거
+
+[1] `evidence_register`는 등록 함수를 부른다.
+
+```python
+        try:
+            _validate_str_length(description, "description", _MAX_TEXT, free_text=True)
+            case_dir = _resolve_case_dir()
+            examiner = resolve_examiner()
+            result = register_evidence_data(
+                case_dir=case_dir,
+                path=path,
+                examiner=examiner,
+                description=description,
+                registered_via="mcp",  # the AI's: its host names never confirm a machine
+                folder_hasher=_folder_hashes,
+            )
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:495-506`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L495-L506)
+
+[2] 해시와 상태 값은 한 번 연 파일에서 얻는다: [`src/vhir_cli/commands/evidence.py:307-334`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L307-L334).
+
+[3] 같은 경로의 해시가 다르면 기준값을 바꾸지 않고 거부한다: [`src/vhir_cli/commands/evidence.py:213-256`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L213-L256), [`src/vhir_cli/commands/evidence.py:257-303`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L257-L303).
+
+[4] 폴더 manifest와 그 해시: [`src/vhir_cli/commands/evidence.py:600-624`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L600-L624), [`src/vhir_cli/commands/evidence.py:644-653`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L644-L653).
+
+[5] (실행 확인) 컨테이너에서 파일과 폴더를 등록한 뒤 파일 내용을 바꾸고 폴더 안 파일 하나를 지워 `evidence_register`, `evidence_verify`, 승인 검사의 증거 근원 검사 `_root`를 바꾸기 전후로 불렀다.
+
+[6] 승인 검사의 범위와 대상, 사용자 CLI `vhir approve`의 호출: [`src/vhir_cli/approval_checks.py:1-12`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L1-L12), [`src/vhir_cli/approval_checks.py:70-115`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L70-L115), [`src/vhir_cli/commands/approve.py:547-549`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/approve.py#L547-L549).
+
+[7] 포털의 승인 계획은 검사가 실패한 항목을 이유 없이는 거부한다.
+
+```python
+    checked = [
+        d for d in direct
+        if d.decision == "approve" and d.type in ("finding", "timeline")
+    ]  # fmt: skip
+    # the audit trail is read once for every item in the plan
+    trail = approval_checks.PlanTrail(case_dir, [(d.item, d.type) for d in checked])
+    for d in checked:
+        try:
+            d.checks = approval_checks.check_item(
+                case_dir, d.item, d.type, background=True, trail=trail
+            )
+        except (
+            approval_checks.AuditUnreadable
+        ) as e:  # nothing to override: refused whole
+            raise _Refused(_error("AUDIT_UNREADABLE", str(e), 409)) from e
+        if d.checks["result"] != "failed":
+            continue
+        given = reasons.get(d.id) or {}
+        if given.get("failed_sha256") == approval_checks.failed_sha256(d.checks):
+            d.approval_override_reason = given["reason"]
+        else:  # none, or given for other failures than these
+            refused.append({"id": d.id, "reason": "CHECKS_FAILED", "checks": d.checks})
+    if refused:
+        return Plan(refused=refused)
+```
+
+[`packages/case-dashboard/src/case_dashboard/signing.py:415-438`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/signing.py#L415-L438)
+
+[8] 증거 근원 검사는 상태 값이 같으면 해시하지 않는다: [`src/vhir_cli/approval_checks.py:293-363`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L293-L363).
+
+[9] 등록된 증거는 읽지 않고 등록 해시를 적는다.
+
+```python
+    rec = place(path)
+    real = rec.get("realpath")
+    if "st_dev" not in rec:
+        return rec, None  # gone, or never there
+    reg = fi.registered_hash(case_dir, real) if case_dir else None
+    if reg:
+        return rec, {"path": real, "sha256": reg}
+```
+
+[`packages/sift-common/src/sift_common/file_place.py:181-187`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_place.py#L181-L187)
+
+```python
+def registered_hash(case_dir, path) -> str | None:
+    """The registry's hash when `path` is a registered file (compared by its
+    real path), else None. The file itself is never read: a registered input
+    links to the registry by its path."""
+    try:
+        # a registry that isn't a regular file reads as none, and never blocks
+        registry = json.loads(read_regular(Path(case_dir) / "evidence.json").decode())
+    except (OSError, ValueError):
+        return None
+    files = registry.get("files") if isinstance(registry, dict) else registry
+    real = os.path.realpath(path)
+    for entry in files if isinstance(files, list) else []:
+        if (
+            isinstance(entry, dict)
+            and entry.get("path") == real
+            and entry.get("sha256")
+        ):
+            return entry["sha256"]
+    return None
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:243-261`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L243-L261)
+
+[10] 보고서 생성은 증거 목록만 읽는다.
+
+```python
+    # Evidence
+    evidence_list: list[dict] = []
+    try:
+        ev_data = list_evidence_data(case_dir)
+        evidence_list = ev_data.get("evidence", [])
+    except (ValueError, OSError):
+        pass
+    evidence_count = len(evidence_list)
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:729-736`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L729-L736)
+
+[11] `evidence_verify`는 검증 함수의 결과를 그대로 돌려준다.
+
+```python
+    @server.tool()
+    def evidence_verify() -> dict:
+        """Verify integrity of all registered evidence files by comparing
+        current SHA-256 hashes against the registry. Reports OK, MODIFIED,
+        MISSING, or ERROR for each file (a folder root's, file by file), or
+        PENDING with a job_id while a large file hashes: call again later."""
+        try:
+            case_dir = _resolve_case_dir()
+            result = verify_evidence_data(case_dir, folder_hasher=_folder_hashes)
+            return result
+        except (ValueError, OSError) as e:
+            return {"error": str(e)}
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:538-549`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L538-L549)
+
+[12] 파일 항목은 다시 해시해 등록 해시와 대조한다: [`src/vhir_cli/commands/evidence.py:845-963`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L845-L963).
+
+[13] 폴더 항목은 manifest를 먼저 보고 파일마다 대조한다: [`src/vhir_cli/commands/evidence.py:966-996`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L966-L996).
+
+[14] `case-mcp`는 끝난 해시 결과를 먼저 쓰고 나머지를 해시한다.
+
+```python
+def _folder_hashes(case_dir, paths: list[str]) -> tuple[dict[str, str], str, dict]:
+    """A folder's file hashes within a tool call's time limit: what a
+    completed background job recorded for an unchanged file is taken (its
+    hash, or the error it couldn't be read with: used up only by a call that
+    starts no job, so a failure is never lost while another file hashes); the
+    rest are hashed in the call up to the inline limit, else in one background
+    job, whose id means "call again"."""
+    done = fi.completed_hashes(case_dir, paths)
+    hashes = {p: r["sha256"] for p, r in done.items() if "sha256" in r}
+    errors = {p: r["error"] for p, r in done.items() if "error" in r}
+    batch = fi.hash_files_for_call(
+        [p for p in paths if p not in done],
+        case_dir=case_dir,
+        requested_by="evidence_register",
+        inline_limit=fi.INLINE_LIMIT,
+    )
+    hashes.update((p, r.sha256) for p, r in batch.done.items())
+    errors.update((p, "not a regular file") for p in batch.not_regular)
+    if not batch.job_id:  # used now: the next request hashes them again
+        fi.take_failures(done)
+    return hashes, batch.job_id, errors
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:171-191`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L171-L191)
+
+포털의 같은 함수: [`packages/case-dashboard/src/case_dashboard/routes.py:708-730`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/routes.py#L708-L730), [`packages/case-dashboard/src/case_dashboard/routes.py:812-818`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/routes.py#L812-L818).
+
+[15] 포털의 증거 검증 요청: [`packages/case-dashboard/src/case_dashboard/routes.py:772-842`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-dashboard/src/case_dashboard/routes.py#L772-L842).
+
+[16] 끝난 해시 결과는 상태 값이 같을 때 다시 쓴다.
+
+```python
+def completed_hashes(case_dir, paths) -> dict[str, dict]:
+    """What completed background jobs recorded for these files in this case,
+    `{path: {"sha256": …} or {"error": …}}`, taken only while a file is
+    unchanged: the same device, inode, size, mtime and ctime as then (ctime
+    can't be set back, so a rewrite with its mtime set back isn't taken; a
+    file fixed after a failure has a new ctime, so it's hashed again; a
+    failure also needs the same permissions, as a coarse ctime may not tick
+    when they're fixed). A failure is taken once, by the call that follows its job, which stops the
+    automatic retry (see `take_failures`); after that it's left out, so the
+    next request hashes the file again. Files with nothing recorded are left
+    out."""
+    rows = _completed_rows(case_dir)
+    found: dict[str, dict] = {}
+    for path in map(str, paths):
+        row = rows.get(os.path.realpath(path))
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        now = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if row is None or tuple(row.get(k) for k in _STAT_KEY) != now:
+            continue
+        if row.get("sha256"):
+            found[path] = {"sha256": row["sha256"]}
+        elif row.get("error") and row.get("st_mode") == st.st_mode:
+            with _jobs_lock:
+                if (str(row.get("job_id", "")), os.path.realpath(path)) in _taken:
+                    continue
+            found[path] = {"error": row["error"], "job_id": str(row.get("job_id", ""))}
+    return found
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:449-478`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L449-L478)
+
+[17] 사용자 CLI의 경고와 종료 코드: [`src/vhir_cli/commands/evidence.py:1028-1039`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L1028-L1039).

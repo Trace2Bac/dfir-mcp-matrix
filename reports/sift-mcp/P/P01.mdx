@@ -1,0 +1,111 @@
+---
+cell: P01
+details:
+- id: P01.01
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 응답에 붙이는 참조 지식(`forensic-knowledge`의 아티팩트 주의 사항과 교차 확인 안내)을 고르는 경로에 적용된다 [1][2].
+`_detect_artifact_context`는 명령의 `--inc` 값에 보안 로그 이벤트 ID(4624, 4688 등)가 있으면 `event_logs_security`로 정한다 [1].
+그렇지 않으면 옵션이 아닌 인자의 파일 이름을 소문자로 바꿔 `security`, `system`, `sysmon`, `powershell`이 들어 있는지 차례로 보고 처음 맞는 아티팩트 이름을 고른다 [1].
+고른 아티팩트가 있으면 `_build_knowledge_context`는 그 도구가 다루는 아티팩트 목록 `artifacts_parsed`를 그 하나로 줄여 아티팩트에서 오는 주의 사항, 교차 확인 안내, 시각 필드 설명은 그 아티팩트의 것만 싣고 도구 자체의 주의 사항은 그대로 싣는다 [2].
+맞는 이름이 없으면 줄이지 않고 그 도구의 아티팩트를 모두 싣는다 [2].
+`EvtxECmd`에 `Security.evtx`를 주면 실리는 주의 사항이 39개에서 14개로 줄었고 `Application.evtx`를 주면 39개가 그대로 실렸다 [3].
+
+증거 형식을 판별하는 다른 경로는 없다.
+`sift-mcp`의 `suggest_tools`는 모델이 준 `artifact_type`을 별칭 표 `ARTIFACT_ALIASES`로 아티팩트 이름에 옮겨 도구를 고르고 입력 파일을 열어 보지 않는다 [4].
+`run_command`는 모델이 만든 명령을 그대로 실행하고 명령에 쓴 분석 도구가 입력 형식이나 OS에 맞는지 대조하지 않는다 [5].
+`get_tool_help`와 `check_tools`가 대조하는 것은 설치된 분석 도구의 버전과 사용 예시를 시험한 버전 범위이고 입력 증거가 아니다 [6].
+
+**한계.** 파일 이름에 `system`이나 `security`가 들어 있으면 이벤트 로그가 아닌 입력도 이벤트 로그 아티팩트로 정한다 [1].
+`rip.pl -r .../SYSTEM -p bam` 명령은 `event_logs_system`으로 정해졌고 RegRipper의 아티팩트 주의 사항은 34개에서 5개로, 교차 확인 안내는 3개에서 0개로 줄었다 [3].
+이 판별은 응답에 싣는 참조 지식만 바꾸고 명령 실행에는 적용되지 않는다 [5].
+
+### 근거
+
+[1] `_detect_artifact_context`는 이벤트 ID와 파일 이름의 낱말로 아티팩트를 정한다.
+
+```python
+def _detect_artifact_context(command: list[str]) -> str | None:
+    """Detect artifact context from command for FK advisory filtering.
+
+    Returns an artifact name (e.g., "event_logs_security") to filter
+    FK advisories, or None for no filtering (include all).
+    """
+    for i, token in enumerate(command):
+        # Match --inc 4624, --inc 4624,4625, or --inc=4624
+        value = None
+        if token.startswith("--inc="):
+            value = token.split("=", 1)[1]
+        elif token == "--inc" and i + 1 < len(command):
+            value = command[i + 1]
+        if value:
+            ids = set(value.replace(",", " ").split())
+            if ids & _SECURITY_EVENT_IDS:
+                return "event_logs_security"
+
+    for token in command:
+        if token.startswith("-"):
+            continue
+        basename = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+        for keyword, artifact in _FILENAME_ARTIFACT_MAP.items():
+            if keyword in basename:
+                return artifact
+
+    return None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:35-61`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L35-L61)
+
+이벤트 ID와 낱말 표: [`packages/sift-mcp/src/sift_mcp/server.py:19-32`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L19-L32).
+
+[2] 정한 아티팩트로 `artifacts_parsed`를 줄여 참조 지식을 싣는다.
+
+```python
+    caveats = list(tool_info.get("caveats", []))
+    advisories = list(tool_info.get("advisories", []))
+    corroboration: dict[str, list[str]] = {}
+    field_notes: dict[str, str] = {}
+    field_meanings: dict[str, str] = dict(tool_info.get("field_meanings", {}))
+    cross_mcp: list[dict] = []
+
+    artifacts_parsed = tool_info.get("artifacts_parsed", [])
+    if artifact_context:
+        artifacts_parsed = [a for a in artifacts_parsed if a == artifact_context]
+
+    for artifact_name in artifacts_parsed:
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:251-262`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L251-L262)
+
+[3] (실행 확인) `_detect_artifact_context`와 `_build_knowledge_context`를 불러 `EvtxECmd`(`Security.evtx`, Sysmon 로그, `Application.evtx`), `hayabusa --inc 4624`, `rip.pl -r SYSTEM`이 고른 아티팩트와 실린 주의 사항·교차 확인 안내의 수를 비교했다.
+
+[4] `suggest_tools`는 받은 `artifact_type`을 별칭 표로 옮긴다.
+
+```python
+    # Resolve aliases
+    artifact_names = ARTIFACT_ALIASES.get(artifact_type.lower(), [artifact_type])
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/discovery.py:241-242`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L241-L242)
+
+별칭 표와 함수 전체: [`packages/sift-mcp/src/sift_mcp/tools/discovery.py:16-32`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L16-L32), [`packages/sift-mcp/src/sift_mcp/tools/discovery.py:235-284`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L235-L284).
+
+[5] `run_command`는 판별한 아티팩트를 응답을 만드는 `build_response`에만 넘긴다.
+
+```python
+            # FK tool name for knowledge enrichment (td already resolved above)
+            fk_name = td.knowledge_name if td else binary
+
+            # Detect artifact context for FK advisory filtering
+            artifact_hint = _detect_artifact_context(command)
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:350-354`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L350-L354)
+
+`build_response` 호출: [`packages/sift-mcp/src/sift_mcp/server.py:439-458`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L439-L458).
+
+[6] 사용 예시는 설치된 버전이 시험한 범위에 속하는지로 고른다: [`packages/sift-mcp/src/sift_mcp/tools/discovery.py:94-134`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/discovery.py#L94-L134).

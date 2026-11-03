@@ -1,0 +1,952 @@
+---
+cell: T01
+details:
+- id: T01.01
+- id: T01.02
+- id: T01.03
+- id: T01.04
+- id: T01.05
+- id: T01.06
+- id: T01.08
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 이 검사는 게이트웨이와 백엔드 7개의 도구 인자에 적용된다 [1][2][3][4][5][6][7][8].
+게이트웨이는 도구 이름이나 인자의 키·값 어디에든 UTF-16 서로게이트 쌍의 한쪽만 있어 UTF-8로 보낼 수 없는 문자가 있으면 백엔드에 보내지 않고 거부한다 [1].
+게이트웨이의 MCP 끝점은 `Content-Length`가 없는 POST를 411로, 10MB를 넘는 요청을 413으로 거부하고 REST 도구 호출은 `arguments`가 객체가 아니면 400으로 거부한다 [2].
+인자에 서로게이트 문자를 넣은 REST 호출은 백엔드에 가지 않고 `UnsendableArguments` 오류로 끝났다 [9].
+
+백엔드는 각자 다음 값을 검사한다.
+- `forensic-mcp`는 제목 500자, 본문 10,000자, 짧은 값 200자를 넘거나 NUL 문자가 있는 문자열을 거부하고 `offset`이 음수이거나 참·거짓 값이면 거부한다 [3].
+- `forensic-mcp`의 `record_finding`은 필수 필드, `type`의 4개 값, `confidence_justification`, ISO 8601 꼴의 `event_timestamp`를 검사하고 `confidence`를 규율 자료의 신뢰도 정의와 대조해 어긋나면 `VALIDATION_FAILED`를 돌려준다 [4].
+- 같은 도구는 `challenged`가 없으면 `REJECTED`를 돌려준다 [4].
+- `case-mcp`는 길이와 NUL 문자를 검사하고 자유 글이 아닌 필드에 `..`가 있으면 거부하며 `case_init`의 `case_id`는 영문·숫자로 시작하는 2~64자의 영문·숫자·하이픈·밑줄이어야 한다 [5].
+- `report-mcp`의 `set_case_metadata`는 보호 필드와 모르는 필드를 거부하고 열거 필드는 값 목록과, 날짜 필드는 ISO 8601 꼴과, 목록 필드는 `list`인지 대조한다 [6].
+- `windows-triage-mcp`는 경로·이름·해시의 길이 상한과 NUL 문자를 검사해 `validation_error`를 돌려주고 해시 꼴이 아니면 `Invalid hash format`을, 예약 작업·자동 실행 조회에 `os_version`이 없으면 조회하지 않고 오류를 돌려준다 [7].
+- `rag-mcp`는 질의 1,000자, 필터 100자, `source_ids` 20개를 넘으면 거부하고 `top_k`가 1보다 작으면 5로, 상한을 넘으면 상한으로 바꾼다 [8].
+- `opencti-mcp`는 길이·NUL 문자, UUID 꼴, 라벨, 날짜, 관측값 형식을 검사하고 `limit`·`days`·`offset`은 범위 안으로 바꾼다 [10].
+- `opencti-mcp`의 관측값 형식 목록에는 사용자가 `OPENCTI_EXTRA_OBSERVABLE_TYPES`로 더한 형식도 들어간다 [10].
+- `sift-mcp`의 `run_command`는 `preview_lines`를 0~200으로 바꾼다 [11].
+`case_init`에 `..`가 들어간 `case_id`를, `set_case_metadata`에 목록 밖의 `severity`, 보호 필드, 모르는 필드를 주자 모두 오류로 끝났다 [9].
+
+규율 자료의 신뢰도 정의 파일이 없으면 정의가 빈 값이 되어 `record_finding`은 어떤 `confidence`도 받지 않는다 [4].
+
+**한계.** `opencti-mcp`의 `lookup_ioc`는 길이, 빈 값, NUL 문자만 거부하고 형식을 알아보지 못한 값도 `unknown` 형식으로 조회한다 [10].
+`windows-triage-mcp`의 길이 상한은 `WT_MAX_PATH_LENGTH` 같은 환경변수로 바꿀 수 있다 [7].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 방식은 `case-mcp`의 `evidence_register`와 `import_bundle`에 적용된다 [12][13].
+`evidence_register`는 상대 경로를 사건 폴더 기준으로 바꾼 뒤 그 경로가 없으면 등록하지 않고 `File not found` 오류를 돌려준다 [12].
+`import_bundle`은 허용 폴더 대조를 통과한 묶음 파일이 없으면 읽지 않고 오류를 돌려준다 [13].
+사건의 `evidence/`에 없는 파일을 `evidence_register`에 주자 `File not found` 오류로 끝났다 [9].
+
+`sift-mcp`의 `run_command`는 명령이 가리키는 입력이 있는지 보고 거부하지 않는다 [14].
+있는 파일과 폴더만 입력으로 기록하고 `input_files`로 적은 파일이 없으면 경고만 붙인 채 명령을 실행한다 [14][15].
+없는 파일을 `input_files`에 적은 호출은 실행되었고 응답에 `input_files_warning`이 붙었다 [9].
+
+### T01.03 실제 경로로 변환해 허용 폴더 대조
+
+**구현.** 이 방식은 `case-mcp`의 `import_bundle`과 `evidence_register`에 적용된다 [13][16].
+`import_bundle`은 `bundle_path`를 `Path.resolve()`로 실제 경로로 바꾸어 지금 사건 폴더나 `/tmp` 아래인지 대조하고 밖이면 거부한 뒤 바꾼 경로로 파일을 읽는다 [13].
+`evidence_register`는 `vhir_cli`의 `register_evidence_data`를 불러 경로를 실제 경로로 바꾸고 사건 폴더 안인지 대조한다 [16].
+사건 폴더 밖의 파일을 `evidence_register`에, 사건 폴더와 `/tmp` 밖의 파일을 `import_bundle`에 주자 모두 거부되었다 [9].
+
+**한계.** `register_evidence_data`는 실제 경로가 사건 폴더 밖이어도 바꾸기 전 경로가 사건 폴더 안이면 받아들인다 [16].
+그래서 사건 폴더 안에 둔 심볼릭 링크는 링크가 가리키는 폴더 밖 파일로 등록된다 [16].
+거부 문구는 사건 폴더 밖 파일을 `evidence/`에 복사하거나 그 안에 심볼릭 링크를 만들라고 안내한다 [16].
+사건의 `evidence/`에 둔 링크로 사건 폴더 밖 파일을 등록하자 거부되지 않았고 등록 경로는 링크가 가리키는 파일의 경로였다 [9].
+
+### T01.04 문자열 경로 검사
+
+**구현.** 이 방식은 사건 ID와 사건 폴더 이름을 받는 `case-mcp`·`report-mcp`의 인자에 적용된다 [5][17].
+`case-mcp`의 `case_status`·`case_activate`와 `report-mcp`의 `generate_report`는 `case_id`에 `..`, `/`, `\`가 있으면 거부한다 [17].
+`case-mcp`는 `cases_dir`, `name` 같은 자유 글이 아닌 필드에 `..`가 있으면 거부한다 [5].
+`generate_report`와 `case_activate`에 `..`로 시작하는 사건 ID를 주자 `Invalid case ID` 오류로 끝났다 [9].
+
+**한계.** `case-mcp`의 `cases_dir`는 `..`와 길이만 보고 절대 경로는 거부하지 않는다 [5].
+
+### T01.05 등록된 ID와 대조
+
+**구현.** 이 방식은 `forensic-mcp`의 `record_finding`이 받는 `artifacts`에 적용된다 [18].
+`artifacts`의 항목마다 `audit_id`를 사건 폴더의 호출 기록에서 읽은 ID 목록과 대조한다 [18].
+목록은 사건 폴더 `audit/` 아래 모든 `*.jsonl` 파일 항목의 `audit_id`다 [19].
+`case-mcp`의 `log_external_action`이 모델이 알린 대로 남긴 항목의 ID도 이 목록에 들어간다 [19].
+`audit_id`가 없으면 바로 `REJECTED`로 거부한다 [18].
+`audit_id`가 목록에 없으면 0.1초 뒤 호출 기록을 한 번 더 읽고 그래도 없으면 발견사항을 `REJECTED`로 거부한다 [18].
+호출 기록에 없는 `audit_id`를 단 `artifacts`를 준 `record_finding`은 `not found in audit trail` 사유로 거부되었다 [9].
+
+**한계.** 발견사항 본문의 `audit_ids`는 하나씩 거부하지 않는다 [20].
+서버는 이 ID를 호출 기록에서 찾아 출처 등급으로 나누고 모두 찾지 못했으면서 `supporting_commands`도 없을 때만 발견사항을 거부한다 [20].
+`supporting_commands`를 주면 호출 기록에 없는 `audit_ids`도 거부되지 않고 저장된다 [20].
+`challenged`의 검사별 `audit_ids`가 호출 기록에 없거나 발견사항 자신의 ID이면 그 검사를 `not run`으로 저장하고 발견사항은 거부하지 않는다 [21].
+
+### T01.06 고정 입력 경로 사용
+
+**구현.** 이 방식은 사건 기록을 읽는 조회·보고 도구와 기준 자료를 읽는 `windows-triage-mcp`·`rag-mcp`에 적용된다 [22][23].
+`forensic-mcp`의 `get_findings`·`get_timeline`, `report-mcp`의 `generate_report`, `case-mcp`의 `evidence_verify`는 경로 인자 없이 지금 사건 폴더의 기록과 증거 등록부에 적힌 경로를 읽는다 [22].
+`windows-triage-mcp`는 환경변수 `WT_KNOWN_GOOD_DB`·`WT_CONTEXT_DB`·`WT_REGISTRY_DB`나 `WT_DATA_DIR`이 정한 DB만 읽고 `rag-mcp`는 `RAG_INDEX_DIR`이 정한 색인만 읽는다 [23].
+
+### T01.08 실제 경로로 변환해 금지 폴더 대조
+
+**구현.** 이 방식은 `sift-mcp`의 `run_command`가 받은 명령의 인자에 적용된다 [24][25].
+서버는 `/`나 `..`로 시작하거나 `/`가 들어 있는 인자, `--플래그=값`의 값, `-`로 시작하지 않는 맨 이름을 경로로 보고 사건이 있으면 실행별 작업 폴더, 없으면 서버 프로세스의 작업 폴더 기준으로 `Path.resolve()`를 거친 실제 경로로 바꾼다 [24][25][26].
+바꾼 경로가 금지 폴더 13곳(`/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/var/lib/vhir`, `~/.vhir`, `~/.ssh`, `~/.claude` 등) 아래이면 명령을 실행하지 않고 오류를 돌려준다 [25].
+금지 폴더 안의 `~/.vhir/cases`와 `~/.vhir/hayabusa-output`은 예외로 받는다 [25].
+Sleuth Kit, `dd`, 마운트 도구처럼 장치를 읽는 도구 22개의 `/dev/` 인자와 출력 플래그 뒤의 값은 이 대조를 하지 않는다 [24][27].
+`/etc` 아래 파일, `/etc` 아래를 가리키는 링크, 상대 경로로 `/etc`에 닿는 인자, `--file=` 꼴로 준 `/etc` 아래 파일은 모두 실행되지 않고 오류로 끝났다 [9].
+
+**한계.** 서버는 대조에 쓴 실제 경로가 아니라 모델이 준 문자열을 그대로 도구에 넘긴다 [28].
+`-`로 시작하고 `=`가 없는 인자는 출력 플래그에 붙여 쓴 꼴만 따로 보고 그 밖에는 경로로 보지 않는다 [24].
+옵션과 경로를 한 인자에 붙여 쓴 일부 꼴은 인자 안의 경로를 금지 폴더와 대조하지 않는다 [24].
+이런 꼴로 준 금지 폴더 아래 파일은 거부되지 않고 도구가 실행되었다 [9].
+셸 해석기에 넘긴 문자열이나 도구가 설정·목록 파일에서 읽는 경로는 대조하지 않는다 [24][29].
+
+### 근거
+
+[1] 게이트웨이는 이름과 인자에서 UTF-8로 보낼 수 없는 문자를 찾으면 백엔드에 보내기 전에 거부한다.
+
+```python
+def lone_surrogate_in(arguments: dict) -> str | None:
+    """The top-level argument with a lone surrogate (half of a UTF-16 pair) in
+    a key or a value at any depth, or None. Such text can't be sent as UTF-8:
+    the transport fails in its writer task, and the call waits out the call
+    timeout. The name comes escaped, so it's safe to show."""
+    for top, value in arguments.items():
+        stack = [top, value]
+        while stack:
+            v = stack.pop()
+            if isinstance(v, str):
+                if _unsendable(v):
+                    return ascii(top)
+            elif isinstance(v, dict):
+                stack.extend(v.keys())
+                stack.extend(v.values())
+            elif isinstance(v, (list, tuple)):
+                stack.extend(v)
+    return None
+```
+
+[`packages/sift-gateway/src/sift_gateway/unsendable.py:24-41`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/unsendable.py#L24-L41)
+
+```python
+def check_sendable(backend_name: str, name: str, arguments: dict | None) -> None:
+    """Raise UnsendableArguments, naming what can't be sent, or return."""
+    where = "its name" if _unsendable(name) else None
+    if where is None and (arg := lone_surrogate_in(arguments or {})) is not None:
+        where = f"its argument {arg}"
+    if where is not None:
+        raise UnsendableArguments(
+            f"Backend {backend_name}: {ascii(name)[1:-1]} wasn't sent: {where} holds a "
+            "lone surrogate (half of a UTF-16 pair), which can't be sent as UTF-8; "
+            "send that text without it"
+        )
+```
+
+[`packages/sift-gateway/src/sift_gateway/unsendable.py:44-54`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/unsendable.py#L44-L54)
+
+모은 끝점의 호출 경로는 [`packages/sift-gateway/src/sift_gateway/server.py:755-759`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L755-L759)에서 같은 검사를 한다.
+
+[2] MCP 끝점의 요청 크기 검사와 REST 호출의 본문 검사다.
+
+```python
+        # Request size validation via Content-Length header
+        content_length = _get_content_length(scope)
+        if content_length is None and scope.get("method", "") == "POST":
+            resp = JSONResponse(
+                {"error": "Content-Length header required"},
+                status_code=411,
+            )
+            await resp(scope, receive, send)
+            return
+        if content_length is not None and content_length > _MAX_REQUEST_BYTES:
+            resp = JSONResponse(
+                {"error": f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)"},
+                status_code=413,
+            )
+            await resp(scope, receive, send)
+            return
+```
+
+[`packages/sift-gateway/src/sift_gateway/mcp_endpoint.py:127-142`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/mcp_endpoint.py#L127-L142)
+
+```python
+    # Read the raw body and enforce actual size limit.
+    # Checking Content-Length alone is insufficient because the header
+    # can be absent or spoofed; reading the body is authoritative.
+    raw_body = await request.body()
+    if len(raw_body) > _MAX_REQUEST_BYTES:
+        return JSONResponse(
+            {"error": f"Request body too large (max {_MAX_REQUEST_BYTES} bytes)"},
+            status_code=413,
+        )
+
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    arguments = body.get("arguments", {})
+    if not isinstance(arguments, dict):
+        return JSONResponse({"error": "arguments must be an object"}, status_code=400)
+```
+
+[`packages/sift-gateway/src/sift_gateway/rest.py:109-126`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/rest.py#L109-L126)
+
+[3] `forensic-mcp`의 길이·NUL 문자·`offset` 검사다.
+
+```python
+_MAX_TITLE = 500
+_MAX_TEXT = 10_000
+_MAX_SHORT = 200
+
+
+def _validate_str_length(value: str | None, field: str, max_len: int) -> None:
+    """Reject strings exceeding max_len or containing null bytes."""
+    if value is not None and isinstance(value, str):
+        if len(value) > max_len:
+            raise ValueError(f"{field} exceeds maximum length of {max_len} characters")
+        if "\x00" in value:
+            raise ValueError(f"{field} contains invalid null byte")
+
+
+def _not_bool(value):
+    """JSON true and false aren't an offset (they would read as 1 and 0)."""
+    if isinstance(value, bool):
+        raise ValueError("offset must be a whole number, not true or false")
+    return value
+
+
+Offset = Annotated[int, Field(ge=0), BeforeValidator(_not_bool)]
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:22-43`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L22-L43)
+
+음수 `offset`의 거부는 [`packages/forensic-mcp/src/forensic_mcp/server.py:46-53`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L46-L53)에 있다.
+
+[4] `record_finding`의 필드 검사와 `challenged` 검사다.
+
+```python
+    confidence_defs = _get_confidence_defs()
+
+    # Required fields
+    required = ["title", "observation", "interpretation", "confidence", "type"]
+    for field in required:
+        if not finding.get(field):
+            errors.append(f"Missing required field: {field}")
+
+    # audit_ids must be present and non-empty
+    audit_ids = finding.get("audit_ids", [])
+    if not isinstance(audit_ids, list):
+        errors.append("audit_ids must be a list")
+        audit_ids = []
+
+    # Type validation
+    finding_type = finding.get("type", "")
+    if finding_type and finding_type not in VALID_TYPES:
+        errors.append(
+            f"Invalid type '{finding_type}'. Must be one of: {sorted(VALID_TYPES)}"
+        )
+
+    # Confidence validation
+    confidence = finding.get("confidence", "").upper()
+    valid_confidence = set(confidence_defs.keys())
+    if confidence and confidence not in valid_confidence:
+        errors.append(
+            f"Invalid confidence '{confidence}'. Must be one of: {sorted(valid_confidence)}"
+        )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/discipline/validation.py:36-63`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/discipline/validation.py#L36-L63)
+
+```python
+        case_dir = self._require_active_case()
+        if not isinstance(finding, dict) or finding.get("challenged") is None:
+            return {
+                "status": "REJECTED",
+                "error": (
+                    "challenged is required: challenge the finding with the "
+                    "finding-skeptic skill first (an isolated subagent), and pass "
+                    "its result. If no skeptic can run, send challenged="
+                    + json.dumps(NOT_CHALLENGED_PAYLOAD)
+                    + " with the reason; the examiner sees it at approval."
+                ),
+            }
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1189-1200`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1189-L1200)
+
+신뢰도 정의는 [`packages/forensic-knowledge/src/forensic_knowledge/loader.py:254-257`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-knowledge/src/forensic_knowledge/loader.py#L254-L257)에서 읽고 파일이 없으면 빈 값이 된다.
+
+[5] `case-mcp`의 문자열 검사와 `case_id` 꼴 검사다.
+
+```python
+def _validate_str_length(
+    value: str | None, field: str, max_len: int, *, free_text: bool = False
+) -> None:
+    """Reject strings exceeding max_len, containing null bytes, or path traversal.
+
+    free_text: the field is prose or a command line that is stored, never
+    used as a path, so ".." in it ("then prefetch...", "cd ..") is kept.
+    """
+    if value is not None and isinstance(value, str):
+        if len(value) > max_len:
+            raise ValueError(f"{field} exceeds maximum length of {max_len} characters")
+        if "\x00" in value:
+            raise ValueError(f"{field} contains invalid null byte")
+        if ".." in value and not free_text:
+            raise ValueError(f"{field} contains invalid path traversal")
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:194-208`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L194-L208)
+
+```python
+            if case_id:
+                _validate_str_length(case_id, "case_id", 64)
+                import re
+
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,63}$", case_id):
+                    return {
+                        "error": "case_id must be alphanumeric with hyphens/underscores, "
+                        "start with letter/digit, 2-64 chars"
+                    }
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:300-308`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L300-L308)
+
+[6] `set_case_metadata`는 보호 필드, 열거 값, 날짜, 목록, 모르는 필드를 검사한다.
+
+```python
+            if field in _PROTECTED_FIELDS:
+                return {
+                    "error": f"Field '{field}' is protected and cannot "
+                    f"be set via this tool. Protected fields: "
+                    f"{', '.join(sorted(_PROTECTED_FIELDS))}"
+                }
+
+            # Validate enum fields (case-insensitive for TLP)
+            if field in _ENUM_FIELDS:
+                valid = _ENUM_FIELDS[field]
+                check_val = value
+                # TLP is uppercase by convention
+                if field == "tlp" and isinstance(value, str):
+                    check_val = value.upper()
+                if check_val not in valid:
+                    return {
+                        "error": f"Invalid value for {field}: {value}. "
+                        f"Valid values: {', '.join(sorted(valid))}"
+                    }
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:983-1001`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L983-L1001)
+
+```python
+            # Validate date fields
+            if field in _DATE_FIELDS:
+                if not isinstance(value, str) or not _validate_iso8601(value):
+                    return {
+                        "error": f"Field '{field}' requires an ISO 8601 "
+                        f"datetime string."
+                    }
+
+            # Validate list fields
+            if field in _LIST_FIELDS:
+                if not isinstance(value, list):
+                    return {
+                        "error": f"Field '{field}' requires a JSON array. "
+                        f'Example: ["{field}_item1", "{field}_item2"]'
+                    }
+
+            # Reject unknown fields
+            _ALLOWED_FIELDS = (
+                _PROTECTED_FIELDS
+                | set(_ENUM_FIELDS)
+                | set(_DATE_FIELDS)
+                | set(_LIST_FIELDS)
+                | set(_TEXT_FIELDS)
+            )
+            if field not in _ALLOWED_FIELDS:
+                return {
+                    "error": f"Unknown metadata field: '{field}'. "
+                    f"Allowed fields: {sorted(_ALLOWED_FIELDS - _PROTECTED_FIELDS)}"
+                }
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:1004-1032`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L1004-L1032)
+
+[7] `windows-triage-mcp`의 길이·NUL 문자 검사와 `os_version` 검사다.
+
+```python
+def _validate_input_length(value: Any, max_length: int, field_name: str) -> None:
+    """Validate input length to prevent resource exhaustion.
+
+    Args:
+        value: Input value to validate (must be string or None)
+        max_length: Maximum allowed length
+        field_name: Name of field for error message
+
+    Raises:
+        ValidationError: If input exceeds max_length
+    """
+    if value is not None and isinstance(value, str) and len(value) > max_length:
+        raise ValidationError(
+            f"{field_name} exceeds maximum length of {max_length} characters"
+        )
+
+
+def _validate_no_null_bytes(value: Any, field_name: str) -> None:
+    """Validate input contains no null bytes.
+
+    Args:
+        value: Input value to validate
+        field_name: Name of field for error message
+
+    Raises:
+        ValidationError: If input contains null bytes
+    """
+    if value is not None and isinstance(value, str) and "\x00" in value:
+        raise ValidationError(f"{field_name} contains invalid null bytes")
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:288-316`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L288-L316)
+
+```python
+        # OS version is required for accurate results
+        if not os_version:
+            return {
+                "error": "os_version is required",
+                "message": "Scheduled task baselines vary between Windows versions. Legacy tasks may not exist on modern Windows. Please provide the target OS version (e.g., W11_22H2, W10_21H2).",
+                "verdict": None,
+                "lookup_performed": False,
+            }
+```
+
+[`packages/windows-triage/src/windows_triage/server.py:1449-1456`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1449-L1456)
+
+해시 꼴 검사는 [`packages/windows-triage/src/windows_triage/server.py:1672-1676`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/server.py#L1672-L1676)에, 길이 상한의 환경변수는 [`packages/windows-triage/src/windows_triage/config.py:157-162`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/config.py#L157-L162)에 있다.
+
+[8] `rag-mcp`의 `search_knowledge` 인자 검사다.
+
+```python
+        _validate_length(query, MAX_QUERY_LENGTH, "query")
+        _validate_length(source, MAX_FILTER_LENGTH, "source")
+        _validate_length(technique, MAX_FILTER_LENGTH, "technique")
+        _validate_length(platform, MAX_FILTER_LENGTH, "platform")
+
+        # Validate source_ids if provided
+        if source_ids is not None:
+            if not isinstance(source_ids, list):
+                raise ValueError("source_ids must be a list of strings")
+            if len(source_ids) > 20:
+                raise ValueError("source_ids cannot contain more than 20 items")
+            for sid in source_ids:
+                _validate_length(sid, MAX_FILTER_LENGTH, "source_ids item")
+
+        if not query:
+            raise ValueError("query is required")
+
+        # Validate top_k is a positive integer
+        if not isinstance(top_k, int) or top_k < 1:
+            top_k = 5
+        elif top_k > MAX_TOP_K:
+            top_k = MAX_TOP_K
+```
+
+[`packages/forensic-rag/src/rag_mcp/server.py:276-297`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/server.py#L276-L297)
+
+[9] (실행 확인) 컨테이너에서 게이트웨이 REST 경로에 서로게이트 문자를 넣은 인자를 주자 `UnsendableArguments` 오류가 돌아왔다.
+`case-mcp`, `report-mcp`, `forensic-mcp`에 잘못된 사건 ID, 목록 밖 메타데이터 값, 사건 폴더 밖 증거와 묶음 파일, 없는 증거, 호출 기록에 없는 `audit_id`를 주자 오류나 거부로 끝났다.
+사건 `evidence/` 안의 링크로 사건 폴더 밖 파일을 등록하자 링크가 가리키는 경로로 등록되었다.
+`run_command`에 금지 폴더를 가리키는 절대 경로, 링크, 상대 경로, `--file=` 값을 주자 거부되었다.
+옵션과 경로를 한 인자에 붙여 쓴 일부 꼴은 거부되지 않고 실행되었다.
+없는 `input_files`를 준 호출은 경고와 함께 실행되었다.
+
+[10] `opencti-mcp`의 IOC 검사는 길이·빈 값·NUL 문자만 거부하고 형식을 모르면 `unknown`을 돌려준다: [`packages/opencti/src/opencti_mcp/validation.py:151-205`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L151-L205), [`packages/opencti/src/opencti_mcp/validation.py:86-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L86-L150), [`packages/opencti/src/opencti_mcp/validation.py:606-640`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/validation.py#L606-L640), [`packages/opencti/src/opencti_mcp/config.py:269-269`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/config.py#L269-L269).
+
+[11] `run_command`는 `preview_lines`를 0~200으로 바꾼다.
+
+```python
+                preview_lines=min(max(preview_lines, 0), 200),
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:342-342`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L342-L342)
+
+[12] `register_evidence_data`는 상대 경로를 사건 폴더 기준으로 바꾸고 없으면 `FileNotFoundError`를 낸다: [`src/vhir_cli/commands/evidence.py:168-176`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L168-L176).
+
+[13] `import_bundle`은 실제 경로로 바꾸어 사건 폴더나 `/tmp` 안인지 대조하고 있는지 본 뒤 그 경로를 읽는다.
+
+```python
+        try:
+            case_dir = _resolve_case_dir()
+            bundle_file = Path(bundle_path).resolve()
+            allowed_parents = [case_dir, Path("/tmp")]
+            if not any(bundle_file.is_relative_to(p) for p in allowed_parents):
+                return {"error": "Bundle path must be within case directory or /tmp"}
+            if not bundle_file.exists():
+                return {"error": f"Bundle file not found: {bundle_path}"}
+            try:
+                bundle_data = json.loads(bundle_file.read_text())
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:606-615`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L606-L615)
+
+[14] `run_command`는 명령이 가리키는 경로 가운데 있는 것만 입력으로 기록하고 `input_files`의 없는 파일은 따로 모은다.
+
+```python
+        # A file the caller lists that the command doesn't name: recorded as
+        # declared (the AI says the run read it), never as a parsed input
+        named = {os.path.realpath(p) for p in parsed}
+        missing: list[str] = []
+        for f in input_files or []:
+            path = command_files.absolute(f, op_dir)
+            if os.path.realpath(path) in named:
+                continue
+            named.add(os.path.realpath(path))
+            rec, _ = file_place.input_record(case_dir, path, "run_command", True)
+            if "st_dev" not in rec:
+                missing.append(f)
+            inputs.append({**rec, "found": "declared"})
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:284-296`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L284-L296)
+
+```python
+def inputs(command: list[str], output_flags, base: str | None = None) -> list[str]:
+    """The existing files and folders the command reads, once each, in order."""
+    seen: set[str] = set()
+    out = []
+    for p in named(command, output_flags, base)[0]:
+        if os.path.exists(p) and os.path.realpath(p) not in seen:
+            seen.add(os.path.realpath(p))
+            out.append(p)
+    return out
+```
+
+[`packages/sift-mcp/src/sift_mcp/command_files.py:56-64`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/command_files.py#L56-L64)
+
+[15] 없는 `input_files`는 응답에 경고로만 붙는다.
+
+```python
+            if missing:
+                response["input_files_warning"] = (
+                    "input_files named files that don't exist: "
+                    + ", ".join(missing)
+                    + ". They are recorded as declared, as given."
+                )
+            elif detection_method == "none" and binary not in _NO_INPUT_CMDS:
+                response["input_files_warning"] = (
+                    "The command names no existing file or folder, so the run "
+                    "records no inputs."
+                )
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:493-503`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L493-L503)
+
+[16] `register_evidence_data`는 실제 경로가 사건 폴더 밖이면 바꾸기 전 경로로 다시 대조하고 거부 문구는 `evidence/`에 복사하거나 심볼릭 링크를 만들라고 안내한다: [`src/vhir_cli/commands/evidence.py:178-214`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L178-L214), [`src/vhir_cli/commands/evidence.py:289-296`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/commands/evidence.py#L289-L296).
+`case-mcp`의 `evidence_register`가 이 함수를 부른다.
+
+```python
+        try:
+            _validate_str_length(description, "description", _MAX_TEXT, free_text=True)
+            case_dir = _resolve_case_dir()
+            examiner = resolve_examiner()
+            result = register_evidence_data(
+                case_dir=case_dir,
+                path=path,
+                examiner=examiner,
+                description=description,
+                registered_via="mcp",  # the AI's: its host names never confirm a machine
+                folder_hasher=_folder_hashes,
+            )
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:495-506`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L495-L506)
+
+[17] `case_id` 인자는 `..`, `/`, `\`가 있으면 거부한다.
+
+```python
+    if case_id:
+        if ".." in case_id or "/" in case_id or "\\" in case_id:
+            raise ValueError(f"Invalid case ID: {case_id}")
+        cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+        case_dir = cases_dir / case_id
+        if not case_dir.exists():
+            raise ValueError(f"Case not found: {case_id}")
+        return case_dir
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:218-225`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L218-L225)
+
+```python
+    if case_id:
+        if ".." in case_id or "/" in case_id or "\\" in case_id:
+            raise ValueError(f"Invalid case ID: {case_id}")
+        cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+        case_dir = cases_dir / case_id
+        if not case_dir.exists():
+            raise ValueError(f"Case not found: {case_id}")
+        return case_dir
+```
+
+[`packages/report-mcp/src/report_mcp/server.py:229-236`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L229-L236)
+
+`case_activate`는 `vhir_cli`의 [`src/vhir_cli/main.py:1554-1556`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1554-L1556)에서 같은 검사를 한다.
+
+[18] `artifacts`의 `audit_id`는 호출 기록에서 읽은 ID와 대조하고 없으면 거부한다.
+
+```python
+        if validated_artifacts:
+            case = pv.load_case(case_dir)
+            for art in validated_artifacts:
+                aid = art.get("audit_id", "")
+                if not aid:
+                    return {
+                        "status": "REJECTED",
+                        "error": (
+                            "Artifact missing audit_id — pass the audit_id "
+                            "from the tool response, or call log_external_action "
+                            "first to record Bash commands."
+                        ),
+                    }
+                if aid not in case.by_id:
+                    time.sleep(0.1)
+                    case = pv.load_case(case_dir)
+                if aid not in case.by_id:
+                    return {
+                        "status": "REJECTED",
+                        "error": (
+                            f"audit_id '{aid}' not found in audit trail. "
+                            "Pass the audit_id from the tool response."
+                        ),
+                    }
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1383-1406`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1383-L1406)
+
+[19] 대조하는 ID 목록은 사건 `audit/` 아래 모든 `*.jsonl` 항목의 `audit_id`이고 `log_external_action`은 모델이 알린 대로 항목을 남긴다.
+
+```python
+    for n_log, log in enumerate(sorted((d / "audit").glob("*.jsonl"))):
+        try:
+            data = read_regular(log)
+        except NotRegularFile:
+            skipped.append(f"audit/{log.name} (not a regular file)")
+            continue
+        except OSError as e:
+            skipped.append(f"audit/{log.name} ({e.strerror or type(e).__name__})")
+            continue
+        entries = []
+        for n, line in enumerate(data.splitlines()):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and isinstance(entry.get("audit_id"), str):
+                by_id[entry["audit_id"]].append((entry, line))
+                order[id(entry)] = (str(entry.get("ts", "")), n_log, n)
+                entries.append(entry)
+```
+
+[`packages/sift-common/src/sift_common/provenance.py:104-122`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/provenance.py#L104-L122)
+
+`log_external_action`의 설명과 기록은 [`packages/case-mcp/src/case_mcp/server.py:738-747`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L738-L747), [`packages/case-mcp/src/case_mcp/server.py:808-827`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L808-L827)에 있다.
+
+[20] 본문의 `audit_ids`는 출처 등급으로 나누고 모두 찾지 못했으면서 `supporting_commands`가 없을 때만 거부한다.
+
+```python
+        # Hard gate: reject if all NONE and no supporting_commands
+        if provenance["summary"] == "NONE" and not validated_commands:
+            return {
+                "status": "REJECTED",
+                "error": (
+                    "Finding rejected: no evidence trail. Every finding needs provenance. "
+                    + (not_checked + " " if not_checked else "")
+                    + "Options: (1) Pass audit_ids from MCP tool responses. "
+                    "(2) Pass supporting_commands as a SEPARATE PARAMETER (not inside the finding dict) "
+                    "with command, purpose, and output_excerpt for each shell command used. "
+                    "(3) For analytical findings without tool evidence, use "
+                    "command='analytical reasoning' in supporting_commands."
+                ),
+            }
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1457-1470`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1457-L1470)
+
+```python
+        for eid in audit_ids:
+            # Reject malformed audit IDs (path traversal, homoglyphs, injection)
+            if not _AUDIT_ID_PATTERN.match(eid):
+                result["none"].append(eid)
+                continue
+            source = eid_source.get(eid)
+            if source:
+                result[source.lower()].append(eid)
+            elif eid.startswith(_FILE_IDENTITY_PREFIX):
+                result["mcp" if eid in loaded_ids else "unchecked"].append(eid)
+            else:
+                result["none"].append(eid)
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:2056-2067`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L2056-L2067)
+
+[21] `challenged`의 검사별 ID가 호출 기록에 없거나 발견사항 자신의 ID이면 그 검사를 `not run`으로 저장한다.
+
+```python
+    if not isinstance(result, str) or result not in _CHECK_RESULTS:
+        got = json.dumps(result, default=str)[:40]
+        check.update(result="not run", reason=f"malformed check: result {got}")
+    elif result == "not run":
+        check.update(result="not run",
+                     reason=_text(raw.get("reason"), _MAX_EXPLANATION)
+                     or "malformed check: not run without a reason")  # fmt: skip
+    elif removed or own or not ids:
+        # an id the finding cites is the finding's evidence, not a re-run
+        why = []
+        if own:
+            why.append(
+                f"audit id {own[0]} is one of the finding's own audit_ids"
+                if len(own) == 1
+                else f"audit ids {', '.join(own)} are among the finding's own audit_ids"
+            )
+            why[-1] += "; list the skeptic's ids only in `challenged`"
+        if removed or not own:
+            why.append(
+                f"unverified audit id: {', '.join(map(str, removed)) or 'none given'}"
+            )
+        check.update(result="not run", reason="; ".join(why))
+    else:
+        check["result"] = result
+    return check
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:499-523`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L499-L523)
+
+[22] 조회·보고 도구는 지금 사건 폴더의 기록을 읽는다: [`packages/forensic-mcp/src/forensic_mcp/server.py:420-422`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L420-L422), [`packages/report-mcp/src/report_mcp/server.py:944-945`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/report-mcp/src/report_mcp/server.py#L944-L945), [`packages/case-mcp/src/case_mcp/server.py:538-549`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L538-L549).
+
+[23] `windows-triage-mcp`의 DB 경로와 `rag-mcp`의 색인 경로는 환경변수로 정한다.
+
+```python
+    # Load paths from environment
+    data_dir_str = os.environ.get("WT_DATA_DIR")
+    known_good_db_str = os.environ.get("WT_KNOWN_GOOD_DB")
+    context_db_str = os.environ.get("WT_CONTEXT_DB")
+    registry_db_str = os.environ.get("WT_REGISTRY_DB")
+
+    # Parse paths
+    data_dir = Path(data_dir_str) if data_dir_str else None
+    known_good_db = Path(known_good_db_str) if known_good_db_str else None
+    context_db = Path(context_db_str) if context_db_str else None
+    registry_db = Path(registry_db_str) if registry_db_str else None
+
+```
+
+[`packages/windows-triage/src/windows_triage/config.py:139-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/windows-triage/src/windows_triage/config.py#L139-L150)
+
+```python
+        self.index_dir = Path(
+            index_dir or os.environ.get("RAG_INDEX_DIR", DEFAULT_INDEX_DIR)
+        )
+        self.model_name = model_name or os.environ.get(
+            "RAG_MODEL_NAME", DEFAULT_MODEL_NAME
+        )
+```
+
+[`packages/forensic-rag/src/rag_mcp/index.py:92-97`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-rag/src/rag_mcp/index.py#L92-L97)
+
+[24] `run_command`는 인자의 꼴로 경로를 골라 입력 경로 대조나 출력 경로 검사로 보낸다.
+
+```python
+    # Validate any arguments that look like file paths
+    output_flags = get_output_flags(binary)
+    prev_was_output_flag = False
+    for arg in command[1:]:
+        # Check flag=value arguments for path values
+        if "=" in arg and arg.startswith("-"):
+            flag_part = arg.split("=", 1)[0]
+            value = arg.split("=", 1)[1]
+            if value and (
+                value.startswith("/") or value.startswith("..") or "/" in value
+            ):
+                if value.startswith("/dev/") and binary in _DEV_PATH_TOOLS:
+                    pass  # Device path for disk forensics
+                elif flag_part in output_flags:
+                    validate_output_path(value, base=cwd)
+                else:
+                    validate_input_path(value, base=cwd)
+            elif value:  # a bare name, resolved against the working folder
+                validate_input_path(value, base=cwd)
+            prev_was_output_flag = False
+            continue
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:112-132`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L112-L132)
+
+```python
+        if arg.startswith("-") and "=" not in arg:
+            if not arg.startswith("--") and len(arg) > 2 and arg[:2] in output_flags:
+                validate_output_path(arg[2:], base=cwd)  # attached: -o<path>
+                prev_was_output_flag = False
+                continue
+            prev_was_output_flag = arg in output_flags
+            continue
+        if arg.startswith("/") or arg.startswith("..") or "/" in arg:
+            if arg.startswith("/dev/") and binary in _DEV_PATH_TOOLS:
+                pass  # Device path for disk forensics
+            elif prev_was_output_flag:
+                validate_output_path(arg, base=cwd)
+            else:
+                validate_input_path(arg, base=cwd)
+        elif arg:
+            # a bare name (.ssh, .claude.json), resolved against the working folder
+            validate_input_path(arg, base=cwd)
+        prev_was_output_flag = False
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:133-150`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L133-L150)
+
+[25] 금지 폴더 목록과 예외, 실제 경로로 바꾸어 대조하는 함수다.
+
+```python
+_BLOCKED_DIRECTORIES = (
+    *SYSTEM_DIRS,  # /etc, /proc, /sys, /dev, /boot, /var/lib/vhir
+    os.path.expanduser("~/.vhir"),
+    os.path.expanduser("~/.ssh"),
+    os.path.expanduser("~/.claude.json"),
+    os.path.expanduser("~/.config/opencti-mcp"),
+    os.path.expanduser("~/.claude"),
+    os.path.expanduser("~/.agents"),  # the deployed skills Codex reads
+    os.path.expanduser("~/.codex"),  # Codex's profile and agents
+)
+
+# Exceptions within blocked directories (evidence data, not config)
+_BLOCKED_EXCEPTIONS = (
+    os.path.expanduser("~/.vhir/cases"),
+    os.path.expanduser("~/.vhir/hayabusa-output"),
+)
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:256-271`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L256-L271)
+
+```python
+    # Handle flag=value arguments: validate the value portion as a path
+    if "=" in path and path.startswith("-"):
+        value = path.split("=", 1)[1]
+        return validate_input_path(value, base) if value else path
+
+    resolved = str(Path(_at(path, base)).resolve())
+    for blocked in _BLOCKED_DIRECTORIES:
+        if (
+            resolved == blocked
+            or resolved.startswith(blocked + "/")
+            or resolved.startswith(blocked + ".vhir-backup-")  # vhir's own copies
+        ):
+            # Check if path falls within an allowed exception (evidence data)
+            if any(
+                resolved == exc or resolved.startswith(exc + "/")
+                for exc in _BLOCKED_EXCEPTIONS
+            ):
+                break  # Allowed exception
+            raise ValueError(
+                f"Access denied: path '{path}' resolves to '{resolved}' "
+                f"which is under protected path '{blocked}'"
+            )
+    return resolved
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:348-370`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L348-L370)
+
+[26] 사건이 없으면 실행별 작업 폴더를 두지 않고 상대 경로는 서버 프로세스의 작업 폴더 기준으로 바꾼다.
+
+```python
+        # In a case the run works in its own folder, named by its audit id and
+        # created empty first: what it writes there is its output, not the
+        # gateway's. Without a case it keeps the process's folder
+        op_dir = None
+        if case_dir and op_id:
+            op_dir = os.path.join(case_dir, "extractions", op_id)
+            try:
+                os.makedirs(op_dir)
+            except FileExistsError:
+                pass
+            except OSError as e:
+                logger.warning("run_command: no op folder %s: %s", op_dir, e)
+                op_dir = None
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:255-267`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L255-L267)
+
+```python
+def _at(path: str, base: str | None) -> str:
+    """A relative path as the run sees it: resolved in its working folder
+    (``base``), else in this process's."""
+    return os.path.join(base, path) if base and not os.path.isabs(path) else path
+```
+
+[`packages/sift-mcp/src/sift_mcp/security.py:17-20`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/security.py#L17-L20)
+
+[27] `/dev/` 인자를 대조하지 않는 장치 도구 목록이다.
+
+```python
+# Tools that legitimately use /dev/ paths as device specifiers
+_DEV_PATH_TOOLS = {
+    "mount",
+    "umount",
+    "mmls",
+    "fls",
+    "icat",
+    "img_stat",
+    "blkid",
+    "fdisk",
+    "losetup",
+    "fsstat",
+    "ifind",
+    "istat",
+    "mmcat",
+    "sigfind",
+    "tsk_recover",
+    "sorter",
+    "dd",
+    "dc3dd",
+    "ewfacquire",
+    "ewfmount",
+    "vshadowinfo",
+    "vshadowmount",
+}
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:23-47`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L23-L47)
+
+[28] 검사를 마친 명령은 실행 파일만 찾은 경로로 바꾸고 나머지 인자는 받은 그대로 둔다.
+
+```python
+    # Resolve binary via find_binary to prevent absolute path bypass
+    resolved = find_binary(binary)
+    if not resolved:
+        raise ExecutionError(f"Binary '{binary}' not found on this system.")
+    command = [resolved] + command[1:]
+```
+
+[`packages/sift-mcp/src/sift_mcp/tools/generic.py:152-156`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/tools/generic.py#L152-L156)
+
+[29] `run_command`의 도구 설명은 셸 해석기 인자와 `dd`를 검사하지 않는다고 적는다.
+
+```python
+        """Execute a forensic tool on this SIFT workstation.
+
+        Most SIFT-installed tools can be executed including curl, wget, dd,
+        fdisk, and python3. Only mkfs, shutdown, kill, and raw socket
+        tools (nc/ncat) are blocked. Tools in the forensic catalog
+        get enriched responses with caveats and corroboration suggestions.
+        In a case the command runs in its own empty folder,
+        extractions/<audit_id>/, so a relative path means a path there.
+        Give parallel runs distinct output folders: files new in a folder two
+        runs share are recorded as both runs' outputs, and trace as ambiguous.
+        Deleting or overwriting case records, audit/ or evidence files is refused;
+        bash -c, python -c, dd and a tool's own output options are not checked.
+
+```
+
+[`packages/sift-mcp/src/sift_mcp/server.py:196-208`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L196-L208)

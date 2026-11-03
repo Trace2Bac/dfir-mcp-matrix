@@ -1,0 +1,428 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+- id: P06.05
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 이 방식은 `opencti-mcp`의 조회 캐시, `sift-mcp`의 참조 지식 횟수, `sift-common`의 백그라운드 해시 작업 표, 검토 포털의 승인 해시 실패 기록에 적용된다 [1][2][3][4].
+`opencti-mcp`는 검색, 개체, IOC 조회 결과를 프로세스 메모리의 캐시 세 개에 둔다 [1].
+`sift-mcp`는 도구마다 참조 지식을 실은 횟수와 다른 백엔드 안내를 실은 횟수를 모듈 변수로 센다 [2].
+`file_identity`는 진행 중인 백그라운드 해시 작업을 사건과 파일 상태 값으로 찾는 표 `_jobs`와 이미 알린 실패 목록 `_taken`을 모듈 변수로 둔다 [3].
+포털을 실행하는 게이트웨이 프로세스는 승인 검사에서 실패한 백그라운드 해시를 `_failed_hashes`에 둔다 [4].
+`forensic-mcp`의 `CaseManager`는 마지막으로 읽은 사건 ID와 폴더를 메모리에 두고 호출마다 표시 파일을 다시 읽어 바꾸며 표시 파일이 사건 폴더를 가리키지 않으면 메모리의 사건을 그대로 쓴다 [5].
+이 상태들은 그 프로세스가 끝나면 사라진다.
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 이 방식은 열린 사건 표시 파일, 사건 폴더의 기록 파일, 호출 기록, 해시 결과 파일에 적용된다 [6][7][8][9].
+열린 사건은 `~/.vhir/active_case`에 사건 폴더의 절대 경로로 저장된다 [6].
+사건 정보 `CASE.yaml`, 발견사항, 타임라인, 할 일, 증거 목록, 작업 기록 `actions.jsonl`은 사건 폴더 안 파일이다 [7].
+`forensic-mcp`는 이 파일을 임시 파일에 쓰고 `fsync`한 뒤 바꿔 끼운다 [7].
+읽을 수 없는 JSON 파일을 만나면 빈 값으로 덮어쓰지 않고 오류를 낸다 [10].
+백그라운드 해시 작업이 끝나면 결과와 그때의 파일 상태 값을 사건의 `audit/file-identity.jsonl`에 쓴다 [8].
+포털과 `vhir approve`의 승인 검사는 증거 파일을 다시 해시한 값과 그때의 상태 값을 사건의 `evidence-verified.json`에 둔다 [9].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** 이 방식은 열린 사건과 끝난 백그라운드 해시 결과에 적용된다 [5][11].
+백엔드는 시작할 때 열린 사건을 따로 불러오지 않고 호출마다 `~/.vhir/active_case`를 읽으므로 다시 시작한 뒤에도 모델이 사건을 다시 열지 않아도 같은 사건을 쓴다 [5][12].
+새로 만든 `CaseManager`가 앞 프로세스가 연 사건을 그대로 찾았다 [13].
+`completed_hashes`는 `audit/file-identity.jsonl`의 결과 가운데 파일의 장치, inode, 크기, 수정 시각, 변경 시각이 그때와 같은 것만 다시 쓴다 [11].
+그래서 다시 시작한 프로세스의 증거 등록과 검증도 앞 프로세스가 끝낸 해시를 다시 계산하지 않는다 [11][14].
+
+**한계.** 프로세스가 끝날 때 진행 중이던 백그라운드 해시 작업은 결과를 남기지 못한다 [3].
+그 작업 ID로 `pending:<작업 ID>`를 적어 둔 호출 기록 항목은 닫히지 않고 다음 요청은 그 파일을 새 작업으로 다시 해시한다 [3][11].
+
+### P06.05 만료
+
+**구현.** 이 방식은 `opencti-mcp`의 조회 캐시와 포털의 승인 해시 실패 기록에 적용된다 [1][4].
+`opencti-mcp`의 캐시는 검색과 IOC 조회 60초, 개체 조회 300초가 지나면 쓰지 않는다 [1].
+찾은 것이 없다는 결과는 검색과 IOC 조회 30초, 개체 조회 60초 동안만 쓴다 [1].
+캐시마다 항목 수 상한(500개, 1,000개)을 넘으면 가장 오래 쓰지 않은 항목부터 버린다 [15].
+포털의 승인 검사는 실패한 백그라운드 해시를 120초 동안만 같은 실패로 알리고 그 뒤나 파일이 바뀐 뒤에는 다시 해시한다 [4].
+TTL 0.2초, 상한 2개로 만든 캐시는 0.3초 뒤 조회에서 항목을 돌려주지 않았고 세 번째 항목을 넣자 첫 항목이 버려졌다 [13].
+
+**한계.** 만료된 캐시 항목은 지우지 않고 남겨 둔다 [15].
+지표 검색은 OpenCTI 요청이 실패하거나 회로 차단기(circuit breaker)가 요청을 막으면 만료된 항목을 돌려준다 [16].
+캐시 시험에서 만료된 항목은 `get`이 돌려주지 않았지만 `get_stale`은 그대로 돌려주었다 [13].
+이렇게 돌려준 결과에 붙는 `_last_response_degraded` 표시는 `opencti-mcp` 서버 모듈이 응답에 싣지 않는다 [16].
+
+### 근거
+
+[1] `opencti-mcp`의 캐시 세 개와 유효 시간.
+
+```python
+        # Search results cache
+        self._search_cache: TTLCache[Any] = TTLCache(
+            ttl_seconds=60, negative_ttl_seconds=30, max_size=500, name="search"
+        )
+        self._cache_manager.register("search", self._search_cache)
+
+        # Entity lookup cache (by ID)
+        self._entity_cache: TTLCache[Any] = TTLCache(
+            ttl_seconds=300, negative_ttl_seconds=60, max_size=1000, name="entity"
+        )
+        self._cache_manager.register("entity", self._entity_cache)
+
+        # IOC context cache
+        self._ioc_cache: TTLCache[Any] = TTLCache(
+            ttl_seconds=60, negative_ttl_seconds=30, max_size=500, name="ioc"
+        )
+        self._cache_manager.register("ioc", self._ioc_cache)
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:359-375`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L359-L375)
+
+[2] 참조 지식 횟수와 호출 횟수는 모듈 변수다.
+
+```python
+# --- Enrichment Token Budget: FK delivery decay counters ---
+_fk_delivery_counts: dict[str, int] = defaultdict(int)
+_related_delivery_counts: dict[str, int] = defaultdict(int)
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:23-25`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L23-L25)
+
+```python
+# Per-process call counter for deterministic reminder rotation (thread-safe)
+_call_counter = itertools.count(1)
+```
+
+[`packages/sift-mcp/src/sift_mcp/response.py:92-93`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/response.py#L92-L93)
+
+[3] 백그라운드 해시 작업은 모듈 변수 표와 daemon 스레드로 실행된다.
+
+```python
+# A list job's rows per closing entry, so one audit line stays a few MB however
+# many files the job hashed (a folder of 300,000 files made one 254 MB line)
+ROWS_PER_ENTRY = 5_000
+# (the case, a file's key: real path, st_dev, st_ino, size, mtime_ns, ctime_ns;
+# or a list's: the tuple of its files' keys) -> the id of the job hashing it,
+# while that job runs. Per case: a job's closing entry goes to the case that asked.
+_jobs: dict[tuple, str] = {}
+_jobs_lock = threading.Lock()
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:37-44`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L37-L44)
+
+```python
+def _start(key: tuple, paths, case_dir: str, requested_by: str) -> str:
+    """The id of the job hashing `paths` (one path, or a list) for this case in
+    this process: the running one for the same key, else a new daemon thread."""
+    key = (os.path.realpath(case_dir), key)
+    with _jobs_lock:
+        if key in _jobs:
+            return _jobs[key]
+        job_id = _jobs[key] = f"hash-{uuid.uuid4().hex[:16]}"
+    threading.Thread(
+        target=_job,
+        args=(key, job_id, paths, case_dir, requested_by),
+        name=f"file-identity-{job_id}",
+        daemon=True,
+    ).start()
+    return job_id
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:329-343`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L329-L343)
+
+[4] 승인 검사의 실패 기록과 유지 시간: [`src/vhir_cli/approval_checks.py:41-56`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L41-L56), [`src/vhir_cli/approval_checks.py:341-353`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L341-L353).
+
+[5] `CaseManager`는 사건 ID를 메모리에 두되 호출마다 표시 파일을 다시 읽는다.
+
+```python
+    def _require_active_case(self) -> Path:
+        # Re-read active_case file on every call to detect case switches
+        active_file = _ACTIVE_CASE_FILE
+        if active_file.exists():
+            try:
+                content = active_file.read_text().strip()
+            except OSError:
+                content = ""
+            if content:
+                if os.path.isabs(content):
+                    case_dir = Path(content)
+                    new_id = case_dir.name
+                else:
+                    _validate_case_id(content)
+                    case_dir = self.cases_dir / content
+                    new_id = content
+                if case_dir.is_dir() and (case_dir / "CASE.yaml").exists():
+                    if (
+                        new_id != self._active_case_id
+                        and self._active_case_id is not None
+                    ):
+                        logger.info(
+                            "Case switched: %s → %s", self._active_case_id, new_id
+                        )
+                    self._active_case_id = new_id
+                    self._active_case_path = case_dir
+        d = self.active_case_dir
+        if d is None or not d.exists():
+            raise ValueError("No active case. Run 'vhir case activate <id>' first.")
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:966-994`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L966-L994)
+
+[6] 사건을 만들 때 표시 파일에 절대 경로를 쓴다: [`src/vhir_cli/main.py:1190-1204`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/main.py#L1190-L1204).
+
+[7] 사건 파일은 임시 파일에 쓴 뒤 바꿔 끼운다.
+
+```python
+def _atomic_write(path: Path, content: str) -> None:
+    """Write file atomically via temp file + rename to prevent data loss on crash."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:38-52`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L38-L52)
+
+[8] 백그라운드 해시 결과를 사건의 `file-identity.jsonl`에서 읽는다.
+
+```python
+def _completed_rows(case_dir) -> dict[str, dict]:
+    """Each file's last recorded background result in this case (a hash or an
+    error), by real path, read from the log once."""
+    try:
+        raw = read_regular(Path(case_dir) / "audit" / "file-identity.jsonl")
+    except (OSError, NotRegularFile):
+        return {}
+    lines = raw.decode("utf-8").splitlines()
+    rows: dict[str, dict] = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("tool") not in (
+            "hash_complete", "hash_failed",
+        ):  # fmt: skip
+            continue
+        for row in entry.get("files") or [entry]:
+            if isinstance(row, dict) and isinstance(row.get("path"), str):
+                rows[os.path.realpath(row["path"])] = {
+                    **row, "job_id": entry.get("job_id", "")}  # fmt: skip
+    return rows
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:420-442`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L420-L442)
+
+[9] 승인 검사는 다시 해시한 값과 상태 값을 사건 파일에 둔다: [`src/vhir_cli/approval_checks.py:48-50`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L48-L50), [`src/vhir_cli/approval_checks.py:249-261`](https://github.com/AppliedIR/Valhuntir/blob/d9ab9279203c43b3e753fe3ebb60aca294b464d1/src/vhir_cli/approval_checks.py#L249-L261).
+
+[10] 읽을 수 없는 JSON 파일은 덮어쓰지 않는다.
+
+```python
+    def _load_json_file(self, path: Path, default: Any) -> Any:
+        """Load a JSON file, returning default on missing or corrupt.
+
+        If the file exists and has content but fails to parse, raises
+        ValueError to prevent silent data loss on the next write.
+        """
+        if not path.exists():
+            return default
+        try:
+            raw = fi.read_regular(path)
+        except (OSError, fi.NotRegularFile) as e:
+            logger.error("Failed to read JSON file %s: %s", path, e)
+            raise ValueError(f"Cannot read {path.name}: {e}") from e
+        data = raw.decode()
+        if not data.strip():
+            return default
+        try:
+            return json.loads(data)
+        except json.JSONDecodeError as e:
+            logger.error("Corrupt JSON file: %s", path)
+            raise ValueError(
+                f"{path.name} is corrupt (invalid JSON). "
+                f"Refusing to overwrite — fix or restore from backup."
+            ) from e
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:2258-2281`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L2258-L2281)
+
+[11] 끝난 해시 결과는 파일이 그대로일 때만 다시 쓴다.
+
+```python
+def completed_hashes(case_dir, paths) -> dict[str, dict]:
+    """What completed background jobs recorded for these files in this case,
+    `{path: {"sha256": …} or {"error": …}}`, taken only while a file is
+    unchanged: the same device, inode, size, mtime and ctime as then (ctime
+    can't be set back, so a rewrite with its mtime set back isn't taken; a
+    file fixed after a failure has a new ctime, so it's hashed again; a
+    failure also needs the same permissions, as a coarse ctime may not tick
+    when they're fixed). A failure is taken once, by the call that follows its job, which stops the
+    automatic retry (see `take_failures`); after that it's left out, so the
+    next request hashes the file again. Files with nothing recorded are left
+    out."""
+    rows = _completed_rows(case_dir)
+    found: dict[str, dict] = {}
+    for path in map(str, paths):
+        row = rows.get(os.path.realpath(path))
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        now = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        if row is None or tuple(row.get(k) for k in _STAT_KEY) != now:
+            continue
+        if row.get("sha256"):
+            found[path] = {"sha256": row["sha256"]}
+        elif row.get("error") and row.get("st_mode") == st.st_mode:
+            with _jobs_lock:
+                if (str(row.get("job_id", "")), os.path.realpath(path)) in _taken:
+                    continue
+            found[path] = {"error": row["error"], "job_id": str(row.get("job_id", ""))}
+    return found
+```
+
+[`packages/sift-common/src/sift_common/file_identity.py:449-478`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/file_identity.py#L449-L478)
+
+[12] `case-mcp`는 호출마다 표시 파일을 읽는다.
+
+```python
+    # Read active_case file first (detects case switches without restart)
+    active_file = _ACTIVE_CASE_FILE
+    if active_file.exists():
+        try:
+            content = active_file.read_text().strip()
+        except OSError:
+            content = ""
+        if content:
+            if os.path.isabs(content):
+                case_dir = Path(content)
+            else:
+                if ".." in content or "/" in content or "\\" in content:
+                    raise ValueError(f"Invalid case ID in active_case: {content}")
+                cases_dir = Path(os.environ.get("VHIR_CASES_DIR", _DEFAULT_CASES_DIR))
+                case_dir = cases_dir / content
+            if case_dir.is_dir():
+                return case_dir
+
+    # Fallback: env var (containers, tests, non-standard deployments)
+    env_dir = os.environ.get("VHIR_CASE_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if not p.is_dir():
+            raise ValueError(f"VHIR_CASE_DIR does not exist: {env_dir}")
+        return p
+
+    raise ValueError("No active case. Use case_init or case_activate first.")
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:227-253`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L227-L253)
+
+[13] (실행 확인) 컨테이너에서 사건을 연 뒤 새 `CaseManager`가 찾는 사건을 확인했고 `opencti_mcp.cache.TTLCache`를 TTL 0.2초, 상한 2개로 만들어 `get`, `get_stale`, 상한을 넘긴 뒤의 조회를 확인했다.
+
+[14] `case-mcp`의 증거 등록과 검증은 끝난 해시 결과를 먼저 쓴다.
+
+```python
+def _folder_hashes(case_dir, paths: list[str]) -> tuple[dict[str, str], str, dict]:
+    """A folder's file hashes within a tool call's time limit: what a
+    completed background job recorded for an unchanged file is taken (its
+    hash, or the error it couldn't be read with: used up only by a call that
+    starts no job, so a failure is never lost while another file hashes); the
+    rest are hashed in the call up to the inline limit, else in one background
+    job, whose id means "call again"."""
+    done = fi.completed_hashes(case_dir, paths)
+    hashes = {p: r["sha256"] for p, r in done.items() if "sha256" in r}
+    errors = {p: r["error"] for p, r in done.items() if "error" in r}
+    batch = fi.hash_files_for_call(
+        [p for p in paths if p not in done],
+        case_dir=case_dir,
+        requested_by="evidence_register",
+        inline_limit=fi.INLINE_LIMIT,
+    )
+    hashes.update((p, r.sha256) for p, r in batch.done.items())
+    errors.update((p, "not a regular file") for p in batch.not_regular)
+    if not batch.job_id:  # used now: the next request hashes them again
+        fi.take_failures(done)
+    return hashes, batch.job_id, errors
+```
+
+[`packages/case-mcp/src/case_mcp/server.py:171-191`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/case-mcp/src/case_mcp/server.py#L171-L191)
+
+[15] 만료된 항목은 지우지 않고 상한을 넘으면 오래된 항목을 버린다.
+
+```python
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return (False, None)
+
+            entry = self._cache[key]
+            ttl = self.negative_ttl if entry.is_negative else self.ttl
+
+            # Check expiration — don't delete, just return miss.
+            # Expired entries are kept for get_stale() (graceful degradation)
+            # and will be evicted by LRU when capacity is needed.
+            if time.monotonic() - entry.timestamp > ttl:
+                self._misses += 1
+                return (False, None)
+
+            # Move to end (LRU)
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return (True, entry.value)
+```
+
+[`packages/opencti/src/opencti_mcp/cache.py:85-103`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/cache.py#L85-L103)
+
+```python
+    def _set_unlocked(self, key: str, value: Any, is_negative: bool) -> None:
+        """Store value (must be called with lock held)."""
+        # Evict oldest if at capacity
+        while len(self._cache) >= self.max_size:
+            oldest_key = next(iter(self._cache))
+            del self._cache[oldest_key]
+            self._evictions += 1
+
+        self._cache[key] = CacheEntry(
+            value=value,
+            timestamp=time.monotonic(),
+            is_negative=is_negative,
+        )
+```
+
+[`packages/opencti/src/opencti_mcp/cache.py:115-127`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/cache.py#L115-L127)
+
+[16] 지표 검색은 실패하면 만료된 캐시 항목을 돌려준다.
+
+```python
+        except Exception as e:
+            # On failure, try graceful degradation
+            if hasattr(self, "_search_cache"):
+                found, cached, degraded = self._get_fallback(
+                    self._search_cache, cache_key
+                )
+                if found:
+                    logger.warning(
+                        f"Indicator search failed, returning cached result: {e}"
+                    )
+                    self._last_response_from_cache = True
+                    self._last_response_degraded = True
+                    return cached
+
+            logger.error(f"Indicator search failed: {e}")
+            raise QueryError(f"Indicator search failed: {type(e).__name__}") from e
+```
+
+[`packages/opencti/src/opencti_mcp/client.py:1215-1230`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1215-L1230)
+
+만료를 무시하는 조회: [`packages/opencti/src/opencti_mcp/client.py:408-428`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L408-L428), [`packages/opencti/src/opencti_mcp/client.py:1168-1180`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/client.py#L1168-L1180).

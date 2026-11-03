@@ -1,0 +1,285 @@
+---
+cell: L03
+details:
+- id: L03.02
+---
+
+# L03 기록 실패 처리
+
+### L03.02 경고 후 계속
+
+**구현.** 이 방식은 공통 기록기 `AuditWriter`로 항목을 쓰는 게이트웨이와 백엔드 7개의 모든 호출에 적용된다 [1].
+모든 경로는 도구를 실행한 뒤 항목을 쓴다 [2][3].
+`AuditWriter._write_entry`는 쓰기에서 `OSError`가 나면 예외를 올리지 않고 운영 로그에 경고를 남긴 뒤 거짓을 돌려준다 [1].
+`AuditWriter.log`는 이때 운영 로그에 경고를 하나 더 남기고 `None`을 돌려준다 [4].
+기록 폴더를 만들지 못한 경우도 운영 로그에 경고를 남기고 `None`을 돌려준다 [5].
+운영 로그는 표준 오류와 `~/.vhir/logs/<서비스>.jsonl`에 JSON 줄로 쓴다 [6].
+
+백엔드 도구는 `None`을 받으면 결과에 `warning`으로 `Audit write failed — action not recorded`를 붙여 돌려준다 [2][3].
+`sift-mcp.jsonl`과 `forensic-mcp.jsonl` 자리에 폴더를 두어 쓰기가 실패하게 하자 `run_command`는 명령을 실행해 결과와 이 경고를 돌려줬고 `add_todo`는 할 일을 저장한 뒤 이 경고를 돌려줬다 [7].
+두 호출 모두 응답의 `audit_id`는 `null`이었고 표준 오류에는 쓰지 못한 호출 ID를 담은 경고가 남았다 [7].
+게이트웨이는 기록 결과를 응답에 반영하지 않고 운영 로그의 경고만 남는다 [8][9].
+`log_lookup`도 쓰기가 실패하면 그 백엔드의 운영 로그에 경고를 남기고 호출을 계속한다 [10].
+
+`forensic-mcp`의 `record_finding`은 반박 검토 결과가 철회인 발견사항을 저장하지 않고 항목만 쓴다 [11][12].
+이 항목을 쓰지 못하면 같은 발견사항을 `withdrawal_unlogged`로 다시 처리해 검토자가 볼 초안으로 저장하고 항목을 한 번 더 쓴다 [11][12].
+초안에는 철회를 기록하지 못해 검토자에게 넘긴다는 메모가 들어간다 [13].
+이 분기는 실행하지 않았고 코드로만 확인했다.
+
+**한계.** 사건 폴더를 찾지 못해 항목을 쓰지 않은 경우에도 `AuditWriter.log`는 `None`을 돌려주므로 백엔드는 같은 쓰기 실패 경고를 붙인다 [4][2].
+사건이 없을 때 `run_command`를 부르자 쓰기를 시도하지 않았는데도 응답에 `Audit write failed — action not recorded`가 붙었다 [7].
+`_write_entry`는 `OSError`만 처리하고 그 밖의 예외는 도구 함수로 올린다 [1].
+
+### 근거
+
+[1] `_write_entry`는 덧붙이기 모드로 열어 쓰고 `OSError`가 나면 경고를 남기고 거짓을 돌려준다.
+
+```python
+        try:
+            log_file = audit_dir / f"{self.mcp_name}.jsonl"
+            # Non-blocking, and only into a regular file: a FIFO there would
+            # wait for a reader, or hand the entry to one
+            fd = os.open(
+                log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK, 0o666
+            )
+            try:  # the descriptor is closed on any failure before fdopen owns it
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError(f"{log_file} is not a regular file")
+                f = os.fdopen(fd, "a", encoding="utf-8")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
+                f.write(json.dumps(entry, default=str) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            return True
+        except OSError as e:
+            logger.warning(
+                "Failed to write audit entry for audit_id=%s tool=%s: %s "
+                "(this audit_id was NOT recorded to the audit trail)",
+                entry.get("audit_id"),
+                entry.get("tool"),
+                e,
+            )
+            return False
+```
+
+[`packages/sift-common/src/sift_common/audit.py:239-266`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L239-L266)
+
+[2] `run_command`는 실행을 마친 뒤 항목을 쓰고 실패하면 응답에 경고를 붙인다: [`packages/sift-mcp/src/sift_mcp/server.py:336-469`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-mcp/src/sift_mcp/server.py#L336-L469).
+
+[3] 저수준 백엔드는 처리를 마친 뒤 항목을 쓰고 실패하면 결과에 경고를 붙인다.
+
+```python
+        audit_id = self._audit.log(
+            tool=tool_name,
+            params=arguments,
+            result_summary=summary,
+            audit_id=audit_id,
+            elapsed_ms=elapsed_ms,
+        )
+        if audit_id is None:
+            result["warning"] = "Audit write failed — action not recorded"
+```
+
+[`packages/opencti/src/opencti_mcp/server.py:699-707`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/opencti/src/opencti_mcp/server.py#L699-L707)
+
+[4] `AuditWriter.log`는 기록 폴더가 없거나 쓰기가 실패하면 `None`을 돌려준다.
+
+```python
+        audit_dir = self._get_audit_dir(case_dir)
+        if not audit_dir:
+            return None
+```
+
+[`packages/sift-common/src/sift_common/audit.py:183-185`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L183-L185)
+
+```python
+        if not self._write_entry(entry, audit_dir):
+            logger.warning(
+                "Audit write failed for audit_id=%s — returning None",
+                audit_id,
+            )
+            return None
+        return audit_id
+```
+
+[`packages/sift-common/src/sift_common/audit.py:216-222`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L216-L222)
+
+[5] 기록 폴더를 만들지 못하면 경고를 남긴다.
+
+```python
+        try:
+            audit_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Cannot create audit directory %s: %s", audit_dir, e)
+            return None
+        return audit_dir
+```
+
+[`packages/sift-common/src/sift_common/audit.py:127-132`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/audit.py#L127-L132)
+
+[6] 운영 로그는 표준 오류와 `~/.vhir/logs/`의 파일에 쓴다.
+
+```python
+    # Always log to stderr
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(level)
+    stderr_handler.setFormatter(formatter)
+    pkg_logger.addHandler(stderr_handler)
+
+    # Optionally log to ~/.vhir/logs/
+    if log_to_file:
+        try:
+            log_dir = Path.home() / ".vhir" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(
+                log_dir / f"{service_name}.jsonl",
+                encoding="utf-8",
+            )
+            file_handler.setLevel(level)
+            file_handler.setFormatter(_StructuredFormatter(service_name))
+            pkg_logger.addHandler(file_handler)
+```
+
+[`packages/sift-common/src/sift_common/oplog.py:88-105`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/oplog.py#L88-L105)
+
+[7] (실행 확인) 컨테이너에서 사건 없이 `run_command`를 부른 다음 사건을 만든 뒤 `sift-mcp.jsonl`·`forensic-mcp.jsonl` 자리에 폴더를 두고 `run_command`와 `add_todo`를 불러 응답, `extractions/`, `todos.json`, 표준 오류의 경고를 확인했다.
+
+[8] 게이트웨이는 HTTP 백엔드 항목의 반환값을 쓰지 않고 예외만 경고로 남긴다.
+
+```python
+        # Centralized audit for HTTP backends (stdio backends audit themselves)
+        if isinstance(backend, HttpMCPBackend) and actual_name not in POLL_TOOLS:
+            elapsed_ms = (time.monotonic() - _start) * 1000
+            try:
+                await asyncio.to_thread(
+                    self._audit.log,
+                    tool=actual_name,
+                    params=_truncate_params(arguments),
+                    result_summary=_summarize_result(result),
+                    source="gateway_proxy",
+                    elapsed_ms=round(elapsed_ms, 1),
+                    extra={
+                        "backend": backend_name,
+                        "examiner": examiner,
+                        "backend_audit_id": _extract_audit_id(result),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Gateway audit failed for %s: %s", actual_name, exc)
+```
+
+[`packages/sift-gateway/src/sift_gateway/server.py:818-836`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/server.py#L818-L836)
+
+[9] 참조 조회 항목도 쓰지 못하면 응답을 그대로 돌려준다.
+
+```python
+def record(audit, backend_name: str, backend, tool: str, arguments: dict, result,
+           examiner=None, case_dir: str = "") -> str | None:  # fmt: skip
+    """Save a reference call's response in ``case_dir`` (from :func:`case_for`)
+    and write its entry there; the entry's audit id, or None (no case, or not
+    a reference call). Never raises: a lookup is answered whether or not it
+    could be recorded."""
+    if not case_dir or not is_reference(backend_name, tool):
+        return None
+    try:
+        from sift_gateway.audit_helpers import _extract_audit_id, _truncate_params
+
+        audit_dir = audit._get_audit_dir(case_dir) if case_dir else None
+        if not audit_dir:
+            return None
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:59-72`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L59-L72)
+
+```python
+    except Exception as e:  # noqa: BLE001 -- the lookup still answers
+        logger.warning("reference call %s not recorded: %s", tool, e)
+        return None
+```
+
+[`packages/sift-gateway/src/sift_gateway/reference.py:102-104`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-gateway/src/sift_gateway/reference.py#L102-L104)
+
+[10] `log_lookup`은 실패를 운영 로그 경고로만 남긴다.
+
+```python
+    except Exception as e:
+        # the writer's own oplog (setup_logging's logger for the service)
+        logging.getLogger(source.replace("-", "_")).warning(
+            "lookups log not written: %s: %s", type(e).__name__, e
+        )
+```
+
+[`packages/sift-common/src/sift_common/oplog.py:160-164`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/sift-common/src/sift_common/oplog.py#L160-L164)
+
+[11] 철회 항목을 쓰지 못하면 발견사항을 다시 처리하고 항목을 한 번 더 쓴다.
+
+```python
+        logged_id = audit.log(
+            tool="record_finding", params={"finding": finding}, result_summary=result
+        )
+        if result.get("status") == "WITHDRAWN" and logged_id is None:
+            # The audit entry is the only record of a withdrawal: without it,
+            # the finding goes to the examiner instead.
+            try:
+                result = manager.record_finding(
+                    finding,
+                    examiner_override=analyst_override,
+                    supporting_commands=supporting_commands,
+                    artifacts=artifacts,
+                    audit=audit,
+                    withdrawal_unlogged=True,
+                )
+            except Exception as e:
+                logger.error("record_finding failed: %s", e)
+                return {"error": str(e)}
+            logged_id = audit.log(
+                tool="record_finding",
+                params={"finding": finding},
+                result_summary=result,
+            )
+        if logged_id is None:
+            result["warning"] = " ".join(
+                filter(
+                    None,
+                    [result.get("warning"), "Audit write failed — action not recorded"],
+                )
+            )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/server.py:316-345`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/server.py#L316-L345)
+
+[12] `withdrawal_unlogged`이면 철회 결과를 돌려주지 않고 검토자용으로 저장한다.
+
+```python
+        challenge = finding.get("challenged") if isinstance(finding, dict) else None
+        if (
+            isinstance(challenge, dict)
+            and challenge.get("outcome") == "withdrawn"
+            and not withdrawal_unlogged
+        ):
+            withdrawn = self._withdrawal(finding, artifacts, case_dir)
+            if withdrawn:
+                return withdrawn
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1223-1231`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1223-L1231)
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1170-1183`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1170-L1183)
+
+[13] 저장하는 초안에 붙는 메모다.
+
+```python
+        if marker["outcome"] == "withdrawn":
+            notes.append(
+                "Withdrawal could not be logged; staged for the examiner."
+                if withdrawal_unlogged
+                else "Withdrawal refused: it needs the skeptic's tool output "
+                "and the output that contradicts the observation. "
+                "Staged for the examiner."
+            )
+```
+
+[`packages/forensic-mcp/src/forensic_mcp/case/manager.py:1498-1505`](https://github.com/AppliedIR/sift-mcp/blob/5ef6081a35252380ffe5456dca1a5f3355fbe01a/packages/forensic-mcp/src/forensic_mcp/case/manager.py#L1498-L1505)
