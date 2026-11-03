@@ -1,6 +1,7 @@
 // MCP 서버 정적 분석의 입구. 분석 화면(src/pages/analyze.tsx)이 쓴다.
 //   core.mjs    언어 판별, 읽을 파일 고르기(소스·의존성 파일), 요약(도구별 범위, 공통 경로)
-//   python.mjs  Python 서버: 등록 도구, 호출 그래프, 도구 밖의 MCP 기능, SDK 버전과 지원 규격
+//   python.mjs  Python 서버: 등록 도구, 호출 그래프, 도구 밖의 MCP 기능, SDK 버전과 지원 규격, 의존성 패키지
+//   osv.mjs     의존성 패키지의 알려진 취약점 조회(osv.dev). 분석과 따로 화면이 부른다
 // 파서(web-tree-sitter)는 부르는 쪽이 만들어 넘긴다. wasm 위치는 화면이 안다.
 //
 // 출력(extractTree):
@@ -13,11 +14,12 @@
 //   graph     도구가 호출하는 함수와 호출(python.mjs의 buildGraph)
 //   mcp       서버 객체·지시문, 전송 방식, 리소스, 프롬프트(python.mjs의 mcpFeatures),
 //             sdk(MCP SDK 버전과 지원 규격 범위, python.mjs의 readSdk)
+//   deps      의존성 패키지와 정확한 버전(python.mjs의 readDeps). 의존성 파일이 없으면 null
 //   summary   도구 수, 도구가 호출하는 함수·파일 수,
 //             shared(여러 도구가 거치는 함수: {fn, tools}. 거치는 도구가 많은 순)
 // 다른 언어는 EXTRACTORS와 GRAMMARS에 더한다.
 
-import { extractPython, readSdk } from './python.mjs';
+import { extractPython, readDeps, readSdk } from './python.mjs';
 
 const SKIP_DIRS = new Set(['.git', '.venv', 'venv', 'node_modules', 'tests', 'test', '__pycache__']);
 
@@ -28,7 +30,9 @@ export const GRAMMARS = { python: 'tree-sitter-python.wasm' };
 const EXTRACTORS = { python: extractPython };
 // 언어마다 의존성 파일에서 MCP SDK 버전과 규격을 읽는 함수
 const SDK_READERS = { python: readSdk };
-// 의존성 파일: MCP SDK 버전을 읽는다
+// 언어마다 의존성 파일에서 패키지와 버전을 읽는 함수
+const DEP_READERS = { python: readDeps };
+// 의존성 파일: MCP SDK 버전과 의존성 패키지를 읽는다
 const DEPENDENCY_FILE = /^(pyproject\.toml|uv\.lock|poetry\.lock|requirements[\w.-]*\.txt)$/;
 
 const ext = path => {
@@ -48,7 +52,7 @@ export function isSource(path) {
   return !isSkipped(path) && ext(path) === '.py' && !base.startsWith('test_');
 }
 
-/** MCP SDK 버전을 읽을 의존성 파일인가 */
+/** MCP SDK 버전과 패키지를 읽을 의존성 파일인가 */
 export function isDependency(path) {
   return !isSkipped(path) && DEPENDENCY_FILE.test(path.slice(path.lastIndexOf('/') + 1));
 }
@@ -122,8 +126,10 @@ export async function extractTree(paths, files, makeParser) {
   try {
     const sorted = files.filter(([p]) => isSource(p)).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     const out = EXTRACTORS[language](sorted, parser);
-    const sdk = SDK_READERS[language](files.filter(([p]) => isDependency(p)));
-    return { language, supported: true, ...out, mcp: { ...out.mcp, sdk }, summary: summarize(out.tools, out.graph) };
+    const depFiles = files.filter(([p]) => isDependency(p));
+    const sdk = SDK_READERS[language](depFiles);
+    const deps = DEP_READERS[language](depFiles);
+    return { language, supported: true, ...out, mcp: { ...out.mcp, sdk }, deps, summary: summarize(out.tools, out.graph) };
   } finally {
     parser.delete();
   }

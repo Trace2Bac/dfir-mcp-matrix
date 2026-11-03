@@ -764,11 +764,155 @@ function buildGraph({ trees, imports, fileSet }, tools, value) {
     }
     return { name: fn.name, path: fn.path, line: fn.line, end: fn.end, calls };
   });
+  const flowsOf = paramFlows(funcs, targets, callRecord, fileSet);
   for (const t of tools) {
     const id = idOf.get(`${t.path}:${t.line}`);
-    if (id !== undefined) t.fn = id;
+    if (id === undefined) continue;
+    t.fn = id;
+    t.flows = flowsOf(`${t.path}:${t.line}`, t.params.map(p => p.name)).map(({ key, ...f }) => ({ ...f, fn: idOf.get(key) }));
   }
   return { functions };
+}
+
+// ── 도구 인자 흐름 ──
+
+// 인자가 닿으면 남기는 저장소 밖 호출(graph의 ext 이름)과 종류
+const FLOW_SINKS = [
+  [/^subprocess\.(run|Popen|call|check_call|check_output|getoutput|getstatusoutput)$|^os\.(system|popen|exec\w*|spawn\w*)$|^asyncio\.create_subprocess_(exec|shell)$/, 'exec'],
+  [/^(open|io\.open|codecs\.open|gzip\.open|bz2\.open|lzma\.open)$/, 'open'],
+  [/^shutil\.(copy|copy2|copyfile|copytree|move|rmtree)$|^os\.(remove|unlink|rename|replace|rmdir|removedirs|makedirs|mkdir|truncate|chmod)$/, 'fs'],
+  [/^sqlite3\.connect$/, 'sqlite'],
+  [/^(requests|httpx)\.\w+$|^urllib\.request\.urlopen$|^socket\.create_connection$/, 'net'],
+  [/^(eval|exec|pickle\.loads?|marshal\.loads?)$/, 'eval'],
+];
+const FLOW_DEPTH = 3; // 도구 함수에서 몇 번 호출을 건너 따라가는가
+// 인자를 넣으면 그 객체도 인자 값을 담는 메서드: cmd.append(path)
+const COLLECT_METHODS = new Set(['append', 'extend', 'insert', 'add', 'update', 'appendleft']);
+
+/** 식 안의 변수 이름. x.attr의 attr, f(k=…)의 k처럼 변수가 아닌 이름은 뺀다 */
+function varNames(n) {
+  const out = new Set();
+  if (!n) return out;
+  for (const c of walk(n)) {
+    if (c.type !== 'identifier') continue;
+    const p = c.parent;
+    if (p?.type === 'attribute' && field(p, 'attribute')?.startIndex === c.startIndex) continue;
+    if (p?.type === 'keyword_argument' && field(p, 'name')?.startIndex === c.startIndex) continue;
+    out.add(c.text);
+  }
+  return out;
+}
+
+/** 대입받는 변수 이름. self.x = …, x[k] = …는 따라가지 않는다 */
+function targetNames(n) {
+  if (!n) return [];
+  if (n.type === 'identifier') return [n.text];
+  if (/pattern|^(tuple|list|expression_list|parenthesized_expression)$/.test(n.type)) return n.namedChildren.flatMap(targetNames);
+  return [];
+}
+
+/** 함수 정의의 매개변수 이름(위치 순). *args 같은 자리는 null */
+function paramNames(fn) {
+  return (field(fn, 'parameters')?.namedChildren ?? []).map(p =>
+    p.type === 'identifier' ? p.text
+      : p.type === 'typed_parameter' ? p.namedChildren.find(c => c.type === 'identifier')?.text ?? null
+        : p.type === 'default_parameter' || p.type === 'typed_default_parameter' ? field(p, 'name')?.text ?? null
+          : null);
+}
+
+/** open(…)의 모드: 'r'(읽기), 'w'(쓰기·추가·생성·갱신), '?'(코드만으로 못 정함) */
+function openMode(call) {
+  const m = positional(call)[1] ?? keywordArg(call, 'mode');
+  if (!m) return 'r';
+  const s = strConst(m);
+  return s === null ? '?' : /[wax+]/.test(s) ? 'w' : 'r';
+}
+
+/**
+ * 도구 인자 흐름을 구하는 함수를 만든다. 반환 함수(key, params)는 도구 함수(funcs의 key)와 인자 이름을 받아
+ * [{param, kind, call, mode?, key, line}]을 돌려준다: 인자 param의 값이 key 함수 line 줄의 저장소 밖 호출 call(종류 kind)의 인자로 들어간다.
+ * 값은 변수 이름으로 따라간다: 대입(x = f(p)), for·with·:=, cmd.append(p), 저장소 안 함수 호출의 인자 → 매개변수(FLOW_DEPTH번까지).
+ * 이름이 같으면 같은 값으로 보므로 실제보다 넓게 잡힐 수 있고, 어느 객체인지 모르는 메서드 호출(path.open())은 따라가지 않는다
+ */
+function paramFlows(funcs, targets, callRecord, fileSet) {
+  // 함수마다 한 번 만든다: 값이 옮겨 가는 곳 [{from, to}]과 호출 [{node, rec, args: [{names, pos?, kw?}]}]
+  const facts = new Map();
+  const factsOf = key => {
+    if (facts.has(key)) return facts.get(key);
+    const { node, path } = funcs.get(key);
+    const moves = [], calls = [];
+    for (const n of walk(field(node, 'body'))) {
+      if (n.type === 'assignment' || n.type === 'augmented_assignment' || n.type === 'for_statement' || n.type === 'for_in_clause') {
+        const right = field(n, 'right');
+        if (right) moves.push({ from: varNames(right), to: targetNames(field(n, 'left')) });
+      } else if (n.type === 'named_expression') {
+        moves.push({ from: varNames(field(n, 'value')), to: targetNames(field(n, 'name')) });
+      } else if (n.type === 'as_pattern') {
+        moves.push({ from: varNames(n.namedChildren[0]), to: targetNames(field(n, 'alias')?.namedChildren[0] ?? field(n, 'alias')) });
+      } else if (n.type === 'call') {
+        const args = [];
+        let pos = 0;
+        for (const a of argNodes(n)) {
+          if (a.type === 'keyword_argument') args.push({ names: varNames(field(a, 'value')), kw: field(a, 'name').text });
+          else if (a.type === 'list_splat' || a.type === 'dictionary_splat') args.push({ names: varNames(a) });
+          else args.push({ names: varNames(a), pos: pos++ });
+        }
+        const f = field(n, 'function');
+        if (f?.type === 'attribute' && field(f, 'object').type === 'identifier' && COLLECT_METHODS.has(field(f, 'attribute').text)) {
+          moves.push({ from: new Set(args.flatMap(a => [...a.names])), to: [field(f, 'object').text] });
+        }
+        calls.push({ node: n, rec: callRecord(n, path), args });
+      }
+    }
+    const out = { moves, calls, path };
+    facts.set(key, out);
+    return out;
+  };
+
+  return (start, params) => {
+    const out = new Map();
+    for (const param of params) {
+      const seen = new Set();
+      const visit = (key, names, depth) => {
+        const mark = `${key}|${[...names].sort().join(',')}`;
+        if (seen.has(mark)) return;
+        seen.add(mark);
+        const { moves, calls, path } = factsOf(key);
+        const tainted = new Set(names);
+        for (let changed = true; changed;) {
+          changed = false;
+          for (const m of moves) {
+            if (![...m.from].some(x => tainted.has(x))) continue;
+            for (const t of m.to) if (!tainted.has(t)) { tainted.add(t); changed = true; }
+          }
+        }
+        for (const { node, rec, args } of calls) {
+          const hit = args.filter(a => [...a.names].some(x => tainted.has(x)));
+          if (!hit.length || !rec) continue;
+          const to = targets(rec, path);
+          if (to.length) {
+            if (depth >= FLOW_DEPTH) continue;
+            for (const k of to) {
+              const ps = paramNames(funcs.get(k).node);
+              // obj.method(…)로 부르면 첫 매개변수(self·cls)는 obj다
+              const skip = rec.base && (ps[0] === 'self' || ps[0] === 'cls') ? 1 : 0;
+              const next = new Set(hit.map(a => (a.kw ?? (a.pos !== undefined ? ps[a.pos + skip] : null))).filter(Boolean));
+              if (next.size) visit(k, next, depth + 1);
+            }
+            continue;
+          }
+          const ext = rec.module && !moduleFile(rec.module, path, fileSet) ? `${rec.module}.${rec.callee}`
+            : !rec.module && !rec.base && BUILTIN_CALLS.has(rec.callee) ? rec.callee : null;
+          const kind = ext && FLOW_SINKS.find(([re]) => re.test(ext))?.[1];
+          if (!kind) continue;
+          const flow = { param, kind, call: ext, ...(kind === 'open' && { mode: openMode(node) }), key, line: line(node) };
+          out.set(`${param}|${key}|${flow.line}|${ext}|${flow.mode ?? ''}`, flow);
+        }
+      };
+      visit(start, new Set([param]), 0);
+    }
+    return [...out.values()];
+  };
 }
 
 // ── 도구 밖의 MCP 기능: 서버, 리소스, 프롬프트 ──
@@ -880,16 +1024,19 @@ const FASTMCP_MCP = [
   ['4.0.0', '2.0.0'],
 ];
 
-/** "1.23.1" → 비교용 숫자 배열. 2.0.0rc1 같은 시험판은 정식판보다 앞으로 친다 */
+/** "1.23.1" → 비교용 {nums: 릴리스 숫자, pre: 시험판(rc·dev 등)인가} */
 function versionKey(v) {
-  const nums = (v.match(/\d+/g) ?? []).slice(0, 3).map(Number);
-  while (nums.length < 3) nums.push(0);
-  return /\d(a|b|rc|dev)\d*$/i.test(v) ? [...nums, -1] : [...nums, 0];
+  const [, release = '', rest = ''] = String(v).match(/^\s*v?(\d+(?:\.\d+)*)(.*)$/) ?? [];
+  return { nums: release ? release.split('.').map(Number) : [], pre: /^[-_.]?(a|b|c|rc|alpha|beta|pre|preview|dev)\d*/i.test(rest) };
 }
+// 1.2.0.2처럼 자리 수가 달라도 빈 자리는 0으로 본다. 1.0rc1은 1.0보다 낮다
 export const versionAtLeast = (v, min) => {
   const a = versionKey(v), b = versionKey(min);
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
-  return true;
+  for (let i = 0; i < Math.max(a.nums.length, b.nums.length); i++) {
+    const x = a.nums[i] ?? 0, y = b.nums[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return !a.pre || b.pre;
 };
 const lookup = (table, v) => table.filter(([min]) => versionAtLeast(v, min)).pop()?.[1] ?? null;
 
@@ -901,17 +1048,19 @@ const lowerBound = spec =>
 
 // 패키지 이름 뒤에 올 수 있는 것: 끝, 공백, [extras], 버전 조건, 환경 표시(;). mcp-server-git 같은 다른 이름을 거른다
 const SDK_NAME = /^\s*(mcp|fastmcp)(?=$|[\s[<>=~!;(])(?:\[[^\]]*\])?\s*([^;#]*)/;
+// 모든 패키지 이름과 조건(readDeps가 쓴다)
+const ANY_NAME = /^\s*([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*([^;#]*)/;
 
 /**
- * pyproject.toml의 의존성에서 mcp·fastmcp 조건: [{pkg, spec, main}]. main은 실행용 의존성(dev·optional이 아님).
+ * pyproject.toml의 의존성에서 nameRe에 맞는 패키지 조건: [{pkg, spec, main}]. main은 실행용 의존성(dev·optional이 아님).
  * [project] dependencies, [project.optional-dependencies], [dependency-groups], tool.uv의 dev-dependencies,
  * poetry의 [tool.poetry.dependencies]·group·dev-dependencies만 본다. keywords 같은 다른 배열은 보지 않는다
  */
-function pyprojectDeps(text) {
+function pyprojectDeps(text, nameRe = SDK_NAME) {
   const out = [];
   let table = '', array = null; // array: 지금 읽는 의존성 배열이 실행용이면 true, dev·optional이면 false, 의존성이 아니면 'skip'
   const take = (str, main) => {
-    const m = str.match(SDK_NAME);
+    const m = str.match(nameRe);
     if (m) out.push({ pkg: m[1], spec: m[2].trim(), main });
   };
   for (const raw of text.split('\n')) {
@@ -933,13 +1082,30 @@ function pyprojectDeps(text) {
         : 'skip';
       if (kind !== 'skip') for (const m of rest.matchAll(/["']([^"']*)["']/g)) take(m[1], kind);
       if (!rest.includes(']')) array = kind;
-    } else if (/^tool\.poetry\.(dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/.test(table) && (key === 'mcp' || key === 'fastmcp')) {
+    } else if (/^tool\.poetry\.(dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/.test(table) && key !== 'python' && nameRe.test(key)) {
       // mcp = "^1.2" 또는 mcp = { version = "^1.2", extras = [...] }
       const spec = rest.match(/^["']([^"']*)["']/)?.[1] ?? rest.match(/version\s*=\s*["']([^"']*)["']/)?.[1] ?? '';
       out.push({ pkg: key, spec, main: table === 'tool.poetry.dependencies' });
     }
   }
   return out;
+}
+
+/** 의존성 파일을 얕은 경로부터(같으면 경로 순) */
+const byDepth = depFiles => {
+  const depth = p => p.split('/').length;
+  return [...depFiles].sort((a, b) => depth(a[0]) - depth(b[0]) || (a[0] < b[0] ? -1 : 1));
+};
+
+/** pyproject.toml·requirements*.txt에서 nameRe에 맞는 패키지 조건: [{pkg, spec, main}]. requirements-dev.txt·requirements-test.txt는 개발용으로 본다 */
+function declaredDeps(path, text, nameRe) {
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  if (base === 'pyproject.toml') return pyprojectDeps(text, nameRe);
+  return text.split('\n').flatMap(l => {
+    const m = l.match(nameRe);
+    // pip-compile --generate-hashes의 줄 끝 \는 조건이 아니다
+    return m ? [{ pkg: m[1], spec: m[2].replace(/\\\s*$/, '').trim(), main: !/dev|test/i.test(base) }] : [];
+  });
 }
 
 /**
@@ -951,25 +1117,16 @@ function pyprojectDeps(text) {
  * oldest~latest가 지원하는 규격 범위다. 실제 통신 규격은 이 안에서 클라이언트가 요청한 것으로 정해진다
  */
 export function readSdk(depFiles) {
-  const files = [...depFiles].sort((a, b) => a[0].split('/').length - b[0].split('/').length || (a[0] < b[0] ? -1 : 1));
   const locked = {}, declared = {};
-  for (const [path, text] of files) {
-    const base = path.slice(path.lastIndexOf('/') + 1);
-    if (base.endsWith('.lock')) {
-      for (const m of text.matchAll(/\[\[package\]\]\s*\nname\s*=\s*"([^"]+)"\s*\nversion\s*=\s*"([^"]+)"/g)) {
-        if ((m[1] === 'mcp' || m[1] === 'fastmcp') && !locked[m[1]]) locked[m[1]] = { version: m[2], source: path };
+  for (const [path, text] of byDepth(depFiles)) {
+    if (path.endsWith('.lock')) {
+      for (const p of lockPackages(text)) {
+        if ((p.name === 'mcp' || p.name === 'fastmcp') && p.version && !locked[p.name]) locked[p.name] = { version: p.version, source: path };
       }
       continue;
     }
-    // requirements-dev.txt·requirements-test.txt는 개발용으로 본다
-    const found = base === 'pyproject.toml'
-      ? pyprojectDeps(text)
-      : text.split('\n').flatMap(l => {
-        const m = l.match(SDK_NAME);
-        return m ? [{ pkg: m[1], spec: m[2].trim(), main: !/dev|test/i.test(base) }] : [];
-      });
     // 실행용 의존성을 개발용보다 먼저 쓴다
-    for (const { pkg, spec, main } of found) {
+    for (const { pkg, spec, main } of declaredDeps(path, text, SDK_NAME)) {
       if (!declared[pkg] || (main && !declared[pkg].main)) declared[pkg] = { spec, source: path, main };
     }
   }
@@ -1000,6 +1157,153 @@ export function readSdk(depFiles) {
     };
   }
   return null;
+}
+
+// PyPI 이름 정규화(PEP 503): Foo_Bar.baz → foo-bar-baz
+export const normName = n => n.toLowerCase().replace(/[-_.]+/g, '-');
+// 개발용으로 보는 묶음 이름(optional-dependencies의 dev, dependency-groups의 test 등)
+const DEV_GROUP = /^(dev|devel|develop|test|tests|testing|lint|linting|typing|docs?|ci)$/i;
+
+/**
+ * lock 파일의 [[package]] 블록을 읽는다(uv.lock·poetry.lock 공통).
+ * 결과: [{name, version, source, deps, optional, groups}].
+ * source는 uv의 source 종류(registry·editable·virtual·git·path·directory·url)나 poetry의 [package.source] type.
+ * deps·optional[묶음]·groups[묶음]은 [{name, version, extra}] (uv.lock만. poetry.lock은 category를 groups 대신 쓴다)
+ */
+function lockPackages(text) {
+  const out = [];
+  for (const block of text.split(/^\[\[package\]\]\s*$/m).slice(1)) {
+    const pkg = { name: null, version: null, source: 'registry', category: null, deps: [], optional: {}, groups: {} };
+    let table = '', key = null, buf = '';
+    const flush = () => {
+      // 항목 안에 source = { … }가 있을 수 있어 중괄호 한 겹까지 받는다
+      const entries = [...buf.matchAll(/\{\s*name\s*=\s*"([^"]+)"((?:[^{}]|\{[^{}]*\})*)\}/g)].map(([, name, rest]) => ({
+        name: normName(name),
+        version: rest.match(/version\s*=\s*"([^"]+)"/)?.[1] ?? null,
+        extra: [...(rest.match(/extra\s*=\s*\[([^\]]*)\]/)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map(m => m[1]),
+      }));
+      if (table === '' && key === 'dependencies') pkg.deps = entries;
+      else if (table === 'package.optional-dependencies') pkg.optional[key] = entries;
+      else if (table === 'package.dev-dependencies') pkg.groups[key] = entries;
+      key = null;
+      buf = '';
+    };
+    for (const raw of block.split('\n')) {
+      const line = raw.trim();
+      if (key !== null) {
+        if (line === ']') flush();
+        else buf += line + '\n';
+        continue;
+      }
+      const header = line.match(/^\[([^\]]+)\]$/);
+      if (header) { table = header[1].trim(); continue; }
+      const assign = line.match(/^"?([\w.-]+)"?\s*=\s*(.*)$/);
+      if (!assign) continue;
+      const [, k, rest] = assign;
+      if (table === '' && k === 'name') pkg.name = normName(rest.replace(/"/g, ''));
+      else if (table === '' && k === 'version') pkg.version = rest.replace(/"/g, '');
+      else if (table === '' && k === 'category') pkg.category = rest.replace(/"/g, '');
+      else if (table === '' && k === 'source') pkg.source = rest.match(/^\{\s*(\w+)/)?.[1] ?? 'registry';
+      else if (table === 'package.source' && k === 'type') pkg.source = rest.replace(/"/g, '');
+      else if (rest.startsWith('[')) {
+        key = k;
+        buf = rest.slice(1);
+        if (rest.trimEnd().endsWith(']')) { buf = buf.replace(/\]\s*$/, ''); flush(); }
+      }
+    }
+    if (pkg.name) out.push(pkg);
+  }
+  return out;
+}
+
+/**
+ * uv.lock 패키지마다 쓰임을 정한다: 프로젝트(editable·virtual)의 dependencies에서 닿으면 main,
+ * 개발용이 아닌 optional-dependencies에서만 닿으면 extra(그 묶음 이름을 group에), 개발용 묶음에서만 닿으면 dev.
+ * 어디서도 닿지 않으면 null
+ */
+function uvScopes(pkgs) {
+  const byName = new Map();
+  for (const p of pkgs) {
+    if (!byName.has(p.name)) byName.set(p.name, []);
+    byName.get(p.name).push(p);
+  }
+  const scope = new Map(); // 패키지 → {scope, group}. main → extra → dev 순서로 따라가서 처음 정한 것을 쓴다
+  const visited = new Set();
+  // 의존성 항목 하나가 가리키는 패키지들. 같은 이름이 여러 버전이면 version으로 고른다
+  const matches = e => (byName.get(e.name) ?? []).filter(p => !e.version || p.version === e.version);
+  const spread = (seeds, s, group) => {
+    const queue = [...seeds];
+    for (let i = 0; i < queue.length; i++) {
+      const e = queue[i];
+      for (const p of matches(e)) {
+        if (!scope.has(p)) scope.set(p, { scope: s, group });
+        // 같은 패키지라도 extra를 달리 요구하면 그 extra의 의존성을 더 따라간다
+        const mark = `${p.name}@${p.version}[${e.extra.join(',')}]`;
+        if (visited.has(mark)) continue;
+        visited.add(mark);
+        queue.push(...p.deps, ...e.extra.flatMap(x => p.optional[x] ?? []));
+      }
+    }
+  };
+  const roots = pkgs.filter(p => p.source === 'editable' || p.source === 'virtual');
+  for (const r of roots) scope.set(r, { scope: 'main', group: null });
+  spread(roots.flatMap(r => r.deps), 'main', null);
+  for (const r of roots) {
+    for (const [g, entries] of Object.entries(r.optional)) if (!DEV_GROUP.test(g)) spread(entries, 'extra', g);
+  }
+  for (const r of roots) {
+    for (const [g, entries] of Object.entries(r.optional)) if (DEV_GROUP.test(g)) spread(entries, 'dev', g);
+    for (const [g, entries] of Object.entries(r.groups)) spread(entries, 'dev', g);
+  }
+  return scope;
+}
+
+/**
+ * 의존성 파일에서 서버가 쓰는 패키지와 정확한 버전을 읽는다. 취약점 조회(osv.mjs)에 넘긴다.
+ * lock 파일(uv.lock, poetry.lock)이 있으면 가장 얕은 lock 파일 하나만 쓴다. 없으면 requirements*.txt의 == 고정 버전을 쓴다.
+ * 결과: {source, packages, skipped, unpinned} 또는 null(의존성 파일 없음).
+ *   packages  [{name, version, scope, group}]. scope는 main(실행용)·extra(선택 설치)·dev(개발용)·null(구분 못함)
+ *   skipped   PyPI 패키지가 아니라 조회하지 않는 것: [{name, version, reason}](git·경로 설치 등)
+ *   unpinned  버전이 정해지지 않아 조회하지 않는 것: [{name, spec, source}]
+ */
+export function readDeps(depFiles) {
+  const depth = p => p.split('/').length;
+  const files = byDepth(depFiles);
+  // 같은 깊이에 둘 다 있으면 uv.lock을 쓴다
+  const locks = files.filter(([p]) => p.endsWith('.lock'));
+  const lock = locks.find(([p]) => p.endsWith('uv.lock') && depth(p) === depth(locks[0][0])) ?? locks[0];
+  if (lock) {
+    const [path, text] = lock;
+    const pkgs = lockPackages(text);
+    const scopes = path.endsWith('uv.lock') ? uvScopes(pkgs) : null;
+    const packages = [], skipped = [];
+    for (const p of pkgs) {
+      if (p.source === 'editable' || p.source === 'virtual') continue; // 프로젝트 자신
+      if (!p.version || !['registry', 'legacy'].includes(p.source)) {
+        skipped.push({ name: p.name, version: p.version, reason: p.source });
+        continue;
+      }
+      const s = scopes?.get(p);
+      const scope = scopes ? s?.scope ?? null : p.category === 'main' ? 'main' : p.category === 'dev' ? 'dev' : null;
+      packages.push({ name: p.name, version: p.version, scope, group: s?.group ?? null });
+    }
+    return { source: path, packages, skipped, unpinned: [] };
+  }
+  if (!files.length) return null;
+  const packages = [], unpinned = [];
+  for (const [path, text] of files) {
+    // URL·경로 설치(pkg @ git+…, git+https://…)는 건너뛴다. -r·-e 같은 옵션 줄은 ANY_NAME에 맞지 않는다
+    for (const { pkg, spec, main } of declaredDeps(path, text, ANY_NAME).filter(d => !/@|:\/\//.test(d.spec))) {
+      const name = normName(pkg);
+      const pin = spec.match(/^===?\s*([\w.+!-]+)$/)?.[1];
+      if (pin && !packages.some(p => p.name === name && p.version === pin)) {
+        packages.push({ name, version: pin, scope: main ? 'main' : 'dev', group: null });
+      } else if (!pin && !unpinned.some(u => u.name === name)) {
+        unpinned.push({ name, spec, source: path });
+      }
+    }
+  }
+  return { source: files.map(([p]) => p).join(', '), packages, skipped: [], unpinned: unpinned.filter(u => !packages.some(p => p.name === u.name)) };
 }
 
 /** files: [경로, 내용] 목록(경로 순). parser: Python 문법을 넣은 web-tree-sitter Parser */
