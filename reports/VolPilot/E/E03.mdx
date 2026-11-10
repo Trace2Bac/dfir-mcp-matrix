@@ -1,0 +1,211 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 이미지 파일을 직접 여는 세 경로와 서버 코드가 파일을 쓰는 두 경로에 적용된다 [1][2][3][4].
+이미지를 여는 경로는 `Session`을 만들 때의 읽기 확인, 시작할 때의 해시 계산, `verify_image_integrity`의 해시 재계산이다 [1][2][3].
+읽기 확인 함수 `_verify_read_only`는 이미지를 `os.O_RDONLY`로 열었다가 바로 닫는다 [1].
+해시 함수 `_compute_sha256`은 이미지를 `rb` 모드로 열고 `verify_image_integrity`도 이 함수로 이미지를 다시 읽는다 [2][3].
+서버 코드에서 파일을 쓰기 모드로 여는 곳은 플러그인 설정 파일을 쓰는 `save_config`와 덤프 파일 처리기 둘뿐이다 [4].
+두 곳 모두 이미지 파일 자체를 쓰기 대상으로 열지 않는다 [4].
+
+초기화 지침은 누가 요청하든 이미지를 지우거나 옮기거나 바꾸지 말라고 적고 도구 설명은 도구마다 이미지를 바꾸지 않는다고 적는다 [5].
+
+**한계.** `_verify_read_only`는 이미지 파일에 쓰기 권한이 있으면 읽기 전용으로 바꾸라는 경고를 로그에 남기기만 한다 [1].
+이 경고는 서버의 표준 오류에만 출력되고 모델이 받는 응답에는 실리지 않으며 서버는 그대로 시작한다 [1][6].
+쓰기 권한이 있는 이미지로 서버를 시작하자 표준 오류에 `Image file is writable` 경고가 출력되었고 도구 호출은 그대로 실행되었다 [6].
+권한을 444로 바꾼 이미지로 `Session`을 만들자 이 경고가 나오지 않았다 [7].
+
+서버 코드는 이미지와 같은 폴더에 파일을 만들 수 있다 [8][9].
+저장한 설정이 없으면 플러그인 객체를 만들고 실행한 직후 `save_config`가 이미지 경로 뒤에 `.vol3cfg.json`을 붙인 파일에 설정을 쓴다 [8].
+시험용 플러그인으로 이 경로를 실행하자 이미지 옆에 `img.raw.vol3cfg.json`이 생겼다 [7].
+덤프 도구의 출력 폴더 `VOL_DUMP_DIR`이 이미지 폴더와 겹치는지는 확인하지 않는다 [9][10].
+덤프 파일 처리기는 같은 이름의 파일이 있으면 이름 뒤에 `-1`, `-2` 같은 번호를 붙여 새 파일로 쓴다 [9].
+이미지 폴더를 출력 폴더로 주고 이미지와 같은 이름 `img.raw`로 덤프 파일을 쓰자 `img-1.raw`가 새로 생겼고 이미지의 SHA-256은 바뀌지 않았다 [7].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 Volatility 3 플러그인을 실행하는 도구 95개에 적용된다 [11][12].
+95개는 `verify_image_integrity`를 뺀 모든 도구이고 교차 분석 도구 7개도 플러그인 결과를 거쳐 이미지를 읽는다 [12].
+서버는 이미지 경로를 `file://` URI로 바꿔 Volatility 3 설정 `automagic.LayerStacker.single_location`에 넣고 이미지를 읽는 일은 라이브러리에 맡긴다 [11][12].
+이 경로에서 원본을 지키는 것은 Volatility 3가 이미지를 읽기만 한다는 동작이다.
+Volatility 3 2.28.0의 `FileLayer`는 이미지를 `rb` 모드로 연다 [13].
+`file` scheme의 위치는 캐시 폴더에 복사하지 않고 그 자리에서 연다 [14].
+Volatility 3는 내려받은 심볼과 심볼 식별자 캐시를 이미지 옆이 아니라 자기 심볼 폴더와 캐시 폴더에 쓴다 [15].
+네트워크를 끈 컨테이너에서 무작위 바이트 이미지로 `windows_info`를 부르자 오류 응답이 돌아왔고 이미지 폴더에는 새 파일이 생기지 않았다 [6].
+이때 캐시 폴더 `~/.cache/volatility3`에는 `identifier.cache`가 생겼다 [6].
+
+증거를 읽기 전용으로 마운트하는 실행 경로는 저장소에 없다.
+README는 `uv`로 `mcp_server.py`를 직접 실행하게 하고 컨테이너 구성은 두지 않는다 [16].
+
+### 근거
+
+[1] `_verify_read_only`는 이미지를 `O_RDONLY`로 열고 쓰기 권한이 있으면 경고만 남긴다.
+
+```python
+    @staticmethod
+    def _verify_read_only(file_path: str) -> None:
+        """Verify the image file is opened read-only.
+
+        Opens the file with O_RDONLY to confirm read access, then checks
+        whether the file is writable. If writable, logs a warning
+        recommending the analyst set the file to read-only.
+        """
+        logger = logging.getLogger(__name__)
+        fd = os.open(file_path, os.O_RDONLY)
+        os.close(fd)
+        if os.access(file_path, os.W_OK):
+            logger.warning(
+                "Image file is writable: %s — "
+                "consider setting it to read-only (e.g., attrib +R or "
+                "chmod 444) to prevent accidental modification.",
+                file_path,
+            )
+```
+
+[`session.py:63-80`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L63-L80)
+
+[2] `_compute_sha256`은 이미지를 `rb`로 연다.
+
+```python
+    @staticmethod
+    def _compute_sha256(file_path: str) -> str:
+        """Compute SHA-256 hash of a file, reading in 64 KiB chunks."""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`session.py:82-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L82-L89)
+
+[3] `verify_image_integrity`는 같은 함수로 이미지를 다시 해시한다.
+
+```python
+    from datetime import datetime, timezone
+
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:127-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L127-L140)
+
+[4] 서버 코드에서 쓰기 모드로 파일을 여는 곳은 설정 파일과 덤프 파일 두 곳이다: [`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112), [`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77).
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112)
+
+[5] 초기화 지침의 증거 보존 문구다: [`mcp_server.py:29-34`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L29-L34), [`mcp_server.py:85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L85), [`mcp_server.py:125`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L125).
+
+[6] (실행 확인) 쓰기 권한이 있는 무작위 바이트 이미지로 stdio 서버를 시작하자 표준 오류에 경고가 출력되었고 `verify_image_integrity`는 정상 응답을 돌려주었으며 `windows_info`는 오류 응답 뒤에도 이미지 폴더에 새 파일을 남기지 않았다.
+
+[7] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 읽기 전용 이미지의 경고 여부, 시험용 플러그인 실행 뒤의 설정 파일, 이미지 폴더에 이미지와 같은 이름으로 쓴 덤프 파일을 확인했다.
+
+[8] 설정 파일 경로는 이미지 경로에 `.vol3cfg.json`을 붙인 것이고 플러그인을 실행한 직후 결과 행을 만들기 전에 쓴다.
+
+```python
+        self._config_path = Path(image_path + ".vol3cfg.json")
+```
+
+[`session.py:32-32`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L32-L32)
+
+```python
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:166-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L166-L171)
+
+[9] 덤프 파일 처리기는 받은 폴더를 만들고 같은 이름이 있으면 번호를 붙인다.
+
+```python
+    os.makedirs(output_dir, exist_ok=True)
+
+    class DumpFileHandler(io.BytesIO, plugins.FileHandlerInterface):
+        def __init__(self, filename: str):
+            io.BytesIO.__init__(self)
+            plugins.FileHandlerInterface.__init__(self, filename)
+
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:55-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L55-L77)
+
+[10] `VOL_DUMP_DIR`은 값 확인 없이 `Session`에 전달된다.
+
+```python
+# Optional on-disk directory for dump plugins (dumpfiles, pedump, ...). When
+# unset, calling any dump tool will raise with a clear message. When set,
+# binary extractions land in this directory; it is created on first use.
+DUMP_DIR = os.environ.get("VOL_DUMP_DIR", "")
+```
+
+[`mcp_server.py:18-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L18-L21)
+
+[11] `_init_context`는 이미지 URI를 Volatility 3 설정에 넣는다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+```
+
+[`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96)
+
+[12] 플러그인 실행은 `run_plugin`이 automagic과 플러그인을 차례로 실행하는 한 경로를 거친다: [`plugins/_common.py:133-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L133-L171), [`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133), [`plugins/correlation.py:1-7`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L1-L7).
+
+[13] Volatility 3 2.28.0의 `FileLayer`가 파일을 여는 모드다: [`volatility3/framework/layers/physical.py:119-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/physical.py#L119-L125).
+
+[14] Volatility 3 2.28.0의 `ResourceAccessor`는 `file` scheme을 캐시하지 않는다: [`volatility3/framework/layers/resources.py:87-101`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/resources.py#L87-L101).
+
+[15] Volatility 3 2.28.0의 캐시 폴더, 심볼 폴더, 심볼을 내려받아 쓰는 곳이다: [`volatility3/framework/constants/__init__.py:28-51`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L51), [`volatility3/framework/symbols/windows/pdbutil.py:237-256`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L237-L256).
+
+[16] README의 실행 안내다: [`README.md:55-58`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L55-L58), [`README.md:87`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L87).

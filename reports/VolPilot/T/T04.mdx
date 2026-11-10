@@ -1,0 +1,117 @@
+---
+cell: T04
+details:
+- id: T04.01
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 서버의 모든 도구에 적용된다 [1][2].
+서버는 Volatility 3 2.28.0을 Python 라이브러리로 불러 플러그인 클래스를 서버 프로세스 안에서 만들고 실행한다 [1].
+공통 함수 `run_plugin`은 automagic을 실행해 계층과 심볼을 정한 뒤 플러그인 객체를 만들고 `run()`이 돌려준 결과 표를 서버 코드가 `dict`의 `list`로 바꾼다 [1].
+`Session`은 서버를 시작할 때 Volatility 문맥 `contexts.Context` 하나를 만들고 모든 도구 호출이 그 문맥을 함께 쓴다 [2].
+교차 분석 도구 7개는 플러그인 결과를 서버 코드로 대조하고 `verify_image_integrity`는 서버 코드로 이미지 해시를 계산한다 [3][4].
+추출 도구가 쓰는 파일도 서버 프로세스 안의 파일 처리기가 `VOL_DUMP_DIR`에 쓴다 [5].
+
+서버 코드에는 하위 프로세스를 실행하는 곳이 없다 [6].
+서버는 Volatility의 병렬 처리 설정을 바꾸지 않고 Volatility 2.28.0의 기본값은 `Parallelism.Off`다 [6][7].
+Volatility 2.28.0은 맞는 Windows 심볼이 없으면 Microsoft 심볼 서버에서 PDB를 받아 변환하는데 이 처리도 플러그인을 실행하는 서버 프로세스 안에서 일어난다 [8].
+그래서 분석은 서버와 같은 계정, 메모리, 파일, 네트워크 권한으로 실행된다.
+
+### 근거
+
+[1] 공통 함수 `run_plugin`이 Volatility의 automagic과 플러그인을 같은 프로세스에서 실행한다.
+결과 표는 `parse_treegrid`가 행마다 `dict`로 바꾼다: [`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85).
+
+```python
+    ctx = session.ctx
+    _purge_stale_hive_layers(ctx)
+    plugin_name = plugin_class.__name__
+    session.apply_config(plugin_name)
+    plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+
+    if extra_config:
+        for key, value in extra_config.items():
+            ctx.config[path_join(plugin_config_path, key)] = value
+
+    available = automagic.available(ctx)
+    automagics = automagic.choose_automagic(available, plugin_class)
+    automagic.run(automagics, ctx, plugin_class, BASE_CONFIG_PATH, progress_callback=_noop_progress)
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:150-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L150-L171)
+
+[2] `Session`은 Volatility 문맥 하나와 결과 캐시를 둔다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+```
+
+[`session.py:25-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L35)
+
+[3] 교차 분석 도구의 대조는 서버 코드다: [`plugins/correlation.py:1-7`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L1-L7), [`plugins/correlation.py:94-174`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L94-L174), [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).
+
+[4] 이미지 해시는 `hashlib`으로 계산한다.
+
+```python
+    @staticmethod
+    def _compute_sha256(file_path: str) -> str:
+        """Compute SHA-256 hash of a file, reading in 64 KiB chunks."""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`session.py:82-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L82-L89)
+
+[5] 추출 파일은 서버 코드의 파일 처리기가 쓴다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[6] 서버 코드가 불러오는 모듈은 `os`, `sys`, `hashlib`, `json`, `logging`, `pathlib`, `io`, `re`, `datetime`, `typing`, MCP SDK, Volatility 3이고 `subprocess`나 병렬 처리 설정은 없다: [`mcp_server.py:1-8`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1-L8), [`session.py:1-12`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L1-L12), [`plugins/_common.py:1-11`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L1-L11), [`plugins/_file_handler.py:16-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L16-L21).
+
+[7] Volatility 2.28.0의 병렬 처리 기본값이다: [`volatility3/framework/constants/__init__.py:110-116`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L110-L116).
+
+[8] Volatility 2.28.0은 PDB를 받아 ISF로 변환하고 심볼 폴더에 저장한다: [`volatility3/framework/symbols/windows/pdbutil.py:237-264`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L237-L264), [`volatility3/framework/constants/__init__.py:58-58`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L58-L58).

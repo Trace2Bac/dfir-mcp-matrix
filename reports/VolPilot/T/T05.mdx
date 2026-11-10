@@ -1,0 +1,173 @@
+---
+cell: T05
+details:
+- id: T05.01
+- id: T05.02
+---
+
+# T05 분석 도구 검증
+
+### T05.01 저장소·의존성 고정
+
+**구현.** 이 방식은 분석 도구 Volatility 3와 Volatility가 쓰는 추가 라이브러리, 교차 분석 도구의 판단 목록에 적용된다 [1][2][3].
+`pyproject.toml`은 `volatility3==2.28.0`을 적고 선택 의존성 `full`도 `volatility3[full]==2.28.0`으로 적는다 [1].
+잠금 파일 `uv.lock`은 `volatility3` 2.28.0과 배포 파일의 sha256을 적는다 [2].
+같은 잠금 파일은 `full`이 설치하는 `yara-python` 4.5.4, `capstone` 5.0.9, `pycryptodome` 3.23.0과 그 sha256도 적는다 [4].
+README는 `uv sync --frozen --python 3.12`로 잠금 파일 그대로 설치하게 하고 선택 의존성도 `--frozen`과 함께 설치하게 한다 [5].
+MCP Python SDK도 잠금 파일에 고정되어 있지만 증거를 해석하지 않는 서버 실행용 라이브러리라 이 방식으로 보지 않는다 [1][2].
+
+교차 분석 도구가 쓰는 판단 목록은 서버 코드의 상수다 [3].
+한 개만 있어야 하는 프로세스, 프로세스마다 기대하는 부모, 세션 0에서 실행되어야 하는 프로세스, 이름을 흉내 내는지 대조할 정상 이름이 여기에 있다 [3].
+그래서 기준 커밋이 이 목록의 내용을 정한다 [3].
+
+Volatility가 쓰는 Windows 심볼은 고정하지 않는다.
+저장소에는 심볼 파일이 없고 README는 처음 분석할 때 맞는 Windows 심볼을 내려받을 수 있다고 적는다 [5].
+서버는 Volatility의 심볼 폴더, 오프라인 여부, 심볼 서버 설정을 바꾸지 않는다 [6].
+Volatility 2.28.0은 패키지 안의 심볼 폴더와 사용자 캐시 폴더에서 심볼을 찾고 없으면 Microsoft 심볼 서버에서 PDB를 받아 변환해 저장한다 [7][8].
+서버는 실행 중에 Volatility나 심볼의 버전을 묻거나 읽지 않는다 [6].
+
+**한계.** `pyproject.toml`만 따라 설치하면 `full`이 설치하는 라이브러리는 Volatility 2.28.0이 적은 범위 안에서 정해진다 [9].
+`yara-python`은 4.5.1 이상 5 미만, `capstone`은 5.0.3 이상 6 미만, `pycryptodome`은 3.21.0 이상 4 미만이다 [9].
+서버는 설치된 버전을 확인하지 않는다 [6].
+
+### T05.02 설정·호출 인자로 지정
+
+**구현.** 이 방식은 서버가 이미지 옆에 저장하는 Volatility 설정 파일 `<이미지 경로>.vol3cfg.json`에 적용된다 [10].
+저장된 설정이 아직 없으면 서버는 플러그인 객체를 만들고 `run()`을 부른 뒤 그 플러그인의 `build_configuration()` 결과를 이 파일에 저장한다 [10].
+저장한 뒤에는 같은 세션의 다음 플러그인 실행과 서버를 다시 시작한 뒤의 실행 모두 이 설정을 플러그인의 설정 위치에 넣는다 [10][11].
+Volatility 2.28.0의 `build_configuration`은 플러그인 요구 사항의 값 가운데 `None`이 아닌 값을 모으고 계층과 심볼 표 요구 사항은 그 객체의 하위 설정을 모은다 [12][13].
+Volatility 2.28.0의 심볼 표는 자기 설정에 ISF 파일 위치 `isf_url`을 넣는다 [14].
+Volatility 2.28.0의 automagic 가운데 가장 먼저 실행되는 `ConstructionMagic`은 설정에 들어 있는 값으로 계층과 심볼 표를 만든다 [15].
+
+**한계.** 서버는 이 파일을 처음 한 번만 쓰고 그 뒤에는 바꾸지 않는다 [10].
+서버는 이 파일에 적힌 심볼 위치나 그 내용을 대조하지 않는다 [10].
+Windows 이미지로 플러그인을 실행하지 못해 파일의 실제 내용은 확인하지 못했다.
+
+### 근거
+
+[1] `pyproject.toml`의 의존성이다.
+
+```toml
+dependencies = [
+    "mcp>=1.0.0",
+    "volatility3==2.28.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "tiktoken>=0.7.0",
+]
+# Mirrors volatility3's own "full" extra (yara-python, capstone, pycryptodome,
+# pillow, leechcorepyc). Unlocks windows.registry.{hashdump,lsadump,cachedump},
+# windows.vadyarascan, windows.mftscan, and windows.malware.{direct,indirect}_system_calls.
+# pillow and leechcorepyc are pulled in for parity with upstream but are not
+# exercised by any Windows plugin this server wraps.
+full = [
+    "volatility3[full]==2.28.0",
+```
+
+[`pyproject.toml:6-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/pyproject.toml#L6-L21)
+
+[2] 잠금 파일의 Volatility 항목이다.
+
+```text
+name = "volatility3"
+version = "2.28.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pefile" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/d7/4bb5bebbc2b2fd64f88d423c991d410a6bcf3535ac7f9f9c5b0decb37505/volatility3-2.28.0.tar.gz", hash = "sha256:b1d83999fea1281cafb6ba06514f764ddbe443dcdd940f7fdb86ad7d9f825293", size = 1132709, upload-time = "2026-04-30T19:56:57.409Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/39/6be7f2f3d67038978edb553050770be4946924ddd87d71bc303c6964c929/volatility3-2.28.0-py3-none-any.whl", hash = "sha256:68ea2257d25d2ab6160bb29203ce9bf3e91a8a852a420cb819ebb4c4115eaa68", size = 1421397, upload-time = "2026-04-30T19:56:55.293Z" },
+]
+```
+
+[`uv.lock:1181-1190`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/uv.lock#L1181-L1190)
+
+[3] 교차 분석 도구의 판단 목록이다.
+
+```python
+# Processes that should normally have exactly one instance
+_SINGLETON_PROCESSES = {
+    "lsass.exe", "services.exe", "smss.exe", "wininit.exe", "lsm.exe",
+}
+
+# Expected parent for key system processes (child -> expected parent name)
+_EXPECTED_PARENTS = {
+    "svchost.exe": "services.exe",
+    "services.exe": "wininit.exe",
+    "lsass.exe": "wininit.exe",
+    "wininit.exe": "smss.exe",
+    "csrss.exe": "smss.exe",
+    "smss.exe": "System",
+}
+
+# System processes that must run in Session 0
+_SESSION0_PROCESSES = {
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "lsm.exe",
+}
+
+# Legitimate names that attackers commonly typosquat
+_LEGIT_NAMES = {
+    "svchost.exe", "csrss.exe", "lsass.exe", "services.exe",
+    "smss.exe", "wininit.exe", "explorer.exe", "winlogon.exe",
+}
+```
+
+[`plugins/correlation.py:50-75`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L50-L75)
+
+[4] 잠금 파일의 `capstone`, `pycryptodome`, `yara-python` 항목이다: [`uv.lock:38-41`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/uv.lock#L38-L41), [`uv.lock:539-542`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/uv.lock#L539-L542), [`uv.lock:1228-1231`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/uv.lock#L1228-L1231).
+
+[5] README의 설치 절차와 심볼 안내다: [`README.md:15-33`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L15-L33).
+
+[6] 서버 코드는 Volatility의 `constants`를 불러오지 않고 버전을 읽는 코드도 없다.
+서버 코드가 불러오는 모듈이다: [`mcp_server.py:1-8`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1-L8), [`session.py:1-12`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L1-L12), [`plugins/_common.py:1-11`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L1-L11).
+
+[7] Volatility 2.28.0의 심볼 폴더와 심볼 서버 주소다: [`volatility3/framework/constants/__init__.py:28-58`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L58), [`volatility3/framework/constants/__init__.py:122-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L122-L125).
+
+[8] Volatility 2.28.0은 PDB를 받아 ISF로 변환하고 심볼 폴더에 저장한다: [`volatility3/framework/symbols/windows/pdbutil.py:237-264`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L237-L264).
+
+[9] Volatility 2.28.0의 `pyproject.toml`이 `full`의 범위를 적는다: [`pyproject.toml:21-27`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/pyproject.toml#L21-L27).
+
+[10] `Session`은 저장된 설정을 시작할 때 읽고 플러그인마다 넣으며 처음 저장할 때만 파일을 쓴다.
+공통 함수 `run_plugin`은 설정이 아직 없으면 `run()`을 부른 플러그인의 `build_configuration()`을 저장한다: [`plugins/_common.py:168-169`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L168-L169).
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+
+    def apply_config(self, plugin_name: str):
+        """Splice saved config into a plugin's config path if available."""
+        if self._saved_config is not None:
+            plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+            self.ctx.config.splice(
+                plugin_config_path,
+                HierarchicalDict(self._saved_config),
+            )
+
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:91-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L112)
+
+[11] (실행 확인) 무작위 바이트 이미지 옆에 `{"pid": [999]}`만 적은 `.vol3cfg.json`을 두고 세션을 만든 뒤 `malware.malfind`, `pslist`, `malware.hollowprocesses`를 부르자 세 플러그인의 설정 `pid`가 모두 `[999]`였다.
+플러그인 실행이 실패한 세션에서는 이 파일이 만들어지지 않았다.
+
+[12] Volatility 2.28.0의 `build_configuration`이다: [`volatility3/framework/interfaces/configuration.py:704-728`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/interfaces/configuration.py#L704-L728).
+
+[13] Volatility 2.28.0의 계층·모듈·심볼 표 요구 사항은 그 객체의 `build_configuration()`으로 하위 설정을 모은다: [`volatility3/framework/configuration/requirements.py:427-432`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/configuration/requirements.py#L427-L432), [`volatility3/framework/configuration/requirements.py:515-520`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/configuration/requirements.py#L515-L520), [`volatility3/framework/configuration/requirements.py:722-727`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/configuration/requirements.py#L722-L727).
+
+[14] Volatility 2.28.0의 심볼 표는 만들 때 받은 `isf_url`을 자기 설정에 넣는다: [`volatility3/framework/symbols/intermed.py:157-159`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/intermed.py#L157-L159).
+
+[15] Volatility 2.28.0의 `ConstructionMagic`은 우선순위가 0이고 요구 사항을 아래에서부터 따라가며 설정의 값으로 계층과 심볼 표를 만든다: [`volatility3/framework/automagic/construct_layers.py:19-87`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/automagic/construct_layers.py#L19-L87).

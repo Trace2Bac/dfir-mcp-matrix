@@ -1,0 +1,180 @@
+---
+cell: E01
+details:
+- id: E01.01
+- id: E01.02
+- id: E01.03
+---
+
+# E01 증거 등록 관리
+
+### E01.01 증거 ID·등록 목록
+
+**구현.** 이 방식은 서버를 시작할 때 환경변수 `VOL_IMAGE_PATH`로 받는 메모리 이미지 하나에 적용된다 [1].
+서버는 이 값이 비었거나 그 경로에 파일이 없으면 표준 오류에 그 사실을 출력하고 종료 코드 1로 끝난다 [1].
+파일이 있으면 서버는 `Session` 객체 하나를 만들고 이미지 경로 `image_path`, 크기 `image_size`, SHA-256 `image_sha256`을 그 객체에 담는다 [1][2].
+`Session`은 서버 프로세스에 하나뿐이고 이 상태 칸에는 이미지가 하나만 들어간다 [1][2].
+초기화 지침은 이미지가 시작할 때 정해진다고 적고 README는 다른 이미지를 분석하려면 서버를 다시 시작하라고 적는다 [3].
+이미지를 바꾸거나 더하는 도구는 없다 [1].
+증거 ID는 따로 없고 이미지는 경로로만 구별한다 [2].
+`windows_info`는 세 값을 응답의 `image`에 담아 돌려준다 [4].
+서버는 이 값을 파일에 쓰지 않으므로 등록 정보는 프로세스가 끝나면 사라진다 [2].
+
+### E01.02 수집 위치와 저장 위치 기록
+
+**구현.** 이 방식은 `Session`의 `image_path`에 적용된다 [2].
+`image_path`는 `VOL_IMAGE_PATH`의 문자열을 그대로 담는다 [1][2].
+서버는 이미지를 다른 곳으로 옮기거나 복사하지 않고 이 경로의 파일을 Volatility 3에 넘긴다 [5].
+그래서 이 값은 이미지가 놓인 저장 위치다.
+서버에는 대상 시스템에서 메모리를 수집하는 기능이 없어 이미지를 어디서 가져왔는지는 남기지 않는다.
+
+**한계.** `windows_info`와 `verify_image_integrity`의 설명은 응답의 경로를 절대 경로라고 적지만 서버는 `image_path`를 절대 경로로 바꾸지 않는다 [4][6].
+`Session`에 상대 경로 `ev6/img.raw`를 주자 `image_path`는 그 상대 경로 그대로였다 [7].
+README는 `VOL_IMAGE_PATH`에 절대 경로를 주라고 적는다 [8].
+
+### E01.03 크기·등록 시각·등록자 기록
+
+**구현.** 이 방식은 `Session`의 `image_size`에 적용된다 [2].
+`image_size`는 서버를 시작할 때 이미지 파일의 `st_size`로 읽은 바이트 수다 [2].
+등록 시각과 등록한 주체는 남기지 않는다 [2].
+
+**한계.** `image_size`는 시작할 때 한 번만 읽고 다시 읽지 않는다 [2].
+`verify_image_integrity`도 다시 읽은 크기가 아니라 이 값을 응답의 `image_size`에 싣는다 [9].
+서버를 시작한 뒤 이미지 끝에 8바이트를 더하고 `verify_image_integrity`를 부르자 응답의 `image_size`는 처음 값 1048576이었다 [10].
+
+### 근거
+
+[1] 서버는 `VOL_IMAGE_PATH`를 확인한 뒤 모듈 변수 `session` 하나를 만든다.
+
+```python
+IMAGE_PATH = os.environ.get("VOL_IMAGE_PATH", "")
+if not IMAGE_PATH or not os.path.isfile(IMAGE_PATH):
+    print(
+        f"VOL_IMAGE_PATH is not set or file does not exist: {IMAGE_PATH!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+```
+
+[`mcp_server.py:10-16`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L10-L16)
+
+```python
+session = Session(IMAGE_PATH, dump_dir=DUMP_DIR)
+```
+
+[`mcp_server.py:45-45`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L45-L45)
+
+[2] `Session`은 이미지 경로, 크기, SHA-256을 객체에 담는다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+
+        # Evidence integrity: verify read-only access and compute SHA-256.
+        # compute_hash=False skips SHA-256 for performance benchmarks where
+        # the hash is a one-time server-startup cost, not part of per-call
+        # latency. Production callers must leave compute_hash=True.
+        image = Path(image_path)
+        self.image_size = image.stat().st_size
+        self._verify_read_only(image_path)
+        self.image_sha256 = self._compute_sha256(image_path) if compute_hash else ""
+
+        self._init_context()
+```
+
+[`session.py:25-46`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L46)
+
+[3] 초기화 지침과 README는 이미지가 시작할 때 정해진다고 적는다: [`mcp_server.py:23-28`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L28), [`README.md:44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L44).
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+        "This server provides read-only forensic analysis of a Windows memory "
+        "image using the Volatility3 framework. The memory image is fixed at "
+        "startup and treated as legally protected evidence.\n\n"
+```
+
+[`mcp_server.py:23-28`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L28)
+
+[4] `windows_info`는 플러그인 결과에 `image`를 더해 돌려주고 설명은 `path`를 절대 경로라고 적는다.
+
+```python
+    info = session.run_plugin("info")
+    info["image"] = {
+        "path": session.image_path,
+        "size": session.image_size,
+        "sha256": session.image_sha256,
+    }
+    return info
+```
+
+[`mcp_server.py:87-93`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L87-L93)
+
+[`mcp_server.py:61-67`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L61-L67)
+
+[5] `_init_context`는 이미지 경로를 실제 경로로 바꾼 `file://` URI를 Volatility 3 설정에 넣는다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+```
+
+[`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96)
+
+[6] `verify_image_integrity`의 설명은 `image_path`를 절대 경로라고 적는다.
+
+```python
+    Returns a dict with:
+    - "plugin": "verify_image_integrity"
+    - "results": {
+        "match": whether current hash matches the baseline (bool),
+        "expected_sha256": hash computed at session start (str),
+        "actual_sha256": hash computed just now (str),
+        "image_path": absolute path to the image file (str),
+        "image_size": file size in bytes (int),
+        "verified_at": ISO 8601 timestamp of this verification (str)
+      }
+```
+
+[`mcp_server.py:107-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L107-L116)
+
+[7] (실행 확인) 컨테이너 작업 폴더에서 `Session`에 상대 경로를 주자 `image_path`가 상대 경로 그대로였다.
+
+[8] README의 환경변수 표는 `VOL_IMAGE_PATH`를 절대 경로로 적는다: [`README.md:41`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L41).
+
+[9] `verify_image_integrity`는 `session.image_size`를 그대로 싣는다.
+
+```python
+    from datetime import datetime, timezone
+
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:127-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L127-L140)
+
+[10] (실행 확인) stdio 클라이언트로 서버를 시작해 이미지 끝에 8바이트를 더한 뒤 `verify_image_integrity`를 부르자 `image_size`가 1048576 그대로였고 파일 크기는 1048584였다.

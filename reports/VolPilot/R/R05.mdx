@@ -1,0 +1,244 @@
+---
+cell: R05
+details:
+- id: R05.01
+- id: R05.03
+- id: R05.04
+---
+
+# R05 결과 출처 표시
+
+### R05.01 증거·파일 ID
+
+**구현.** 이 방식은 `windows_info`와 `verify_image_integrity`에 적용된다 [1][2].
+서버는 시작할 때 `VOL_IMAGE_PATH`가 가리키는 파일 하나를 세션에 묶고 모든 도구가 이 이미지를 읽는다 [3].
+이미지를 바꾸려면 서버를 다시 시작해야 하므로 한 서버 프로세스의 응답은 모두 같은 이미지에서 나온다 [3].
+`windows_info`는 응답의 `image`에 이미지 경로 `path`, 크기 `size`, 시작할 때 계산한 SHA-256 `sha256`을 싣는다 [1].
+`verify_image_integrity`는 `image_path`, `image_size`, 시작할 때의 해시 `expected_sha256`을 싣는다 [2].
+다른 도구의 응답에는 이미지 경로나 해시가 없다 [4].
+
+**한계.** `path`와 `image_path`는 `VOL_IMAGE_PATH`에 준 문자열 그대로다 [3].
+그래서 상대 경로를 주면 서버를 시작한 폴더 기준의 상대 경로가 실린다 [3].
+두 도구의 설명은 이 값을 이미지 파일의 절대 경로라고 적는다 [5].
+
+### R05.03 레코드 키·번호
+
+**구현.** 이 방식은 Volatility 3 플러그인의 열을 모두 싣는 플러그인 도구와 교차 분석 도구에 적용된다 [4][6].
+서버는 플러그인이 낸 열을 빼지 않고 싣는다 [4].
+프로세스를 다루는 플러그인의 행에는 프로세스 ID(`pslist`·`psscan`·`dlllist`·`netscan`의 `PID`, `ldrmodules`의 `Pid`)가 있다 [7].
+`registry.printkey`의 행에는 레지스트리 키 경로 `Key`가, `mftscan`의 행에는 MFT 레코드 번호 `Record Number`가 있다 [7].
+교차 분석 도구는 결과 항목마다 `pid`를 싣거나 플러그인 행을 그대로 싣는다 [6].
+
+**한계.** `build_timeline`의 `program_executed`·`userassist_executed` 사건은 `pid`를 `None`으로 두고 키 경로나 레코드 번호를 싣지 않는다 [8].
+이 사건을 만들면 `name`은 `shimcachemem`에서는 `Path` 키 값이고 `userassist`에서는 값 이름 `Name`이다 [8].
+
+### R05.04 바이트·섹터·행 오프셋
+
+**구현.** 이 방식은 물리 주소나 이미지 파일 안 위치를 열로 내는 플러그인 도구에 적용된다 [9][10][11].
+`windows_memmap`은 Volatility 3 `windows.memmap`의 물리 주소 `Physical`과 이미지 파일 안 위치 `Offset in File`을 싣는다 [9].
+`windows_strings`는 `Physical Address` 열을, `windows_mbrscan`은 `Potential MBR at Physical Offset` 열을 싣는다 [9].
+`windows_malware_psxview`는 모델이 `physical_offsets`를 참으로 주면 `physical-offsets`를 켜고 이때 열 이름은 `Offset(Physical)`이 된다 [10].
+`windows_psscan`·`windows_netscan`·`windows_filescan`의 오프셋은 풀 스캔이 찾은 객체의 위치다 [11].
+Volatility 3 2.28.0의 풀 스캔은 Windows 10 이전 이미지에서 커널 가상 주소 계층이 아니라 그 아래의 메모리 계층을 훑는다 [11].
+그래서 Windows 10 이전 이미지에서 세 도구의 오프셋은 물리 주소다 [11].
+`pslist`의 `Offset(V)`, `vadregexscan`의 `Offset`, `dlllist`의 `Base`는 가상 주소다 [7].
+
+**한계.** Windows 10 이후 이미지에서는 풀 스캔이 커널 가상 주소 계층을 훑으므로 세 도구의 오프셋이 가상 주소가 된다 [11].
+서버는 `windows.psscan`에 물리 주소로 바꿔 내는 `physical`을 넘기지 않는다 [12].
+`windows_psscan`의 열 이름은 늘 `Offset(V)`이고 `windows_netscan`·`windows_filescan`의 `Offset`과 응답 어디에도 물리 주소인지 가상 주소인지 표시가 없다 [11][12].
+
+### 근거
+
+[1] `windows_info`는 플러그인 결과에 이미지 경로, 크기, 해시를 더한다.
+
+```python
+    info = session.run_plugin("info")
+    info["image"] = {
+        "path": session.image_path,
+        "size": session.image_size,
+        "sha256": session.image_sha256,
+    }
+    return info
+```
+
+[`mcp_server.py:87-93`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L87-L93)
+
+[2] `verify_image_integrity`의 응답 필드다.
+
+```python
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:129-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L129-L140)
+
+[3] 서버는 시작할 때 환경변수의 경로 하나로 세션을 만들고 그 문자열을 그대로 둔다.
+
+```python
+IMAGE_PATH = os.environ.get("VOL_IMAGE_PATH", "")
+if not IMAGE_PATH or not os.path.isfile(IMAGE_PATH):
+    print(
+        f"VOL_IMAGE_PATH is not set or file does not exist: {IMAGE_PATH!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+```
+
+[`mcp_server.py:10-16`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L10-L16)
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+```
+
+[`session.py:25-27`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L27)
+
+[4] 플러그인을 감싼 도구는 `parse_treegrid`가 만든 행을 그대로 `results`에 싣는다.
+
+```python
+def parse_treegrid(treegrid) -> list[dict[str, Any]]:
+    """Parse a Volatility3 TreeGrid into a list of dicts."""
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return rows
+```
+
+[`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85)
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+[5] 두 도구의 설명은 경로를 절대 경로라고 적는다.
+
+```python
+    - "image": {
+        "path": absolute path to the memory image file (str),
+        "size": file size in bytes (int),
+        "sha256": SHA-256 hash computed at session start (str)
+      }
+```
+
+[`mcp_server.py:63-67`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L63-L67)
+
+```python
+        "image_path": absolute path to the image file (str),
+```
+
+[`mcp_server.py:113-113`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L113-L113)
+
+[6] 교차 분석 도구가 결과 항목에 PID를 싣는다: [`plugins/correlation.py:30-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L30-L43), [`plugins/correlation.py:125-131`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L125-L131), [`plugins/correlation.py:203-219`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L219), [`plugins/correlation.py:313-320`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L313-L320).
+
+[7] Volatility 3 2.28.0 플러그인의 열 이름이다: [`windows/pslist.py:358-367`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L358-L367), [`windows/registry/printkey.py:317-318`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/printkey.py#L317-L318), [`windows/mftscan.py:267-269`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/mftscan.py#L267-L269), [`windows/dlllist.py:234-239`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dlllist.py#L234-L239), [`windows/vadregexscan.py:128-132`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/vadregexscan.py#L128-L132).
+`ldrmodules`의 프로세스 ID 열 이름이 `Pid`라는 것은 서버 코드 주석에도 있다.
+
+```python
+    # ldrmodules uses "Pid" (lowercase id)
+    ldr_for_pid = [m for m in ldrmodules_data["results"] if m["Pid"] == pid]
+```
+
+[`plugins/correlation.py:245-246`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L245-L246)
+
+[8] `build_timeline`의 `shimcachemem`·`userassist` 사건이다.
+
+```python
+    # --- 4. shimcachemem: program execution evidence ---
+    shimcache_data = session.run_plugin("shimcachemem")
+    for entry in shimcache_data["results"]:
+        ts = _parse_timestamp(str(entry.get("Last Update", "")))
+        if ts:
+            events.append({
+                "timestamp": ts,
+                "event_type": "program_executed",
+                "pid": None,
+                "name": entry.get("Path", ""),
+                "detail": f"Exec={entry.get('Exec Flag', '?')}",
+            })
+
+    # --- 5. registry.userassist: user program launches ---
+    userassist_data = session.run_plugin("registry.userassist")
+    for entry in userassist_data["results"]:
+        ts = _parse_timestamp(str(entry.get("Last Updated", "")))
+        if ts:
+            events.append({
+                "timestamp": ts,
+                "event_type": "userassist_executed",
+                "pid": None,
+                "name": entry.get("Name", ""),
+                "detail": f"Count={entry.get('Count', '?')} Focus={entry.get('Focus Count', '?')}",
+            })
+```
+
+[`plugins/correlation.py:480-504`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L480-L504)
+
+[9] Volatility 3 2.28.0의 `windows.memmap`, `windows.strings`, `windows.mbrscan`의 위치 열이다: [`windows/memmap.py:103-106`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/memmap.py#L103-L106), [`windows/strings.py:53`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/strings.py#L53), [`windows/mbrscan.py:234`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/mbrscan.py#L234).
+
+[10] `windows_malware_psxview`는 `physical_offsets`를 플러그인 설정으로 넘긴다.
+
+```python
+def run_malware_psxview(session: Session, physical_offsets: bool = False) -> dict:
+    """Run windows.malware.psxview to cross-correlate process enumeration methods.
+
+    physical_offsets: if True, the Offset column reports physical addresses
+        (matches the on-disk pool tag scan); default reports virtual addresses.
+    """
+    extra: dict = {}
+    if physical_offsets:
+        # The plugin's requirement name uses a dash, not an underscore.
+        extra["physical-offsets"] = True
+    treegrid = run_plugin(session, psxview.PsXView, extra_config=extra or None)
+    return {"plugin": "malware.psxview", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/malware.py:145-156`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/malware.py#L145-L156)
+
+Volatility 3 2.28.0 `windows.malware.psxview`의 열 이름은 이 설정에 따라 바뀐다: [`windows/malware/psxview.py:225-231`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/psxview.py#L225-L231).
+
+[11] Volatility 3 2.28.0의 풀 스캔은 Windows 10 이전 이미지에서 메모리 계층을 훑는다: [`windows/poolscanner.py:411-421`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/poolscanner.py#L411-L421).
+`windows.psscan`, `windows.filescan`, `windows.netscan`은 이 풀 스캔을 쓴다: [`windows/psscan.py:172-177`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L172-L177), [`windows/filescan.py:54`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/filescan.py#L54), [`windows/netscan.py:381`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L381).
+`windows.netscan`의 `Offset` 열이다: [`windows/netscan.py:512`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L512).
+
+[12] `windows_psscan`은 플러그인 설정 없이 실행한다.
+
+```python
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:21-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L21-L24)
+
+Volatility 3 2.28.0 `windows.psscan`은 `physical`이 꺼져 있으면 찾은 객체의 위치를 그대로 내고 열 이름은 `Offset(V)`다: [`windows/psscan.py:299-300`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L299-L300), [`windows/psscan.py:340`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L340).

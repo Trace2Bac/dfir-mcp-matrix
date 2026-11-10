@@ -1,0 +1,442 @@
+---
+cell: R01
+details:
+- id: R01.02
+- id: R01.03
+- id: R01.04
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.02 구조화 파싱·필드 선택
+
+**구현.** 이 방식은 교차 분석 도구 `triage_process`, `detect_dll_injection`, `network_process_correlation`, `build_timeline`에 적용된다 [1][2][3][4].
+이 도구들은 다른 플러그인의 결과 행을 서버 안에서 다시 읽어 그 가운데 일부 필드만 골라 새 응답을 만든다 [1][2][3][4].
+`triage_process`는 `pslist` 행의 `ImageFileName`·`PPID`·`CreateTime`을 `name`·`ppid`·`create_time`으로 옮기고 `cmdline` 행의 `Args`를 `cmdline`으로 옮긴다 [1].
+같은 도구는 `dlllist`·`handles`·`netscan`·`malfind` 결과에서 모델이 준 PID의 행을 모든 필드와 함께 싣는다 [1].
+`detect_dll_injection`은 `ldrmodules` 행의 `MappedPath`와 빠진 목록 이름을 이어 `detail` 문장을 만들고 `Base`를 `base`로 옮긴다 [2].
+`malfind` 행에서는 `Start VPN`·`End VPN`·`Protection`을 이어 `detail`을 만들고 `Notes`를 `notes`로 옮긴다 [2].
+`network_process_correlation`은 `netscan` 행의 필드를 모두 두고 `pslist`·`cmdline` 결과에서 고른 `process_name`·`ppid`·`create_time`·`cmdline`을 덧붙인다 [3].
+`build_timeline`은 다섯 플러그인의 행마다 시각 필드 하나와 이름, PID, 몇몇 필드를 골라 `timestamp`·`event_type`·`pid`·`name`·`detail` 다섯 필드의 사건을 만든다 [4].
+`netscan` 사건의 `detail`은 프로토콜, 로컬·원격 주소와 포트, 연결 상태를 이은 글이다 [4].
+
+**한계.** `build_timeline`은 `shimcachemem` 행의 실행 파일 경로를 `Path` 키로 읽는다 [5].
+Volatility 3 2.28.0의 `windows.shimcachemem`은 경로 열을 `File Path`로 낸다 [6].
+그래서 이 원천에서 사건을 만들면 `program_executed` 사건의 `name`은 빈 문자열이 된다 [5][6].
+`File Path`만 있는 가짜 `shimcachemem` 행을 넣자 `program_executed` 사건의 `name`이 빈 문자열이었다 [7].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 Volatility 3 플러그인을 감싼 도구 88개와 교차 분석 도구 7개에 적용된다 [8][9].
+플러그인을 감싼 도구는 Volatility 3가 돌려준 `TreeGrid`를 `parse_treegrid`로 바꿔 행마다 열 이름을 키로 한 `dict`의 `list`를 `results`에 싣는다 [8].
+`_serialize_value`는 값이 없다는 표시(`BaseAbsentValue`)를 `None`으로, `Hex` 형식 힌트를 `0x`로 시작하는 16진 문자열로 바꾼다 [10].
+바이트, `HexBytes`, `Disassembly`는 구분자 없는 16진 문자열이 된다 [10].
+`MultiTypeData`는 `show_hex`가 켜져 있으면 16진 문자열이 되고 꺼져 있으면 지정된 인코딩으로 디코딩한 글이 된다 [10].
+`LayerData`는 그 값이 가리키는 메모리 계층의 바이트를 읽어 16진 문자열로 바꾼다 [10].
+정수, 실수, `bool`, `str`은 그대로 두고 나머지 객체는 `str`로 바꾼다 [10].
+`windows_info`는 `Variable`·`Value` 두 열의 행을 `Variable`을 키로 한 `dict` 하나로 바꾼다 [11].
+`windows_pstree`는 행마다 트리 깊이 `depth`를 더한다 [12].
+MCP Python SDK 1.27.0의 `FastMCP`는 도구가 돌려준 `dict`를 들여쓰기 2칸의 JSON 글로 바꿔 응답의 글 내용 하나에 싣는다 [13].
+도구의 반환 형식이 `dict`라 출력 스키마는 없고 응답의 `structuredContent`도 비어 있다 [13][14].
+
+교차 분석 도구는 결과 건수를 센 값을 함께 싣는다 [9].
+`detect_hidden_processes`는 `pslist_count`·`psscan_count`·`hidden_count`를, `detect_process_anomalies`는 `total_processes`·`anomaly_count`를 싣는다 [9].
+`detect_dll_injection`은 `injection_indicator_count`와 그 PID의 `dlllist`·`ldrmodules` 행 수 `dlls_in_dlllist`·`modules_in_ldrmodules`를 싣는다 [9].
+`detect_service_tampering`은 `svcscan_count`·`svclist_count`·`hidden_count`를, `network_process_correlation`은 `total_connections`를 싣는다 [9].
+`build_timeline`은 사건을 `timestamp` 순으로 정렬하고 `event_type`마다 사건 수를 센 `sources`와 전체 수 `total_events`를 싣는다 [15].
+
+**한계.** `parse_treegrid`는 `TreeGrid` 노드의 깊이를 버리고 모든 노드를 한 목록에 차례로 싣는다 [8].
+깊이를 따로 더하는 도구는 `windows_pstree` 하나다 [12].
+Volatility 3 2.28.0의 `windows.devicetree`와 `windows.mftscan`은 하위 항목을 깊이 1 이상의 노드로 낸다 [16].
+깊이 0·1·2·0의 노드 네 개로 만든 `TreeGrid`를 `parse_treegrid`에 넣자 깊이 값 없이 네 행이 나란히 나왔다 [17].
+`LayerData`가 가리키는 메모리를 읽지 못하면 값은 `None`이 되어 Volatility 3가 값이 없다고 표시한 경우와 구별되지 않는다 [10].
+`windows_vadregexscan`의 설명은 `Hex` 열을 바이트 객체의 `str` 표현이라고 적는다 [18].
+Volatility 3 2.28.0의 `windows.vadregexscan`은 이 열을 `bytes`로 내므로 서버는 이 값을 구분자 없는 16진 문자열로 바꾼다 [18][10].
+
+### R01.04 가공 사실·대상 표시
+
+**구현.** 이 방식은 서버의 모든 도구 응답에 적용된다 [19][20].
+플러그인을 감싼 도구의 응답은 최상위 `plugin`에 결과를 낸 Volatility 3 플러그인 이름(`pslist`, `registry.hashdump` 등)을 싣는다 [19].
+교차 분석 도구와 `verify_image_integrity`의 `plugin`에는 도구 이름이 들어 있다 [20].
+`detect_dll_injection`은 근거 항목마다 그 항목을 만든 플러그인 이름을 `source`(`ldrmodules`·`malfind`)에 싣는다 [2].
+`detect_service_tampering`은 `svclist`에 없는 서비스 행에 `source` 값 `svcscan_only`를 붙인다 [21].
+`build_timeline`은 사건의 원천을 `event_type`으로 나누고 `pslist`에 없고 `psscan`에만 있는 프로세스의 사건은 `name` 뒤에 `[psscan-only]`를 붙인다 [4].
+
+**한계.** `triage_process`, `network_process_correlation`, `detect_hidden_processes`, `detect_process_anomalies`의 응답은 대조한 플러그인의 이름을 싣지 않는다 [1][3][9].
+대조한 플러그인은 도구 설명에만 적혀 있다 [22].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `build_timeline`에 적용된다 [4].
+`build_timeline`은 시각 값을 `_parse_timestamp`가 해석하지 못한 행을 사건으로 만들지 않는다 [4][23].
+`_parse_timestamp`는 빈 값과 `N/A`·`None` 문자열을 버리고 `%Y-%m-%d %H:%M:%S.%f`, `%Y-%m-%d %H:%M:%S`와 이 둘의 `T` 구분 형식만 해석한다 [23].
+`psscan` 행 가운데 PID가 `pslist`에 있는 행은 사건으로 만들지 않는다 [4].
+응답에는 뺀 행의 수나 뺀 규칙을 싣지 않는다 [15].
+
+**한계.** Volatility 3 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 돌려준다 [24].
+`build_timeline`이 읽는 다섯 원천의 시각 열(`CreateTime`·`ExitTime`·`Created`·`Last Update`·`Last Updated`)은 모두 이 `datetime` 열이다 [25].
+`_serialize_value`는 이 값을 `str`로 바꿔 `2026-03-15 14:22:01+00:00`처럼 끝에 `+00:00`이 붙은 글로 만든다 [10][26].
+`_parse_timestamp`의 네 형식은 시간대 부분을 받지 않으므로 이 글을 해석하지 못하고 `None`을 돌려준다 [23][26].
+Volatility 3의 `wintime_to_datetime`이 만든 값을 서버의 변환 함수로 바꿔 다섯 원천의 가짜 행에 넣자 `build_timeline`의 `total_events`는 0이었다 [26].
+그래서 다섯 원천의 행은 시각이 있어도 모두 빠지고 응답의 `timeline`은 비게 된다 [4][23][24].
+실제 Windows 메모리 이미지로는 확인하지 못했다.
+도구 설명은 이 도구가 여러 플러그인의 시각을 합친 연대순 사건 목록을 돌려준다고 적는다 [27].
+
+### 근거
+
+[1] `triage_process`는 `pslist`·`cmdline` 행에서 필드를 골라 옮기고 다른 결과에서는 PID가 같은 행을 싣는다.
+
+```python
+    cmdline_match = next(
+        (c for c in cmdline_data["results"] if c["PID"] == pid), None,
+    )
+
+    return {
+        "plugin": "triage_process",
+        "results": {
+            "pid": pid,
+            "name": proc_match.get("ImageFileName", ""),
+            "ppid": proc_match.get("PPID"),
+            "create_time": proc_match.get("CreateTime"),
+            "cmdline": cmdline_match.get("Args", "") if cmdline_match else "",
+            "dlls": [d for d in dlllist_data["results"] if d["PID"] == pid],
+            "handles": [h for h in handles_data["results"] if h["PID"] == pid],
+            "network_connections": [
+                n for n in netscan_data["results"] if n.get("PID") == pid
+            ],
+            "malfind_hits": [
+                m for m in malfind_data["results"] if m["PID"] == pid
+            ],
+        },
+```
+
+[`plugins/correlation.py:199-219`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L199-L219)
+
+[2] `detect_dll_injection`은 `ldrmodules`·`malfind` 행에서 근거 항목의 필드를 만든다.
+
+```python
+    # Signal 1: unlinked DLLs in ldrmodules
+    for mod in ldr_for_pid:
+        in_load = mod.get("InLoad", True)
+        in_init = mod.get("InInit", True)
+        in_mem = mod.get("InMem", True)
+        if not (in_load and in_init and in_mem):
+            missing = []
+            if not in_load:
+                missing.append("InLoad")
+            if not in_init:
+                missing.append("InInit")
+            if not in_mem:
+                missing.append("InMem")
+            indicators.append({
+                "type": "unlinked_dll",
+                "detail": f"{mod.get('MappedPath', 'unknown')} missing from {', '.join(missing)}",
+                "base": mod.get("Base"),
+                "source": "ldrmodules",
+            })
+
+    # Signal 2: RWX regions from malfind
+    for hit in mal_for_pid:
+        indicators.append({
+            "type": "rwx_region",
+            "detail": f"RWX VAD at {hit.get('Start VPN', '?')}-{hit.get('End VPN', '?')} ({hit.get('Protection', '')})",
+            "notes": hit.get("Notes", ""),
+            "source": "malfind",
+        })
+```
+
+[`plugins/correlation.py:252-279`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L252-L279)
+
+[3] `network_process_correlation`은 `netscan` 행에 `pslist`·`cmdline` 값을 덧붙인다.
+
+```python
+    pid_to_proc = {p["PID"]: p for p in pslist_data["results"]}
+    pid_to_cmdline = {}
+    for c in cmdline_data["results"]:
+        pid_to_cmdline[c["PID"]] = c.get("Args", "")
+
+    connections = []
+    for conn in netscan_data["results"]:
+        pid = conn.get("PID")
+        proc = pid_to_proc.get(pid, {})
+        enriched = {
+            **conn,
+            "process_name": proc.get("ImageFileName", conn.get("Owner", "")),
+            "ppid": proc.get("PPID"),
+            "create_time": proc.get("CreateTime"),
+            "cmdline": pid_to_cmdline.get(pid, ""),
+        }
+        connections.append(enriched)
+```
+
+[`plugins/correlation.py:304-320`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L304-L320)
+
+[4] `build_timeline`이 다섯 원천의 행에서 사건을 만들고 정렬한다: [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).
+
+[5] `shimcachemem` 사건의 이름은 `Path` 키에서 읽는다.
+
+```python
+    # --- 4. shimcachemem: program execution evidence ---
+    shimcache_data = session.run_plugin("shimcachemem")
+    for entry in shimcache_data["results"]:
+        ts = _parse_timestamp(str(entry.get("Last Update", "")))
+        if ts:
+            events.append({
+                "timestamp": ts,
+                "event_type": "program_executed",
+                "pid": None,
+                "name": entry.get("Path", ""),
+                "detail": f"Exec={entry.get('Exec Flag', '?')}",
+            })
+```
+
+[`plugins/correlation.py:480-491`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L480-L491)
+
+[6] Volatility 3 2.28.0 `windows.shimcachemem`의 열 이름이다: [`volatility3/framework/plugins/windows/shimcachemem.py:560-571`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/shimcachemem.py#L560-L571).
+
+[7] (실행 확인) `File Path`·`Last Update`만 있는 가짜 `shimcachemem` 행을 `run_build_timeline`에 넣자 `program_executed` 사건의 `name`이 빈 문자열이었다.
+
+[8] `parse_treegrid`는 열 이름을 키로 행마다 `dict`를 만든다.
+
+```python
+def parse_treegrid(treegrid) -> list[dict[str, Any]]:
+    """Parse a Volatility3 TreeGrid into a list of dicts."""
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return rows
+```
+
+[`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85)
+
+[9] 교차 분석 도구가 건수를 싣는다: [`plugins/correlation.py:35-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L35-L43), [`plugins/correlation.py:167-174`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L167-L174), [`plugins/correlation.py:281-291`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L281-L291), [`plugins/correlation.py:322-328`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L322-L328), [`plugins/correlation.py:366-376`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L366-L376).
+
+[10] `_serialize_value`가 값의 형식을 바꾼다.
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:51-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L68)
+
+```python
+def _serialize_layerdata(val: "renderers.LayerData") -> str | None:
+    """Read the bytes a LayerData reference points at and hex-encode them."""
+    try:
+        data = val.context.layers[val.layer_name].read(val.offset, val.length, True)
+    except Exception:
+        return None
+    return _bytes_to_hex(data)
+
+
+def _serialize_multitypedata(val: "format_hints.MultiTypeData") -> str:
+    """Decode MultiTypeData as text where the plugin expects text, else hex."""
+    if val.show_hex:
+        return _bytes_to_hex(bytes(val))
+    text = val.decode(val.encoding, errors="replace")
+    if val.split_nulls:
+        return "\n".join(part for part in text.split("\x00") if part)
+    return text.split("\x00", 1)[0]
+```
+
+[`plugins/_common.py:32-48`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L32-L48)
+
+[11] `windows_info`의 행을 `dict` 하나로 바꾼다.
+
+```python
+def run_info(session: Session) -> dict:
+    """Run windows.info and return system information."""
+    treegrid = run_plugin(session, info.Info)
+    results = {}
+    for row in parse_treegrid(treegrid):
+        results[row["Variable"]] = row["Value"]
+    return {"plugin": "info", "results": results}
+```
+
+[`plugins/sysinfo.py:15-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L15-L21)
+
+[12] `windows_pstree`만 행에 `depth`를 더한다.
+
+```python
+def run_pstree(session: Session) -> dict:
+    """Run windows.pstree and return process tree with depth info."""
+    treegrid = run_plugin(session, pstree.PsTree)
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        row["depth"] = node.path_depth
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return {"plugin": "pstree", "results": rows}
+```
+
+[`plugins/process.py:27-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L27-L43)
+
+[13] MCP Python SDK 1.27.0의 `FastMCP`는 출력 스키마가 없으면 반환값을 글 내용으로 바꾸고 `dict`는 들여쓰기 2칸의 JSON으로 바꾼다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:97-122`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/func_metadata.py#L97-L122), [`src/mcp/server/fastmcp/utilities/func_metadata.py:529-532`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/func_metadata.py#L529-L532).
+
+[14] (실행 확인) MCP SDK 클라이언트로 서버에 붙어 도구 목록과 `verify_image_integrity`·`windows_strings`의 응답을 보자 `windows_pslist`·`triage_process`의 `outputSchema`는 `null`이었고 응답은 JSON 글 하나와 비어 있는 `structuredContent`였다.
+
+[15] `build_timeline`은 정렬 뒤 원천별 사건 수와 전체 수만 싣는다.
+
+```python
+    # Sort chronologically
+    events.sort(key=lambda e: e["timestamp"])
+
+    # Compute source counts
+    sources: dict[str, int] = {}
+    for e in events:
+        sources[e["event_type"]] = sources.get(e["event_type"], 0) + 1
+
+    return {
+        "plugin": "build_timeline",
+        "results": {
+            "total_events": len(events),
+            "sources": sources,
+            "timeline": events,
+        },
+    }
+```
+
+[`plugins/correlation.py:506-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L506-L521)
+
+[16] Volatility 3 2.28.0의 `windows.devicetree`와 `windows.mftscan`은 깊이 1 이상의 노드를 낸다: [`volatility3/framework/plugins/windows/devicetree.py:138-140`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/devicetree.py#L138-L140), [`volatility3/framework/plugins/windows/mftscan.py:175-177`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/mftscan.py#L175-L177).
+
+[17] (실행 확인) Volatility 3 2.28.0의 `TreeGrid`로 깊이 0·1·2·0의 노드 네 개를 만들어 `parse_treegrid`에 넣자 `depth` 같은 깊이 값 없이 네 `dict`가 차례로 나왔다.
+
+[18] `windows_vadregexscan`의 설명은 `Hex`를 바이트 객체의 `str` 표현이라고 적는다.
+
+```python
+    Returns a dict with:
+    - "plugin": "vadregexscan"
+    - "results": list of dicts, each containing:
+        "PID": process ID where the match was found (int),
+        "Process": image name of that process (str),
+        "Offset": virtual address of the match (str, hex),
+        "Text": UTF-8 decoded match / context (str),
+        "Hex": raw bytes of the match (str repr of the bytes object)
+```
+
+[`mcp_server.py:1324-1331`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1324-L1331)
+
+Volatility 3 2.28.0 `windows.vadregexscan`의 `Hex` 열 형식은 `bytes`다: [`volatility3/framework/plugins/windows/vadregexscan.py:131-132`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/vadregexscan.py#L131-L132).
+
+[19] 플러그인을 감싼 도구는 Volatility 3 플러그인 이름을 `plugin`에 싣는다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+[20] `verify_image_integrity`의 `plugin`은 도구 이름이다.
+
+```python
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:129-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L129-L140)
+
+교차 분석 도구도 `plugin`에 도구 이름을 싣는다: [`plugins/correlation.py:35-36`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L35-L36), [`plugins/correlation.py:203-204`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L204).
+
+[21] `svclist`에 이름이 없는 `svcscan` 행에 `source`를 붙인다.
+
+```python
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+```
+
+[`plugins/correlation.py:349-355`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L349-L355)
+
+[22] 교차 분석 도구의 설명은 대조하는 플러그인을 적는다: [`mcp_server.py:143-176`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L143-L176), [`mcp_server.py:311-346`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L311-L346), [`mcp_server.py:394-437`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L394-L437).
+
+[23] `_parse_timestamp`가 해석하는 형식이다.
+
+```python
+def _parse_timestamp(val: str | None) -> str | None:
+    """Normalize a Volatility3 timestamp string to ISO 8601, or None."""
+    if not val or val == "N/A" or val == "None":
+        return None
+    val = val.strip()
+    # Already ISO-ish: "2026-03-15 14:22:01.000000" → "2026-03-15T14:22:01"
+    try:
+        from datetime import datetime
+        # Handle "YYYY-MM-DD HH:MM:SS.ffffff" (most common vol3 format)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(val, fmt)
+                return dt.isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+```
+
+[`plugins/correlation.py:379-396`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L379-L396)
+
+[24] Volatility 3 2.28.0의 `wintime_to_datetime`은 UTC 시간대를 붙인 `datetime`을 돌려준다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28).
+
+[25] Volatility 3 2.28.0에서 다섯 원천의 시각 열은 `datetime` 형식이다: [`windows/pslist.py:366-367`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L366-L367), [`windows/psscan.py:350-351`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L350-L351), [`windows/netscan.py:521`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L521), [`windows/shimcachemem.py:565`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/shimcachemem.py#L565), [`windows/registry/userassist.py:392`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/userassist.py#L392).
+
+[26] (실행 확인) Volatility 3 2.28.0의 `wintime_to_datetime`으로 만든 값은 `_serialize_value`를 거쳐 `2026-03-15 14:22:01+00:00`이 되었고 `_parse_timestamp`는 이 글에 `None`을 돌려주었으며 이 값을 다섯 원천의 가짜 행에 넣은 `run_build_timeline`의 `total_events`는 0이었다.
+
+[27] `build_timeline`의 설명이다: [`mcp_server.py:394-436`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L394-L436).

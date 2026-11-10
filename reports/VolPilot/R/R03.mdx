@@ -1,0 +1,281 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.04
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 서버의 모든 도구 호출에 적용된다 [1][2].
+도구 함수는 `session.run_plugin`의 결과를 그대로 돌려주고 Volatility 3의 예외를 대부분 처리하지 않는다 [2].
+MCP Python SDK 1.27.0의 `FastMCP`는 도구 함수의 예외를 `Error executing tool <도구 이름>: <예외 문구>` 글로 바꾸고 요청 처리기는 이 글을 `isError`가 참인 결과로 돌려준다 [1].
+목록에 없는 도구 이름과 형식이 틀린 인자도 `isError`가 참인 결과가 된다 [1][3].
+덤프 도구는 `VOL_DUMP_DIR`이 설정되지 않았으면 그 사실을 적은 `RuntimeError`를 내고 이 예외도 같은 결과가 된다 [4].
+무작위 바이트 파일을 이미지로 준 서버에서 `windows_pslist`, `windows_info`, `triage_process`, `windows_pedump`는 `isError`가 참인 결과와 `The plugin configuration failed to validate` 문구를 돌려주었다 [3].
+성공한 응답은 `isError`가 거짓이고 본문에는 성공 여부를 따로 적는 필드가 없다 [5][3].
+
+**한계.** `windows_strings`는 `strings_file`이 비어 있거나 Volatility 3가 그 파일 요구 조건을 받아들이지 않으면 예외를 내지 않는다 [6].
+이때 응답은 빈 `results`와 `error` 문구를 담은 정상 결과이고 `isError`는 거짓이다 [6][3].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 `triage_process`와 `detect_dll_injection`에 적용된다 [7].
+두 도구는 모델이 준 PID가 `pslist` 결과에 없으면 `results`에 `pid`와 `error` 문구 `PID <번호> not found in pslist`만 담아 정상 결과로 돌려준다 [7].
+이 응답의 `isError`는 거짓이고 플러그인 실행이 실패하면 `isError`가 참인 결과가 된다 [7][1].
+`pslist`에 없는 PID를 두 도구에 주자 `error`만 담긴 `results`가 돌아왔다 [8].
+플러그인을 감싼 도구는 결과 행이 없으면 `results`를 빈 목록으로 돌려준다 [5].
+
+**한계.** `windows_crashinfo`는 이미지가 크래시 덤프가 아닐 때 Volatility 3가 내는 `RuntimeError`를 처리해 빈 `results`를 돌려준다 [9].
+`windows_virtmap`은 커널 심볼에 필요한 항목이 없을 때 나는 `SymbolError`를 처리해 빈 `results`를 돌려준다 [9].
+Volatility 3 2.28.0의 `windows.svclist`는 64비트 Windows 10 15063 이상이 아니면 경고만 기록하고 행 없이 끝나므로 `windows_svclist`도 빈 `results`를 돌려준다 [10].
+이 세 경우의 응답은 이미지에 해당 행이 없는 경우와 같은 모양이다 [9][10].
+`triage_process`와 `detect_dll_injection`은 `pslist`에 PID가 있는지만 보므로 `psscan`에서만 찾은 프로세스의 PID에도 찾지 못했다는 응답을 돌려준다 [7].
+`detect_hidden_processes`의 설명은 이 도구가 찾은 프로세스마다 `triage_process`를 부르라고 적는다 [11].
+이 도구가 찾는 프로세스는 `psscan`에 있고 `pslist`에 없는 프로세스다 [12].
+
+### R03.04 시간 초과·부분 완료 표시
+
+**구현.** 이 방식은 `detect_service_tampering`에 적용된다 [13].
+`detect_service_tampering`은 `svclist` 결과가 비어 있으면 `os_compatible`을 거짓으로, `svclist_count`를 `null`로 두고 두 목록을 대조하지 않는다 [13].
+이때 응답에는 `svcscan_count`만 값이 있고 `hidden_services`와 `svcdiff_results`는 빈 목록이다 [13].
+도구 설명은 `os_compatible`이 거짓이면 대조를 할 수 없으니 `svcscan`만 보고 보고서에 그 한계를 적으라고 적는다 [14].
+비어 있는 `svclist` 결과를 넣자 `os_compatible`은 거짓, `svclist_count`는 `null`, `hidden_services`는 빈 목록이었다 [8].
+
+**한계.** `os_compatible`은 운영체제 판을 읽어 정하지 않고 `svclist` 행 수로 정한다 [13].
+Volatility 3 2.28.0의 `windows.svclist`는 지원하는 판이어도 `services.exe`의 메모리나 실행 파일 영역을 읽지 못하면 경고만 남기고 그 프로세스를 건너뛴다 [10].
+그래서 이 경우에도 응답은 `os_compatible`을 거짓으로 적는다 [13][10].
+`malware.svcdiff`가 예외를 내면 `svcdiff_results`는 빈 목록이 되고 응답에는 실패 표시가 없다 [13].
+`malware.svcdiff`가 예외를 내도록 만든 가짜 세션에서 `svcdiff_results`는 빈 목록이었고 다른 필드는 정상 값이었다 [8].
+
+### 근거
+
+[1] MCP Python SDK 1.27.0의 `FastMCP`는 도구 예외와 목록에 없는 이름을 `ToolError`로 바꾸고 요청 처리기는 예외를 `isError` 결과로 바꾼다: [`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L116-L117), [`src/mcp/server/fastmcp/tools/tool_manager.py:88-91`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/tool_manager.py#L88-L91), [`src/mcp/server/lowlevel/server.py:467-474`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L467-L474), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[2] 도구 함수는 `session.run_plugin`의 결과를 그대로 돌려주고 `run_plugin`은 예외를 처리하지 않는다.
+
+```python
+    return session.run_plugin("pslist")
+```
+
+[`mcp_server.py:479-479`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L479-L479)
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[3] (실행 확인) 무작위 바이트 1 MiB 파일을 `VOL_IMAGE_PATH`로 주고 MCP SDK 클라이언트로 도구를 부르자 플러그인 도구와 교차 분석 도구, 목록에 없는 이름, 정수 대신 글을 준 `pid`는 `isError` 결과였고 `verify_image_integrity`와 `windows_strings`는 `isError`가 거짓이었다.
+
+[4] 덤프 도구가 쓰는 `file_handler`는 `VOL_DUMP_DIR`이 없으면 예외를 낸다.
+
+```python
+    @property
+    def file_handler(self):
+        """FileHandler class bound to ``dump_dir`` for use with dump plugins.
+
+        Raises RuntimeError if ``VOL_DUMP_DIR`` was not set when the server
+        started, so the Claude-visible MCP tool can return a clear message.
+        """
+        if self._file_handler is None:
+            raise RuntimeError(
+                "VOL_DUMP_DIR is not configured. Set the VOL_DUMP_DIR "
+                "environment variable in claude_desktop_config.json to "
+                "an existing directory before calling any dump tool."
+            )
+        return self._file_handler
+```
+
+[`session.py:48-61`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L48-L61)
+
+[5] 플러그인을 감싼 도구의 응답은 `plugin`과 `results`만 담는다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+[6] `windows_strings`는 파일이 없거나 요구 조건 예외가 나면 `error`를 담은 정상 결과를 돌려준다.
+
+```python
+def run_strings(session: Session, strings_file: str = "") -> dict:
+    """Run windows.strings and return strings mapped to processes.
+
+    strings_file: absolute path to a pre-generated strings-with-offsets
+        file, e.g. produced by `strings -a -t d <image> > strings.txt`.
+        This is a hard (non-optional) requirement of the underlying
+        plugin -- without it, plugin construction itself fails
+        validation before run() is ever reached, so an empty string
+        here returns an empty result with an explanatory error instead
+        of letting that exception propagate.
+    """
+    if not strings_file:
+        return {
+            "plugin": "strings",
+            "results": [],
+            "error": (
+                "strings_file is required by windows.strings and was not "
+                "provided. Generate one first (e.g. `strings -a -t d "
+                "<image> > strings.txt` on Linux/WSL, or any tool that "
+                "emits 'offset:string' lines) and pass its absolute path."
+            ),
+        }
+    extra_config = {"strings_file": Path(strings_file).resolve().as_uri()}
+    try:
+        treegrid = run_plugin(session, strings.Strings, extra_config=extra_config)
+    except exceptions.PluginRequirementException as e:
+        return {"plugin": "strings", "results": [], "error": str(e)}
+    return {"plugin": "strings", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:62-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L62-L89)
+
+[7] PID가 `pslist`에 없으면 `error`를 담은 결과를 돌려준다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    proc_match = next(
+        (p for p in pslist_data["results"] if p["PID"] == pid), None,
+    )
+    if proc_match is None:
+        return {
+            "plugin": "triage_process",
+            "results": {"pid": pid, "error": f"PID {pid} not found in pslist"},
+        }
+```
+
+[`plugins/correlation.py:183-191`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L183-L191)
+
+`detect_dll_injection`도 같다: [`plugins/correlation.py:231-239`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L231-L239).
+
+[8] (실행 확인) 서버의 교차 분석 함수에 가짜 세션 객체로 만든 플러그인 결과를 넣어 `triage_process`·`detect_dll_injection`의 찾지 못함 응답과 `detect_service_tampering`의 `svclist` 빈 결과·`svcdiff` 예외 응답을 보았다.
+
+[9] `windows_crashinfo`와 `windows_virtmap`은 Volatility 3의 예외를 빈 결과로 바꾼다.
+
+```python
+    try:
+        treegrid = run_plugin(session, crashinfo.Crashinfo)
+    except RuntimeError as e:
+        if "No active exception to reraise" in str(e):
+            return {"plugin": "crashinfo", "results": []}
+        raise
+    return {"plugin": "crashinfo", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/sysinfo.py:43-49`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L43-L49)
+
+```python
+    try:
+        treegrid = run_plugin(session, virtmap.VirtMap)
+    except exceptions.SymbolError:
+        return {"plugin": "virtmap", "results": []}
+    return {"plugin": "virtmap", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:55-59`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L55-L59)
+
+[10] Volatility 3 2.28.0 `windows.svclist`는 판이 맞지 않거나 `services.exe`를 읽지 못하면 경고만 남긴다: [`volatility3/framework/plugins/windows/svclist.py:80-110`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/svclist.py#L80-L110).
+
+[11] `detect_hidden_processes`의 설명은 찾은 프로세스마다 `triage_process`를 부르라고 적는다.
+
+```python
+    - For each hidden process, call triage_process(pid) to gather cmdline,
+      DLLs, handles, and network connections for deeper investigation
+    - Terminated processes may also appear in psscan but not pslist; check
+      ExitTime to distinguish exited processes from truly hidden ones
+```
+
+[`mcp_server.py:169-172`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L169-L172)
+
+[12] `detect_hidden_processes`는 `psscan` 행 가운데 PID가 `pslist`에 없는 행을 고른다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    psscan_data = session.run_plugin("psscan")
+
+    pslist_pids = {proc["PID"] for proc in pslist_data["results"]}
+
+    hidden = [
+        proc for proc in psscan_data["results"]
+        if proc["PID"] not in pslist_pids
+    ]
+```
+
+[`plugins/correlation.py:25-33`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L25-L33)
+
+[13] `detect_service_tampering`은 `svclist` 행 수로 `os_compatible`을 정하고 `svcdiff` 예외를 처리한다.
+
+```python
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+```
+
+[`plugins/correlation.py:343-364`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L343-L364)
+
+응답 필드: [`plugins/correlation.py:366-376`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L366-L376).
+
+[14] `detect_service_tampering`의 설명이다.
+
+```python
+    Note: svclist requires 64-bit Windows 10 build 15063+. On older or
+    32-bit systems, only svcscan results are returned and the comparison
+    is unavailable (os_compatible will be false).
+```
+
+[`mcp_server.py:363-365`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L363-L365)
+
+```python
+    - When os_compatible is false, the comparison cannot be performed;
+      rely on svcscan alone and note the limitation in the report
+```
+
+[`mcp_server.py:385-386`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L385-L386)

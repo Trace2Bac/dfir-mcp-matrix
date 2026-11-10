@@ -1,0 +1,220 @@
+---
+cell: P01
+details:
+- id: not_implemented
+---
+
+# P01 분석 방법 적합성 확인
+
+### 미구현
+
+**판단.** 서버는 이미지 형식이나 OS를 판별하지 않고 도구마다 정해 둔 Volatility 3 Windows 플러그인을 대조 없이 실행한다 [1][2].
+플러그인 도구는 도구 하나에 `windows.pslist`처럼 Windows 플러그인 하나가 정해져 있다 [1].
+서버는 시작할 때 이미지 경로를 Volatility 3 설정에 넣고 플러그인마다 Volatility 3가 고른 automagic을 실행한다 [3][2].
+이미지의 계층 형식을 알아내고 Windows 커널과 심볼을 찾는 일은 Volatility 3의 automagic이 한다 [2].
+서버 코드는 형식을 정하려고 이미지 이름이나 앞부분 바이트를 보지 않는다 [3][4].
+무작위 바이트 파일을 이미지로 주고 `windows_info`를 부르자 `The plugin configuration failed to validate` 오류 응답이 돌아왔다 [5].
+README는 지원하는 증거를 Windows 메모리 이미지로 적는다 [6].
+
+`windows_info`는 OS 버전과 `Is64Bit` 같은 값을 돌려주지만 서버는 이 값으로 도구나 플러그인을 고르지 않는다 [7].
+`windows_info`의 설명은 OS 버전을 보고 어떤 아티팩트와 동작을 기대할지 정하라고 모델에게 적는다 [7].
+
+일부 도구는 플러그인이 이미지에 맞지 않아 끝난 경우를 빈 결과로 바꾼다.
+`windows_crashinfo`는 이미지가 crash dump가 아니어서 플러그인이 `No active exception to reraise` 문구의 `RuntimeError`로 끝나면 빈 결과를 돌려준다 [8].
+`windows_virtmap`은 커널 심볼에 필요한 심볼이 없어 `SymbolError`가 나면 빈 결과를 돌려준다 [9].
+`detect_service_tampering`은 `svclist` 결과가 비면 `os_compatible`을 거짓으로 두고 `svcscan`과의 비교를 건너뛴다 [10].
+이 값은 OS를 판별한 결과가 아니라 `svclist` 결과가 비었는지다 [10].
+
+### 근거
+
+[1] 플러그인 도구는 정해 둔 Windows 플러그인 클래스로 실행한다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-18`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L18)
+
+[2] `run_plugin`은 플러그인 클래스에 맞는 automagic을 Volatility 3가 고르게 하고 실행한다.
+
+```python
+    ctx = session.ctx
+    _purge_stale_hive_layers(ctx)
+    plugin_name = plugin_class.__name__
+    session.apply_config(plugin_name)
+    plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+
+    if extra_config:
+        for key, value in extra_config.items():
+            ctx.config[path_join(plugin_config_path, key)] = value
+
+    available = automagic.available(ctx)
+    automagics = automagic.choose_automagic(available, plugin_class)
+    automagic.run(automagics, ctx, plugin_class, BASE_CONFIG_PATH, progress_callback=_noop_progress)
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+```
+
+[`plugins/_common.py:150-166`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L150-L166)
+
+[3] `_init_context`는 이미지 URI를 Volatility 3 설정에 넣기만 한다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+```
+
+[`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96)
+
+[4] 서버 코드가 이미지를 여는 곳은 읽기 확인과 해시 계산뿐이다.
+
+```python
+    @staticmethod
+    def _verify_read_only(file_path: str) -> None:
+        """Verify the image file is opened read-only.
+
+        Opens the file with O_RDONLY to confirm read access, then checks
+        whether the file is writable. If writable, logs a warning
+        recommending the analyst set the file to read-only.
+        """
+        logger = logging.getLogger(__name__)
+        fd = os.open(file_path, os.O_RDONLY)
+        os.close(fd)
+        if os.access(file_path, os.W_OK):
+            logger.warning(
+                "Image file is writable: %s — "
+                "consider setting it to read-only (e.g., attrib +R or "
+                "chmod 444) to prevent accidental modification.",
+                file_path,
+            )
+
+    @staticmethod
+    def _compute_sha256(file_path: str) -> str:
+        """Compute SHA-256 hash of a file, reading in 64 KiB chunks."""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`session.py:63-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L63-L89)
+
+[5] (실행 확인) 네트워크를 끈 컨테이너에서 무작위 바이트 1 MiB 파일로 stdio 서버를 시작해 `windows_info`를 부르자 `isError`가 참인 응답에 `Error executing tool windows_info: The plugin configuration failed to validate`가 실렸다.
+
+[6] README의 지원 범위 문장이다: [`README.md:5`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L5).
+
+[7] `windows_info`의 설명은 OS 버전으로 기대할 아티팩트를 정하라고 적고 코드는 플러그인 결과에 이미지 정보만 더한다.
+
+```python
+    - After reviewing the system information, proceed with process analysis
+      by calling windows_pslist to enumerate running processes
+    - Use the OS version to determine which artifacts and behaviors are expected
+      (e.g., Windows 7 vs Windows 10 have different default processes)
+    - The "Is64Bit" value determines whether WoW64 fields from windows_pslist
+      or windows_psscan are meaningful
+    - The memory image is read-only evidence; this tool does not modify it
+```
+
+[`mcp_server.py:79-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L79-L85)
+
+```python
+    info = session.run_plugin("info")
+    info["image"] = {
+        "path": session.image_path,
+        "size": session.image_size,
+        "sha256": session.image_sha256,
+    }
+    return info
+```
+
+[`mcp_server.py:87-93`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L87-L93)
+
+[8] `windows_crashinfo`의 처리기는 특정 `RuntimeError`를 빈 결과로 바꾼다.
+
+```python
+def run_crashinfo(session: Session) -> dict:
+    """Run windows.crashinfo and return crash dump header information.
+
+    Only produces data when the image is an actual Windows crash dump
+    (.dmp), not a raw/VM memory snapshot. volatility3's own plugin has a
+    bug on that path: it logs "This plugin requires a Windows crash
+    dump" and then executes a bare ``raise`` outside any except block,
+    which Python turns into ``RuntimeError("No active exception to
+    reraise")`` instead of returning cleanly. Caught here and translated
+    into an empty result, matching how sibling tools (svclist, consoles,
+    truecrypt, ...) report "not applicable to this image" without
+    crashing the MCP call.
+    """
+    try:
+        treegrid = run_plugin(session, crashinfo.Crashinfo)
+    except RuntimeError as e:
+        if "No active exception to reraise" in str(e):
+            return {"plugin": "crashinfo", "results": []}
+        raise
+    return {"plugin": "crashinfo", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/sysinfo.py:30-49`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L30-L49)
+
+[9] `windows_virtmap`의 처리기는 `SymbolError`를 빈 결과로 바꾼다.
+
+```python
+def run_virtmap(session: Session) -> dict:
+    """Run windows.virtmap and return virtual mapped sections.
+
+    Some Windows builds' kernel PDB lacks both symbols volatility3 knows
+    how to read the system VA layout from (MiVisibleState,
+    MiSystemVaType); the plugin raises SymbolError uncaught in that case
+    instead of returning empty like similarly version-gated plugins
+    (e.g. svclist). Caught here and translated into an empty result.
+    """
+    try:
+        treegrid = run_plugin(session, virtmap.VirtMap)
+    except exceptions.SymbolError:
+        return {"plugin": "virtmap", "results": []}
+    return {"plugin": "virtmap", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:46-59`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L46-L59)
+
+[10] `detect_service_tampering`은 `svclist` 결과의 건수로 `os_compatible`을 정한다.
+
+```python
+    svcscan_data = session.run_plugin("svcscan")
+    svcscan_services = svcscan_data["results"]
+
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+```
+
+[`plugins/correlation.py:340-364`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L340-L364)

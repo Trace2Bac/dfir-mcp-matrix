@@ -1,0 +1,128 @@
+---
+cell: D03
+details:
+- id: not_implemented
+---
+
+# D03 파생물 무결성 검증
+
+### 미구현
+
+**판단.** 서버는 덤프 파일과 설정 파일을 남기지만 그 기준값을 계산하지도 대조하지도 않는다.
+`DumpFileHandler`는 모은 바이트를 파일에 쓰기만 하고 해시나 크기를 계산하지 않는다 [1].
+덤프 도구의 응답에는 파일 이름만 들어가고 해시가 없다 [2][3].
+설정 파일은 쓴 뒤 다시 읽을 때 내용을 대조하지 않고 JSON으로 읽어 그대로 쓴다 [4].
+파생물 경로를 받아 해시를 계산하거나 대조하는 도구가 없다 [5].
+
+서버가 해시를 계산하는 대상은 원본 메모리 이미지 하나다.
+`Session`은 시작할 때 이미지의 SHA-256을 계산하고 `verify_image_integrity`는 이를 다시 계산해 대조한다 [6][7].
+
+### 근거
+
+[1] `DumpFileHandler.close`는 바이트를 파일에 쓰고 닫는다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[2] `windows_dumpfiles` 응답의 열이다.
+
+```python
+    Returns a dict with:
+    - "plugin": "dumpfiles"
+    - "results": list of dicts, each containing:
+        "Cache": cache type such as SharedCacheMap or DataSectionObject (str),
+        "FileObject": address of the _FILE_OBJECT (str, hex),
+        "FileName": path of the cached file (str),
+        "Result": final on-disk path of the dumped bytes or an error string
+```
+
+[`mcp_server.py:2166-2172`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2166-L2172)
+
+[3] `windows_pedump` 응답의 열이다.
+
+```python
+    Returns a dict with:
+    - "plugin": "pedump"
+    - "results": list of dicts, each containing:
+        "PID": owning process ID (or 4 / System for kernel modules) (int),
+        "Process": image name of the owning process (str),
+        "File output": final on-disk path of the reconstructed PE or an
+          error string if reconstruction failed
+```
+
+[`mcp_server.py:1735-1741`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1735-L1741)
+
+[4] 설정 파일은 있으면 읽고 그대로 덧붙인다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+
+    def apply_config(self, plugin_name: str):
+        """Splice saved config into a plugin's config path if available."""
+        if self._saved_config is not None:
+            plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+            self.ctx.config.splice(
+                plugin_config_path,
+                HierarchicalDict(self._saved_config),
+            )
+```
+
+[`session.py:91-105`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L105)
+
+[5] (실행 확인) 무작위 바이트 파일을 이미지로 주어 서버를 stdio로 실행하고 MCP SDK 1.27.0 클라이언트로 도구 96개의 입력 schema 인자 이름을 모았다.
+경로를 받는 인자는 `windows_strings`의 `strings_file` 하나였고 이 인자는 문자열 목록 입력 파일이다.
+
+[6] 서버를 시작할 때 이미지 해시를 계산한다.
+
+```python
+        image = Path(image_path)
+        self.image_size = image.stat().st_size
+        self._verify_read_only(image_path)
+        self.image_sha256 = self._compute_sha256(image_path) if compute_hash else ""
+```
+
+[`session.py:41-44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L41-L44)
+
+[7] `verify_image_integrity`는 이미지 해시를 다시 계산해 대조한다.
+
+```python
+    from datetime import datetime, timezone
+
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:127-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L127-L140)

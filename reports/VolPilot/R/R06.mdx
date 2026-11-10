@@ -1,0 +1,183 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 증거에서 나온 비밀 값을 응답에 그대로 싣고 그 값을 가리거나 빼는 코드를 두지 않는다 [1][2].
+비밀 값을 돌려주는 도구는 `windows_registry_hashdump`, `windows_registry_lsadump`, `windows_registry_cachedump`, `windows_truecrypt`다 [3][4].
+`windows_registry_hashdump`는 계정마다 `lmhash`·`nthash`를, `windows_registry_cachedump`는 캐시된 도메인 로그온의 `Hash`를 싣는다 [3].
+`windows_registry_lsadump`는 복호화한 LSA 비밀을 `Secret`과 `Hex` 두 열에 16진 문자열로 싣는다 [3].
+`windows_truecrypt`는 메모리에 남은 TrueCrypt 암호를 `Password`에 싣는다 [4].
+세 레지스트리 도구는 `pycryptodome`을 불러올 수 있을 때만 등록된다 [5].
+서버의 실행 환경에서는 이 세 도구가 등록되어 있었다 [6].
+
+이 도구들의 결과도 다른 플러그인 도구와 같은 `parse_treegrid`와 `_serialize_value`만 거친다 [1][2].
+`_serialize_value`는 값의 형식만 바꾸고 값의 뜻이나 열 이름을 보고 가리지 않는다 [2].
+`hashdump`와 같은 열로 만든 `TreeGrid`에 가짜 해시 값을 넣자 `lmhash`·`nthash`가 그대로 나왔다 [7].
+300바이트 가짜 비밀을 `HexBytes`로 넣자 `Secret`은 앞 256바이트의 16진 문자열과 잘림 표시로 나왔다 [7].
+이 잘림은 모든 바이트 값에 적용되는 길이 상한이고 256바이트 이하의 비밀은 전부 실린다 [2][7].
+
+세 레지스트리 도구의 설명은 결과가 자격증명이니 사용자의 자료 처리 규칙에 따라 다루라고 적는다 [8].
+서버는 이 문구를 응답에 싣지 않는다 [1].
+서버는 도구 호출 기록이나 보고서 파일을 쓰지 않는다 [9].
+서버 코드가 쓰는 파일은 Volatility 설정 파일과 `VOL_DUMP_DIR`의 추출 파일이다 [9].
+결과는 서버 프로세스가 끝날 때까지 세션의 메모리 캐시에 남고 같은 도구를 다시 부르면 같은 값을 다시 돌려준다 [10].
+
+### 근거
+
+[1] 플러그인을 감싼 도구는 `TreeGrid`의 모든 열을 `parse_treegrid`로 싣는다.
+
+```python
+def parse_treegrid(treegrid) -> list[dict[str, Any]]:
+    """Parse a Volatility3 TreeGrid into a list of dicts."""
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return rows
+```
+
+[`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85)
+
+[2] `_serialize_value`는 형식에 따라 값을 바꿀 뿐 값을 가리지 않는다.
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:51-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L68)
+
+바이트 값의 길이 상한: [`plugins/_common.py:22-29`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L22-L29).
+
+[3] 세 레지스트리 도구는 Volatility 3 플러그인의 결과를 그대로 싣는다.
+
+```python
+    def run_hashdump(session: Session) -> dict:
+        """Run windows.registry.hashdump and return LM/NT password hashes.
+
+        Requires the optional `pycryptodome` dependency (install with the
+        `full` extra: `uv pip install -e .[full]`).
+        """
+        treegrid = run_plugin(session, hashdump.Hashdump)
+        return {"plugin": "registry.hashdump", "results": parse_treegrid(treegrid)}
+
+    def run_lsadump(session: Session) -> dict:
+        """Run windows.registry.lsadump and return decrypted LSA secrets.
+
+        Requires the optional `pycryptodome` dependency.
+        """
+        treegrid = run_plugin(session, lsadump.Lsadump)
+        return {"plugin": "registry.lsadump", "results": parse_treegrid(treegrid)}
+
+    def run_cachedump(session: Session) -> dict:
+        """Run windows.registry.cachedump and return cached domain credentials.
+
+        Requires the optional `pycryptodome` dependency.
+        """
+        treegrid = run_plugin(session, cachedump.Cachedump)
+        return {"plugin": "registry.cachedump", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/registry.py:76-99`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/registry.py#L76-L99)
+
+Volatility 3 2.28.0 `windows.registry.hashdump`·`lsadump`·`cachedump`의 열이다: [`windows/registry/cachedump.py:189`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/cachedump.py#L189), [`windows/registry/hashdump.py:646-647`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/hashdump.py#L646-L647), [`windows/registry/lsadump.py:260`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/lsadump.py#L260).
+
+[4] `windows_truecrypt`는 플러그인 결과를 그대로 싣고 설명은 `Password` 열을 적는다.
+
+```python
+def run_truecrypt(session: Session) -> dict:
+    """Run windows.truecrypt and return cached TrueCrypt passphrases."""
+    treegrid = run_plugin(session, truecrypt.Passphrase)
+    return {"plugin": "truecrypt", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/security.py:18-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/security.py#L18-L21)
+
+```python
+    Returns a dict with:
+    - "plugin": "truecrypt"
+    - "results": list of dicts, each containing:
+        "Offset": memory offset where the passphrase was found (str, hex),
+        "Length": length of the passphrase in bytes (int),
+        "Password": the cached passphrase string (str)
+```
+
+[`mcp_server.py:3027-3032`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L3027-L3032)
+
+Volatility 3 2.28.0 `windows.truecrypt`의 열이다: [`windows/truecrypt.py:143-148`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/truecrypt.py#L143-L148).
+
+[5] 세 레지스트리 도구는 `pycryptodome`을 불러올 수 있을 때만 등록된다: [`plugins/registry.py:14-23`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/registry.py#L14-L23), [`plugins/registry.py:113-120`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/registry.py#L113-L120), [`mcp_server.py:2775-2778`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2775-L2778).
+
+[6] (실행 확인) `full` 추가 의존성을 설치한 컨테이너에서 MCP SDK 클라이언트로 도구 목록을 읽자 도구는 96개였고 `windows_registry_hashdump`가 있었다.
+
+[7] (실행 확인) Volatility 3 2.28.0의 `TreeGrid`로 `hashdump`와 같은 열(`User`·`rid`·`lmhash`·`nthash`)과 `lsadump`와 같은 열(`Key`·`Secret`·`Hex`)을 만들어 가짜 값을 넣고 `parse_treegrid`를 불렀다.
+
+[8] 세 레지스트리 도구의 설명이다: [`mcp_server.py:2814-2816`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2814-L2816), [`mcp_server.py:2861-2863`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2861-L2863), [`mcp_server.py:2912-2914`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2912-L2914).
+
+[9] 서버 코드가 파일을 쓰는 곳은 Volatility 3 설정 파일과 덤프 폴더뿐이다.
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112)
+
+덤프 파일 쓰기: [`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77).
+
+[10] `run_plugin`은 결과를 세션의 메모리 캐시에 두고 같은 호출에는 그 결과를 돌려준다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)

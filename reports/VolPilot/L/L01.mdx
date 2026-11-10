@@ -1,0 +1,122 @@
+---
+cell: L01
+details:
+- id: not_implemented
+---
+
+# L01 기록 방식
+
+### 미구현
+
+**판단.** 서버 코드에는 MCP 도구 호출을 기록하는 코드가 없다 [1].
+서버 코드에서 로거를 쓰는 곳은 `Session._verify_read_only` 하나다 [2].
+이 함수는 서버를 시작할 때 이미지 파일에 쓰기 권한이 있으면 경고 한 줄을 남긴다 [2].
+서버 코드가 파일을 쓰는 곳은 이미지 옆의 Volatility 3 설정 파일 `<이미지 경로>.vol3cfg.json`과 `VOL_DUMP_DIR`의 덤프 파일뿐이다 [3][4].
+도구 호출을 적는 파일이나 DB는 없다 [3][4].
+
+서버는 MCP Python SDK 1.27.0의 `FastMCP`를 기본 로그 설정으로 만든다 [5].
+SDK 1.27.0의 `FastMCP`는 만들어질 때 루트 로거를 `INFO` 수준으로 설정하고 표준 오류로 내보낸다 [5].
+SDK의 요청 처리기는 요청마다 `Processing request of type CallToolRequest`처럼 요청 종류만 `INFO`로 쓴다 [6].
+이 줄에는 도구 이름과 인자가 없다 [6].
+목록에 없는 도구 이름이 오면 SDK는 그 이름을 담은 `WARNING` 줄을 쓴다 [6].
+도구 함수에서 예외가 나면 SDK는 오류 결과를 돌려주고 로그를 쓰지 않는다 [7].
+루트 로거가 `INFO`로 설정되므로 Volatility 3가 플러그인을 실행하며 쓰는 `Running automagic: …` 같은 진단 줄도 표준 오류로 나간다 [8].
+서버를 실행해 성공하는 호출, 오류 결과를 돌려주는 호출, 형식이 틀린 인자의 호출, 목록에 없는 이름의 호출을 보냈다 [8].
+표준 오류에 남은 도구 호출의 줄은 `Processing request of type …` 줄, 목록에 없는 이름의 경고 줄, Volatility 3의 진단 줄뿐이었다 [8].
+그래서 등록된 도구의 호출에는 도구 이름도 인자도 담지 않는 진단 줄만 남는다 [6][7][8].
+
+저장소에는 MCP 클라이언트 설정 파일, 훅, 사용자 CLI가 없다.
+README는 클라이언트에 서버를 등록하는 예시만 적는다 [9].
+`evaluation/rq4/live/`의 평가 하네스는 모델이 요청한 도구 호출을 `events.jsonl`에 남기고 서버를 감싼 `audit_server.py`로 파일 열기 사건을 기록한다 [10].
+이 하네스는 연구 평가용 자료이고 서버 구현이 아니다 [10].
+
+### 근거
+
+[1] 서버 코드가 불러오는 모듈 가운데 기록에 쓰는 것은 `session.py`의 `logging`뿐이다: [`mcp_server.py:3-8`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L3-L8), [`session.py:3-12`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L3-L12), [`plugins/_common.py:3-14`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L3-L14).
+기준 커밋의 `mcp_server.py`, `session.py`, `plugins/`에서 `logging`, `logger`, `print(`를 찾으면 `session.py`의 경고와 `mcp_server.py`의 시작 오류 출력만 나온다.
+
+[2] 이미지 파일에 쓰기 권한이 있으면 경고를 남긴다.
+
+```python
+    @staticmethod
+    def _verify_read_only(file_path: str) -> None:
+        """Verify the image file is opened read-only.
+
+        Opens the file with O_RDONLY to confirm read access, then checks
+        whether the file is writable. If writable, logs a warning
+        recommending the analyst set the file to read-only.
+        """
+        logger = logging.getLogger(__name__)
+        fd = os.open(file_path, os.O_RDONLY)
+        os.close(fd)
+        if os.access(file_path, os.W_OK):
+            logger.warning(
+                "Image file is writable: %s — "
+                "consider setting it to read-only (e.g., attrib +R or "
+                "chmod 444) to prevent accidental modification.",
+                file_path,
+            )
+```
+
+[`session.py:63-80`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L63-L80)
+
+[3] Volatility 3 설정을 이미지 옆 JSON 파일에 쓴다.
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112)
+
+[4] 덤프 파일을 `VOL_DUMP_DIR`에 쓴다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[5] 서버는 `FastMCP`를 이름과 지침만 주어 만든다.
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+```
+
+[`mcp_server.py:23-25`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L25)
+
+MCP Python SDK 1.27.0의 기본 수준과 로깅 설정: [`src/mcp/server/fastmcp/server.py:160`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/server.py#L160), [`src/mcp/server/fastmcp/server.py:241-242`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/server.py#L241-L242), [`src/mcp/server/fastmcp/utilities/logging.py:19-43`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/logging.py#L19-L43).
+
+[6] MCP Python SDK 1.27.0은 요청마다 요청 종류만 `INFO`로 쓰고 목록에 없는 도구 이름은 `WARNING`으로 쓴다: [`src/mcp/server/lowlevel/server.py:727`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L727), [`src/mcp/server/lowlevel/server.py:476-490`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L476-L490).
+
+[7] MCP Python SDK 1.27.0은 도구 함수의 예외를 `ToolError`로 바꾸고 요청 처리기가 이를 오류 결과로 바꾼다: [`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L116-L117), [`src/mcp/server/lowlevel/server.py:583-584`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L583-L584).
+
+[8] (실행 확인) 무작위 바이트 파일을 이미지로 준 서버를 MCP SDK 클라이언트로 실행하고 세션의 `errlog`를 파일로 받았다.
+보낸 호출은 `verify_image_integrity`, `windows_strings`, `windows_pslist`, `triage_process`(정수 PID와 글 PID), `windows_info`, `windows_pedump`, 목록에 없는 이름이다.
+표준 오류에는 시작 경고, 요청마다의 `Processing request of type …` 줄, `Tool 'no_such_tool' not listed, no validation will be performed`, Volatility 3의 automagic 진단 줄만 남았다.
+
+[9] README의 클라이언트 등록 예시다: [`README.md`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md).
+
+[10] 평가 하네스가 사건 기록과 파일 사건 기록을 남긴다: [`evaluation/rq4/live/harness.py:57-60`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/evaluation/rq4/live/harness.py#L57-L60), [`evaluation/rq4/live/harness.py:125-130`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/evaluation/rq4/live/harness.py#L125-L130), [`evaluation/rq4/live/audit_server.py:1-33`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/evaluation/rq4/live/audit_server.py#L1-L33).
+`audit_server.py`의 첫 줄은 이 파일을 평가 전용 관찰기라고 적는다.

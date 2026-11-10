@@ -1,0 +1,488 @@
+---
+cell: T10
+details:
+- id: T10.01
+---
+
+# T10 도구 명세 구성
+
+### T10.01 처리 함수에서 명세 생성
+
+**구현.** 이 방식은 서버가 등록하는 도구 96개 모두에 적용된다 [1].
+서버는 도구 함수마다 `@mcp.tool()`만 붙이고 이름, 설명, 입력 schema를 따로 주지 않는다 [1].
+MCP Python SDK 1.27.0의 FastMCP는 함수 이름을 도구 이름으로, docstring 전체를 설명으로 쓰고 함수 서명에서 입력 schema를 만든다 [2].
+docstring은 `Use this tool when the user asks about:`, `Returns a dict with:`, `Forensic context:` 단락으로 쓰여 있고 인자가 있는 도구는 `Arguments:`나 `Args:` 단락도 둔다 [3].
+실행 확인에서 도구는 96개였고 설명이 빈 도구는 없었다 [4].
+입력 schema가 있는 도구는 15개이고 인자마다 `title`, 자료형, 기본값만 싣는다 [4].
+출력 schema와 도구 annotation은 없고 초기화 응답의 `tools.listChanged`는 거짓이다 [4].
+서버는 리소스와 프롬프트를 두지 않고 `FastMCP`를 만들 때 서버 지침 `instructions`를 준다 [5][4].
+
+선택 의존성이 없으면 도구 9개는 등록되지 않는다 [6].
+`mcp_server.py`는 그 도구 함수를 `if "<이름>" in PLUGIN_MAP:` 아래에 두고 이 조건이 참일 때만 `@mcp.tool()`을 붙인다 [6].
+`yara`와 `pycryptodome`을 불러오지 못하게 한 프로세스에서 도구는 87개였고 등록된 도구의 이름, 설명, schema를 바꾸는 다른 설정은 없다 [4][7].
+
+**한계.** 다음 도구는 설명이 알리는 것과 처리 코드의 동작이 다르다.
+
+`pid`를 받는 도구 가운데 4개의 설명은 `pid`가 0이면 모든 프로세스를 본다고 적는다 [8].
+실행 함수는 `pid`가 0이 아닐 때만 그 값을 Volatility 설정에 넣고 0이면 아무것도 넣지 않는다 [9].
+공통 함수 `run_plugin`은 저장된 설정이 있으면 플러그인을 실행할 때마다 그 플러그인의 설정 위치를 저장된 설정으로 바꾼 뒤 받은 값을 넣는다 [10][11].
+저장된 설정은 그 이미지에서 `run()`까지 처음 실행된 플러그인의 `build_configuration()` 결과이고 Volatility 2.28.0의 이 함수는 그 호출의 인자 값도 모은다 [10][12].
+그래서 그 호출에 `pid`가 있었으면 그 뒤 `pid`를 0으로 준 호출과 `pid` 인자가 없는 도구의 플러그인도 그 `pid`를 설정으로 받는다 [10][12].
+Volatility 2.28.0의 `hollowprocesses`, `malfind`, `pslist`는 설정의 `pid`로 프로세스를 거른다 [13].
+저장된 설정의 `pid`가 999 하나가 들어간 목록인 세션에서 `malware.hollowprocesses`를 `pid` 1234로 부른 뒤 `pid` 없이 부르자 설정 `plugins.HollowProcesses.pid`와 이어서 부른 `pslist`의 `plugins.PsList.pid`가 모두 999 하나가 들어간 목록이었다 [14].
+저장된 설정은 `<이미지 경로>.vol3cfg.json`에 남아 서버를 다시 시작해도 같은 이미지에 다시 적용된다 [15][11].
+`pid`만 적은 설정 파일을 두고 시작하자 `pslist`, `malware.malfind`, `malware.hollowprocesses`의 설정 `pid`가 모두 그 값이었다 [16].
+저장된 설정이 아직 없는 세션에서는 같은 Volatility 문맥에 앞선 호출이 넣은 값이 같은 플러그인의 다음 호출에 남는다 [10][11].
+이런 세션에서 `windows_malware_hollowprocesses`를 `pid` 1234로 부른 뒤 0으로 부르자 설정 `plugins.HollowProcesses.pid`는 1234 하나가 들어간 목록으로 남았다 [16].
+`windows_malware_psxview`의 `physical_offsets`도 참으로 부른 뒤 거짓으로 부르자 설정이 참으로 남았다 [16].
+`windows_dumpfiles`의 설명은 0이나 빈 값을 주면 그 인자를 쓰지 않는다고 적지만 이 도구의 인자도 같은 방식으로 설정에 넣는다 [17][9].
+
+`windows_pedump`의 설명은 `pid`를 기본값 0인 선택 인자로 적고 `kernel_module`이 참이면 `pid`를 쓰지 않는다고 적는다 [18].
+Volatility 2.28.0의 `pedump`는 `pid`와 `kernel_module`이 함께 있거나 함께 없으면 오류를 기록하고 행 없이 끝난다 [19].
+그래서 `pid` 0과 `kernel_module` 거짓, `pid`와 `kernel_module` 참의 두 조합은 빈 `results`를 돌려준다 [19][9].
+
+`detect_hidden_processes`의 설명은 숨은 프로세스마다 `triage_process(pid)`를 부르라고 적는다 [20].
+`triage_process`는 `pslist`에 없는 `PID`를 거부하고 숨은 프로세스는 `pslist`에 없는 `PID`다 [21].
+가짜 결과로 `detect_hidden_processes`가 돌려준 `PID`를 `triage_process`에 주자 `not found in pslist` 오류가 돌아왔다 [22].
+
+`detect_dll_injection`의 설명은 `rwx_region`을 실행과 쓰기가 함께 허용된 메모리로 적는다 [23].
+처리 코드는 `malware.malfind`의 행을 보호 속성과 관계없이 모두 `rwx_region`으로 넣는다 [24].
+Volatility 2.28.0의 `malfind`는 쓰기 권한이 없는 실행 영역도 바뀐 페이지가 있으면 결과로 낸다 [25].
+
+`build_timeline`의 설명은 플러그인 다섯 개의 시각을 ISO 8601로 바꿔 시간순으로 싣고 시각이 없는 사건만 뺀다고 적는다 [26].
+Volatility 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 내고 서버는 이 값을 `str`로 바꿔 `results`에 담는다 [27][28].
+`_parse_timestamp`가 대조하는 네 형식에는 시간대 표기가 없어 `+00:00`이 붙은 값은 `None`이 되고 그 사건은 빠진다 [29].
+Volatility 2.28.0에서 다섯 원천의 시각 열은 모두 이 `datetime`이므로 `build_timeline`은 Volatility가 낸 결과로는 사건을 하나도 만들지 않는다 [27][30].
+Volatility의 시각 변환 함수가 낸 값을 서버의 변환 함수에 넣자 `2024-01-17 21:20:00+00:00`이 되었고 `_parse_timestamp`는 `None`을 돌려주었다 [31].
+`shimcachemem` 사건을 만들 때 `name`은 `Path` 열에서 읽지만 Volatility 2.28.0의 열 이름은 `File Path`다 [32][33].
+`File Path`가 있는 가짜 행으로 부르자 그 사건의 `name`은 빈 문자열이었다 [31].
+
+다음 도구는 설명이 적은 값과 응답 값이 다르다.
+
+- `windows_malware_malfind`, `windows_malware_ldrmodules`, `windows_malware_drivermodule`, `windows_malware_skeleton_key_check`의 설명은 `plugin` 값을 `malware.` 없이 적지만 응답의 `plugin`은 `malware.`로 시작한다 [34].
+- `windows_vadregexscan`의 설명은 `Hex`를 바이트 객체의 `repr` 글로 적지만 서버는 바이트 값을 16진 문자열로 바꾼다 [35][36].
+- `windows_info`와 `verify_image_integrity`의 설명은 이미지 경로를 절대 경로로 적지만 응답에는 `VOL_IMAGE_PATH`의 값이 그대로 실린다 [37].
+- `VOL_IMAGE_PATH`를 상대 경로로 주자 `verify_image_integrity`의 `image_path`도 그 상대 경로였다 [38].
+- `windows_dumpfiles`의 `Result`와 `windows_pedump`의 `File output`은 설명이 추출 파일의 최종 경로(`final on-disk path`)라고 적지만 응답에는 폴더 없이 Volatility가 지은 파일 이름이 실리고 서버가 번호를 붙여 쓴 경우에도 번호가 없는 이름이 실린다 [39].
+
+### 근거
+
+[1] 도구 등록의 예이며 도구 96개가 모두 같은 형식이다.
+
+```python
+@mcp.tool()
+def windows_info() -> dict:
+    """
+    Retrieve system information from the Windows memory image, including
+    OS version, architecture, kernel details, and evidence integrity metadata.
+
+    Use this tool when the user asks about:
+    - What operating system or Windows version the memory image is from
+    - System architecture (32-bit vs 64-bit)
+    - Kernel or NT build information
+    - General information about the captured machine
+    - When to start analysis (call this first to warm up the session)
+
+```
+
+[`mcp_server.py:48-60`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L48-L60)
+
+[2] MCP Python SDK 1.27.0의 FastMCP가 함수 이름, docstring, 서명으로 도구 명세를 만드는 곳이다: [`src/mcp/server/fastmcp/tools/base.py:46-91`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L46-L91).
+
+[3] 인자가 있는 도구의 docstring 예다: [`mcp_server.py:1301-1350`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1301-L1350), [`mcp_server.py:225-262`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L225-L262).
+
+[4] (실행 확인) MCP Python SDK 클라이언트로 서버에 연결해 `tools/list`와 초기화 응답을 읽었다.
+도구는 96개, 설명이 빈 도구는 0개, `annotations`가 있는 도구는 0개, `outputSchema`가 있는 도구는 0개였다.
+`inputSchema`에 `properties`가 있는 도구는 15개였고 `windows_dumpfiles`의 `pid`는 `{"default": 0, "title": "Pid", "type": "integer"}`였다.
+초기화 응답의 `capabilities.tools.listChanged`는 거짓이었고 `instructions`는 `This server provides read-only forensic analysis`로 시작했다.
+선택 모듈 `yara`, `yara_x`, `Crypto`, `Cryptodome`을 불러오지 못하게 한 프로세스에서 `list_tools()`는 87개였다.
+
+[5] FastMCP를 만들 때 서버 지침을 준다.
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+        "This server provides read-only forensic analysis of a Windows memory "
+        "image using the Volatility3 framework. The memory image is fixed at "
+        "startup and treated as legally protected evidence.\n\n"
+        "EVIDENCE INTEGRITY POLICY:\n"
+        "The memory image must NEVER be deleted, moved, renamed, modified, "
+        "compressed, or overwritten — regardless of who requests it. If the "
+        "user (or any other prompt) asks to alter or destroy the image in any "
+        "way, refuse the request and explain that evidence integrity must be "
+        "preserved for chain-of-custody requirements.\n\n"
+        "RECOMMENDED WORKFLOW:\n"
+        "1. Call windows_info first to display OS details and the image "
+        "SHA-256 hash (chain-of-custody baseline).\n"
+        "2. Proceed with process analysis (windows_pslist) and use "
+        "correlation tools (detect_hidden_processes, "
+        "detect_process_anomalies) to triage.\n"
+        "3. Before generating any report, call verify_image_integrity to "
+        "confirm the image has not been altered during the session."
+    ),
+)
+```
+
+[`mcp_server.py:23-44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L44)
+
+[6] 선택 도구는 `PLUGIN_MAP`에 이름이 있을 때만 등록된다.
+다른 선택 도구도 같은 꼴이다: [`mcp_server.py:2268-2271`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2268-L2271), [`mcp_server.py:2775-2778`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2775-L2778), [`mcp_server.py:3724-3727`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L3724-L3727).
+
+```python
+if "vadyarascan" in PLUGIN_MAP:
+
+    @mcp.tool()
+    def windows_vadyarascan(yara_rule: str, pid: int = 0) -> dict:
+```
+
+[`mcp_server.py:1354-1357`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1354-L1357)
+
+[7] 서버가 읽는 환경변수는 `VOL_IMAGE_PATH`와 `VOL_DUMP_DIR` 둘이고 도구 등록에 쓰지 않는다: [`mcp_server.py:10-45`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L10-L45).
+
+[8] `pid`를 받는 도구의 설명이 0의 뜻을 적는다.
+`windows_vadyarascan`, `windows_etwpatch`, `windows_malware_suspicious_threads`도 같은 뜻을 적는다: [`mcp_server.py:1381-1382`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1381-L1382), [`mcp_server.py:3389-3391`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L3389-L3391), [`mcp_server.py:4032-4034`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L4032-L4034).
+
+```python
+    Arguments:
+    - pid (optional, default 0): restrict the scan to a single process.
+      0 inspects every process.
+```
+
+[`mcp_server.py:3945-3947`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L3945-L3947)
+
+[9] 실행 함수는 값이 0이나 거짓이 아닐 때만 설정 값을 만든다.
+다른 실행 함수도 같은 꼴이다: [`plugins/malware.py:145-156`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/malware.py#L145-L156), [`plugins/file.py:54-72`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L54-L72), [`plugins/module.py:86-97`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/module.py#L86-L97).
+
+```python
+def run_malware_hollowprocesses(session: Session, pid: int = 0) -> dict:
+    """Run windows.malware.hollowprocesses to detect process hollowing.
+
+    pid: optional filter to a single process ID. 0 (default) inspects every process.
+    """
+    extra: dict = {}
+    if pid:
+        extra["pid"] = [pid]
+    treegrid = run_plugin(session, hollowprocesses.HollowProcesses, extra_config=extra or None)
+    return {"plugin": "malware.hollowprocesses", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/malware.py:109-118`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/malware.py#L109-L118)
+
+[10] 공통 함수 `run_plugin`은 저장된 설정을 넣은 뒤 받은 값만 세션의 Volatility 설정에 덮어쓴다.
+
+```python
+    ctx = session.ctx
+    _purge_stale_hive_layers(ctx)
+    plugin_name = plugin_class.__name__
+    session.apply_config(plugin_name)
+    plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+
+    if extra_config:
+        for key, value in extra_config.items():
+            ctx.config[path_join(plugin_config_path, key)] = value
+```
+
+[`plugins/_common.py:150-158`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L150-L158)
+
+[11] `Session`은 Volatility 문맥 하나를 만들어 모든 호출에서 쓰고 저장된 설정을 플러그인 설정 위치에 넣는다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+```
+
+[`session.py:25-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L35)
+
+```python
+    def apply_config(self, plugin_name: str):
+        """Splice saved config into a plugin's config path if available."""
+        if self._saved_config is not None:
+            plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+            self.ctx.config.splice(
+                plugin_config_path,
+                HierarchicalDict(self._saved_config),
+            )
+```
+
+[`session.py:98-105`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L98-L105)
+
+[12] 공통 함수 `run_plugin`은 저장된 설정이 없으면 `run()`을 부른 플러그인의 `build_configuration()` 결과를 저장하고 Volatility 2.28.0의 이 함수는 값이 있는 플러그인 요구 사항을 모은다.
+
+```python
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+```
+
+[`plugins/_common.py:166-169`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L166-L169)
+
+Volatility 2.28.0: [`volatility3/framework/interfaces/configuration.py:704-728`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/interfaces/configuration.py#L704-L728).
+
+[13] Volatility 2.28.0의 플러그인이 설정의 `pid`로 거르는 곳이다: [`volatility3/framework/plugins/windows/malware/hollowprocesses.py:211-211`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/hollowprocesses.py#L211-L211), [`volatility3/framework/plugins/windows/malware/malfind.py:272-272`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L272-L272), [`volatility3/framework/plugins/windows/pslist.py:293-293`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L293-L293).
+
+[14] (실행 확인) 무작위 바이트 이미지로 만든 `Session`에서 `save_config`로 설정을 저장한 뒤 `run_plugin`으로 `malware.hollowprocesses`를 `pid` 1234로, 이어서 `pid` 없이 부르고 `pslist`를 불렀다.
+저장한 설정이 `{"pid": [999]}`이면 두 번째 `plugins.HollowProcesses.pid`와 `plugins.PsList.pid`가 모두 `[999]`였다.
+`pid`가 없는 설정을 저장한 세션에서는 두 번째 `plugins.HollowProcesses.pid`가 빈 목록이었다.
+
+[15] `Session`은 시작할 때 이미지 경로 뒤에 `.vol3cfg.json`을 붙인 파일이 있으면 저장된 설정으로 읽는다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+```
+
+[`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96)
+
+[16] (실행 확인) 무작위 바이트 이미지로 만든 `Session`에서 `run_plugin`을 불러 Volatility 설정을 읽었다.
+플러그인은 요구 사항을 채우지 못해 `PluginRequirementException`으로 끝났지만 설정은 그 전에 들어갔다.
+`malware.hollowprocesses`를 `pid=1234`로, 이어서 `pid=0`으로 부른 뒤 `plugins.HollowProcesses.pid`는 두 번 모두 1234 하나가 들어간 목록이었다.
+`malware.psxview`를 `physical_offsets=True`로, 이어서 `False`로 부른 뒤 `plugins.PsXView.physical-offsets`는 두 번 모두 참이었다.
+이미지 옆에 `{"pid": [999]}`만 적은 `.vol3cfg.json`을 두고 만든 세션에서 `plugins.Malfind.pid`, `plugins.PsList.pid`, `plugins.HollowProcesses.pid`는 모두 `[999]`였다.
+
+[17] `windows_dumpfiles`의 설명이 0과 빈 값의 뜻을 적는다.
+
+```python
+    Arguments (all optional — pass ``0`` / ``""`` to leave unset; the
+    defaults dump every file object volatility3 finds, which can be slow
+    and produce many files):
+```
+
+[`mcp_server.py:2157-2159`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2157-L2159)
+
+[18] `windows_pedump`의 설명이 `pid`와 `kernel_module`을 적는다.
+
+```python
+    - pid (optional, default 0): if non-zero, restrict search to this
+      process. Ignored when kernel_module=True.
+    - kernel_module (optional, default False): set True to dump a kernel
+      mode PE (driver) instead of a userland image.
+```
+
+[`mcp_server.py:1730-1733`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1730-L1733)
+
+[19] Volatility 2.28.0의 `pedump`는 인자 조합이 맞지 않으면 오류를 기록하고 끝난다: [`volatility3/framework/plugins/windows/pedump.py:231-237`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L231-L237).
+
+[20] `detect_hidden_processes`의 설명이 숨은 프로세스마다 `triage_process`를 부르라고 적는다.
+
+```python
+    - For each hidden process, call triage_process(pid) to gather cmdline,
+      DLLs, handles, and network connections for deeper investigation
+```
+
+[`mcp_server.py:169-170`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L169-L170)
+
+[21] 숨은 프로세스는 `pslist`에 없는 `PID`이고 `triage_process`는 `pslist`에 없는 `PID`를 거부한다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    psscan_data = session.run_plugin("psscan")
+
+    pslist_pids = {proc["PID"] for proc in pslist_data["results"]}
+
+    hidden = [
+        proc for proc in psscan_data["results"]
+        if proc["PID"] not in pslist_pids
+    ]
+```
+
+[`plugins/correlation.py:25-33`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L25-L33)
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    proc_match = next(
+        (p for p in pslist_data["results"] if p["PID"] == pid), None,
+    )
+    if proc_match is None:
+        return {
+            "plugin": "triage_process",
+            "results": {"pid": pid, "error": f"PID {pid} not found in pslist"},
+        }
+```
+
+[`plugins/correlation.py:183-191`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L183-L191)
+
+[22] (실행 확인) 서버의 `plugins.correlation` 모듈을 같은 프로세스에서 불러 가짜 `pslist`에 `PID` 4, `psscan`에 4와 666을 두었다.
+`run_detect_hidden_processes`는 666을 돌려주었고 그 값으로 부른 `run_triage_process`는 `PID 666 not found in pslist`를 돌려주었다.
+
+[23] `detect_dll_injection`의 설명이 `rwx_region`을 적는다.
+
+```python
+    - rwx_region indicators from malfind show executable writable memory
+      not backed by a file, suggesting shellcode or reflective loading
+```
+
+[`mcp_server.py:300-301`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L300-L301)
+
+[24] `malfind`의 행은 모두 `rwx_region`이 된다.
+
+```python
+    # Signal 2: RWX regions from malfind
+    for hit in mal_for_pid:
+        indicators.append({
+            "type": "rwx_region",
+            "detail": f"RWX VAD at {hit.get('Start VPN', '?')}-{hit.get('End VPN', '?')} ({hit.get('Protection', '')})",
+            "notes": hit.get("Notes", ""),
+            "source": "malfind",
+        })
+```
+
+[`plugins/correlation.py:272-279`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L272-L279)
+
+[25] Volatility 2.28.0의 `malfind`는 쓰기 권한이 없는 실행 영역에서 바뀐 페이지를 찾으면 그 영역도 낸다: [`volatility3/framework/plugins/windows/malware/malfind.py:145-166`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L145-L166).
+
+[26] `build_timeline`의 설명이다.
+
+```python
+    - "results": {
+        "total_events": number of timestamped events (int),
+        "sources": dict of event_type -> count (dict),
+        "timeline": list of {
+          "timestamp": ISO 8601 timestamp (str),
+          "event_type": one of "process_created", "process_exited",
+            "network_connection", "program_executed",
+            "userassist_executed" (str),
+          "pid": process ID if applicable (int or None),
+          "name": process name, program path, or owner (str),
+          "detail": additional context (str)
+        } sorted chronologically
+```
+
+[`mcp_server.py:409-420`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L409-L420)
+
+```python
+    - Events with no timestamp are excluded; the timeline only contains
+      artifacts where Volatility3 recovered a valid time value
+```
+
+[`mcp_server.py:431-432`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L431-L432)
+
+[27] Volatility 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 바꾼다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28).
+
+[28] `_serialize_value`는 정해 둔 자료형이 아닌 값을 `str`로 바꾼다.
+
+```python
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:66-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L66-L68)
+
+[29] `_parse_timestamp`는 시간대 표기가 없는 네 형식만 대조한다.
+
+```python
+def _parse_timestamp(val: str | None) -> str | None:
+    """Normalize a Volatility3 timestamp string to ISO 8601, or None."""
+    if not val or val == "N/A" or val == "None":
+        return None
+    val = val.strip()
+    # Already ISO-ish: "2026-03-15 14:22:01.000000" → "2026-03-15T14:22:01"
+    try:
+        from datetime import datetime
+        # Handle "YYYY-MM-DD HH:MM:SS.ffffff" (most common vol3 format)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(val, fmt)
+                return dt.isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+```
+
+[`plugins/correlation.py:379-396`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L379-L396)
+
+[30] Volatility 3 2.28.0에서 다섯 원천의 시각 열은 `datetime` 형식이다: [`volatility3/framework/plugins/windows/pslist.py:366-367`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pslist.py#L366-L367), [`volatility3/framework/plugins/windows/psscan.py:350-351`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/psscan.py#L350-L351), [`volatility3/framework/plugins/windows/netscan.py:521-521`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/netscan.py#L521-L521), [`volatility3/framework/plugins/windows/shimcachemem.py:565-565`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/shimcachemem.py#L565-L565), [`volatility3/framework/plugins/windows/registry/userassist.py:392-392`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/userassist.py#L392-L392).
+
+[31] (실행 확인) 서버의 `plugins._common`과 `plugins.correlation` 모듈을 같은 프로세스에서 불렀다.
+Volatility의 `wintime_to_datetime`이 낸 값을 `_serialize_value`에 넣자 `2024-01-17 21:20:00+00:00`이 되었고 `_parse_timestamp`는 `None`을 돌려주었다.
+`pslist`의 `CreateTime`을 이 값으로 둔 가짜 결과와 `Last Update`가 `2026-01-01 00:00:00`이고 `File Path`가 있는 `shimcachemem` 행으로 `run_build_timeline`을 부르자 `total_events`는 1이었다.
+남은 사건은 `program_executed` 하나였고 `name`은 빈 문자열이었다.
+
+[32] `shimcachemem` 사건의 `name`은 `Path` 열에서 읽는다.
+
+```python
+    # --- 4. shimcachemem: program execution evidence ---
+    shimcache_data = session.run_plugin("shimcachemem")
+    for entry in shimcache_data["results"]:
+        ts = _parse_timestamp(str(entry.get("Last Update", "")))
+        if ts:
+            events.append({
+                "timestamp": ts,
+                "event_type": "program_executed",
+                "pid": None,
+                "name": entry.get("Path", ""),
+                "detail": f"Exec={entry.get('Exec Flag', '?')}",
+            })
+```
+
+[`plugins/correlation.py:480-491`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L480-L491)
+
+[33] Volatility 2.28.0의 `shimcachemem` 열 이름이다: [`volatility3/framework/plugins/windows/shimcachemem.py:560-569`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/shimcachemem.py#L560-L569).
+
+[34] 설명의 `plugin` 값과 실행 함수가 돌려주는 값이다: [`mcp_server.py:1021-1021`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1021-L1021), [`mcp_server.py:1470-1470`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1470-L1470), [`mcp_server.py:1892-1892`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1892-L1892), [`mcp_server.py:2935-2935`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2935-L2935), [`plugins/malware.py:50-83`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/malware.py#L50-L83).
+
+[35] `windows_vadregexscan`의 설명이 `Hex`를 적는다.
+
+```python
+        "Hex": raw bytes of the match (str repr of the bytes object)
+```
+
+[`mcp_server.py:1331-1331`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1331-L1331)
+
+[36] 서버는 바이트 값을 16진 문자열로 바꾸고 Volatility 2.28.0의 `vadregexscan`은 `Hex` 열을 `bytes`로 낸다: [`volatility3/framework/plugins/windows/vadregexscan.py:126-135`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/vadregexscan.py#L126-L135).
+
+```python
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+```
+
+[`plugins/_common.py:63-65`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L63-L65)
+
+[37] 두 도구의 설명과 응답 값이다: [`mcp_server.py:63-67`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L63-L67), [`mcp_server.py:113-113`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L113-L113), [`mcp_server.py:88-92`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L88-L92), [`mcp_server.py:136-136`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L136-L136), [`session.py:25-26`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L26).
+
+[38] (실행 확인) 작업 폴더를 `/work`로 두고 `VOL_IMAGE_PATH`를 `img/dummy.raw`로 준 프로세스에서 `mcp_server`를 불러 `verify_image_integrity()`를 부르자 `image_path`는 `img/dummy.raw`였다.
+
+[39] 두 도구의 설명은 결과 칸을 최종 경로라고 적고 덤프 파일 처리기는 번호를 붙인 이름을 지역 변수에만 두며 Volatility 3 2.28.0의 두 플러그인은 처리기의 `preferred_filename`을 결과 칸에 싣는다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+설명: [`mcp_server.py:2172-2172`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2172-L2172), [`mcp_server.py:1740-1741`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1740-L1741).
+
+Volatility 3 2.28.0: [`volatility3/framework/plugins/windows/dumpfiles.py:194-214`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dumpfiles.py#L194-L214), [`volatility3/framework/plugins/windows/pedump.py:72-92`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L72-L92), [`volatility3/framework/interfaces/plugins.py:38-54`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/interfaces/plugins.py#L38-L54).

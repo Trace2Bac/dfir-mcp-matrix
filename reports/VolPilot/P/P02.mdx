@@ -1,0 +1,400 @@
+---
+cell: P02
+details:
+- id: P02.01
+- id: P02.02
+- id: P02.04
+---
+
+# P02 다음 작업 결정
+
+### P02.01 고정 문서·프로필 반환
+
+**구현.** 이 방식은 서버의 초기화 지침에 적용된다 [1].
+서버는 `FastMCP`를 만들 때 초기화 지침을 `instructions`로 등록한다 [1].
+지침의 권장 절차는 세 단계다 [1].
+첫 단계는 `windows_info`로 OS 정보와 이미지 SHA-256을 보는 것이다 [1].
+둘째 단계는 `windows_pslist`로 프로세스를 보고 교차 분석 도구 `detect_hidden_processes`와 `detect_process_anomalies`로 분류하는 것이다 [1].
+셋째 단계는 보고서를 만들기 전에 `verify_image_integrity`를 부르는 것이다 [1].
+stdio로 서버를 시작해 초기화하자 이 지침이 `instructions`로 돌아왔다 [2].
+
+도구 설명도 `Forensic context` 아래에 다음에 부를 도구를 적는다 [3].
+`windows_info`의 설명은 이 도구를 먼저 부르고 이어서 `windows_pslist`를 부르라고 적는다 [3].
+`detect_hidden_processes`의 설명은 숨은 프로세스마다 `triage_process`를 부르라고 적는다 [3].
+절차는 모델에게 주는 글이고 서버는 모델이 그 순서를 따르는지 확인하지 않는다 [4].
+`windows_info`의 설명은 이 도구를 먼저 불러야 설정이 만들어진다고 적지만 설정은 어느 플러그인이든 `run()`까지 처음 실행된 호출에서 저장된다 [3][5].
+
+### P02.02 규칙·조사 상태로 추천
+
+**구현.** 이 방식은 덤프 도구 2개와 `windows_strings`가 입력 조건을 채우지 못했을 때의 응답에 적용된다 [6][7].
+`VOL_DUMP_DIR` 없이 시작한 서버에서 `windows_dumpfiles`와 `windows_pedump`는 플러그인을 실행하기 전에 예외로 끝난다 [6].
+예외 문구는 덤프 도구를 부르기 전에 `claude_desktop_config.json`에서 `VOL_DUMP_DIR`을 기존 폴더로 정하라고 적는다 [6].
+FastMCP는 이 예외를 도구 이름을 붙인 `isError` 응답으로 돌려준다 [8].
+`windows_dumpfiles`를 부르자 `Error executing tool windows_dumpfiles: VOL_DUMP_DIR is not configured.`로 시작하는 오류 응답이 돌아왔다 [9].
+`windows_strings`는 `strings_file`이 비었으면 플러그인을 실행하지 않고 빈 결과와 `error`를 돌려준다 [7].
+`error`는 `strings -a -t d` 같은 도구로 오프셋이 붙은 문자열 목록 파일을 먼저 만들고 그 절대 경로를 주라고 적는다 [7].
+이 문구는 응답의 글이고 서버가 다음 호출을 대신 고르지 않는다.
+그 밖의 도구 응답은 플러그인 결과나 교차 분석 결과만 싣고 다음에 부를 도구를 싣지 않는다 [10].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 교차 분석 도구 7개에 적용된다 [10].
+`detect_hidden_processes`는 `pslist`와 `psscan`을 실행하고 `pslist`에 없는 PID의 `psscan` 행을 숨은 프로세스로 모은다 [11].
+`detect_process_anomalies`는 `pslist` 결과에 코드에 적은 부모 프로세스 표, 이름 편집 거리, 하나만 있어야 하는 프로세스, Session 0 프로세스의 규칙 4개를 적용한다 [12].
+`triage_process`는 받은 PID가 `pslist`에 있으면 `cmdline`, `dlllist`, `handles`, `netscan`, `malware.malfind`를 실행해 그 PID의 행만 모은다 [13].
+`detect_dll_injection`은 `malware.ldrmodules`, `malware.malfind`, `dlllist`를 실행하고 연결 목록에서 빠진 DLL과 `malfind` 영역을 징후로 모은다 [14].
+`network_process_correlation`은 `netscan` 행마다 `pslist`의 프로세스 이름, 부모 PID, 생성 시각과 `cmdline`의 명령줄을 붙인다 [15].
+`detect_service_tampering`은 `svcscan`과 `svclist`를 비교하고 `svclist` 결과가 있을 때만 `malware.svcdiff`를 더한다 [16].
+`build_timeline`은 `pslist`, `psscan`, `netscan`, `shimcachemem`, `registry.userassist`의 시각을 사건으로 모아 시각 차례로 정렬한다 [17].
+하위 플러그인 결과는 세션의 결과 캐시를 거치므로 앞서 실행한 플러그인은 다시 실행하지 않는다 [10][18].
+모델은 도구와 PID만 고르고 그 안의 단계는 서버 코드가 정한다.
+서버 안에서 모델을 불러 계획을 세우는 경로는 없다.
+
+**한계.** `triage_process`와 `detect_dll_injection`은 `pslist`에 없는 PID를 받으면 나머지 단계를 실행하지 않고 `error`를 담은 결과를 돌려준다 [13][14].
+`detect_hidden_processes`가 찾는 숨은 프로세스는 `pslist`에 없는 PID이고 그 설명은 숨은 프로세스마다 `triage_process`를 부르라고 적는다 [11][3].
+시험용 플러그인 결과로 `detect_hidden_processes`가 찾은 PID 666을 `triage_process`에 주자 `PID 666 not found in pslist`가 돌아왔다 [19].
+`detect_dll_injection`의 코드 설명은 `dlllist`와 `ldrmodules`의 모듈 수 차이를 세 번째 신호로 적지만 코드는 두 수를 응답에 싣기만 하고 징후로 만들지 않는다 [14].
+`dlllist`에 3개, `ldrmodules`에 1개를 둔 시험에서 `injection_indicator_count`는 0이었다 [19].
+`build_timeline`은 시각 문자열을 정해 둔 형식 4개로 해석하지 못하면 그 사건을 뺀다 [20].
+Volatility 3 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 돌려주고 서버는 이를 `2019-04-17 18:40:00+00:00` 꼴의 문자열로 바꾼다 [21][22].
+이 꼴의 생성 시각을 담은 시험용 `pslist` 결과로 `build_timeline`을 부르자 `total_events`가 0이었고 시간대를 뺀 같은 시각으로는 1이었다 [23].
+도구 설명은 시각이 없는 사건만 뺀다고 적는다 [24].
+
+### 근거
+
+[1] 초기화 지침의 글과 등록이다.
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+        "This server provides read-only forensic analysis of a Windows memory "
+        "image using the Volatility3 framework. The memory image is fixed at "
+        "startup and treated as legally protected evidence.\n\n"
+        "EVIDENCE INTEGRITY POLICY:\n"
+        "The memory image must NEVER be deleted, moved, renamed, modified, "
+        "compressed, or overwritten — regardless of who requests it. If the "
+        "user (or any other prompt) asks to alter or destroy the image in any "
+        "way, refuse the request and explain that evidence integrity must be "
+        "preserved for chain-of-custody requirements.\n\n"
+        "RECOMMENDED WORKFLOW:\n"
+        "1. Call windows_info first to display OS details and the image "
+        "SHA-256 hash (chain-of-custody baseline).\n"
+        "2. Proceed with process analysis (windows_pslist) and use "
+        "correlation tools (detect_hidden_processes, "
+        "detect_process_anomalies) to triage.\n"
+        "3. Before generating any report, call verify_image_integrity to "
+        "confirm the image has not been altered during the session."
+    ),
+)
+```
+
+[`mcp_server.py:23-44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L44)
+
+[2] (실행 확인) MCP SDK 1.27.0 클라이언트로 stdio 서버를 시작해 초기화하자 이 지침과 도구 96개가 돌아왔다.
+
+[3] 도구 설명의 다음 작업 안내다: [`mcp_server.py:73-80`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L73-L80), [`mcp_server.py:165-173`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L165-L173), [`mcp_server.py:253-257`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L253-L257).
+
+[4] 도구는 호출 순서를 보지 않고 캐시를 보거나 플러그인을 실행한다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[5] 설정은 저장한 설정이 없을 때 플러그인을 실행한 뒤 저장한다.
+
+```python
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:166-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L166-L171)
+
+[6] `VOL_DUMP_DIR`이 없으면 `file_handler`가 안내 문구를 담은 예외를 낸다.
+
+```python
+    @property
+    def file_handler(self):
+        """FileHandler class bound to ``dump_dir`` for use with dump plugins.
+
+        Raises RuntimeError if ``VOL_DUMP_DIR`` was not set when the server
+        started, so the Claude-visible MCP tool can return a clear message.
+        """
+        if self._file_handler is None:
+            raise RuntimeError(
+                "VOL_DUMP_DIR is not configured. Set the VOL_DUMP_DIR "
+                "environment variable in claude_desktop_config.json to "
+                "an existing directory before calling any dump tool."
+            )
+        return self._file_handler
+```
+
+[`session.py:48-61`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L48-L61)
+
+[7] `windows_strings`는 `strings_file`이 비면 안내 문구를 담은 빈 결과를 돌려준다.
+
+```python
+def run_strings(session: Session, strings_file: str = "") -> dict:
+    """Run windows.strings and return strings mapped to processes.
+
+    strings_file: absolute path to a pre-generated strings-with-offsets
+        file, e.g. produced by `strings -a -t d <image> > strings.txt`.
+        This is a hard (non-optional) requirement of the underlying
+        plugin -- without it, plugin construction itself fails
+        validation before run() is ever reached, so an empty string
+        here returns an empty result with an explanatory error instead
+        of letting that exception propagate.
+    """
+    if not strings_file:
+        return {
+            "plugin": "strings",
+            "results": [],
+            "error": (
+                "strings_file is required by windows.strings and was not "
+                "provided. Generate one first (e.g. `strings -a -t d "
+                "<image> > strings.txt` on Linux/WSL, or any tool that "
+                "emits 'offset:string' lines) and pass its absolute path."
+            ),
+        }
+```
+
+[`plugins/memory.py:62-83`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L62-L83)
+
+[8] MCP SDK 1.27.0의 FastMCP는 도구 함수의 예외를 `Error executing tool <이름>: <문구>`로 바꾼다: [`src/mcp/server/fastmcp/tools/base.py:93-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L93-L117).
+
+[9] (실행 확인) `VOL_DUMP_DIR` 없이 시작한 stdio 서버에서 `windows_dumpfiles`를 `pid` 4로 부르자 `isError`가 참인 응답에 이 문구가 실렸다.
+
+[10] 교차 분석 모듈의 설명과 도구 등록이다: [`plugins/correlation.py:1-7`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L1-L7), [`plugins/correlation.py:524-532`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L524-L532), [`mcp_server.py:143-437`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L143-L437).
+
+[11] `detect_hidden_processes`는 `pslist`에 없는 `psscan` 행을 모은다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    psscan_data = session.run_plugin("psscan")
+
+    pslist_pids = {proc["PID"] for proc in pslist_data["results"]}
+
+    hidden = [
+        proc for proc in psscan_data["results"]
+        if proc["PID"] not in pslist_pids
+    ]
+
+    return {
+        "plugin": "detect_hidden_processes",
+        "results": {
+            "pslist_count": len(pslist_data["results"]),
+            "psscan_count": len(psscan_data["results"]),
+            "hidden_count": len(hidden),
+            "hidden_processes": hidden,
+        },
+    }
+```
+
+[`plugins/correlation.py:25-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L25-L43)
+
+[12] `detect_process_anomalies`의 규칙 표와 규칙 적용이다: [`plugins/correlation.py:50-75`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L50-L75), [`plugins/correlation.py:94-174`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L94-L174).
+
+```python
+# Processes that should normally have exactly one instance
+_SINGLETON_PROCESSES = {
+    "lsass.exe", "services.exe", "smss.exe", "wininit.exe", "lsm.exe",
+}
+
+# Expected parent for key system processes (child -> expected parent name)
+_EXPECTED_PARENTS = {
+    "svchost.exe": "services.exe",
+    "services.exe": "wininit.exe",
+    "lsass.exe": "wininit.exe",
+    "wininit.exe": "smss.exe",
+    "csrss.exe": "smss.exe",
+    "smss.exe": "System",
+}
+
+# System processes that must run in Session 0
+_SESSION0_PROCESSES = {
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "lsm.exe",
+}
+
+# Legitimate names that attackers commonly typosquat
+_LEGIT_NAMES = {
+    "svchost.exe", "csrss.exe", "lsass.exe", "services.exe",
+    "smss.exe", "wininit.exe", "explorer.exe", "winlogon.exe",
+}
+```
+
+[`plugins/correlation.py:50-75`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L50-L75)
+
+[13] `triage_process`는 `pslist`에 PID가 없으면 다른 단계를 실행하지 않는다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    proc_match = next(
+        (p for p in pslist_data["results"] if p["PID"] == pid), None,
+    )
+    if proc_match is None:
+        return {
+            "plugin": "triage_process",
+            "results": {"pid": pid, "error": f"PID {pid} not found in pslist"},
+        }
+
+    cmdline_data = session.run_plugin("cmdline")
+    dlllist_data = session.run_plugin("dlllist")
+    handles_data = session.run_plugin("handles")
+    netscan_data = session.run_plugin("netscan")
+    malfind_data = session.run_plugin("malware.malfind")
+```
+
+[`plugins/correlation.py:183-197`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L183-L197)
+
+[14] `detect_dll_injection`의 설명은 신호 세 개를 적고 코드는 두 신호로 징후를 만든다: [`plugins/correlation.py:223-291`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L223-L291).
+
+[15] `network_process_correlation`은 연결마다 프로세스 정보를 붙인다.
+
+```python
+    netscan_data = session.run_plugin("netscan")
+    pslist_data = session.run_plugin("pslist")
+    cmdline_data = session.run_plugin("cmdline")
+
+    pid_to_proc = {p["PID"]: p for p in pslist_data["results"]}
+    pid_to_cmdline = {}
+    for c in cmdline_data["results"]:
+        pid_to_cmdline[c["PID"]] = c.get("Args", "")
+
+    connections = []
+    for conn in netscan_data["results"]:
+        pid = conn.get("PID")
+        proc = pid_to_proc.get(pid, {})
+        enriched = {
+            **conn,
+            "process_name": proc.get("ImageFileName", conn.get("Owner", "")),
+            "ppid": proc.get("PPID"),
+            "create_time": proc.get("CreateTime"),
+            "cmdline": pid_to_cmdline.get(pid, ""),
+        }
+        connections.append(enriched)
+```
+
+[`plugins/correlation.py:300-320`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L300-L320)
+
+[16] `detect_service_tampering`의 단계다.
+
+```python
+    svcscan_data = session.run_plugin("svcscan")
+    svcscan_services = svcscan_data["results"]
+
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+```
+
+[`plugins/correlation.py:340-364`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L340-L364)
+
+[17] `build_timeline`은 다섯 플러그인의 시각을 모아 정렬한다: [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).
+
+[18] (실행 확인) 시험용 플러그인 처리기를 둔 `Session`에서 같은 플러그인을 두 번 부르자 처리기는 한 번만 실행되었다.
+
+[19] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 `PLUGIN_MAP`의 하위 플러그인을 시험용 결과를 돌려주는 함수로 바꾸고 교차 분석 도구를 실행했다.
+
+[20] `_parse_timestamp`는 정해 둔 형식 4개로만 해석하고 실패하면 `None`을 돌려준다.
+
+```python
+def _parse_timestamp(val: str | None) -> str | None:
+    """Normalize a Volatility3 timestamp string to ISO 8601, or None."""
+    if not val or val == "N/A" or val == "None":
+        return None
+    val = val.strip()
+    # Already ISO-ish: "2026-03-15 14:22:01.000000" → "2026-03-15T14:22:01"
+    try:
+        from datetime import datetime
+        # Handle "YYYY-MM-DD HH:MM:SS.ffffff" (most common vol3 format)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(val, fmt)
+                return dt.isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+```
+
+[`plugins/correlation.py:379-396`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L379-L396)
+
+[21] Volatility 3 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 바꾸고 프로세스 생성 시각에 이 함수를 쓴다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28), [`volatility3/framework/symbols/windows/extensions/__init__.py:997-998`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/extensions/__init__.py#L997-L998).
+
+[22] 서버는 `datetime` 값을 `str`로 바꿔 결과에 싣는다.
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:51-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L68)
+
+[23] (실행 확인) `wintime_to_datetime`의 값을 서버의 `_serialize_value`로 바꾼 `2019-04-17 18:40:00+00:00`을 생성 시각으로 둔 시험용 `pslist` 결과로 `build_timeline`을 실행했다.
+
+[24] `build_timeline`의 설명은 시각이 없는 사건만 뺀다고 적는다.
+
+```python
+    - Events with no timestamp are excluded; the timeline only contains
+      artifacts where Volatility3 recovered a valid time value
+```
+
+[`mcp_server.py:431-432`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L431-L432)

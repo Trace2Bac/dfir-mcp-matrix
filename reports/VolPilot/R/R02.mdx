@@ -1,0 +1,167 @@
+---
+cell: R02
+details:
+- id: R02.06
+---
+
+# R02 대량 결과 전달
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 플러그인을 감싼 도구 88개의 결과 값 가운데 바이트로 나오는 값에 적용된다 [1][2].
+`_bytes_to_hex`는 바이트 값이 256바이트(`_MAX_BYTES_PREVIEW`)를 넘으면 앞 256바이트만 16진 문자열로 바꾸고 `...(truncated, N bytes total)`을 덧붙인다 [1].
+덧붙인 글에는 원래 값의 전체 바이트 수가 들어 있다 [1].
+`_serialize_value`는 바이트, `HexBytes`, `Disassembly`, `LayerData`, `show_hex`가 켜진 `MultiTypeData`를 이 함수로 바꾼다 [2].
+300바이트 값을 넣자 앞 256바이트의 16진 문자열 뒤에 `...(truncated, 300 bytes total)`이 붙었다 [3].
+256바이트 값은 512자 16진 문자열로 잘리지 않고 나왔다 [3].
+코드 주석은 이 상한이 지금 알려진 값에는 닿지 않는 방어용 상한이라고 적는다 [1].
+
+결과 목록의 행 수와 응답 전체의 크기에는 상한이 없다 [4][5].
+플러그인을 감싼 도구는 `parse_treegrid`가 만든 행을 모두 `results`에 싣는다 [4].
+교차 분석 도구도 고른 행을 모두 싣는다 [6].
+문자열 값(`str`)은 길이와 관계없이 그대로 싣는다 [2].
+`windows_memmap`의 설명은 결과가 크니 특정 프로세스를 조사할 때 쓰라고 적는다 [7].
+서버는 결과를 파일로 남기거나 이어서 읽는 경로를 두지 않는다 [8].
+모델이 같은 도구를 다시 부르면 세션 캐시에 둔 같은 결과 전체를 다시 돌려준다 [8].
+
+**한계.** 이 상한은 바이트로 나오는 값에만 적용되고 같은 내용을 글로 디코딩해 내는 열에는 적용되지 않는다 [2].
+`MultiTypeData`의 `show_hex`가 꺼져 있으면 디코딩한 글을 길이 제한 없이 싣는다 [2].
+
+### 근거
+
+[1] `_bytes_to_hex`의 상한과 잘림 표시다.
+
+```python
+# Cap on how many raw bytes get hex-encoded into a single field. All known
+# callers (LayerData previews, HexBytes secrets, Disassembly blocks) are a
+# few hundred bytes at most; this is a defensive bound against a future
+# plugin passing something much larger, not a limit anything hits today.
+_MAX_BYTES_PREVIEW = 256
+
+
+def _bytes_to_hex(data: bytes) -> str:
+    """Compact hex encoding (no separators/newlines) with a size cap."""
+    if len(data) > _MAX_BYTES_PREVIEW:
+        return f"{data[:_MAX_BYTES_PREVIEW].hex()}...(truncated, {len(data)} bytes total)"
+    return data.hex()
+```
+
+[`plugins/_common.py:18-29`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L18-L29)
+
+[2] `_serialize_value`가 상한을 적용하는 값의 종류다.
+
+```python
+def _serialize_multitypedata(val: "format_hints.MultiTypeData") -> str:
+    """Decode MultiTypeData as text where the plugin expects text, else hex."""
+    if val.show_hex:
+        return _bytes_to_hex(bytes(val))
+    text = val.decode(val.encoding, errors="replace")
+    if val.split_nulls:
+        return "\n".join(part for part in text.split("\x00") if part)
+    return text.split("\x00", 1)[0]
+
+
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:41-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L41-L68)
+
+[3] (실행 확인) `_serialize_value`에 300바이트와 256바이트 값을 넣어 잘림 표시와 길이를 보았다.
+
+[4] 플러그인을 감싼 도구는 변환한 행을 모두 싣는다.
+
+```python
+def parse_treegrid(treegrid) -> list[dict[str, Any]]:
+    """Parse a Volatility3 TreeGrid into a list of dicts."""
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return rows
+```
+
+[`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85)
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+[5] MCP Python SDK 1.27.0의 `FastMCP`는 도구가 돌려준 `dict`를 JSON 글 하나로 바꾸고 길이를 제한하지 않는다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:499-532`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/func_metadata.py#L499-L532).
+
+[6] 교차 분석 도구는 고른 행을 목록에 모두 싣는다: [`plugins/correlation.py:30-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L30-L43), [`plugins/correlation.py:203-219`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L219), [`plugins/correlation.py:309-328`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L309-L328), [`plugins/correlation.py:506-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L506-L521).
+
+[7] `windows_memmap`의 설명이다.
+
+```python
+    Forensic context:
+    - Physical addresses can be used to locate data directly in the raw
+      memory image file for manual hex analysis or carving
+    - Large contiguous mappings may indicate memory-mapped files or large
+      allocations worth investigating
+    - Use windows_vadinfo for higher-level memory region metadata (protection,
+      mapped files) rather than raw page-level mappings
+    - This tool produces large result sets; use it for targeted investigation
+      of specific processes identified through windows_pslist
+    - The memory image is read-only evidence; this tool does not modify it
+```
+
+[`mcp_server.py:1158-1167`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1158-L1167)
+
+[8] `run_plugin`은 결과를 세션의 메모리 캐시에 두고 같은 호출에는 그 결과를 돌려준다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)

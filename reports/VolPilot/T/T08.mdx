@@ -1,0 +1,268 @@
+---
+cell: T08
+details:
+- id: T08.03
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 `windows_crashinfo`와 `detect_service_tampering`에 적용된다 [1][2].
+`run_crashinfo`는 Volatility가 낸 `RuntimeError`의 문구에 `No active exception to reraise`가 있으면 빈 `results`를 돌려준다 [1].
+코드 주석은 이 문구를 크래시 덤프가 아닌 이미지에서 Volatility의 `crashinfo`가 내는 오류로 설명한다 [1].
+문구가 다른 `RuntimeError`는 다시 내보내므로 FastMCP가 오류 응답으로 돌려준다 [1][3].
+`detect_service_tampering`은 `svclist` 결과가 비었는지 보고 비었으면 `os_compatible`을 거짓으로 둔다 [2].
+`run_crashinfo`의 `run_plugin`을 바꿔 두 문구의 `RuntimeError`를 내게 하자 `No active exception to reraise`는 빈 `results`가 되고 다른 문구는 그대로 예외로 나왔다 [4].
+
+서버는 Volatility가 기록한 경고나 오류를 읽지 않는다 [5].
+FastMCP가 이 기록을 서버의 표준 오류로 보낸다 [6].
+플러그인이 예외 없이 오류를 기록하고 행 없이 끝나면 서버는 빈 `results`를 성공 응답으로 돌려준다 [5].
+Volatility 2.28.0의 `pedump`는 `pid`와 `kernel_module`이 함께 있거나 함께 없을 때, `svclist`는 지원하지 않는 OS일 때 이렇게 끝난다 [7][8].
+`windows_pe_symbols`의 설명도 `symbols`와 `addresses`가 모두 비면 플러그인이 오류를 기록하고 행 없이 끝난다고 적는다 [9].
+
+**한계.** `windows_crashinfo`의 빈 `results`에는 크래시 덤프가 아니어서 비었다는 사실이 실리지 않는다 [1].
+`detect_service_tampering`은 `svclist` 결과가 빈 이유를 가리지 않는다 [2].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 `windows_strings`에 적용된다 [10].
+`run_strings`는 Volatility가 플러그인을 만들 때 낸 `PluginRequirementException`을 처리해 빈 `results`와 예외 문구를 담은 `error`를 돌려준다 [10].
+이 응답은 `isError`가 거짓인 일반 결과다 [11].
+없는 `strings_file`로 부르자 `error`에 `The plugin configuration failed to validate`가 실린 응답이 돌아왔다 [11].
+
+다른 도구는 서버 코드가 분석 예외를 처리하지 않는다 [12].
+MCP Python SDK 1.27.0의 FastMCP는 도구 함수에서 난 예외를 `Error executing tool <도구>: <문구>` 오류로 바꾸고 응답의 `isError`를 참으로 둔다 [3].
+무작위 바이트 이미지로 부른 플러그인 도구와 교차 분석 도구는 모두 이 꼴의 오류를 돌려주었다 [11].
+여러 플러그인을 부르는 교차 분석 도구는 `malware.svcdiff`를 뺀 플러그인 하나에서 예외가 나면 호출 전체가 이 오류로 끝나고 앞선 플러그인의 결과는 응답에 싣지 않는다 [13].
+실패한 플러그인 실행은 결과 캐시에 넣지 않으므로 같은 인자로 다시 부르면 다시 실행한다 [14].
+이미지 폴더에 쓸 수 없으면 플러그인의 `run()`까지 처음 실행된 호출이 설정 파일을 쓰다 난 `PermissionError`로 끝나고 다음 호출부터는 설정 파일을 쓰지 않는다 [15].
+서버는 플러그인 실행에 시간 제한을 두지 않는다 [12][14].
+
+**한계.** 다음 경로에서는 분석 중 난 예외가 실패로 표시되지 않고 빈 값이나 빈 결과가 된다.
+
+- `windows_virtmap`은 `SymbolError`가 나면 빈 `results`를 돌려준다 [16].
+- `windows_crashinfo`는 Volatility가 낸 `RuntimeError`의 문구가 `No active exception to reraise`이면 빈 `results`를 돌려준다 [1].
+- `detect_service_tampering`은 `malware.svcdiff`에서 어떤 예외가 나도 `svcdiff_results`를 빈 `list`로 두고 오류를 싣지 않는다 [2].
+- 결과 값을 바꾸는 `_serialize_layerdata`는 이미지 계층을 읽다 예외가 나면 `None`을 돌려주므로 그 필드는 값이 없는 필드와 같은 `null`이 된다 [17].
+
+`run_virtmap`의 `run_plugin`을 `SymbolError`를 내게 바꾸자 빈 `results`가 돌아왔다 [18].
+
+### 근거
+
+[1] `run_crashinfo`는 오류 문구로 크래시 덤프가 아닌 경우를 가린다.
+
+```python
+def run_crashinfo(session: Session) -> dict:
+    """Run windows.crashinfo and return crash dump header information.
+
+    Only produces data when the image is an actual Windows crash dump
+    (.dmp), not a raw/VM memory snapshot. volatility3's own plugin has a
+    bug on that path: it logs "This plugin requires a Windows crash
+    dump" and then executes a bare ``raise`` outside any except block,
+    which Python turns into ``RuntimeError("No active exception to
+    reraise")`` instead of returning cleanly. Caught here and translated
+    into an empty result, matching how sibling tools (svclist, consoles,
+    truecrypt, ...) report "not applicable to this image" without
+    crashing the MCP call.
+    """
+    try:
+        treegrid = run_plugin(session, crashinfo.Crashinfo)
+    except RuntimeError as e:
+        if "No active exception to reraise" in str(e):
+            return {"plugin": "crashinfo", "results": []}
+        raise
+    return {"plugin": "crashinfo", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/sysinfo.py:30-49`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L30-L49)
+
+[2] `detect_service_tampering`은 `svclist`가 비었는지 보고 `svcdiff`의 예외를 처리한다.
+
+```python
+    svcscan_data = session.run_plugin("svcscan")
+    svcscan_services = svcscan_data["results"]
+
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+```
+
+[`plugins/correlation.py:340-364`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L340-L364)
+
+[3] MCP Python SDK 1.27.0의 FastMCP는 도구 함수에서 난 예외를 `ToolError`로 바꾸고 저수준 서버가 이를 `isError` 응답으로 보낸다: [`src/mcp/server/fastmcp/tools/base.py:93-117`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/tools/base.py#L93-L117).
+
+[4] (실행 확인) 서버의 `plugins.sysinfo` 모듈을 같은 프로세스에서 불러 `run_plugin`이 `RuntimeError("No active exception to reraise")`를 내게 하자 `run_crashinfo`는 `{"plugin": "crashinfo", "results": []}`를 돌려주었다.
+`RuntimeError("other")`를 내게 하자 `run_crashinfo`는 그 예외를 그대로 냈다.
+
+[5] 플러그인 실행 함수는 플러그인의 결과 표만 읽는다.
+
+```python
+    available = automagic.available(ctx)
+    automagics = automagic.choose_automagic(available, plugin_class)
+    automagic.run(automagics, ctx, plugin_class, BASE_CONFIG_PATH, progress_callback=_noop_progress)
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:160-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L160-L171)
+
+[6] MCP Python SDK 1.27.0의 FastMCP는 만들 때 표준 오류로 쓰는 로그 처리기를 `INFO` 수준으로 설정한다: [`src/mcp/server/fastmcp/utilities/logging.py:19-43`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/logging.py#L19-L43), [`src/mcp/server/fastmcp/server.py:242-242`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/server.py#L242-L242).
+
+[7] Volatility 2.28.0의 `pedump`는 인자 조합이 맞지 않으면 오류를 기록하고 끝난다: [`volatility3/framework/plugins/windows/pedump.py:231-237`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L231-L237).
+
+[8] Volatility 2.28.0의 `svclist`는 지원하지 않는 OS면 경고를 기록하고 끝난다: [`volatility3/framework/plugins/windows/svclist.py:80-88`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/svclist.py#L80-L88).
+
+[9] `windows_pe_symbols`의 설명이 두 인자가 모두 비었을 때의 동작을 적는다.
+
+```python
+    - One of ``symbols`` or ``addresses`` is effectively required: if
+      both are left empty the underlying plugin logs "--address or
+      --symbol must be specified" and returns zero rows rather than
+      dumping every symbol in the module.
+```
+
+[`mcp_server.py:1674-1677`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L1674-L1677)
+
+[10] `run_strings`는 `PluginRequirementException`을 처리해 `error`를 싣는다.
+
+```python
+    extra_config = {"strings_file": Path(strings_file).resolve().as_uri()}
+    try:
+        treegrid = run_plugin(session, strings.Strings, extra_config=extra_config)
+    except exceptions.PluginRequirementException as e:
+        return {"plugin": "strings", "results": [], "error": str(e)}
+    return {"plugin": "strings", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:84-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L84-L89)
+
+[11] (실행 확인) 무작위 바이트 1MiB 파일을 이미지로 준 서버에 MCP Python SDK 클라이언트로 도구를 불렀다.
+`windows_strings`에 없는 파일 `/work/img/none.txt`를 주자 `isError`가 거짓이고 `error`가 `The plugin configuration failed to validate`인 응답이 돌아왔다.
+`windows_pslist`, `windows_info`, `windows_virtmap`, `windows_crashinfo`, `triage_process`, `detect_service_tampering`, `build_timeline`, `windows_vadregexscan`은 모두 `isError`가 참인 `Error executing tool <도구>: The plugin configuration failed to validate`였다.
+서버의 표준 오류에는 Volatility가 남긴 `No suitable kernels found during pdbscan`, `Plugin failed validation`이 있었다.
+
+[12] 다른 실행 함수는 예외를 처리하지 않고 공통 함수 `run_plugin`을 부른다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+[13] `build_timeline`은 플러그인 다섯 개를 차례로 부르고 예외를 처리하지 않는다: [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).
+`triage_process`는 플러그인 여섯 개를 부른다: [`plugins/correlation.py:177-220`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L177-L220).
+
+[14] `Session.run_plugin`은 실행 함수가 결과를 돌려준 뒤에만 캐시에 넣는다.
+
+```python
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:126-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L126-L133)
+
+[15] 공통 함수 `run_plugin`은 `run()` 뒤 저장한 설정이 없으면 `save_config`를 부르고 `save_config`는 파일을 열기 전에 설정을 세션에 둔다.
+
+```python
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+```
+
+[`plugins/_common.py:166-169`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L166-L169)
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+
+    @property
+    def has_config(self) -> bool:
+        return self._saved_config is not None
+```
+
+[`session.py:107-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L116)
+
+[16] `run_virtmap`은 `SymbolError`를 빈 결과로 바꾼다.
+
+```python
+    try:
+        treegrid = run_plugin(session, virtmap.VirtMap)
+    except exceptions.SymbolError:
+        return {"plugin": "virtmap", "results": []}
+    return {"plugin": "virtmap", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:55-59`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L55-L59)
+
+[17] `_serialize_layerdata`는 예외가 나면 `None`을 돌려주고 값이 없는 Volatility 값도 `None`으로 바뀐다.
+
+```python
+def _serialize_layerdata(val: "renderers.LayerData") -> str | None:
+    """Read the bytes a LayerData reference points at and hex-encode them."""
+    try:
+        data = val.context.layers[val.layer_name].read(val.offset, val.length, True)
+    except Exception:
+        return None
+    return _bytes_to_hex(data)
+```
+
+[`plugins/_common.py:32-38`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L32-L38)
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+```
+
+[`plugins/_common.py:51-54`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L54)
+
+[18] (실행 확인) 서버의 `plugins.memory` 모듈을 같은 프로세스에서 불러 `run_plugin`이 `SymbolError`를 내게 바꾸고 `run_virtmap`을 부르자 `{"plugin": "virtmap", "results": []}`가 돌아왔다.

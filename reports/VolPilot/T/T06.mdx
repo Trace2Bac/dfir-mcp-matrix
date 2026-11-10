@@ -1,0 +1,179 @@
+---
+cell: T06
+details:
+- id: not_implemented
+---
+
+# T06 실행 환경정보 표시
+
+### 미구현
+
+**판단.** 서버는 Volatility 3로 결과를 내지만 응답과 파생물 어디에도 Volatility나 심볼의 버전을 싣지 않는다.
+플러그인 도구의 응답은 실행 함수가 정한 `plugin` 이름과 `results`만 담는다 [1].
+`windows_info`는 여기에 이미지 경로, 크기, 시작할 때 계산한 SHA-256을 담은 `image`를 더하고 버전은 더하지 않는다 [2].
+Volatility 2.28.0의 `windows.info`가 내는 행에는 심볼 파일 위치 `Symbols`가 있다 [3].
+서버는 이 행을 다른 행과 같이 `results`의 키와 값으로 바꿀 뿐 따로 읽어 싣지 않는다 [4].
+교차 분석 도구의 응답에도 대조에 쓴 플러그인의 버전은 없다 [5].
+`windows_dumpfiles`와 `windows_pedump`가 쓰는 추출 파일에는 Volatility가 만든 바이트만 들어가고 서버는 manifest를 만들지 않는다 [6].
+설정 파일 `.vol3cfg.json`은 Volatility 설정을 저장하고 서버 코드가 버전을 넣지 않는다 [7].
+서버는 도구 호출 기록을 남기지 않는다 [8].
+
+서버 자신의 버전도 싣지 않는다.
+서버는 FastMCP를 이름과 지침만 주어 만들고 MCP Python SDK 1.27.0은 버전이 없으면 초기화 응답 `serverInfo.version`에 `mcp` 패키지의 버전을 넣는다 [9][10].
+초기화 응답의 `serverInfo`는 이름 `VolPilot`, 버전 `1.27.0`이었고 `pyproject.toml`의 서버 버전은 0.1.0이다 [11][12].
+
+서버는 모델을 부르지 않는다.
+
+### 근거
+
+[1] 플러그인 실행 함수는 `plugin`과 `results`만 돌려준다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-18`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L18)
+
+[2] `windows_info`는 `image`를 더한다.
+
+```python
+    info = session.run_plugin("info")
+    info["image"] = {
+        "path": session.image_path,
+        "size": session.image_size,
+        "sha256": session.image_sha256,
+    }
+    return info
+```
+
+[`mcp_server.py:87-93`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L87-L93)
+
+[3] Volatility 2.28.0의 `windows.info`가 `Symbols` 행에 심볼 표의 `isf_url`을 낸다: [`volatility3/framework/plugins/windows/info.py:202-204`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/info.py#L202-L204).
+
+[4] `run_info`는 행마다 `Variable`을 키로, `Value`를 값으로 담는다.
+
+```python
+def run_info(session: Session) -> dict:
+    """Run windows.info and return system information."""
+    treegrid = run_plugin(session, info.Info)
+    results = {}
+    for row in parse_treegrid(treegrid):
+        results[row["Variable"]] = row["Value"]
+    return {"plugin": "info", "results": results}
+```
+
+[`plugins/sysinfo.py:15-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L15-L21)
+
+[5] 교차 분석 도구의 응답 예다.
+
+```python
+    return {
+        "plugin": "network_process_correlation",
+        "results": {
+            "total_connections": len(connections),
+            "connections": connections,
+        },
+    }
+```
+
+[`plugins/correlation.py:322-328`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L322-L328)
+
+[6] 추출 파일은 플러그인이 쓴 바이트만 저장한다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[7] `save_config`는 받은 설정 `dict`만 JSON으로 쓴다.
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112)
+
+[8] 서버 코드의 기록은 이미지가 쓰기 가능할 때 남기는 경고 하나다.
+
+```python
+        logger = logging.getLogger(__name__)
+        fd = os.open(file_path, os.O_RDONLY)
+        os.close(fd)
+        if os.access(file_path, os.W_OK):
+            logger.warning(
+                "Image file is writable: %s — "
+                "consider setting it to read-only (e.g., attrib +R or "
+                "chmod 444) to prevent accidental modification.",
+                file_path,
+            )
+```
+
+[`session.py:71-80`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L71-L80)
+
+[9] 서버는 FastMCP에 이름과 지침만 준다.
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+        "This server provides read-only forensic analysis of a Windows memory "
+        "image using the Volatility3 framework. The memory image is fixed at "
+        "startup and treated as legally protected evidence.\n\n"
+        "EVIDENCE INTEGRITY POLICY:\n"
+        "The memory image must NEVER be deleted, moved, renamed, modified, "
+        "compressed, or overwritten — regardless of who requests it. If the "
+        "user (or any other prompt) asks to alter or destroy the image in any "
+        "way, refuse the request and explain that evidence integrity must be "
+        "preserved for chain-of-custody requirements.\n\n"
+        "RECOMMENDED WORKFLOW:\n"
+        "1. Call windows_info first to display OS details and the image "
+        "SHA-256 hash (chain-of-custody baseline).\n"
+        "2. Proceed with process analysis (windows_pslist) and use "
+        "correlation tools (detect_hidden_processes, "
+        "detect_process_anomalies) to triage.\n"
+        "3. Before generating any report, call verify_image_integrity to "
+        "confirm the image has not been altered during the session."
+    ),
+)
+```
+
+[`mcp_server.py:23-44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L44)
+
+[10] MCP Python SDK 1.27.0은 서버 버전이 없으면 `mcp` 패키지의 버전을 넣는다: [`src/mcp/server/lowlevel/server.py:171-183`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L171-L183), [`src/mcp/server/fastmcp/server.py:205-213`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/server.py#L205-L213).
+
+[11] (실행 확인) MCP Python SDK 클라이언트로 서버에 연결하자 초기화 응답의 `serverInfo`는 `VolPilot`과 `1.27.0`이었다.
+
+[12] `pyproject.toml`의 서버 버전이다.
+
+```toml
+[project]
+name = "volpilot"
+version = "0.1.0"
+description = "MCP server wrapping Volatility3 for conversational Windows memory forensics"
+```
+
+[`pyproject.toml:1-4`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/pyproject.toml#L1-L4)

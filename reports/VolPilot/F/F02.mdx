@@ -1,0 +1,521 @@
+---
+cell: F02
+details:
+- id: F02.01
+- id: F02.03
+- id: F02.05
+- id: F02.09
+---
+
+# F02 발견사항·결론 도출
+
+### F02.01 규칙·키 기반 판정·상관
+
+**구현.** 이 방식은 교차 분석 도구 7개(`detect_hidden_processes`, `detect_process_anomalies`, `triage_process`, `detect_dll_injection`, `network_process_correlation`, `detect_service_tampering`, `build_timeline`)에 적용된다 [1].
+각 도구는 `Session.run_plugin`으로 하위 플러그인 결과를 받아 `plugins/correlation.py`에 정한 규칙이나 PID로 대조한다 [1].
+같은 세션에서 이미 실행한 플러그인은 다시 실행하지 않고 캐시에 둔 결과를 쓴다 [1].
+Windows 플러그인 도구 88개의 래퍼는 인자를 플러그인 설정으로 넘기고 결과를 `parse_treegrid`로 `dict` 목록으로 바꿀 뿐 판정 규칙을 두지 않는다 [2].
+`windows_malware_malfind`나 `windows_malware_svcdiff`처럼 플러그인이 낸 판정은 Volatility 3가 정한 것이고 서버는 그 결과를 그대로 옮긴다 [2].
+
+도구마다 쓰는 규칙과 대조 키를 아래에 적는다.
+
+- `detect_hidden_processes`는 `psscan` 항목 가운데 PID가 `pslist` 항목의 PID 집합에 없는 것을 `hidden_processes`로 고른다 [3].
+- `detect_process_anomalies`는 `pslist`의 프로세스마다 코드에 정한 이름 표 네 개로 규칙 네 가지를 대조한다 [4][5].
+- `unexpected_parent`는 이름이 표의 6개 가운데 하나이고 부모 PID의 프로세스 이름이 정해 둔 부모 이름과 다르면 싣는다 [4][5].
+- `name_masquerading`은 정상 이름 8개에 없는 이름이 그 가운데 하나와 편집 거리 1이나 2이면 싣는다 [4][5].
+- `singleton_violation`은 이름 5개 가운데 하나가 `pslist`에 둘 이상 있으면 그 이름의 프로세스마다 싣는다 [4][5].
+- `session0_violation`은 이름 6개 가운데 하나의 `SessionId`가 0이 아니면 싣는다 [4][5].
+- 규칙마다 `severity`를 정해 두며 `singleton_violation`만 `medium`이고 나머지는 `high`다 [5].
+- `triage_process`는 모델이 준 PID가 `pslist`에 있으면 `cmdline`·`dlllist`·`handles`·`netscan`·`malware.malfind` 결과에서 같은 PID의 항목을 모아 한 응답으로 돌려준다 [6].
+- `detect_dll_injection`은 모델이 준 PID의 `malware.ldrmodules` 항목 가운데 `InLoad`·`InInit`·`InMem` 중 하나라도 거짓인 모듈을 `unlinked_dll`로 싣는다 [7].
+- 같은 도구는 그 PID의 `malware.malfind` 항목을 모두 `rwx_region`으로 싣는다 [7].
+- `network_process_correlation`은 `netscan` 항목마다 PID로 `pslist`의 프로세스 이름, 부모 PID, 생성 시각과 `cmdline`의 명령줄을 붙인다 [8].
+- `detect_service_tampering`은 `svclist` 결과가 비어 있지 않으면 `svcscan` 항목 가운데 이름이 `svclist`에 없는 것을 `hidden_services`로 고르고 `malware.svcdiff` 결과를 `svcdiff_results`로 붙인다 [9].
+- `build_timeline`은 `pslist`·`psscan`·`netscan`·`shimcachemem`·`registry.userassist`의 시각을 사건으로 모아 시각순으로 정렬한다 [10].
+- 같은 도구는 PID가 `pslist`에 없는 `psscan` 프로세스의 사건 이름 뒤에 `[psscan-only]`를 붙인다 [10].
+
+`build_timeline`은 사건을 시각 차이나 시간 범위로 잇거나 묶지 않는다 [10].
+확신 수준이나 판단 보류를 값으로 싣는 도구는 없고 `severity`는 규칙마다 정한 위험 등급이다 [5].
+
+손으로 만든 플러그인 결과를 Volatility 3의 `TreeGrid`로 만들어 서버의 `parse_treegrid`로 바꾼 뒤 교차 분석 함수에 넣자 다음 결과가 나왔다 [11].
+
+- `psscan`에만 있는 프로세스는 실행 중인 것과 종료 시각이 있는 것이 모두 `hidden_processes`에 실렸다 [11].
+- `LsaIso.exe` 프로세스는 `lsass.exe`와 편집 거리 2로 `name_masquerading`에 실렸다 [11].
+- `SessionId`가 1인 `csrss.exe`는 `session0_violation`에 실렸다 [11].
+- 종료 시각이 있는 `lsass.exe`와 실행 중인 `lsass.exe`가 함께 `singleton_violation`에 실렸다 [11].
+
+**한계.** `detect_hidden_processes`는 PID만 대조하므로 `pslist`에 있는 PID와 같은 PID를 가진 다른 `psscan` 항목은 고르지 않는다 [3].
+오프셋과 이름이 다르고 PID만 같은 `psscan` 항목은 `hidden_processes`에 실리지 않았다 [11].
+`unexpected_parent`는 부모 PID가 `pslist`에 없으면 적용되지 않는다 [5].
+부모 PID가 `pslist`에 없는 `svchost.exe`는 어느 규칙에도 실리지 않았다 [11].
+
+`detect_dll_injection`은 `malware.ldrmodules` 항목이 프로세스 실행 파일 자신인지 가리지 않는다 [7].
+프로세스 실행 파일 자신의 `malware.ldrmodules` 항목이 `InInit`이 거짓이라는 이유로 `unlinked_dll`에 실렸다 [11].
+`detect_dll_injection`의 설명은 `dlllist`와 `malware.ldrmodules`의 모듈 수 차이를 셋째 신호로 본다고 적는다 [12].
+코드는 두 수를 `dlls_in_dlllist`와 `modules_in_ldrmodules`로 싣기만 하고 지표로 만들지 않는다 [7].
+`dlllist` 항목 3개와 `malware.ldrmodules` 항목 2개를 넣자 수 차이는 지표에 들어가지 않았다 [11].
+`rwx_region`의 `detail`은 늘 "RWX VAD"로 시작한다 [7].
+Volatility 3 2.28.0의 `malfind`는 쓰기 권한이 없는 실행 영역도 수정된 페이지가 있으면 결과에 싣는다 [13].
+보호 속성이 `PAGE_EXECUTE_READ`인 `malware.malfind` 항목은 "RWX VAD at 0x10000-0x10fff (PAGE_EXECUTE_READ)"로 실렸다 [11].
+
+`detect_service_tampering`은 `os_compatible`을 운영체제 버전이 아니라 `svclist` 결과가 비었는지로만 정한다 [9].
+이름이 없는 `svcscan` 항목은 대조에서 빠진다 [9].
+`malware.svcdiff`가 예외로 끝나면 `svcdiff_results`를 빈 목록으로 두고 실패를 응답에 싣지 않는다 [9].
+`malware.svcdiff`가 예외를 내도록 한 실행에서 응답은 `svcdiff_results` `[]`이었고 오류 표시가 없었다 [11].
+
+`build_timeline`의 `_parse_timestamp`는 시간대 표시가 없는 날짜·시각 형식 네 가지만 읽고 읽지 못하면 그 사건을 뺀다 [14][10].
+Volatility 3 2.28.0은 다섯 플러그인의 시각을 UTC 시간대가 붙은 `datetime`으로 낸다 [15].
+서버의 `parse_treegrid`는 이 값을 `str`로 바꿔 `2024-01-01 10:04:00+00:00`처럼 시간대가 붙은 글로 싣는다 [16][17].
+이 형식의 시각만 넣자 `build_timeline`은 `total_events` 0과 빈 `timeline`을 돌려주었고 `[psscan-only]` 사건도 없었다 [17].
+같은 결과에서 `+00:00`만 지우자 사건 21개가 정렬되어 실렸다 [17].
+
+### F02.03 통계·점수 산정
+
+**구현.** 이 방식은 `detect_process_anomalies`의 `name_masquerading`과 `singleton_violation`에 적용된다 [5].
+`_edit_distance`는 두 문자열의 Levenshtein 편집 거리를 계산한다 [18].
+`name_masquerading`은 프로세스 이름을 소문자로 바꿔 정상 이름 8개와 차례로 거리를 계산하고 거리가 1 이상 2 이하인 첫 이름에서 멈춘다 [5].
+거리는 `detail`에 `edit distance=<거리>`로 싣고 `severity`는 거리와 관계없이 `high`다 [5].
+`singleton_violation`은 `pslist`에서 소문자로 바꾼 이름마다 프로세스 수를 세어 1보다 크면 그 수를 `detail`에 싣는다 [5].
+종료 시각이 있는 프로세스도 이 수에 들어간다 [5][11].
+
+**한계.** 정상 이름 8개는 `set`이라 거리를 계산하는 차례가 프로세스마다 정해지는 문자열 해시에 따라 달라진다 [4][5].
+`csass.exe`는 `csrss.exe`와 `lsass.exe` 모두와 거리가 1이다 [19].
+`PYTHONHASHSEED`만 바꿔 실행하자 `detail`이 `lsass.exe`(거리 1), `csrss.exe`(거리 1), `smss.exe`(거리 2)로 갈렸다 [19].
+
+### F02.05 사용 근거·변환 기록
+
+**구현.** 이 방식은 교차 분석 도구 7개의 응답에 적용된다 [1].
+응답마다 `plugin`에 도구 이름을 싣는다 [3][9].
+`detect_process_anomalies`는 항목마다 맞은 규칙 이름 `rule`과 부모 이름, 편집 거리, 개수, 세션 번호를 적은 `detail`을 싣는다 [5].
+`detect_dll_injection`은 지표마다 근거 플러그인 이름을 `source`에 `ldrmodules`나 `malfind`로 싣는다 [7].
+`detect_service_tampering`은 고른 서비스마다 `source` `svcscan_only`를 싣는다 [9].
+`detect_hidden_processes`는 고른 `psscan` 항목을 필드 그대로 싣는다 [3].
+`build_timeline`은 사건마다 종류 `event_type`을 싣고 종류별 사건 수를 `sources`로 싣는다 [10].
+플러그인 실행 시각이나 캐시에서 가져온 결과인지는 응답에 싣지 않는다 [1].
+
+**한계.** `network_process_correlation`은 PID가 `pslist`에 없으면 `process_name`에 `netscan`의 `Owner`를 넣고 어느 쪽에서 온 값인지 표시하지 않는다 [8].
+PID가 `pslist`에 없는 연결은 `process_name`에 `Owner` 값이 실리고 `ppid`와 `create_time`이 `null`이었다 [11].
+`build_timeline`의 `process_created` 사건은 `pslist`와 `psscan`에서 온 것을 같은 종류로 싣고 이름 뒤의 `[psscan-only]`로만 구별한다 [10].
+`build_timeline`의 `program_executed` 사건은 이름을 `Path` 키에서 읽고 Volatility 3 2.28.0의 `windows.shimcachemem`은 경로를 `File Path` 열로 내므로 이 사건을 만들면 어느 프로그램의 사건인지 싣지 않는다 [10][20].
+
+### F02.09 판정 제외 조건의 공개
+
+**구현.** 이 방식은 `detect_hidden_processes`, `detect_process_anomalies`, `detect_service_tampering`의 응답에 적용된다 [3][5][9].
+`detect_hidden_processes`는 대조한 `pslist`와 `psscan`의 항목 수를 `pslist_count`와 `psscan_count`로 싣는다 [3].
+`detect_process_anomalies`는 규칙을 대조한 프로세스 수를 `total_processes`로 싣는다 [5].
+`detect_service_tampering`은 `svcscan` 항목 수를 싣는다 [9].
+`svclist` 결과가 비어 비교하지 않았으면 `os_compatible`을 거짓으로, `svclist_count`를 `null`로 싣는다 [9].
+`svclist`가 빈 결과를 내도록 한 실행에서 응답은 `os_compatible` 거짓, `svclist_count` `null`, `hidden_count` 0이었다 [11].
+`build_timeline`은 시각을 읽지 못해 뺀 사건의 수를 응답에 싣지 않는다 [10].
+도구 설명만 시각이 없는 사건은 빠진다고 적는다 [21].
+
+**한계.** `detect_service_tampering`은 이름이 없어 대조에서 뺀 `svcscan` 항목의 수를 싣지 않는다 [9].
+`svcscan` 항목 3개 가운데 하나의 이름을 비우자 응답에는 `svcscan_count` 3과 `hidden_count` 1만 실렸다 [11].
+`detect_process_anomalies`는 부모가 `pslist`에 없어 `unexpected_parent`를 적용하지 않은 프로세스를 알리지 않는다 [5].
+
+### 근거
+
+[1] 교차 분석 도구 7개의 함수 목록과 결과를 캐시하는 `Session.run_plugin`이다.
+
+```python
+PLUGIN_MAP = {
+    "detect_hidden_processes": run_detect_hidden_processes,
+    "detect_process_anomalies": run_detect_process_anomalies,
+    "triage_process": run_triage_process,
+    "detect_dll_injection": run_detect_dll_injection,
+    "network_process_correlation": run_network_process_correlation,
+    "detect_service_tampering": run_detect_service_tampering,
+    "build_timeline": run_build_timeline,
+}
+```
+
+[`plugins/correlation.py:524-532`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L524-L532)
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[2] Windows 플러그인 래퍼는 플러그인을 실행해 `parse_treegrid` 결과를 돌려준다: [`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24), [`plugins/file.py:27-30`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L27-L30), [`plugins/sysinfo.py:15-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L15-L21), [`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85).
+
+[3] `detect_hidden_processes`는 PID 집합의 차집합을 고르고 두 플러그인의 항목 수를 싣는다.
+
+```python
+def run_detect_hidden_processes(session: Session) -> dict:
+    """Compare pslist vs psscan to detect hidden processes.
+
+    Processes present in psscan (pool-tag scan) but absent from pslist
+    (EPROCESS linked list walk) are strong indicators of DKOM — Direct
+    Kernel Object Manipulation — a technique used by rootkits to unlink
+    a process from the active process list while keeping it running.
+    """
+    pslist_data = session.run_plugin("pslist")
+    psscan_data = session.run_plugin("psscan")
+
+    pslist_pids = {proc["PID"] for proc in pslist_data["results"]}
+
+    hidden = [
+        proc for proc in psscan_data["results"]
+        if proc["PID"] not in pslist_pids
+    ]
+
+    return {
+        "plugin": "detect_hidden_processes",
+        "results": {
+            "pslist_count": len(pslist_data["results"]),
+            "psscan_count": len(psscan_data["results"]),
+            "hidden_count": len(hidden),
+            "hidden_processes": hidden,
+        },
+    }
+```
+
+[`plugins/correlation.py:17-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L17-L43)
+
+[4] `detect_process_anomalies`가 쓰는 이름 표 네 개다.
+
+```python
+# Processes that should normally have exactly one instance
+_SINGLETON_PROCESSES = {
+    "lsass.exe", "services.exe", "smss.exe", "wininit.exe", "lsm.exe",
+}
+
+# Expected parent for key system processes (child -> expected parent name)
+_EXPECTED_PARENTS = {
+    "svchost.exe": "services.exe",
+    "services.exe": "wininit.exe",
+    "lsass.exe": "wininit.exe",
+    "wininit.exe": "smss.exe",
+    "csrss.exe": "smss.exe",
+    "smss.exe": "System",
+}
+
+# System processes that must run in Session 0
+_SESSION0_PROCESSES = {
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "lsm.exe",
+}
+
+# Legitimate names that attackers commonly typosquat
+_LEGIT_NAMES = {
+    "svchost.exe", "csrss.exe", "lsass.exe", "services.exe",
+    "smss.exe", "wininit.exe", "explorer.exe", "winlogon.exe",
+}
+```
+
+[`plugins/correlation.py:50-75`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L50-L75)
+
+[5] `detect_process_anomalies`의 규칙 네 가지와 응답이다: [`plugins/correlation.py:94-174`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L94-L174).
+
+[6] `triage_process`는 같은 PID의 항목을 플러그인마다 모은다.
+
+```python
+    cmdline_data = session.run_plugin("cmdline")
+    dlllist_data = session.run_plugin("dlllist")
+    handles_data = session.run_plugin("handles")
+    netscan_data = session.run_plugin("netscan")
+    malfind_data = session.run_plugin("malware.malfind")
+
+    cmdline_match = next(
+        (c for c in cmdline_data["results"] if c["PID"] == pid), None,
+    )
+
+    return {
+        "plugin": "triage_process",
+        "results": {
+            "pid": pid,
+            "name": proc_match.get("ImageFileName", ""),
+            "ppid": proc_match.get("PPID"),
+            "create_time": proc_match.get("CreateTime"),
+            "cmdline": cmdline_match.get("Args", "") if cmdline_match else "",
+            "dlls": [d for d in dlllist_data["results"] if d["PID"] == pid],
+            "handles": [h for h in handles_data["results"] if h["PID"] == pid],
+            "network_connections": [
+                n for n in netscan_data["results"] if n.get("PID") == pid
+            ],
+            "malfind_hits": [
+                m for m in malfind_data["results"] if m["PID"] == pid
+            ],
+        },
+```
+
+[`plugins/correlation.py:193-219`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L193-L219)
+
+[7] `detect_dll_injection`의 신호 두 가지와 응답이다.
+
+```python
+    # Signal 1: unlinked DLLs in ldrmodules
+    for mod in ldr_for_pid:
+        in_load = mod.get("InLoad", True)
+        in_init = mod.get("InInit", True)
+        in_mem = mod.get("InMem", True)
+        if not (in_load and in_init and in_mem):
+            missing = []
+            if not in_load:
+                missing.append("InLoad")
+            if not in_init:
+                missing.append("InInit")
+            if not in_mem:
+                missing.append("InMem")
+            indicators.append({
+                "type": "unlinked_dll",
+                "detail": f"{mod.get('MappedPath', 'unknown')} missing from {', '.join(missing)}",
+                "base": mod.get("Base"),
+                "source": "ldrmodules",
+            })
+
+    # Signal 2: RWX regions from malfind
+    for hit in mal_for_pid:
+        indicators.append({
+            "type": "rwx_region",
+            "detail": f"RWX VAD at {hit.get('Start VPN', '?')}-{hit.get('End VPN', '?')} ({hit.get('Protection', '')})",
+            "notes": hit.get("Notes", ""),
+            "source": "malfind",
+        })
+```
+
+[`plugins/correlation.py:252-279`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L252-L279)
+
+```python
+    return {
+        "plugin": "detect_dll_injection",
+        "results": {
+            "pid": pid,
+            "name": proc_match.get("ImageFileName", ""),
+            "injection_indicator_count": len(indicators),
+            "injection_indicators": indicators,
+            "dlls_in_dlllist": len(dll_for_pid),
+            "modules_in_ldrmodules": len(ldr_for_pid),
+        },
+    }
+```
+
+[`plugins/correlation.py:281-291`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L281-L291)
+
+[8] `network_process_correlation`은 PID로 프로세스 정보와 명령줄을 붙인다.
+
+```python
+    pid_to_proc = {p["PID"]: p for p in pslist_data["results"]}
+    pid_to_cmdline = {}
+    for c in cmdline_data["results"]:
+        pid_to_cmdline[c["PID"]] = c.get("Args", "")
+
+    connections = []
+    for conn in netscan_data["results"]:
+        pid = conn.get("PID")
+        proc = pid_to_proc.get(pid, {})
+        enriched = {
+            **conn,
+            "process_name": proc.get("ImageFileName", conn.get("Owner", "")),
+            "ppid": proc.get("PPID"),
+            "create_time": proc.get("CreateTime"),
+            "cmdline": pid_to_cmdline.get(pid, ""),
+        }
+        connections.append(enriched)
+```
+
+[`plugins/correlation.py:304-320`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L304-L320)
+
+[9] `detect_service_tampering`은 `svclist`가 비어 있지 않을 때만 이름을 대조하고 `svcdiff` 예외를 처리해 빈 목록을 둔다.
+
+```python
+    svcscan_data = session.run_plugin("svcscan")
+    svcscan_services = svcscan_data["results"]
+
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+```
+
+[`plugins/correlation.py:340-364`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L340-L364)
+
+```python
+    return {
+        "plugin": "detect_service_tampering",
+        "results": {
+            "svcscan_count": len(svcscan_services),
+            "svclist_count": len(svclist_services) if os_compatible else None,
+            "os_compatible": os_compatible,
+            "hidden_count": len(hidden_services),
+            "hidden_services": hidden_services,
+            "svcdiff_results": svcdiff_results,
+        },
+    }
+```
+
+[`plugins/correlation.py:366-376`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L366-L376)
+
+[10] `build_timeline`은 `psscan`에만 있는 프로세스에 표시를 붙이고 사건을 시각순으로 정렬한다: [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).
+
+```python
+    # --- 2. psscan: add processes not in pslist (hidden/terminated) ---
+    psscan_data = session.run_plugin("psscan")
+    for proc in psscan_data["results"]:
+        pid = proc["PID"]
+        if pid in pslist_pids:
+            continue
+        name = proc.get("ImageFileName", "")
+
+        ts = _parse_timestamp(str(proc.get("CreateTime", "")))
+        if ts:
+            events.append({
+                "timestamp": ts,
+                "event_type": "process_created",
+                "pid": pid,
+                "name": f"{name} [psscan-only]",
+                "detail": f"PPID={proc.get('PPID', '?')}",
+            })
+```
+
+[`plugins/correlation.py:435-451`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L435-L451)
+
+[11] (실행 확인) 손으로 만든 플러그인 결과를 Volatility 3 2.28.0의 `TreeGrid`와 서버의 `parse_treegrid`로 바꿔 가짜 세션으로 교차 분석 함수 7개에 넣었다.
+`pslist` 15개와 `psscan` 18개(실행 중인 `psscan` 전용 1개, 종료한 `psscan` 전용 1개, `pslist`와 PID만 같은 1개)에서 `hidden_processes`는 앞의 두 개였다.
+`detect_process_anomalies`는 `csrss.exe`(세션 1)의 `session0_violation`, `lsass.exe` 두 개의 `singleton_violation`, `LsaIso.exe`와 `scvhost.exe`의 `name_masquerading`, 부모가 `explorer.exe`인 `svchost.exe`의 `unexpected_parent`를 실었고 부모 PID 9999인 `svchost.exe`는 싣지 않았다.
+`detect_dll_injection`은 실행 파일 항목의 `unlinked_dll`과 `PAGE_EXECUTE_READ` 항목의 `rwx_region` 두 지표를 싣고 `dlls_in_dlllist` 3, `modules_in_ldrmodules` 2를 실었다.
+`network_process_correlation`은 PID 4242 연결에 `process_name` `ghost.exe`(`Owner` 값), `ppid` `null`을 실었다.
+`detect_service_tampering`은 `malware.svcdiff`가 예외를 내도록 한 실행에서 `svcdiff_results` `[]`을, `svclist`를 비운 실행에서 `os_compatible` 거짓과 `svclist_count` `null`을 실었다.
+
+[12] `detect_dll_injection`의 docstring은 신호 세 가지를 적는다.
+
+```python
+def run_detect_dll_injection(session: Session, *, pid: int) -> dict:
+    """Cross-reference ldrmodules + malfind + dlllist to detect DLL injection.
+
+    Checks three signals:
+    1. ldrmodules: InLoad/InInit/InMem list discrepancies (unlinked DLLs)
+    2. malfind: RWX memory regions in the process (injected code)
+    3. dlllist vs ldrmodules module count mismatch
+    """
+```
+
+[`plugins/correlation.py:223-230`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L223-L230)
+
+[13] Volatility 3 2.28.0의 `malfind`는 쓰기·실행 영역과 함께 수정된 페이지가 있는 실행 전용 영역도 고른다: [`volatility3/framework/plugins/windows/malware/malfind.py:138-185`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/malware/malfind.py#L138-L185).
+
+[14] `_parse_timestamp`가 읽는 형식은 시간대 표시가 없는 네 가지다.
+
+```python
+def _parse_timestamp(val: str | None) -> str | None:
+    """Normalize a Volatility3 timestamp string to ISO 8601, or None."""
+    if not val or val == "N/A" or val == "None":
+        return None
+    val = val.strip()
+    # Already ISO-ish: "2026-03-15 14:22:01.000000" → "2026-03-15T14:22:01"
+    try:
+        from datetime import datetime
+        # Handle "YYYY-MM-DD HH:MM:SS.ffffff" (most common vol3 format)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(val, fmt)
+                return dt.isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+```
+
+[`plugins/correlation.py:379-396`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L379-L396)
+
+[15] Volatility 3 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 바꾸고 프로세스·연결·shimcache 시각에 이 변환을 쓴다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28), [`volatility3/framework/symbols/windows/extensions/__init__.py:997-1001`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/extensions/__init__.py#L997-L1001), [`volatility3/framework/symbols/windows/extensions/network.py:115-125`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/extensions/network.py#L115-L125), [`volatility3/framework/symbols/windows/extensions/shimcache.py:121-134`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/extensions/shimcache.py#L121-L134), [`volatility3/framework/plugins/windows/registry/userassist.py:129-131`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/registry/userassist.py#L129-L131).
+
+[16] `_serialize_value`는 정한 형식이 아닌 값을 `str`로 바꾼다.
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:51-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L68)
+
+[17] (실행 확인) Volatility 3 2.28.0의 `wintime_to_datetime`으로 만든 시각을 넣은 다섯 플러그인 결과로 `build_timeline`을 실행했다.
+`parse_treegrid`를 거친 `CreateTime`은 `2024-01-01 10:04:00+00:00`이었고 `_parse_timestamp`는 이 값에 `None`을 돌려주었다.
+응답은 `total_events` 0, `sources` `{}`, `timeline` `[]`이었다.
+같은 결과에서 시각 글의 `+00:00`만 지우자 `total_events` 21이었고 `psscan` 전용 프로세스 사건 이름에 `[psscan-only]`가 붙었다.
+
+[18] `_edit_distance`는 Levenshtein 편집 거리를 계산한다.
+
+```python
+def _edit_distance(a: str, b: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(a) < len(b):
+        return _edit_distance(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            cost = 0 if ca == cb else 1
+            curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost))
+        prev = curr
+    return prev[-1]
+```
+
+[`plugins/correlation.py:78-91`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L78-L91)
+
+[19] (실행 확인) 이름이 `csass.exe`인 프로세스 하나로 `detect_process_anomalies`를 `PYTHONHASHSEED` 0부터 5까지 바꿔 6번 실행했다.
+`detail`은 0·3·5에서 `Similar to lsass.exe (edit distance=1)`, 2에서 `Similar to csrss.exe (edit distance=1)`, 1·4에서 `Similar to smss.exe (edit distance=2)`였다.
+
+[20] Volatility 3 2.28.0의 `windows.shimcachemem`은 경로 열을 `File Path`로 낸다: [`volatility3/framework/plugins/windows/shimcachemem.py:560-571`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/shimcachemem.py#L560-L571).
+
+[21] `build_timeline`의 도구 설명은 시각이 없는 사건이 빠진다고 적는다.
+
+```python
+    - Events with no timestamp are excluded; the timeline only contains
+      artifacts where Volatility3 recovered a valid time value
+```
+
+[`mcp_server.py:431-432`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L431-L432)

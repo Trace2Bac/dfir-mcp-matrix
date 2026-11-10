@@ -1,0 +1,124 @@
+---
+cell: F06
+details:
+- id: not_applicable
+---
+
+# F06 보고 산출물 구성
+
+### 비적용
+
+**판단.** 서버에는 사건 단위가 없고 보고 산출물을 만들거나 내보내는 도구도 없다.
+서버는 시작할 때 환경변수 `VOL_IMAGE_PATH`의 이미지 하나를 세션에 묶고 도구 인자에는 사건이나 세션을 가리키는 식별자가 없다 [1][2].
+서버는 호출 기록이나 발견사항을 모아 두지 않는다 [3].
+
+덤프 파일을 쓰는 도구는 `windows_dumpfiles`와 `windows_pedump` 둘이다 [4][5].
+두 도구는 메모리에서 꺼낸 파일 내용과 다시 짜 맞춘 PE 파일을 `VOL_DUMP_DIR`에 쓴다 [4][5].
+이 파일에는 조사의 범위, 방법, 결과, 한계, 판단의 확정 상태가 들어가지 않는다 [4][5].
+
+서버 지침은 보고서를 만들기 전에 `verify_image_integrity`를 부르라고 적고 `verify_image_integrity`의 설명은 시작할 때와 마지막의 해시를 보고서 메타데이터에 적으라고 적는다 [6][7].
+이 보고서는 클라이언트 모델이 안내문에 따라 직접 쓰는 글이다.
+같은 저장소에는 서버 응답을 정해진 코드로 가공해 보고 산출물을 만드는 사용자 CLI나 클라이언트 코드가 없다.
+
+### 근거
+
+[1] 서버는 시작할 때 `VOL_IMAGE_PATH`의 파일 하나로 세션을 만든다.
+
+```python
+IMAGE_PATH = os.environ.get("VOL_IMAGE_PATH", "")
+if not IMAGE_PATH or not os.path.isfile(IMAGE_PATH):
+    print(
+        f"VOL_IMAGE_PATH is not set or file does not exist: {IMAGE_PATH!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+```
+
+[`mcp_server.py:10-16`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L10-L16)
+
+```python
+session = Session(IMAGE_PATH, dump_dir=DUMP_DIR)
+```
+
+[`mcp_server.py:45-45`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L45-L45)
+
+[2] (실행 확인) 무작위 바이트 파일을 이미지로 주어 서버를 stdio로 실행하고 MCP SDK 1.27.0 클라이언트로 도구 96개의 입력 schema 인자 이름을 모았다.
+사건이나 세션을 가리키는 인자는 없었다.
+
+[3] 서버가 호출 사이에 두는 것은 프로세스 메모리의 결과 캐시다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[4] `windows_dumpfiles`는 꺼낸 파일을 `VOL_DUMP_DIR`에 쓴다고 적고 플러그인 `dumpfiles`를 실행한다.
+
+```python
+    treegrid = run_plugin(
+        session,
+        dumpfiles.DumpFiles,
+        extra_config=extra or None,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "dumpfiles", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/file.py:66-72`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L66-L72)
+
+[5] `windows_pedump`는 다시 짜 맞춘 PE를 `VOL_DUMP_DIR`에 쓴다.
+
+```python
+    extra: dict = {"base": base}
+    if pid:
+        extra["pid"] = [pid]
+    if kernel_module:
+        extra["kernel_module"] = True
+    treegrid = run_plugin(
+        session,
+        pedump.PEDump,
+        extra_config=extra,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "pedump", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/module.py:86-97`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/module.py#L86-L97)
+
+[6] 서버 지침의 권장 작업 순서 셋째 항목이다.
+
+```python
+        "3. Before generating any report, call verify_image_integrity to "
+        "confirm the image has not been altered during the session."
+```
+
+[`mcp_server.py:41-42`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L41-L42)
+
+[7] `verify_image_integrity`의 설명이다.
+
+```python
+    Forensic context:
+    - Call this tool before generating any report to confirm evidence integrity
+    - If match is false, all prior analysis results are potentially invalid
+      and the report must be flagged as integrity-compromised
+    - For court-admissible reports, record both the initial hash (from
+      windows_info) and the final hash (from this tool) in the report metadata
+```
+
+[`mcp_server.py:118-123`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L118-L123)

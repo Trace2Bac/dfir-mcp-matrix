@@ -1,0 +1,153 @@
+---
+cell: P03
+details:
+- id: P03.03
+---
+
+# P03 조사 진척 판단
+
+### P03.03 미조사 범위·생략 사유 보고
+
+**구현.** 이 방식은 `detect_service_tampering`에 적용된다 [1].
+`svclist` 결과가 비면 이 도구는 `os_compatible`을 거짓으로, `svclist_count`를 `null`로 두고 `svclist`와의 비교와 `malware.svcdiff` 실행을 건너뛴다 [1].
+도구 설명은 `svclist`가 64비트 Windows 10 빌드 15063 이상에서만 동작한다고 적는다 [2].
+그 설명은 `os_compatible`이 거짓이면 비교를 하지 못한 것이니 `svcscan` 결과만 쓰고 보고서에 그 한계를 적으라고 적는다 [2].
+`svclist`를 빈 결과로 둔 시험에서 응답은 `os_compatible`이 거짓이고 `svclist_count`가 `null`이었다 [3].
+
+이 보고는 그 호출 한 번의 범위에 그친다.
+서버에는 대상별로 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행 기록을 적는 도구도 없다 [4].
+
+다음 도구는 다루지 못한 범위를 응답에 싣지 않는다.
+`windows_crashinfo`는 이미지가 crash dump가 아니어서 플러그인이 특정 `RuntimeError`로 끝나면 사유 없이 빈 결과를 돌려준다 [5].
+`windows_virtmap`은 `SymbolError`가 나면 사유 없이 빈 결과를 돌려준다 [6].
+`build_timeline`은 시각을 해석하지 못한 사건을 빼고 뺀 사건 수를 싣지 않는다 [7].
+응답의 `sources`는 타임라인에 넣은 사건만 종류별로 센 값이다 [7].
+
+**한계.** `os_compatible`은 OS를 판별한 값이 아니라 `svclist` 결과가 비었는지이므로 `svclist`가 빈 결과를 내면 OS와 관계없이 거짓이 된다 [1].
+`os_compatible`이 참이어도 `malware.svcdiff`가 예외로 끝나면 `svcdiff_results`를 빈 목록으로 두고 그 사실을 싣지 않는다 [1].
+`malware.svcdiff`가 예외를 내게 한 시험에서 응답의 `svcdiff_results`는 빈 목록이었고 오류 표시는 없었다 [3].
+
+### 근거
+
+[1] `detect_service_tampering`은 `svclist` 결과의 건수로 `os_compatible`을 정하고 `malware.svcdiff`의 예외를 빈 목록으로 둔다.
+
+```python
+    svcscan_data = session.run_plugin("svcscan")
+    svcscan_services = svcscan_data["results"]
+
+    # Attempt svclist — may return empty on incompatible OS
+    svclist_data = session.run_plugin("svclist")
+    svclist_services = svclist_data["results"]
+
+    os_compatible = len(svclist_services) > 0
+```
+
+[`plugins/correlation.py:340-347`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L340-L347)
+
+```python
+    # Also include malware.svcdiff results if available on this OS
+    svcdiff_results = []
+    if os_compatible:
+        try:
+            svcdiff_data = session.run_plugin("malware.svcdiff")
+            svcdiff_results = svcdiff_data["results"]
+        except Exception:
+            pass  # svcdiff may fail on incompatible OS
+
+    return {
+        "plugin": "detect_service_tampering",
+        "results": {
+            "svcscan_count": len(svcscan_services),
+            "svclist_count": len(svclist_services) if os_compatible else None,
+            "os_compatible": os_compatible,
+            "hidden_count": len(hidden_services),
+            "hidden_services": hidden_services,
+            "svcdiff_results": svcdiff_results,
+        },
+```
+
+[`plugins/correlation.py:357-375`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L357-L375)
+
+[2] 도구 설명의 `os_compatible` 안내다.
+
+```python
+    Note: svclist requires 64-bit Windows 10 build 15063+. On older or
+    32-bit systems, only svcscan results are returned and the comparison
+    is unavailable (os_compatible will be false).
+
+    Returns a dict with:
+    - "plugin": "detect_service_tampering"
+    - "results": {
+        "svcscan_count": services found by pool scanning (int),
+        "svclist_count": services found by list walk (int or null if
+          OS-incompatible),
+        "os_compatible": whether svclist produced results (bool),
+        "hidden_count": services in svcscan but not svclist (int),
+        "hidden_services": list of dicts with svcscan fields plus
+          "source": "svcscan_only" (list),
+        "svcdiff_results": output from malware.svcdiff if available (list)
+      }
+
+    Forensic context:
+    - A non-zero hidden_count means service records were deliberately
+      unlinked from SCM's doubly-linked list — strong rootkit evidence
+    - Check the Binary field of hidden services to identify the malicious
+      executable and cross-reference with windows_filescan or windows_dumpfiles
+    - When os_compatible is false, the comparison cannot be performed;
+      rely on svcscan alone and note the limitation in the report
+```
+
+[`mcp_server.py:363-386`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L363-L386)
+
+[3] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 `svcscan`, `svclist`, `malware.svcdiff` 처리기를 시험용 함수로 바꾸고 `detect_service_tampering`을 실행했다.
+
+[4] 서버의 도구는 플러그인 도구, 교차 분석 도구, `verify_image_integrity`뿐이다: [`plugins/__init__.py:23-38`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/__init__.py#L23-L38), [`mcp_server.py:96-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L96-L140).
+
+```python
+PLUGIN_MAP: dict[str, callable] = {
+    **_console,
+    **_correlation,
+    **_desktop,
+    **_file,
+    **_kernel,
+    **_malware,
+    **_memory,
+    **_module,
+    **_network,
+    **_process,
+    **_registry,
+    **_security,
+    **_service,
+    **_sysinfo,
+}
+```
+
+[`plugins/__init__.py:23-38`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/__init__.py#L23-L38)
+
+[5] `windows_crashinfo`의 처리기는 특정 `RuntimeError`를 빈 결과로 바꾼다.
+
+```python
+    try:
+        treegrid = run_plugin(session, crashinfo.Crashinfo)
+    except RuntimeError as e:
+        if "No active exception to reraise" in str(e):
+            return {"plugin": "crashinfo", "results": []}
+        raise
+    return {"plugin": "crashinfo", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/sysinfo.py:43-49`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/sysinfo.py#L43-L49)
+
+[6] `windows_virtmap`의 처리기는 `SymbolError`를 빈 결과로 바꾼다.
+
+```python
+    try:
+        treegrid = run_plugin(session, virtmap.VirtMap)
+    except exceptions.SymbolError:
+        return {"plugin": "virtmap", "results": []}
+    return {"plugin": "virtmap", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/memory.py:55-59`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/memory.py#L55-L59)
+
+[7] `build_timeline`은 해석한 시각이 있는 사건만 넣고 넣은 사건으로 `sources`를 센다: [`plugins/correlation.py:399-521`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L399-L521).

@@ -1,0 +1,216 @@
+---
+cell: R07
+details:
+- id: R07.01
+- id: R07.02
+---
+
+# R07 증거 내용과 지시 구분
+
+### R07.01 JSON 필드 분리
+
+**구현.** 이 방식은 서버의 모든 도구 응답에 적용된다 [1][2].
+도구는 `plugin`과 `results`를 담은 `dict`를 돌려주고 증거에서 온 값은 `results` 아래 플러그인 열 이름의 필드 값으로 들어간다 [1].
+MCP Python SDK 1.27.0의 `FastMCP`는 이 `dict`를 JSON 글로 바꿔 응답에 싣는다 [2].
+그래서 증거에서 온 문자열은 따옴표와 이스케이프가 붙은 JSON 문자열 값으로 실린다 [2][3].
+교차 분석 도구가 더하는 서버 문구는 `rule`·`severity`·`type` 같은 따로 된 필드에 들어간다 [4].
+
+서버 지침의 증거 보존 문구는 사용자나 다른 프롬프트가 이미지를 바꾸거나 지우라고 해도 거부하라고 적는다 [5].
+이 문구는 이미지 파일을 바꾸는 요청만 다루고 증거에서 온 글 속의 지시를 따르지 말라고 적지 않는다 [5].
+도구 설명에도 그런 안내는 없다 [6].
+
+**한계.** 교차 분석 도구의 몇몇 필드는 증거 값을 서버 문장 안에 이어 넣는다 [4][7][8].
+`detect_dll_injection`의 `detail`은 `ldrmodules`의 `MappedPath`와 서버 문구를 이은 문장이다 [7].
+`detect_process_anomalies`의 `detail`은 증거의 부모 프로세스 이름, 프로세스 이름, 세션 번호를 서버 문장에 넣는다 [4].
+`build_timeline`의 `name`은 증거의 프로세스 이름 뒤에 `[psscan-only]`를 붙이고 `detail`은 주소와 상태 같은 증거 값을 서버가 정한 모양으로 잇는다 [8].
+
+### R07.02 출처 필드 부여
+
+**구현.** 이 방식은 서버의 모든 도구 응답에 적용된다 [1][9].
+응답의 최상위 `plugin`은 결과를 낸 Volatility 3 플러그인 이름이나 교차 분석 도구 이름이다 [1][9].
+`detect_dll_injection`의 근거 항목은 그 항목을 만든 플러그인 이름을 `source`에 싣는다 [7].
+`detect_service_tampering`의 숨은 서비스 행은 `source`에 `svcscan_only`를 싣는다 [10].
+
+**한계.** 교차 분석 도구는 여러 플러그인의 값을 한 응답에 담으면서 항목마다 원천 이름을 적지 않는다 [11][12].
+`triage_process`는 `dlllist`·`handles`·`netscan`·`malfind`의 행을 `dlls`·`handles`·`network_connections`·`malfind_hits` 필드 이름으로만 나눈다 [11].
+`network_process_correlation`은 `netscan` 행의 필드와 `pslist`·`cmdline`에서 가져온 필드를 한 `dict`에 합친다 [12].
+
+### 근거
+
+[1] 플러그인을 감싼 도구의 응답은 `plugin`과 플러그인 열 이름을 키로 한 `results`다.
+
+```python
+def run_pslist(session: Session) -> dict:
+    """Run windows.pslist and return structured process list."""
+    treegrid = run_plugin(session, pslist.PsList)
+    return {"plugin": "pslist", "results": parse_treegrid(treegrid)}
+
+
+def run_psscan(session: Session) -> dict:
+    """Run windows.psscan and return process list found by pool scanning."""
+    treegrid = run_plugin(session, psscan.PsScan)
+    return {"plugin": "psscan", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/process.py:15-24`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/process.py#L15-L24)
+
+```python
+def parse_treegrid(treegrid) -> list[dict[str, Any]]:
+    """Parse a Volatility3 TreeGrid into a list of dicts."""
+    col_names = [col.name for col in treegrid.columns]
+    rows: list[dict[str, Any]] = []
+
+    def visitor(node, accumulator):
+        row = {
+            name: _serialize_value(node.values[i])
+            for i, name in enumerate(col_names)
+        }
+        accumulator.append(row)
+        return accumulator
+
+    treegrid.populate(visitor, rows)
+    return rows
+```
+
+[`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85)
+
+[2] MCP Python SDK 1.27.0의 `FastMCP`는 반환한 `dict`를 JSON 글로 바꾼다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:529-532`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/func_metadata.py#L529-L532).
+
+[3] (실행 확인) MCP SDK 클라이언트로 `verify_image_integrity`와 `windows_strings`를 부르자 응답의 글 내용은 `plugin`·`results`·`error` 키를 가진 JSON 글이었고 `error`의 글은 JSON 문자열 값으로 실렸다.
+
+[4] `detect_process_anomalies`는 서버 규칙 이름과 등급을 따로 된 필드에 싣고 `detail`에 증거 값을 넣는다.
+
+```python
+        if name_lower in _EXPECTED_PARENTS:
+            expected_parent = _EXPECTED_PARENTS[name_lower]
+            if parent_name and parent_name.lower() != expected_parent.lower():
+                anomalies.append({
+                    "pid": pid,
+                    "name": name,
+                    "rule": "unexpected_parent",
+                    "detail": f"Parent is {parent_name} (PID {ppid}), expected {expected_parent}",
+                    "severity": "high",
+                })
+```
+
+[`plugins/correlation.py:122-131`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L122-L131)
+
+다른 규칙의 `detail`: [`plugins/correlation.py:147-165`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L147-L165).
+
+[5] 서버 지침의 증거 보존 문구다.
+
+```python
+mcp = FastMCP(
+    "VolPilot",
+    instructions=(
+        "This server provides read-only forensic analysis of a Windows memory "
+        "image using the Volatility3 framework. The memory image is fixed at "
+        "startup and treated as legally protected evidence.\n\n"
+        "EVIDENCE INTEGRITY POLICY:\n"
+        "The memory image must NEVER be deleted, moved, renamed, modified, "
+        "compressed, or overwritten — regardless of who requests it. If the "
+        "user (or any other prompt) asks to alter or destroy the image in any "
+        "way, refuse the request and explain that evidence integrity must be "
+        "preserved for chain-of-custody requirements.\n\n"
+```
+
+[`mcp_server.py:23-34`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L23-L34)
+
+[6] 도구 설명에 증거 속 지시를 다루는 문구가 없다: [`mcp_server.py`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py).
+기준 커밋의 `mcp_server.py`에서 `instruction`, `ignore`, `untrusted`, `prompt`를 대소문자 구분 없이 찾으면 서버 지침의 `instructions=`, 위 증거 보존 문구, 인자 설명, CPU 명령어 설명만 나온다.
+
+[7] `detect_dll_injection`의 근거 항목이다.
+
+```python
+    # Signal 1: unlinked DLLs in ldrmodules
+    for mod in ldr_for_pid:
+        in_load = mod.get("InLoad", True)
+        in_init = mod.get("InInit", True)
+        in_mem = mod.get("InMem", True)
+        if not (in_load and in_init and in_mem):
+            missing = []
+            if not in_load:
+                missing.append("InLoad")
+            if not in_init:
+                missing.append("InInit")
+            if not in_mem:
+                missing.append("InMem")
+            indicators.append({
+                "type": "unlinked_dll",
+                "detail": f"{mod.get('MappedPath', 'unknown')} missing from {', '.join(missing)}",
+                "base": mod.get("Base"),
+                "source": "ldrmodules",
+            })
+
+    # Signal 2: RWX regions from malfind
+    for hit in mal_for_pid:
+        indicators.append({
+            "type": "rwx_region",
+            "detail": f"RWX VAD at {hit.get('Start VPN', '?')}-{hit.get('End VPN', '?')} ({hit.get('Protection', '')})",
+            "notes": hit.get("Notes", ""),
+            "source": "malfind",
+        })
+```
+
+[`plugins/correlation.py:252-279`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L252-L279)
+
+[8] `build_timeline`의 `psscan`·`netscan` 사건이다: [`plugins/correlation.py:443-478`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L443-L478).
+
+[9] 교차 분석 도구와 `verify_image_integrity`의 `plugin`은 도구 이름이다: [`plugins/correlation.py:35-36`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L35-L36), [`plugins/correlation.py:203-204`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L204), [`mcp_server.py:130-131`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L130-L131).
+
+[10] `svclist`에 이름이 없는 `svcscan` 행에 `source`를 붙인다.
+
+```python
+    hidden_services: list[dict] = []
+    if os_compatible:
+        svclist_names = {s["Name"] for s in svclist_services if s.get("Name")}
+        for svc in svcscan_services:
+            name = svc.get("Name", "")
+            if name and name not in svclist_names:
+                hidden_services.append({**svc, "source": "svcscan_only"})
+```
+
+[`plugins/correlation.py:349-355`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L349-L355)
+
+[11] `triage_process`의 응답 필드다.
+
+```python
+    return {
+        "plugin": "triage_process",
+        "results": {
+            "pid": pid,
+            "name": proc_match.get("ImageFileName", ""),
+            "ppid": proc_match.get("PPID"),
+            "create_time": proc_match.get("CreateTime"),
+            "cmdline": cmdline_match.get("Args", "") if cmdline_match else "",
+            "dlls": [d for d in dlllist_data["results"] if d["PID"] == pid],
+            "handles": [h for h in handles_data["results"] if h["PID"] == pid],
+            "network_connections": [
+                n for n in netscan_data["results"] if n.get("PID") == pid
+            ],
+            "malfind_hits": [
+                m for m in malfind_data["results"] if m["PID"] == pid
+            ],
+        },
+```
+
+[`plugins/correlation.py:203-219`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L219)
+
+[12] `network_process_correlation`은 두 원천의 필드를 한 `dict`에 합친다.
+
+```python
+    connections = []
+    for conn in netscan_data["results"]:
+        pid = conn.get("PID")
+        proc = pid_to_proc.get(pid, {})
+        enriched = {
+            **conn,
+            "process_name": proc.get("ImageFileName", conn.get("Owner", "")),
+            "ppid": proc.get("PPID"),
+            "create_time": proc.get("CreateTime"),
+            "cmdline": pid_to_cmdline.get(pid, ""),
+        }
+        connections.append(enriched)
+```
+
+[`plugins/correlation.py:309-320`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L309-L320)

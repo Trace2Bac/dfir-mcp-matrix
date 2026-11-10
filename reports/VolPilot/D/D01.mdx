@@ -1,0 +1,204 @@
+---
+cell: D01
+details:
+- id: D01.01
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 덤프 도구 `windows_dumpfiles`·`windows_pedump`가 쓰는 파일과 서버가 이미지 곁에 쓰는 Volatility 3 설정 파일에 적용된다 [1][2][3].
+덤프 파일은 서버를 시작할 때 환경변수 `VOL_DUMP_DIR`로 정한 폴더에 남는다 [1][4].
+`windows_dumpfiles`는 메모리의 파일 캐시에서 꺼낸 내용을, `windows_pedump`는 메모리에서 다시 짜 맞춘 PE를 쓴다 [2][3].
+서버의 `DumpFileHandler`는 Volatility 3 플러그인이 넘긴 바이트를 메모리에 모았다가 파일을 닫을 때 그 폴더에 한 번에 쓴다 [1].
+파일 내용은 플러그인이 넘긴 바이트 그대로이고 서버는 가공하지 않는다 [1].
+서버 코드에는 덤프 파일을 지우는 경로가 없고 보관 기간, 용량, 대상을 정하는 설정이나 코드도 없다 [1][4].
+
+설정 파일은 이미지 경로 뒤에 `.vol3cfg.json`을 붙인 경로에 남는다 [5].
+읽은 설정이 없으면 공통 실행 함수가 플러그인의 `run()`을 부른 직후 그 플러그인의 `build_configuration()` 결과를 이 파일에 JSON으로 쓴다 [6][5].
+한 번 쓰거나 읽은 뒤에는 그 세션에서 다시 쓰지 않는다 [5][6].
+다음에 같은 이미지로 서버를 시작하면 이 파일을 읽어 플러그인마다 설정에 덧붙인다 [5].
+무작위 바이트 이미지와 Volatility 3의 자동 탐지와 플러그인을 바꿔 둔 시험에서 첫 호출 뒤 이미지 곁에 `img.raw.vol3cfg.json`이 생겼다 [7].
+
+그 밖의 결과는 파일로 남지 않는다.
+Windows 플러그인 도구와 교차 분석 도구의 결과는 `Session.run_plugin`이 프로세스 메모리의 `dict`에 두고 응답으로 돌려준다 [8].
+Volatility 3 2.28.0이 사용자 캐시 폴더 아래 `volatility3`에 쓰는 심볼 캐시는 증거에서 나온 파생물이 아니다 [9].
+한 호출이 분석 도구의 원래 출력과 그 가공본을 함께 남기는 경로는 없다.
+덤프 도구의 응답 행은 파일로 남지 않고 덤프 파일만 남는다 [1][8].
+
+### 근거
+
+[1] `DumpFileHandler`는 바이트를 `BytesIO`에 모았다가 `close`에서 출력 폴더에 쓴다.
+
+```python
+    os.makedirs(output_dir, exist_ok=True)
+
+    class DumpFileHandler(io.BytesIO, plugins.FileHandlerInterface):
+        def __init__(self, filename: str):
+            io.BytesIO.__init__(self)
+            plugins.FileHandlerInterface.__init__(self, filename)
+
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:55-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L55-L77)
+
+[2] `windows_dumpfiles`는 `session.file_handler`를 열기 방법으로 넘겨 `dumpfiles`를 실행한다.
+
+```python
+    extra: dict = {}
+    if pid:
+        extra["pid"] = pid
+    if filter:
+        extra["filter"] = filter
+    if filter_ignore_case:
+        extra["ignore-case"] = True
+    if virtaddr:
+        extra["virtaddr"] = [virtaddr]
+    if physaddr:
+        extra["physaddr"] = [physaddr]
+
+    treegrid = run_plugin(
+        session,
+        dumpfiles.DumpFiles,
+        extra_config=extra or None,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "dumpfiles", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/file.py:54-72`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L54-L72)
+
+[3] `windows_pedump`도 같은 열기 방법으로 `pedump`를 실행한다.
+
+```python
+    extra: dict = {"base": base}
+    if pid:
+        extra["pid"] = [pid]
+    if kernel_module:
+        extra["kernel_module"] = True
+    treegrid = run_plugin(
+        session,
+        pedump.PEDump,
+        extra_config=extra,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "pedump", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/module.py:86-97`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/module.py#L86-L97)
+
+[4] 출력 폴더는 `VOL_DUMP_DIR`이고 세션을 만들 때 파일 핸들러를 묶는다.
+
+```python
+DUMP_DIR = os.environ.get("VOL_DUMP_DIR", "")
+```
+
+[`mcp_server.py:21-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L21-L21)
+
+```python
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+```
+
+[`session.py:34-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L34-L35)
+
+[5] 설정 파일 경로와 읽기, 덧붙이기, 쓰기다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+
+    def apply_config(self, plugin_name: str):
+        """Splice saved config into a plugin's config path if available."""
+        if self._saved_config is not None:
+            plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+            self.ctx.config.splice(
+                plugin_config_path,
+                HierarchicalDict(self._saved_config),
+            )
+
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+
+    @property
+    def has_config(self) -> bool:
+        return self._saved_config is not None
+```
+
+[`session.py:91-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L116)
+
+```python
+        self._config_path = Path(image_path + ".vol3cfg.json")
+```
+
+[`session.py:32-32`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L32-L32)
+
+[6] 공통 실행 함수는 설정이 없으면 실행한 플러그인의 설정을 저장한다.
+
+```python
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:163-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L163-L171)
+
+[7] (실행 확인) 무작위 바이트 64 KiB 파일을 이미지로 `Session`을 만들고 Volatility 3의 자동 탐지를 빈 함수로, `dumpfiles` 플러그인을 파일 하나를 쓰는 가짜 클래스로 바꿔 `run_plugin("dumpfiles", …)`을 불렀다.
+첫 호출 뒤 이미지와 같은 폴더에 `img.raw.vol3cfg.json`이 생겼고 같은 이미지로 새 `Session`을 만들자 `has_config`가 참이었으며 이 파일은 다음 실행 뒤에도 바뀌지 않았다.
+`VOL_DUMP_DIR`로 준 폴더에는 가짜 플러그인이 연 파일이 남았다.
+
+[8] `Session.run_plugin`은 결과를 프로세스 메모리의 캐시에 둔다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[9] Volatility 3 2.28.0의 캐시 폴더와 심볼 경로다: [`volatility3/framework/constants/__init__.py:27-52`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L27-L52).

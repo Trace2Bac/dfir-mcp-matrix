@@ -1,0 +1,153 @@
+---
+cell: P05
+details:
+- id: not_implemented
+---
+
+# P05 사건 자료 정리
+
+### 미구현
+
+**판단.** 서버는 사건 자료를 남기지만 그 자료를 지우거나 초기화하는 도구, 명령, 자동 처리가 없다.
+서버가 남기는 자료는 세 가지다 [1][2][3].
+첫째는 프로세스 메모리의 결과 캐시와 Volatility 3 문맥이다 [1].
+둘째는 이미지 옆에 쓰는 설정 파일 `<이미지 경로>.vol3cfg.json`이다 [2].
+셋째는 `VOL_DUMP_DIR`에 쓰는 덤프 파일이다 [3].
+서버 코드에는 파일을 지우는 호출이 없고 결과 캐시를 비우는 도구도 없다 [1][4].
+설정 파일은 저장한 설정이 없을 때만 쓰고 그 뒤로 지우거나 다시 쓰지 않는다 [2].
+덤프 파일 처리기는 같은 이름의 파일이 있으면 번호를 붙인 새 파일로 쓰고 앞 파일을 지우지 않는다 [3].
+
+플러그인을 실행하기 전마다 `_purge_stale_hive_layers`가 Volatility 3 문맥에서 레지스트리 하이브 계층을 지운다 [5].
+이 계층은 다음 플러그인이 물리 계층 위에 다시 만드는 보기이고 결과 캐시와 설정은 그대로 남는다 [5].
+코드 설명은 이 처리를 같은 문맥에서 하이브 계층 이름이 겹쳐 생기는 오류를 막으려는 것이라고 적는다 [5].
+
+초기화 지침은 누가 요청하든 이미지를 지우거나 옮기거나 바꾸지 말고 그 요청을 거부하라고 적는다 [6].
+이 지침은 모델에게 주는 글이고 서버에는 이미지를 지우는 도구도 없다 [4][6].
+
+### 근거
+
+[1] 결과 캐시와 문맥은 `Session` 객체에 있고 캐시는 넣기만 한다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[`session.py:25-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L35)
+
+[2] 설정 파일은 저장한 설정이 없을 때만 쓴다.
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+
+    @property
+    def has_config(self) -> bool:
+        return self._saved_config is not None
+```
+
+[`session.py:107-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L116)
+
+```python
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+```
+
+[`plugins/_common.py:168-169`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L168-L169)
+
+[3] 덤프 파일 처리기는 같은 이름이 있으면 번호를 붙인다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[4] 서버 코드에서 파일을 다루는 호출은 이미지 읽기, 설정 파일 읽기와 쓰기, 덤프 폴더 만들기와 덤프 파일 쓰기뿐이다: [`session.py:63-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L63-L112), [`plugins/_file_handler.py:47-79`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L47-L79).
+
+[5] `_purge_stale_hive_layers`의 설명과 처리다.
+
+```python
+    volatility3's own CLI never hits this because it builds a brand-new
+    Context for every single-plugin invocation. This server deliberately
+    reuses one Context across every tool call in a session (to skip
+    re-scanning layers and re-downloading PDBs on every call), so any
+    second plugin that touches the registry in the same session collides
+    with hive layers a previous one left registered, raising
+    ``LayerException("Layer already exists: ...")``. At least 15 wrapped
+    plugins touch hives, directly or indirectly: everything under
+    windows.registry.*, plus windows.consoles, windows.envars,
+    windows.getservicesids, windows.getsids, and windows.svcscan.
+
+    Hive layers are cheap views over the physical layer (no PDB download,
+    no large scan), so dropping and letting the next plugin reconstruct
+    them is safe and matches what a fresh-Context CLI run would do
+    anyway.
+    """
+    for name in [n for n in ctx.layers if _HIVE_LAYER_NAME_RE.match(n)]:
+        try:
+            ctx.layers.del_layer(name)
+        except Exception:
+            # Defensive: if something unexpected still depends on this
+            # layer, leave it rather than let cleanup itself crash the
+            # call. Worst case the upcoming plugin hits the same
+            # LayerException this function exists to prevent.
+            pass
+```
+
+[`plugins/_common.py:106-130`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L106-L130)
+
+```python
+    ctx = session.ctx
+    _purge_stale_hive_layers(ctx)
+```
+
+[`plugins/_common.py:150-151`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L150-L151)
+
+[6] 초기화 지침의 증거 보존 문구다.
+
+```python
+        "EVIDENCE INTEGRITY POLICY:\n"
+        "The memory image must NEVER be deleted, moved, renamed, modified, "
+        "compressed, or overwritten — regardless of who requests it. If the "
+        "user (or any other prompt) asks to alter or destroy the image in any "
+        "way, refuse the request and explain that evidence integrity must be "
+        "preserved for chain-of-custody requirements.\n\n"
+```
+
+[`mcp_server.py:29-34`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L29-L34)

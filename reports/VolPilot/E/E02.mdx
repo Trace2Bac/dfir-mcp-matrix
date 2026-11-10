@@ -1,0 +1,188 @@
+---
+cell: E02
+details:
+- id: E02.01
+- id: E02.04
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 서버를 시작할 때 `VOL_IMAGE_PATH`의 이미지로 `Session`을 만드는 경로에 적용된다 [1].
+`Session`은 모델의 요청 없이 이미지 파일 전체의 SHA-256을 계산해 `image_sha256`에 둔다 [1].
+해시 범위는 이미지 파일 하나의 처음부터 끝까지이고 `_compute_sha256`이 파일을 `rb` 모드로 64 KiB씩 읽는다 [2].
+기준값은 서버 프로세스 메모리에만 두고 파일이나 기록에 쓰지 않는다 [1].
+`windows_info`는 이 값을 응답의 `image.sha256`으로 돌려준다 [3].
+그 설명은 이 값을 조사 처음의 기준값으로 적어 두고 보고하기 전에 `verify_image_integrity`로 다시 확인하라고 적는다 [3].
+직접 만든 1 MiB 파일로 `Session`을 만들자 `image_sha256`은 Python `hashlib`로 계산한 값과 같았다 [4].
+`Session`의 인자 `compute_hash`를 거짓으로 주면 해시를 계산하지 않지만 `mcp_server.py`는 이 인자를 주지 않는다 [1][5].
+서버는 사용자나 수집 도구가 남긴 해시를 받지 않는다 [1].
+그래서 서버를 시작하기 전에 바뀐 이미지는 바뀐 상태가 기준값이 된다.
+
+**한계.** 해시 범위는 `VOL_IMAGE_PATH`의 파일 하나이고 Volatility 3가 그 이미지와 함께 읽는 파일은 포함되지 않는다 [2][6].
+Volatility 3 2.28.0은 이미지 이름이 `.vmem`으로 끝나면 같은 이름의 `.vmss` 파일을, 없으면 `.vmsn` 파일을 찾아 함께 연다 [6].
+README의 설정 예시는 이미지 경로를 `memory.vmem`으로 적는다 [7].
+
+### E02.04 도구를 요청해 검증
+
+**구현.** 이 방식은 `verify_image_integrity`에 적용된다 [8].
+모델이 이 도구를 부르면 서버는 `_compute_sha256`으로 이미지 파일 전체의 SHA-256을 다시 계산해 시작할 때의 `image_sha256`과 대조한다 [8][2].
+응답은 두 값이 같은지(`match`), 기준값(`expected_sha256`), 다시 계산한 값(`actual_sha256`), 경로, 크기, 대조한 시각(`verified_at`)을 싣는다 [8].
+초기화 지침은 보고서를 만들기 전에 이 도구를 불러 이미지가 바뀌지 않았는지 확인하라고 적는다 [9].
+stdio 클라이언트로 서버를 시작한 뒤 이미지 끝에 8바이트를 더하고 부르자 `match`가 거짓이고 `actual_sha256`이 기준값과 다른 응답이 돌아왔다 [10].
+다른 도구는 호출 중에 이미지를 기준값과 대조하지 않고 플러그인을 실행하거나 결과 캐시를 돌려준다 [11].
+
+**한계.** 해시가 어긋나도 서버는 `match`가 거짓인 정상 응답을 돌려줄 뿐 경고 문구를 붙이거나 이후 호출을 막지 않는다 [8][10].
+도구 설명은 `match`가 거짓이면 앞의 분석 결과가 모두 무효일 수 있으므로 보고서에 무결성 훼손을 표시해야 한다고 적는다 [12].
+응답의 `image_size`는 다시 읽은 크기가 아니라 시작할 때 읽은 값이다 [8].
+8바이트를 더한 이미지에서도 응답의 `image_size`는 처음 값 1048576이었다 [10].
+기준값은 서버를 시작할 때마다 새로 계산하므로 서버 실행 사이에 바뀐 이미지는 이 도구로 드러나지 않는다 [1].
+
+### 근거
+
+[1] `Session`은 시작할 때 이미지의 크기를 읽고 SHA-256을 계산한다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+
+        # Evidence integrity: verify read-only access and compute SHA-256.
+        # compute_hash=False skips SHA-256 for performance benchmarks where
+        # the hash is a one-time server-startup cost, not part of per-call
+        # latency. Production callers must leave compute_hash=True.
+        image = Path(image_path)
+        self.image_size = image.stat().st_size
+        self._verify_read_only(image_path)
+        self.image_sha256 = self._compute_sha256(image_path) if compute_hash else ""
+
+        self._init_context()
+```
+
+[`session.py:25-46`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L46)
+
+[2] `_compute_sha256`은 파일을 `rb`로 열어 64 KiB씩 읽는다.
+
+```python
+    @staticmethod
+    def _compute_sha256(file_path: str) -> str:
+        """Compute SHA-256 hash of a file, reading in 64 KiB chunks."""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+```
+
+[`session.py:82-89`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L82-L89)
+
+[3] `windows_info`는 시작할 때 계산한 해시를 `image`에 싣고 설명은 그 값을 기준값으로 적으라고 적는다.
+
+```python
+    info = session.run_plugin("info")
+    info["image"] = {
+        "path": session.image_path,
+        "size": session.image_size,
+        "sha256": session.image_sha256,
+    }
+    return info
+```
+
+[`mcp_server.py:87-93`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L87-L93)
+
+[`mcp_server.py:73-78`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L73-L78)
+
+[4] (실행 확인) 컨테이너에서 무작위 바이트 1 MiB 파일로 `Session`을 만들자 `image_sha256`이 `hashlib`로 계산한 값과 같았다.
+
+[5] `mcp_server.py`는 `compute_hash` 없이 `Session`을 만들고 이 인자를 거짓으로 주는 곳은 서버 밖의 평가 하네스다.
+
+```python
+session = Session(IMAGE_PATH, dump_dir=DUMP_DIR)
+```
+
+[`mcp_server.py:45-45`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L45-L45)
+
+[`evaluation/rq1/eval/runner_ours.py:51-56`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/evaluation/rq1/eval/runner_ours.py#L51-L56)
+
+[6] Volatility 3 2.28.0의 VMware 계층은 `.vmem` 옆의 `.vmss`·`.vmsn`을 찾아 연다: [`volatility3/framework/layers/vmware.py:187-230`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/layers/vmware.py#L187-L230).
+
+[7] README의 설정 예시는 `.vmem` 이미지를 적는다: [`README.md:57`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L57).
+
+[8] `verify_image_integrity`는 다시 계산한 해시를 시작할 때의 값과 대조하고 크기는 시작할 때의 값을 싣는다.
+
+```python
+    from datetime import datetime, timezone
+
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:127-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L127-L140)
+
+[9] 초기화 지침의 권장 절차 세 번째 단계다.
+
+```python
+        "3. Before generating any report, call verify_image_integrity to "
+        "confirm the image has not been altered during the session."
+```
+
+[`mcp_server.py:41-42`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L41-L42)
+
+[10] (실행 확인) stdio 클라이언트로 서버를 시작해 `verify_image_integrity`를 부르자 `match`가 참이었고 이미지 끝에 8바이트를 더한 뒤 다시 부르자 `isError`가 거짓인 응답에 `match`가 거짓, `image_size`가 1048576으로 실렸다.
+
+[11] 플러그인 도구는 `Session.run_plugin`으로 캐시를 보거나 플러그인을 실행하고 이미지를 해시하지 않는다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[12] `verify_image_integrity`의 설명은 `match`가 거짓일 때의 처리를 모델에게 적는다.
+
+```python
+    Forensic context:
+    - Call this tool before generating any report to confirm evidence integrity
+    - If match is false, all prior analysis results are potentially invalid
+      and the report must be flagged as integrity-compromised
+    - For court-admissible reports, record both the initial hash (from
+      windows_info) and the final hash (from this tool) in the report metadata
+    - Large images (4-16 GB) may take tens of seconds to re-hash
+    - The memory image is read-only evidence; this tool does not modify it
+```
+
+[`mcp_server.py:118-125`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L118-L125)

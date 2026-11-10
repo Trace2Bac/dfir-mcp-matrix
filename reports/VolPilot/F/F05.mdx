@@ -1,0 +1,103 @@
+---
+cell: F05
+details:
+- id: not_applicable
+---
+
+# F05 발견사항·결론 근거 검증
+
+### 비적용
+
+**판단.** 서버에는 발견사항, 결론, 부재 주장을 받거나 저장하거나 보고하는 경로가 없다.
+도구 96개 가운데 발견사항이나 주장을 인자로 받는 도구가 없고 보고 산출물을 쓰는 도구도 없다 [1][2].
+
+서버가 스스로 만드는 판정은 응답으로만 돌아간다.
+`detect_hidden_processes`, `detect_process_anomalies`, `detect_dll_injection`, `detect_service_tampering`은 판정한 항목과 그 수를 응답에 싣는다 [3].
+서버는 이 판정을 저장하거나 다른 도구의 입력으로 다시 받지 않는다 [1][4].
+`verify_image_integrity`는 이미지 파일의 SHA-256을 다시 계산해 서버를 시작할 때 계산한 값과 대조하고 결과를 응답으로만 돌려준다 [5].
+이 대조는 원본 증거의 해시를 보는 것이고 발견사항의 근거를 보지 않는다 [5].
+
+### 근거
+
+[1] (실행 확인) 무작위 바이트 파일을 이미지로 주어 서버를 stdio로 실행하고 MCP SDK 1.27.0 클라이언트로 도구 96개의 입력 schema 인자 이름을 모았다.
+인자가 있는 도구는 15개였고 발견사항, 주장, 근거 참조를 받는 인자는 없었다.
+
+[2] 서버가 파일을 쓰는 곳은 덤프 파일 핸들러와 설정 파일 저장 두 곳이다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+```
+
+[`session.py:107-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L112)
+
+[3] 교차 분석 도구의 판정 함수다: [`plugins/correlation.py:17-376`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L17-L376).
+
+[4] 결과는 프로세스 메모리의 캐시에만 둔다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[5] `verify_image_integrity`는 이미지 해시를 다시 계산해 시작할 때의 값과 대조한다.
+
+```python
+    from datetime import datetime, timezone
+
+    actual = session._compute_sha256(session.image_path)
+    return {
+        "plugin": "verify_image_integrity",
+        "results": {
+            "match": actual == session.image_sha256,
+            "expected_sha256": session.image_sha256,
+            "actual_sha256": actual,
+            "image_path": session.image_path,
+            "image_size": session.image_size,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+```
+
+[`mcp_server.py:127-140`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L127-L140)

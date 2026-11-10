@@ -1,0 +1,232 @@
+---
+cell: D04
+details:
+- id: D04.01
+- id: D04.04
+---
+
+# D04 출력 경로 제한
+
+### D04.01 서버가 출력 위치 결정
+
+**구현.** 이 방식은 덤프 도구 `windows_dumpfiles`·`windows_pedump`가 쓰는 파일과 서버가 쓰는 설정 파일에 적용된다 [1][2].
+덤프 파일의 폴더는 호출 인자가 아니라 서버를 시작할 때 환경변수 `VOL_DUMP_DIR`로 정한 값이다 [3].
+`Session`은 만들어질 때 `make_file_handler`로 이 폴더를 `os.makedirs`로 만들고 그 폴더에 묶은 핸들러 클래스를 둔다 [4][1].
+파일 이름은 Volatility 3 2.28.0의 `dumpfiles`·`pedump`가 객체 주소, 캐시 종류, 이미지 안 파일 이름, PID, 기준 주소로 짓는다 [5][6].
+서버의 `DumpFileHandler`는 폴더와 그 이름을 `os.path.join`으로 이어 쓴다 [1].
+`windows_dumpfiles`의 인자 `pid`·`filter`·`filter_ignore_case`·`virtaddr`·`physaddr`와 `windows_pedump`의 `base`·`pid`·`kernel_module`은 무엇을 꺼낼지만 정한다 [7][8].
+`windows_pedump`의 `pid`와 `base`는 숫자로 바뀌어 이름에 들어간다 [6].
+설정 파일 경로는 `VOL_IMAGE_PATH`의 이미지 경로 뒤에 `.vol3cfg.json`을 붙인 것이라 이미지와 같은 폴더에 생긴다 [2].
+Windows에서는 덤프 파일을 쓸 때 절대 경로 앞에 `\\?\`를 붙여 경로 길이 제한 없이 연다 [9].
+저장된 파생물을 고치거나 지우는 도구는 없다.
+
+`VOL_DUMP_DIR`이 비어 있으면 덤프 도구는 플러그인을 실행하기 전에 오류로 끝난다 [10].
+`VOL_DUMP_DIR` 없이 시작한 서버에 `windows_dumpfiles`와 `windows_pedump`를 부르자 두 응답 모두 `isError` 참과 `VOL_DUMP_DIR is not configured` 문장이었다 [11].
+서버는 `VOL_DUMP_DIR` 값이 절대 경로인지 검사하지 않는다 [3][4].
+README는 이 값에 절대 경로를 적으라고 적는다 [12].
+
+### D04.04 이름·확장자·충돌 검사
+
+**구현.** 이 방식은 서버 코드가 아니라 덤프 도구가 쓰는 Volatility 3 2.28.0의 파일 핸들러 기반 클래스에 적용된다 [13].
+`FileHandlerInterface`의 `preferred_filename`은 이름에 `os.path.sep`이 있으면 `ValueError`로 거부한다 [13].
+서버의 `DumpFileHandler`는 이 클래스를 이어받아 생성자에서 그 검사를 거친다 [1].
+경로 구분자가 들어간 이름으로 핸들러를 만들자 `ValueError: FileHandler filenames cannot contain path separators`가 났다 [14].
+`dumpfiles`는 이미지 안 파일 경로를 `ntpath.basename`으로 마지막 조각만 남겨 이름에 넣으므로 `\`와 `/`는 이 검사 전에 빠진다 [5].
+확장자, `:`, Windows 예약 이름은 검사하지 않는다 [13][1].
+같은 이름이 이미 있으면 거부하지 않고 번호를 붙인 새 이름으로 쓴다 [1].
+
+**한계.** Windows에서 `:`나 예약 이름이 들어간 덤프 파일 이름을 `\\?\` 경로로 열 때의 동작은 실행으로 확인하지 않았다 [9].
+
+### 근거
+
+[1] `make_file_handler`가 만드는 `DumpFileHandler`는 폴더와 `preferred_filename`을 이어 쓰고 겹치면 번호를 붙인다.
+
+```python
+def make_file_handler(output_dir: str):
+    """Return a FileHandlerInterface subclass that writes into ``output_dir``.
+
+    The directory is created on first use. Every handler instance buffers
+    writes in an ``io.BytesIO`` and flushes to
+    ``<output_dir>/<preferred_filename>`` in ``close()``. Collisions are
+    resolved by inserting ``-N`` before the extension.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    class DumpFileHandler(io.BytesIO, plugins.FileHandlerInterface):
+        def __init__(self, filename: str):
+            io.BytesIO.__init__(self)
+            plugins.FileHandlerInterface.__init__(self, filename)
+
+```
+
+[`plugins/_file_handler.py:47-61`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L47-L61)
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+
+    return DumpFileHandler
+```
+
+[`plugins/_file_handler.py:62-79`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L79)
+
+[2] 설정 파일 경로다.
+
+```python
+        self._config_path = Path(image_path + ".vol3cfg.json")
+```
+
+[`session.py:32-32`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L32-L32)
+
+[3] 덤프 폴더는 시작할 때 읽는 환경변수다.
+
+```python
+DUMP_DIR = os.environ.get("VOL_DUMP_DIR", "")
+```
+
+[`mcp_server.py:21-21`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L21-L21)
+
+```python
+session = Session(IMAGE_PATH, dump_dir=DUMP_DIR)
+```
+
+[`mcp_server.py:45-45`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L45-L45)
+
+[4] `Session`은 `dump_dir`가 있으면 파일 핸들러를 만든다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+```
+
+[`session.py:25-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L35)
+
+[5] Volatility 3 2.28.0의 `dumpfiles`는 이미지 안 파일 이름의 마지막 조각으로 이름을 짓는다: [`volatility3/framework/plugins/windows/dumpfiles.py:194-206`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dumpfiles.py#L194-L206).
+
+[6] Volatility 3 2.28.0의 `pedump`는 `PE.<프로세스 객체 주소>.<PID>.<기준 주소>.dmp`로 이름을 짓는다: [`volatility3/framework/plugins/windows/pedump.py:136-150`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L136-L150).
+
+[7] `windows_dumpfiles`의 인자는 플러그인 설정으로만 들어간다.
+
+```python
+    extra: dict = {}
+    if pid:
+        extra["pid"] = pid
+    if filter:
+        extra["filter"] = filter
+    if filter_ignore_case:
+        extra["ignore-case"] = True
+    if virtaddr:
+        extra["virtaddr"] = [virtaddr]
+    if physaddr:
+        extra["physaddr"] = [physaddr]
+
+    treegrid = run_plugin(
+        session,
+        dumpfiles.DumpFiles,
+        extra_config=extra or None,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "dumpfiles", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/file.py:54-72`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L54-L72)
+
+[8] `windows_pedump`의 인자도 플러그인 설정으로만 들어간다.
+
+```python
+    extra: dict = {"base": base}
+    if pid:
+        extra["pid"] = [pid]
+    if kernel_module:
+        extra["kernel_module"] = True
+    treegrid = run_plugin(
+        session,
+        pedump.PEDump,
+        extra_config=extra,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "pedump", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/module.py:86-97`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/module.py#L86-L97)
+
+[9] Windows에서는 쓰기 경로를 `\\?\` 절대 경로로 바꾼다.
+
+```python
+def _long_path_safe(path: str) -> str:
+    """Return a path Windows' file APIs will accept regardless of length.
+
+    Windows' classic MAX_PATH (260-character) limit applies unless the
+    path is absolute and prefixed with ``\\\\?\\``, which Windows treats
+    as an escape into the unrestricted-length API and which is a no-op
+    everywhere else. Forensic artifact names routinely exceed this once
+    joined with an output directory -- e.g. a Windows Event Log channel
+    name like ``Microsoft-Windows-Windows Firewall With Advanced
+    Security%4Firewall.evtx`` combined with dumpfiles' own
+    ``file.<offset>.<offset>.<type>.`` prefix -- so this is applied to
+    every dump write rather than only ones measured as "too long".
+    """
+    if os.name != "nt":
+        return path
+    abs_path = os.path.abspath(path)
+    if abs_path.startswith("\\\\?\\"):
+        return abs_path
+    if abs_path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_path.lstrip("\\")
+    return "\\\\?\\" + abs_path
+```
+
+[`plugins/_file_handler.py:24-44`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L24-L44)
+
+[10] `file_handler`는 덤프 폴더가 없으면 `RuntimeError`를 낸다.
+
+```python
+    @property
+    def file_handler(self):
+        """FileHandler class bound to ``dump_dir`` for use with dump plugins.
+
+        Raises RuntimeError if ``VOL_DUMP_DIR`` was not set when the server
+        started, so the Claude-visible MCP tool can return a clear message.
+        """
+        if self._file_handler is None:
+            raise RuntimeError(
+                "VOL_DUMP_DIR is not configured. Set the VOL_DUMP_DIR "
+                "environment variable in claude_desktop_config.json to "
+                "an existing directory before calling any dump tool."
+            )
+        return self._file_handler
+```
+
+[`session.py:48-61`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L48-L61)
+
+[11] (실행 확인) 무작위 바이트 파일을 이미지로 주고 `VOL_DUMP_DIR` 없이 서버를 stdio로 실행해 MCP SDK 1.27.0 클라이언트로 `windows_dumpfiles`와 `windows_pedump(base=4096)`를 불렀다.
+두 응답 모두 `isError` 참이었고 글은 `Error executing tool …: VOL_DUMP_DIR is not configured.`로 시작했다.
+
+[12] README의 환경변수 표다: [`README.md`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/README.md#L42).
+
+[13] Volatility 3 2.28.0의 `FileHandlerInterface`는 경로 구분자가 있는 이름을 거부한다: [`volatility3/framework/interfaces/plugins.py:38-53`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/interfaces/plugins.py#L38-L53).
+
+[14] (실행 확인) 서버의 `make_file_handler`로 만든 핸들러를 `/`가 들어간 이름으로 만들자 `ValueError`가 났고 파일은 생기지 않았다.

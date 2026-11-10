@@ -1,0 +1,208 @@
+---
+cell: P06
+details:
+- id: P06.02
+- id: P06.03
+- id: P06.04
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 이 방식은 `Session`의 결과 캐시 `_cache`와 Volatility 3 문맥 `ctx`에 적용된다 [1].
+`Session.run_plugin`은 인자가 없는 도구면 플러그인 이름을, 인자가 있는 도구면 이름과 인자 묶음을 키로 결과를 `_cache`에 둔다 [2].
+같은 키로 다시 부르면 플러그인을 실행하지 않고 담아 둔 결과를 돌려준다 [2].
+교차 분석 도구도 같은 캐시를 거쳐 하위 플러그인 결과를 다시 쓴다 [3].
+시험용 플러그인 처리기를 둔 `Session`에서 같은 플러그인을 두 번 부르자 두 응답은 같은 객체였고 처리기는 한 번만 실행되었다 [4].
+문맥 `ctx`는 `Session`을 만들 때 하나 생기고 모든 도구 호출이 이를 함께 쓴다 [1][5].
+코드 설명은 계층 검색과 PDB 내려받기를 호출마다 되풀이하지 않으려고 문맥 하나를 쓴다고 적는다 [5].
+캐시에는 유효 시간이나 개수 한도가 없고 캐시를 비우는 도구도 없다 [2].
+이 상태는 파일에 쓰지 않으므로 프로세스가 끝나면 사라진다 [1].
+
+**한계.** 캐시 키에는 이미지의 내용이나 해시가 들어가지 않는다 [2].
+같은 `Session`에서 이미지 내용을 바꾼 뒤 같은 플러그인을 부르자 처리기를 다시 실행하지 않고 앞의 결과를 돌려주었다 [4].
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 이 방식은 플러그인 설정 파일 `<이미지 경로>.vol3cfg.json`에 적용된다 [6].
+플러그인 실행을 맡는 `_common.run_plugin`은 플러그인을 실행한 뒤 저장한 설정이 없으면 그 플러그인의 `build_configuration()` 결과를 `save_config`로 이 파일에 쓴다 [7][6].
+`save_config`의 설명은 다음 로드를 빠르게 하려고 플러그인 설정을 JSON 파일에 저장한다고 적는다 [6].
+Volatility 3 2.28.0의 `build_configuration`은 플러그인 요구사항 가운데 값이 있는 것을 하위 설정까지 모두 담는다 [8].
+그래서 `run()`까지 처음 실행된 플러그인 호출에 준 인자도 이 파일에 들어간다 [7][8].
+automagic을 바꿔 둔 시험에서 정수 요구사항 `pid` 하나를 둔 시험용 플러그인을 `pid` 4로 실행하자 이미지 옆 파일에 `{"pid": 4}`가 쓰였다 [9].
+저장한 설정은 그 뒤 모든 플러그인 호출 전에 `apply_config`가 그 플러그인의 설정 경로에 합친다 [6][7].
+같은 `pid` 요구사항을 둔 다른 시험용 플러그인을 인자 없이 부르자 그 플러그인도 `pid` 값 4를 받았다 [9].
+파일 이름은 이미지 경로로만 정하고 이미지 내용이나 해시는 파일에 담지 않는다 [6].
+
+Volatility 3 라이브러리는 서버 프로세스 안에서 심볼을 찾으며 자기 폴더에 파일을 쓴다 [10].
+식별자 캐시 `identifier.cache`는 캐시 폴더에 두고 Microsoft 심볼 서버에서 내려받아 바꾼 심볼은 쓸 수 있는 첫 심볼 폴더에 둔다 [10].
+캐시 폴더는 `XDG_CACHE_HOME`이나 홈 폴더 아래 `.cache/volatility3`이고 서버 코드는 이 위치를 정하지 않는다 [10][11].
+`HOME`을 작업 폴더로 둔 컨테이너에서 서버를 실행하자 그 아래 `.cache/volatility3/identifier.cache`가 생겼다 [12].
+
+**한계.** `save_config`는 파일을 쓰기 전에 설정을 저장한 것으로 표시한다 [6].
+그래서 이미지 폴더에 쓸 수 없으면 플러그인 객체를 처음 만들고 실행한 호출이 `PermissionError`로 끝나고 그 뒤 호출은 파일 없이 메모리의 설정만 쓴다 [6][7].
+읽기 전용 폴더에 둔 이미지로 시험하자 첫 호출은 `PermissionError`였고 두 번째 호출은 성공했으며 설정 파일은 생기지 않았다 [9].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** 이 방식은 서버를 시작할 때 설정 파일을 읽는 `_init_context`에 적용된다 [13].
+`Session`을 만들 때 이미지 경로 뒤에 `.vol3cfg.json`을 붙인 파일이 있으면 서버가 이를 읽어 저장한 설정으로 둔다 [13].
+그 뒤 플러그인 호출마다 이 설정을 합치므로 모델이 따로 복구하지 않아도 앞 실행의 설정을 쓴다 [6][7].
+같은 경로로 `Session`을 새로 만들자 `has_config`가 참이었고 인자 없이 부른 시험용 플러그인이 앞 실행의 `pid` 4를 받았다 [9].
+결과 캐시와 문맥은 파일에서 다시 읽지 않는다 [1].
+
+**한계.** 서버는 읽은 설정이 지금 이미지에서 나온 것인지 확인하지 않는다 [13].
+같은 경로의 이미지 내용을 바꾼 뒤 `Session`을 새로 만들자 앞 이미지로 저장한 설정을 그대로 읽었다 [9].
+
+### 근거
+
+[1] `Session`은 문맥, 결과 캐시, 설정 파일 경로를 객체 안에 둔다.
+
+```python
+    def __init__(self, image_path: str, dump_dir: str = "", compute_hash: bool = True):
+        self.image_path = image_path
+        self.ctx = contexts.Context()
+        # Cache key is either the plugin name (zero-arg tools) or a
+        # (plugin_name, frozenset-of-kwargs) tuple for parameterized tools
+        # such as windows_vadregexscan where results differ by argument.
+        self._cache: dict = {}
+        self._config_path = Path(image_path + ".vol3cfg.json")
+        self._saved_config: dict | None = None
+        self.dump_dir = dump_dir
+        self._file_handler = make_file_handler(dump_dir) if dump_dir else None
+```
+
+[`session.py:25-35`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L25-L35)
+
+[2] `Session.run_plugin`의 캐시 키와 캐시 조회다.
+
+```python
+    def run_plugin(self, plugin_name: str, **kwargs) -> dict:
+        """Run a plugin by name, returning cached results if available.
+
+        Extra kwargs are forwarded to the plugin's runner function and used
+        to key the cache, so calling the same parameterized plugin twice
+        with identical arguments returns the cached result, while different
+        arguments trigger a fresh run.
+        """
+        cache_key = (plugin_name, frozenset(kwargs.items())) if kwargs else plugin_name
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        if plugin_name not in PLUGIN_MAP:
+            raise ValueError(f"Unknown plugin: {plugin_name}")
+        result = PLUGIN_MAP[plugin_name](self, **kwargs)
+        self._cache[cache_key] = result
+        return result
+```
+
+[`session.py:118-133`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L118-L133)
+
+[3] 교차 분석 모듈의 설명은 캐시를 거쳐 하위 플러그인을 부른다고 적는다.
+
+```python
+"""Cross-plugin correlation tools.
+
+Each function calls session.run_plugin() for the underlying plugins,
+leveraging the result cache so already-executed plugins cost nothing.
+The correlation logic itself is deterministic Python — no LLM reasoning
+involved — guaranteeing reproducibility.
+"""
+```
+
+[`plugins/correlation.py:1-7`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L1-L7)
+
+[4] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 `PLUGIN_MAP`의 `pslist`를 호출 횟수를 세는 함수로 바꾸고 같은 `Session`에서 두 번 부른 뒤 이미지 내용을 바꾸고 다시 불렀다.
+
+[5] `_purge_stale_hive_layers`의 설명은 문맥 하나를 모든 도구 호출이 쓴다고 적는다.
+
+```python
+    volatility3's own CLI never hits this because it builds a brand-new
+    Context for every single-plugin invocation. This server deliberately
+    reuses one Context across every tool call in a session (to skip
+    re-scanning layers and re-downloading PDBs on every call), so any
+    second plugin that touches the registry in the same session collides
+    with hive layers a previous one left registered, raising
+    ``LayerException("Layer already exists: ...")``. At least 15 wrapped
+```
+
+[`plugins/_common.py:106-112`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L106-L112)
+
+[6] 저장한 설정을 플러그인 설정 경로에 합치고 파일에 쓰는 함수다.
+
+```python
+    def apply_config(self, plugin_name: str):
+        """Splice saved config into a plugin's config path if available."""
+        if self._saved_config is not None:
+            plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+            self.ctx.config.splice(
+                plugin_config_path,
+                HierarchicalDict(self._saved_config),
+            )
+
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+
+    @property
+    def has_config(self) -> bool:
+        return self._saved_config is not None
+```
+
+[`session.py:98-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L98-L116)
+
+[7] `_common.run_plugin`은 실행 전에 설정을 합치고 실행 뒤 저장한 설정이 없으면 쓴다.
+
+```python
+    ctx = session.ctx
+    _purge_stale_hive_layers(ctx)
+    plugin_name = plugin_class.__name__
+    session.apply_config(plugin_name)
+    plugin_config_path = path_join(BASE_CONFIG_PATH, plugin_name)
+
+    if extra_config:
+        for key, value in extra_config.items():
+            ctx.config[path_join(plugin_config_path, key)] = value
+
+    available = automagic.available(ctx)
+    automagics = automagic.choose_automagic(available, plugin_class)
+    automagic.run(automagics, ctx, plugin_class, BASE_CONFIG_PATH, progress_callback=_noop_progress)
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:150-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L150-L171)
+
+[8] Volatility 3 2.28.0의 `build_configuration`은 값이 있는 요구사항을 모두 담는다: [`volatility3/framework/interfaces/configuration.py:704-727`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/interfaces/configuration.py#L704-L727).
+
+[9] (실행 확인) 서버 모듈을 같은 프로세스에서 불러 `_common`의 automagic 세 함수를 아무것도 하지 않는 함수로 바꾸고 정수 요구사항 `pid`를 둔 시험용 플러그인 두 개를 실행했다.
+쓸 수 있는 폴더, 같은 경로의 새 `Session`, 내용을 바꾼 이미지, 쓸 수 없는 폴더(권한 555)에서 각각 확인했다.
+
+[10] Volatility 3 2.28.0의 캐시 폴더와 심볼 폴더, 식별자 캐시와 심볼 내려받기다: [`volatility3/framework/constants/__init__.py:28-51`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/constants/__init__.py#L28-L51), [`volatility3/framework/symbols/windows/pdbutil.py:99-121`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L99-L121), [`volatility3/framework/symbols/windows/pdbutil.py:237-296`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/symbols/windows/pdbutil.py#L237-L296), [`volatility3/symbols/__init__.py:12`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/symbols/__init__.py#L12).
+
+[11] 서버 코드에는 Volatility 3의 캐시 위치나 오프라인 설정을 바꾸는 코드가 없고 문맥 설정에는 이미지 위치만 넣는다.
+
+```python
+    def _init_context(self):
+        uri = Path(self.image_path).resolve().as_uri()
+        self.ctx.config["automagic.LayerStacker.single_location"] = uri
+        if self._config_path.exists():
+            with open(self._config_path) as f:
+                self._saved_config = json.load(f)
+```
+
+[`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96)
+
+[12] (실행 확인) `HOME=/work`로 실행한 stdio 서버에서 `windows_info`를 부른 뒤 `/work/.cache/volatility3`에 `identifier.cache`가 있었다.
+
+[13] `_init_context`는 시작할 때 설정 파일이 있으면 읽는다: [`session.py:91-96`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L91-L96).

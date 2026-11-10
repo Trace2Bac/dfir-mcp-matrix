@@ -1,0 +1,136 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 플러그인을 감싼 도구와 `triage_process`, `network_process_correlation`, `detect_hidden_processes`에 적용된다 [1][2][3].
+Volatility 3 2.28.0은 Windows 시각을 UTC 시간대가 붙은 `datetime`으로 돌려준다 [4].
+서버의 `_serialize_value`는 이 `datetime`을 시각이나 시간대를 바꾸지 않고 `str`로 바꿔 싣는다 [1].
+`wintime_to_datetime`이 만든 값은 `2026-03-15 14:22:01+00:00`이 되었다 [5].
+시각이 0이거나 바꿀 수 없으면 Volatility 3는 값이 없다는 표시를 내고 서버는 이를 `None`으로 싣는다 [4][1][5].
+`triage_process`와 `network_process_correlation`은 `pslist` 행의 `CreateTime` 문자열을 `create_time`에 그대로 옮긴다 [2].
+`detect_hidden_processes`는 `psscan` 행을 시각 필드까지 그대로 싣는다 [3].
+
+`build_timeline`은 이 방식을 쓰지 않는다 [6].
+이 도구는 시각 문자열을 `_parse_timestamp`로 해석해 `isoformat()` 글로 바꾸고 원래 문자열은 싣지 않는다 [6].
+`_parse_timestamp`는 시간대가 붙은 글을 해석하지 못하므로 Volatility 3가 낸 시각으로는 사건을 만들지 않는다 [6][5].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 플러그인을 감싼 도구와 Volatility 3 시각을 옮겨 싣는 교차 분석 도구에 적용된다 [1][2][3].
+Volatility 3의 `datetime`에는 UTC 시간대가 붙어 있어 `str`로 바꾼 값 끝에 `+00:00`이 들어 있다 [4][1][5].
+그래서 응답의 시각 값마다 시간대가 값으로 표시된다 [5].
+`build_timeline`의 `timestamp`는 `_parse_timestamp`가 해석한 시간대 없는 시각의 `isoformat()` 글이라 `2026-03-15T14:22:01`처럼 오프셋이 붙지 않는다 [6][7].
+Volatility 3 2.28.0이 낸 시각은 이 함수가 해석하지 못하므로 `timestamp`가 실린 사건은 시간대 없는 시각 글이 들어올 때만 만들어진다 [6][5].
+
+**한계.** Volatility 3 2.28.0의 `wintime_to_datetime`은 100나노초 단위의 FILETIME을 초 단위로 버린 뒤 바꾼다 [4].
+그래서 응답의 시각 값에는 초 아래 자리가 없고 응답은 그 정밀도를 적지 않는다 [1][4].
+
+### 근거
+
+[1] `_serialize_value`는 `datetime`을 `str`로 바꾸고 값이 없다는 표시를 `None`으로 바꾼다.
+
+```python
+def _serialize_value(val: Any) -> Any:
+    """Convert a volatility3 rendered value to a JSON-serializable type."""
+    if isinstance(val, BaseAbsentValue):
+        return None
+    if isinstance(val, format_hints.Hex):
+        return hex(val)
+    if isinstance(val, format_hints.MultiTypeData):
+        return _serialize_multitypedata(val)
+    if isinstance(val, renderers.LayerData):
+        return _serialize_layerdata(val)
+    if isinstance(val, renderers.Disassembly):
+        return _bytes_to_hex(val.data)
+    if isinstance(val, bytes):
+        # Covers format_hints.HexBytes too (a plain bytes subclass).
+        return _bytes_to_hex(val)
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+```
+
+[`plugins/_common.py:51-68`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L51-L68)
+
+[2] 교차 분석 도구는 `pslist` 행의 `CreateTime`을 그대로 옮긴다.
+
+```python
+    return {
+        "plugin": "triage_process",
+        "results": {
+            "pid": pid,
+            "name": proc_match.get("ImageFileName", ""),
+            "ppid": proc_match.get("PPID"),
+            "create_time": proc_match.get("CreateTime"),
+            "cmdline": cmdline_match.get("Args", "") if cmdline_match else "",
+```
+
+[`plugins/correlation.py:203-210`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L203-L210)
+
+`network_process_correlation`도 같다: [`plugins/correlation.py:313-319`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L313-L319).
+
+[3] `detect_hidden_processes`는 `psscan` 행을 그대로 싣는다.
+
+```python
+    pslist_data = session.run_plugin("pslist")
+    psscan_data = session.run_plugin("psscan")
+
+    pslist_pids = {proc["PID"] for proc in pslist_data["results"]}
+
+    hidden = [
+        proc for proc in psscan_data["results"]
+        if proc["PID"] not in pslist_pids
+    ]
+
+    return {
+        "plugin": "detect_hidden_processes",
+        "results": {
+            "pslist_count": len(pslist_data["results"]),
+            "psscan_count": len(psscan_data["results"]),
+            "hidden_count": len(hidden),
+            "hidden_processes": hidden,
+        },
+    }
+```
+
+[`plugins/correlation.py:25-43`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L25-L43)
+
+[4] Volatility 3 2.28.0의 `wintime_to_datetime`은 FILETIME을 초 단위로 나눈 뒤 UTC 시간대를 붙인 `datetime`으로 바꾸고 0이면 값이 없다는 표시를 돌려준다: [`volatility3/framework/renderers/conversion.py:15-28`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/renderers/conversion.py#L15-L28).
+
+[5] (실행 확인) Volatility 3 2.28.0의 `wintime_to_datetime`으로 만든 값과 `NotApplicableValue`·`UnparsableValue`를 서버의 `_serialize_value`에 넣자 `2026-03-15 14:22:01+00:00`, `None`, `None`이 나왔고 앞의 글은 `_parse_timestamp`에서 `None`이 되었다.
+
+[6] `build_timeline`은 `_parse_timestamp`가 돌려준 글만 `timestamp`에 싣는다.
+
+```python
+def _parse_timestamp(val: str | None) -> str | None:
+    """Normalize a Volatility3 timestamp string to ISO 8601, or None."""
+    if not val or val == "N/A" or val == "None":
+        return None
+    val = val.strip()
+    # Already ISO-ish: "2026-03-15 14:22:01.000000" → "2026-03-15T14:22:01"
+    try:
+        from datetime import datetime
+        # Handle "YYYY-MM-DD HH:MM:SS.ffffff" (most common vol3 format)
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(val, fmt)
+                return dt.isoformat()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+```
+
+[`plugins/correlation.py:379-396`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L379-L396)
+
+사건을 만드는 부분: [`plugins/correlation.py:407-433`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/correlation.py#L407-L433).
+
+[7] (실행 확인) 시간대 없는 시각 문자열을 넣은 가짜 `pslist`·`psscan`·`shimcachemem` 행으로 `run_build_timeline`을 부르자 `timestamp`는 `2026-03-15T14:22:01` 꼴이었다.

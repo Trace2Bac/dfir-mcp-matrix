@@ -1,0 +1,140 @@
+---
+cell: D05
+details:
+- id: D05.01
+- id: D05.03
+---
+
+# D05 파생물 저장 실패 처리
+
+### D05.01 오류·부분 완료 표시
+
+**구현.** 이 방식은 덤프 도구 `windows_dumpfiles`·`windows_pedump`의 파일 쓰기, `windows_dumpfiles`의 덤프 실패 행, 설정 파일 쓰기에 적용된다 [1][2][3].
+서버의 `DumpFileHandler.close`는 파일을 열거나 쓰다가 난 예외를 처리하지 않는다 [1].
+이 예외는 Volatility 3 플러그인과 `parse_treegrid`를 거쳐 도구 함수 밖으로 나가고 MCP SDK가 그 호출을 오류 응답으로 돌려준다 [1][4].
+읽기 전용 폴더에 묶은 핸들러로 파일을 닫자 `PermissionError`가 났고 파일은 생기지 않았다 [5].
+`windows_dumpfiles`에서 예외가 난 MCP 호출의 응답은 `isError` 참과 `Error executing tool` 문장이었다 [6].
+
+Volatility 3 2.28.0의 `dumpfiles`는 캐시 객체 하나의 페이지를 읽지 못하거나 읽은 바이트가 없으면 그 행의 `Result`를 `Error dumping file`로 싣는다 [7].
+그래서 `windows_dumpfiles`의 응답은 꺼내지 못한 캐시 객체를 행마다 알린다 [7][2].
+
+설정 파일 `<이미지 경로>.vol3cfg.json`을 쓰지 못하면 그 호출도 오류로 끝난다 [3][8].
+`save_config`는 쓰기 전에 설정을 세션에 넣고 파일 쓰기 예외를 처리하지 않는다 [3].
+공통 실행 함수는 플러그인의 `run()`을 부른 뒤 결과 행을 만들기 전에 설정을 저장하므로 저장이 실패하면 결과 행 없이 오류가 난다 [8].
+이미지 폴더를 읽기 전용으로 둔 시험에서 첫 호출은 `PermissionError`로 끝났고 덤프 폴더에는 파일이 생기지 않았다 [9].
+
+**한계.** 한 호출에서 파일 몇 개를 쓴 뒤 다음 파일 쓰기가 실패하면 앞서 쓴 파일은 폴더에 남고 오류 응답에는 그 파일의 이름이 실리지 않는다 [1][4].
+파일 하나를 쓴 뒤 `OSError`를 내도록 한 시험에서 호출은 `OSError`로 끝났고 앞서 쓴 파일은 남았다 [10].
+`Error dumping file`로 실린 캐시 객체도 덤프 폴더에 파일이 남을 수 있다 [7][11].
+`dump_file_producer`는 실패하면 열어 둔 핸들러를 닫지 않고 `None`을 돌려준다 [7].
+페이지 읽기가 중간에 실패한 경우와 읽은 바이트가 없는 경우 모두 함수가 `None`을 돌려준 뒤 덤프 폴더에 그 이름의 파일이 생겼고 크기는 4바이트와 0바이트였다 [11].
+설정 파일 저장이 실패한 뒤 세션은 설정이 있는 것으로 처리해 다시 쓰지 않는다 [3].
+같은 시험에서 두 번째 호출은 성공 응답을 돌려주었고 설정 파일은 끝까지 생기지 않았으며 이를 알리는 값은 없었다 [9].
+
+### D05.03 알림 없이 계속
+
+**구현.** 이 방식은 `windows_pedump`가 PE를 다시 짜 맞추지 못한 경우에 적용된다 [12].
+Volatility 3 2.28.0의 `pedump`는 PE 재구성 중 `OSError`, `VolatilityException`, `OverflowError`, `ValueError`가 나면 `debug` 수준 로그만 남기고 `None`을 돌려준다 [12].
+`None`을 받은 프로세스는 결과 행에 들어가지 않으므로 응답은 실패한 대상을 싣지 않은 성공 응답이다 [12].
+재구성은 `with` 블록 안에서 하므로 실패해도 블록을 나갈 때 핸들러가 닫히고 서버의 `DumpFileHandler.close`가 그때까지 모은 바이트를 파일로 쓴다 [12][1].
+재구성이 예외를 내도록 한 시험에서 `dump_pe`는 `None`을 돌려주었고 덤프 폴더에 0바이트 `PE.0x1.4.0x2.dmp`가 생겼다 [11].
+MCP 서버 안에서 Volatility 3의 로그는 `FastMCP`가 붙인 `INFO` 수준 처리기로 표준 오류에 나가므로 `debug` 로그는 어디에도 남지 않는다 [13].
+
+### 근거
+
+[1] `DumpFileHandler.close`는 파일 열기와 쓰기 예외를 처리하지 않는다.
+
+```python
+        def close(self):
+            if self.closed:
+                return None
+            self.seek(0)
+
+            output_path = os.path.join(output_dir, self.preferred_filename)
+            base, ext = os.path.splitext(output_path)
+            counter = 1
+            while os.path.exists(_long_path_safe(output_path)):
+                output_path = f"{base}-{counter}{ext}"
+                counter += 1
+
+            with open(_long_path_safe(output_path), "wb") as fp:
+                fp.write(self.read())
+
+            super().close()
+```
+
+[`plugins/_file_handler.py:62-77`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_file_handler.py#L62-L77)
+
+[2] `windows_dumpfiles`는 덤프 결과 행을 `parse_treegrid`로 바꿔 돌려준다.
+
+```python
+    treegrid = run_plugin(
+        session,
+        dumpfiles.DumpFiles,
+        extra_config=extra or None,
+        open_method=session.file_handler,
+    )
+    return {"plugin": "dumpfiles", "results": parse_treegrid(treegrid)}
+```
+
+[`plugins/file.py:66-72`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/file.py#L66-L72)
+
+[3] `save_config`는 설정을 먼저 세션에 넣고 파일을 쓴다.
+
+```python
+    def save_config(self, config_dict: dict):
+        """Save plugin configuration to JSON file for fast subsequent loads."""
+        self._saved_config = config_dict
+        with open(self._config_path, "w") as f:
+            json.dump(config_dict, f, sort_keys=True, indent=2)
+            f.write("\n")
+
+    @property
+    def has_config(self) -> bool:
+        return self._saved_config is not None
+```
+
+[`session.py:107-116`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/session.py#L107-L116)
+
+[4] 공통 실행 함수와 도구 함수에는 예외 처리가 없다: [`plugins/_common.py:133-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L133-L171), [`plugins/_common.py:71-85`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L71-L85), [`mcp_server.py:2189-2196`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/mcp_server.py#L2189-L2196).
+
+[5] (실행 확인) 서버의 `make_file_handler`로 만든 핸들러의 폴더 권한을 `0555`로 바꾸고 파일을 열어 쓰고 닫았다.
+`PermissionError: [Errno 13] Permission denied`가 났고 그 이름의 파일은 없었다.
+
+[6] (실행 확인) 무작위 바이트 파일을 이미지로 주어 서버를 stdio로 실행하고 MCP SDK 1.27.0 클라이언트로 `windows_dumpfiles`를 불렀다.
+`VOL_DUMP_DIR`이 없을 때와 플러그인 설정 검사가 실패할 때 모두 응답은 `isError` 참이었고 글은 `Error executing tool windows_dumpfiles:`로 시작했다.
+
+[7] Volatility 3 2.28.0의 `dumpfiles`는 실패하면 핸들러를 닫지 않고 `None`을 돌려주고 그 행을 `Error dumping file`로 싣는다: [`volatility3/framework/plugins/windows/dumpfiles.py:78-119`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dumpfiles.py#L78-L119), [`volatility3/framework/plugins/windows/dumpfiles.py:194-214`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/dumpfiles.py#L194-L214).
+
+[8] 공통 실행 함수는 `run()` 뒤 결과 행을 만들기 전에 설정을 저장한다.
+
+```python
+    constructed = plugin_class(ctx, plugin_config_path, progress_callback=_noop_progress)
+    if open_method is not None:
+        constructed.set_open_method(open_method)
+    treegrid = constructed.run()
+
+    if not session.has_config:
+        session.save_config(dict(constructed.build_configuration()))
+
+    return treegrid
+```
+
+[`plugins/_common.py:163-171`](https://github.com/cpuu/VolPilot/blob/5c848519cfa2e86a86abbe613c7249fddeffc6df/plugins/_common.py#L163-L171)
+
+[9] (실행 확인) 무작위 바이트 이미지를 `0555` 폴더에 두고 `Session`을 만든 뒤 Volatility 3의 자동 탐지를 빈 함수로, `dumpfiles` 플러그인을 행을 만들 때 파일 하나를 쓰는 가짜 클래스로 바꿔 두 번 불렀다.
+첫 호출은 `PermissionError: … img.raw.vol3cfg.json`으로 끝났고 덤프 폴더는 비어 있었으며 `has_config`는 참이었다.
+두 번째 호출은 행 하나를 돌려주었고 덤프 파일이 생겼으며 설정 파일은 없었다.
+
+[10] (실행 확인) 같은 방식의 가짜 `dumpfiles`가 파일 하나를 쓰고 행 하나를 낸 뒤 `OSError`를 내게 했다.
+`run_plugin`은 `OSError: [Errno 28] No space left on device (simulated)`로 끝났고 덤프 폴더에는 앞서 쓴 파일이 남았다.
+
+[11] (실행 확인) Volatility 3 2.28.0의 `DumpFiles.dump_file_producer`와 `PEDump.dump_pe`를 서버의 `make_file_handler` 핸들러와 가짜 메모리 객체로 불렀다.
+페이지를 하나 쓴 뒤 `InvalidAddressException`을 내는 객체와 페이지가 없는 객체에서 함수는 `None`을 돌려주었고 덤프 폴더에 4바이트와 0바이트 파일이 생겼다.
+`object()`가 `VolatilityException`을 내는 가짜 문맥으로 부른 `dump_pe`는 `None`을 돌려주었고 0바이트 `PE.0x1.4.0x2.dmp`가 생겼다.
+
+[12] Volatility 3 2.28.0의 `pedump`는 재구성 예외를 `debug` 로그로 남기고 `None`을 돌려주며 `None`인 대상은 행으로 내지 않는다: [`volatility3/framework/plugins/windows/pedump.py:60-92`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L60-L92), [`volatility3/framework/plugins/windows/pedump.py:193-222`](https://github.com/volatilityfoundation/volatility3/blob/d61335e2a54961bfd619fe6cd7f7b27f01481604/volatility3/framework/plugins/windows/pedump.py#L193-L222).
+
+[13] (실행 확인) 컨테이너에서 `mcp_server`를 불러온 뒤 Volatility 3 로거에 `debug`·`info`·`warning`·`error` 로그를 하나씩 남겼다.
+루트 로거에는 `INFO` 수준의 `StreamHandler`가 붙어 있었고 표준 오류에는 `info`·`warning`·`error` 세 줄만 나왔다.
+MCP Python SDK 1.27.0의 `FastMCP`는 만들어질 때 `configure_logging`으로 루트 로거에 기본 `INFO` 수준의 처리기를 붙인다: [`src/mcp/server/fastmcp/server.py:242`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/server.py#L242), [`src/mcp/server/fastmcp/utilities/logging.py:19-43`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/fastmcp/utilities/logging.py#L19-L43).
