@@ -1,0 +1,182 @@
+---
+cell: E02
+details:
+- id: not_implemented
+---
+
+# E02 증거 무결성 검증
+
+### 미구현
+
+**판단.** 서버는 하이브의 기준값을 계산하지도 대조하지도 않는다.
+서버 코드에는 해시를 계산하거나 파일 상태 값을 읽어 남기는 호출이 없다 [1].
+regipy에는 파일의 SHA-1을 계산하는 `calculate_sha1`이 있지만 서버는 이 함수를 부르지 않는다 [2][1].
+regipy `RegistryHive`는 헤더의 `checksum` 필드를 해석하지만 헤더에서 다시 계산한 값과 대조하지 않는다 [3][4].
+서버는 이 값을 응답에 싣지도 않는다 [5].
+
+regipy 6.5.2의 `apply_transaction_logs`는 트랜잭션 로그 항목마다 해시 필드를 대조하고 맞지 않는 항목부터 적용을 멈춘다 [6][7][8].
+서버는 이 함수가 있는 `regipy.recovery`를 불러오지 않는다 [9].
+서버 모듈을 불러오고 도구를 부른 뒤에도 `regipy.recovery`는 불러와 있지 않았다 [10].
+
+불러 둔 하이브는 불러올 때 메모리에 복사한 내용이므로 서버는 그 뒤 파일이 바뀌어도 알지 못한다 [11].
+하이브 하나를 불러 둔 뒤 같은 경로의 파일을 다른 하이브로 덮어쓰고 같은 플러그인을 다시 실행하자 덮어쓰기 전과 같은 결과가 경고 없이 돌아왔다 [10].
+
+### 근거
+
+[1] 서버가 불러오는 모듈이다.
+`hashlib`과 `regipy.utils`가 없다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)
+
+[2] regipy의 `calculate_sha1`이다.
+
+```python
+def calculate_sha1(file_path):
+    sha1 = hashlib.sha1()
+    with open(file_path, "rb") as f:
+        while True:
+            data = f.read(1024**2)
+            if not data:
+                break
+            sha1.update(data)
+    return sha1.hexdigest()
+```
+
+[`regipy/utils.py:42-50`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/utils.py#L42-L50)
+
+[3] `RegistryHive`는 헤더를 해석만 한다.
+
+```python
+        self.partial_hive_path = None
+        self.hive_type = None
+
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+
+        with boomerang_stream(self._stream) as s:
+            self.header = REGF_HEADER.parse_stream(s)  # type: ignore[union-attr]
+
+            # Get the first cell in root HBin, which is the root NKRecord:
+            root_hbin = self.get_hbin_at_offset()
+            root_hbin_cell = next(root_hbin.iter_cells(s))
+            self.root = NKRecord(root_hbin_cell, s)
+        self.name = self.header.file_name
+```
+
+[`regipy/registry.py:143-156`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L143-L156)
+
+[4] 헤더 구조의 마지막 필드가 `checksum`이다.
+
+```python
+REGF_HEADER = Struct(
+    "signature" / Const(b"regf"),
+    "primary_sequence_num" / Int32ul,
+    "secondary_sequence_num" / Int32ul,
+    "last_modification_time" / Int64ul,
+    "major_version" / Int32ul,
+    "minor_version" / Int32ul,
+    "file_type" / Int32ul,
+    "file_format" / Int32ul,
+    "root_key_offset" / Int32ul,
+    "hive_bins_data_size" / Int32ul,
+    "clustering_factor" / Int32ul,
+    "file_name" / PaddedString(64, "utf-16-le"),
+    "padding" * Bytes(396),
+    "checksum" / Int32ul,
+).compile()
+```
+
+[`regipy/structs.py:16-31`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/structs.py#L16-L31)
+
+[5] 서버 코드에서 `header`를 읽는 곳은 없다: [`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431).
+
+[6] `apply_transaction_logs`는 복원한 하이브를 파일로 쓰는 함수다.
+
+```python
+def apply_transaction_logs(
+    hive_path,
+    primary_log_path,
+    secondary_log_path=None,
+    restored_hive_path=None,
+    verbose=False,
+):
+    """
+    Apply transactions logs
+    :param hive_path: The path to the original hive
+    :param primary_log_path: The path to the primary log path
+    :param secondary_log_path: The path to the secondary log path (optional).
+    :param restored_hive_path: Path to save the restored hive
+    :param verbose: verbosity
+    :return:
+    """
+    recovered_dirty_pages_total_count = 0
+
+    if not restored_hive_path:
+        restored_hive_path = f"{hive_path}.restored"
+
+    registry_hive = RegistryHive(hive_path)
+```
+
+[`regipy/recovery.py:399-420`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/recovery.py#L399-L420)
+
+[7] `apply_transaction_logs`가 부르는 `_scan_hvle_entries`는 로그 항목의 해시 두 개가 맞지 않으면 복구를 멈춘다.
+
+```python
+        # Hash-1 covers everything from the first page reference on (Size - 40 bytes);
+        # Hash-2 covers the first 32 bytes of the entry (including the stored Hash-1).
+        # An entry that fails either check is corrupt (or was truncated by a crash) and
+        # everything after it is suspect: recovery stops here.
+        if (
+            _marvin32(log_data[offset + HVLE_BLOCK_HEADER_SIZE : entry_end]) != parsed_entry.hash_1
+            or _marvin32(log_data[offset : offset + 32]) != parsed_entry.hash_2
+        ):
+            logger.warning(
+                f"HvLE entry with sequence number {sequence_number} at {hex(offset)} failed hash verification. "
+                "Stopping recovery; only the preceding entries are applied."
+            )
+            break
+```
+
+[`regipy/recovery.py:123-135`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/recovery.py#L123-L135)
+
+[8] 6.5.2 변경 기록은 로그 항목마다 Marvin32 해시 필드를 검증한다고 적는다: [`CHANGELOG.md:8-18`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/CHANGELOG.md#L8-L18).
+
+[9] 서버가 regipy에서 불러오는 것은 `regipy.plugins`, `PLUGINS`, `run_relevant_plugins`, `RegistryHive`다.
+
+```python
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:17-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L17-L21)
+
+[10] (실행 확인) 네트워크를 끈 컨테이너에서 서버 모듈을 불러 도구를 부른 뒤 `sys.modules`를 보았다.
+`SYSTEM` 하이브 하나를 둔 폴더를 불러 `run_plugin`으로 `computer_name`을 실행한 뒤 그 파일을 `SYSTEM_2`로 덮어쓰고 다시 실행했다.
+
+[11] `RegistryHive`는 하이브 내용 전체를 `BytesIO`에 복사한다.
+
+```python
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+```
+
+[`regipy/registry.py:146-147`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L146-L147)

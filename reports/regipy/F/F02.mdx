@@ -1,0 +1,201 @@
+---
+cell: F02
+details:
+- id: not_implemented
+---
+
+# F02 발견사항·결론 도출
+
+### 미구현
+
+**판단.** 서버는 regipy 플러그인의 결과를 옮기고 형식을 바꿔 돌려줄 뿐 규칙으로 판정하거나 결과끼리 잇거나 점수를 매기지 않는다.
+`run_plugin`은 하이브마다 플러그인 객체의 `entries`를 하이브 파일 이름 아래에 담아 돌려준다 [1].
+`run_all_plugins_for_hive`는 하이브마다 regipy `run_relevant_plugins`가 돌려준 플러그인별 결과를 같은 방식으로 담는다 [2].
+서버 코드가 결과에 하는 처리는 `_serialize_plugin_results`로 `datetime` 값을 ISO 8601 문자열로 바꾸는 것뿐이다 [3].
+`get_registry_key`의 처리 코드는 키 하나의 시각과 값 목록을 담는 필드를 두지만 regipy 6.5.2에서는 키가 있어도 `found`가 거짓인 응답을 돌려준다 [4][5].
+`list_relevant_plugins`는 받은 `question`을 응답에 그대로 싣고 플러그인을 고르는 데 쓰지 않는다 [6].
+
+지속성 키처럼 정해 둔 키 목록을 읽어 결과를 만드는 일은 regipy 플러그인이 한다 [7].
+regipy 플러그인 기반 클래스에는 이상 징후를 찾는 메서드 `detect_anomalies`가 있지만 본문이 비어 있고 서버 코드는 이 메서드를 부르지 않는다 [8][9].
+README의 예시는 클라이언트 모델이 지속성 항목 가운데 의심스러운 항목을 짚었다고 적고 그때 부른 도구를 `answer_forensic_question`으로 적는다 [10].
+기준 커밋의 서버에는 이 이름의 도구가 없다 [11].
+
+### 근거
+
+[1] `run_plugin`은 하이브마다 플러그인의 `entries`를 옮긴다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[2] `run_all_plugins_for_hive`는 `run_relevant_plugins`의 결과를 하이브 파일 이름 아래에 옮긴다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L323)
+
+[3] `_serialize_plugin_results`는 `dict`와 `list`를 따라가며 `datetime`만 문자열로 바꾼다.
+
+```python
+def _serialize_plugin_results(results):
+    """Recursively serialize plugin results, converting datetimes to strings."""
+    if isinstance(results, dict):
+        return {k: _serialize_plugin_results(v) for k, v in results.items()}
+    elif isinstance(results, list):
+        return [_serialize_plugin_results(item) for item in results]
+    elif isinstance(results, datetime):
+        return results.isoformat()
+    else:
+        return results
+```
+
+[`regipy_mcp_server/server.py:107-116`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L107-L116)
+
+[4] `get_registry_key`의 처리 코드는 찾은 키의 시각과 값을 담는 필드를 둔다.
+
+```python
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+
+    if not any(r.get("found") for r in results.values()):
+        return {"key_path": key_path, "found": False, "searched_hives": [Path(p).name for p, _ in hives_to_search]}
+
+    return {"key_path": key_path, "results": results}
+```
+
+[`regipy_mcp_server/server.py:393-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L411)
+
+[5] (실행 확인) 네트워크를 끈 컨테이너에서 SYSTEM 하이브에 있는 키 `\ControlSet001\Control\TimeZoneInformation`으로 `get_registry_key`를 부르자 `found`가 거짓인 응답이 돌아왔다.
+
+[6] `list_relevant_plugins`는 `question`을 응답에만 싣는다.
+
+```python
+    if not _loaded_hives:
+        return {"error": "No hives loaded. Use set_hive_directory first."}
+
+    # Get loaded hive types
+    loaded_types = {hive.hive_type for hive in _loaded_hives.values()}
+
+    # Build list of available plugins with their descriptions
+    available_plugins = []
+    for plugin_class in PLUGINS:
+        if plugin_class.COMPATIBLE_HIVE not in loaded_types:
+            continue
+
+        available_plugins.append(
+            {
+                "name": plugin_class.NAME,
+                "description": plugin_class.DESCRIPTION or "No description",
+                "hive_type": plugin_class.COMPATIBLE_HIVE,
+            }
+        )
+
+    return {
+        "question": question,
+        "available_plugins": available_plugins,
+        "total_count": len(available_plugins),
+        "instruction": "Based on the question, select relevant plugin(s) and call run_plugin() for each one.",
+    }
+```
+
+[`regipy_mcp_server/server.py:341-366`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L341-L366)
+
+[7] regipy 플러그인 `software_plugin`은 정해 둔 지속성 키 목록의 값을 읽는다.
+
+```python
+PERSISTENCE_ENTRIES = [
+    r"\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run",
+    r"\Microsoft\Windows\CurrentVersion\Run",
+    r"\Microsoft\Windows\CurrentVersion\RunOnce",
+    r"\Microsoft\Windows\CurrentVersion\RunOnce\Setup",
+    r"\Microsoft\Windows\CurrentVersion\RunOnceEx",
+    r"\Wow6432Node\Microsoft\Windows\CurrentVersion\Run",
+    r"\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+    r"\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce\Setup",
+    r"\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnceEx",
+    r"\Wow6432Node\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run",
+    r"\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Notify",
+]
+
+
+class SoftwarePersistencePlugin(Plugin):
+    NAME = "software_plugin"
+    DESCRIPTION = "Retrieve values from known persistence subkeys in Software hive"
+    COMPATIBLE_HIVE = SOFTWARE_HIVE_TYPE
+
+    def run(self):
+        self.entries = get_subkey_values_from_list(self.registry_hive, PERSISTENCE_ENTRIES, as_json=self.as_json)
+```
+
+[`regipy/plugins/software/persistence.py:9-30`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/software/persistence.py#L9-L30)
+
+[8] regipy 플러그인 기반 클래스의 `detect_anomalies`는 본문이 없다.
+
+```python
+    def generate_timeline_artifacts(self):
+        """
+        Run on the output of a plugin and generate timeline entries
+        :return:
+        """
+        pass
+
+    def detect_anomalies(self):
+        """
+        Run on the output of a plugin and detect possible anomalies
+        :return:
+        """
+        pass
+```
+
+[`regipy/plugins/plugin.py:43-55`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/plugin.py#L43-L55)
+
+[9] 서버 코드 전체에서 플러그인 객체에 부르는 메서드는 `can_run`과 `run`이다: [`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431).
+
+[10] README의 예시 2: [`regipy_mcp_server/README.md:49-62`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/README.md#L49-L62).
+
+[11] (실행 확인) MCP SDK 클라이언트로 받은 도구 목록은 `set_hive_directory`, `list_available_hives`, `list_available_plugins`, `run_plugin`, `run_all_plugins_for_hive`, `list_relevant_plugins`, `get_registry_key`의 7개였다.

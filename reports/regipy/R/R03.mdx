@@ -1,0 +1,264 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 `dict`를 돌려주는 도구 4개와 서버가 처리하지 않은 예외에 적용된다 [1][2].
+`run_plugin`, `run_all_plugins_for_hive`, `list_relevant_plugins`, `get_registry_key`는 적재한 하이브가 없거나 플러그인이나 유형에 맞는 하이브가 없으면 실행하지 않고 `error` 필드에 문구를 담아 돌려준다 [1].
+`run_plugin`과 `run_all_plugins_for_hive`는 하이브 파일마다의 실패도 그 파일 아래 `error`로 싣는다 [3].
+이 응답들의 `isError`는 거짓이다 [4].
+서버가 처리하지 않은 예외, 인자 검사 실패, 목록에 없는 도구 이름은 MCP Python SDK 1.30.0이 `isError`가 참인 결과로 돌려준다 [2][4].
+성공한 응답에는 성공 여부를 따로 적는 필드가 없다 [3].
+
+**한계.** 문자열을 돌려주는 도구는 상태를 글로만 알린다 [5].
+`set_hive_directory`는 폴더가 없거나 하이브를 하나도 적재하지 못하면 `No valid registry hives found in <폴더>` 글을 `isError`가 거짓인 결과로 돌려준다 [5][4].
+`list_available_hives`는 하이브가 없으면 `No hives loaded` 글을 돌려준다 [5].
+`get_registry_key`는 하이브 파일마다 난 예외를 `error`에 담지만 찾은 하이브가 없으면 그 `error`를 버리고 `found`만 거짓으로 돌려준다 [6].
+유형을 판별하지 못한 하이브와 유형을 판별한 하이브를 함께 적재한 서버에서 맞는 하이브가 없는 유형으로 `run_all_plugins_for_hive`를 부르면 `available_types`를 정렬하다 `TypeError`가 난다 [7][8].
+이 경우 `error` 응답 대신 `isError`가 참인 결과가 돌아가고 적재한 유형 목록은 실리지 않는다 [2][8].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 `run_plugin`과 `run_all_plugins_for_hive`에 적용된다 [3].
+두 도구는 플러그인이 찾은 것이 없으면 그 파일 아래 빈 목록이나 플러그인이 정한 빈 구조를 싣고 실패한 파일은 `error`를 담은 `dict`로 싣는다 [3].
+regipy 6.5.2의 `installed_programs_ntuser`처럼 찾는 키가 하이브에 없으면 오류 로그를 남기고 결과를 비우는 플러그인이 있다 [9].
+NTUSER 시험 하이브에 `run_all_plugins_for_hive`를 부르자 `installed_programs_ntuser`가 빈 목록이었고 서버 표준 오류에 `Did not find Uninstall at Software\Microsoft\Windows`가 남았다 [4].
+
+`get_registry_key`는 찾아본 하이브 어디에서도 키를 찾지 못하면 `found`를 거짓으로 두고 찾아본 파일 이름 `searched_hives`를 담아 정상 결과로 돌려준다 [6].
+하이브 파일마다 난 예외도 `found`가 거짓인 결과로 두므로 찾은 하이브가 없으면 실패와 찾지 못함이 같은 응답이 된다 [6].
+적재한 하이브가 없거나 `hive_type`에 맞는 하이브가 없을 때만 `found` 없이 `error`를 돌려준다 [6][1].
+없는 키 `\NoSuchKey`로 부르자 `found`가 거짓인 응답이 돌아왔고 `hive_type`을 `SYSTEM`으로 주자 `error`만 담긴 응답이 돌아왔다 [4].
+regipy 6.5.2의 `get_key`가 돌려주는 객체에는 서버가 읽는 `path` 속성이 없어 키가 있어도 예외가 난다 [6][10].
+SYSTEM 하이브에 있는 키와 루트 `\`로 부르자 없는 키와 같은 `found`가 거짓인 응답이 돌아왔다 [11].
+
+**한계.** `run_all_plugins_for_hive`에서 의존 모듈을 불러오지 못한 플러그인은 결과에서 빠진다 [12].
+그래서 그 플러그인 하나만 맞는 하이브는 실패 표시 없이 빈 `dict`로 실렸다 [13].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `run_plugin`과 `run_all_plugins_for_hive`에 적용된다 [3].
+두 도구는 고른 유형의 하이브 파일마다 결과를 파일 이름 아래에 싣고 실패한 파일은 그 자리에 `error`를 싣는다 [3].
+SYSTEM 하이브 두 개를 적재한 서버에서 `run_plugin`에 `computer_name`을 주자 `SYSTEM`과 `SYSTEM_2` 두 키 아래 결과가 돌아왔다 [11].
+`run_all_plugins_for_hive`는 파일마다 플러그인 이름을 키로 한 결과를 싣는다 [3][12].
+
+**한계.** 생략한 항목과 플러그인 단위의 실패는 싣지 않는다.
+`run_all_plugins_for_hive`가 부르는 `run_relevant_plugins`는 검증 목록 밖 플러그인과 의존 모듈이 없는 플러그인을 결과에 넣지 않는다 [12].
+`run_relevant_plugins`는 플러그인 하나가 예외를 내면 그 예외를 다시 내보내므로 그 파일 아래에는 다른 플러그인의 결과 없이 `error` 하나만 실린다 [12][3].
+이 `error`에는 실패한 플러그인의 이름이 없다 [12][3].
+손상 하이브에 같은 호출을 서버 프로세스 다섯 개에서 보내자 `error`에 실린 오류 문구가 실행마다 두 가지로 갈렸다 [14].
+`files_analyzed`는 오류로 끝난 파일도 센다 [3].
+
+### 근거
+
+[1] 실행 전에 `error`를 돌려주는 곳이다: [`regipy_mcp_server/server.py:251-269`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L251-L269), [`regipy_mcp_server/server.py:303-310`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L303-L310), [`regipy_mcp_server/server.py:341-342`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L341-L342), [`regipy_mcp_server/server.py:381-391`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L381-L391).
+
+[2] MCP Python SDK 1.30.0은 도구 함수의 예외와 목록에 없는 도구 이름을 `ToolError`로 만들고 저수준 서버가 `isError`가 참인 결과로 돌려준다: [`src/mcp/server/fastmcp/tools/base.py:93-117`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/tools/base.py#L93-L117), [`src/mcp/server/fastmcp/tools/tool_manager.py:81-93`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/tools/tool_manager.py#L81-L93), [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590).
+
+[3] 두 도구는 하이브 파일마다 결과나 `error`를 싣는다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L323)
+
+[4] (실행 확인) MCP SDK 클라이언트로 시험 하이브 8개를 둔 서버에 호출을 보냈다.
+하이브가 없을 때의 `run_plugin`, 없는 플러그인 이름, `get_registry_key`의 `\NoSuchKey`와 `SYSTEM`, 없는 폴더의 `set_hive_directory`는 모두 `isError`가 거짓이었다.
+`get_registry_key`의 `\NoSuchKey`는 `{"key_path": "\\NoSuchKey", "found": false, "searched_hives": ["SYSTEM"]}`, `hive_type` `SYSTEM`은 `{"error": "No hives available for search"}`였다.
+`plugin_name`에 정수를 준 호출, 파일 경로를 준 `set_hive_directory`, 목록에 없는 도구 이름은 `isError`가 참이었다.
+`run_all_plugins_for_hive('ntuser')`의 `installed_programs_ntuser`는 빈 목록이었고 서버 표준 오류에 `ERROR:regipy.plugins.ntuser.installed_programs_ntuser:Did not find Uninstall at Software\Microsoft\Windows`가 있었다.
+
+[5] 문자열을 돌려주는 도구의 상태 문구다.
+
+```python
+    if not _loaded_hives:
+        return f"No valid registry hives found in {directory}"
+```
+
+[`regipy_mcp_server/server.py:135-136`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L135-L136)
+
+```python
+    if not _loaded_hives:
+        return "No hives loaded. Use set_hive_directory to load hives."
+```
+
+[`regipy_mcp_server/server.py:163-164`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L163-L164)
+
+[6] `get_registry_key`는 예외를 `found`가 거짓인 결과로 두고 찾은 하이브가 없으면 `found`와 `searched_hives`만 돌려준다.
+
+```python
+    # Determine which hives to search
+    if hive_type:
+        hives_to_search = _get_hives_by_type(hive_type)
+    else:
+        hives_to_search = list(_loaded_hives.items())
+
+    if not hives_to_search:
+        return {"error": "No hives available for search"}
+
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+
+    if not any(r.get("found") for r in results.values()):
+        return {"key_path": key_path, "found": False, "searched_hives": [Path(p).name for p, _ in hives_to_search]}
+
+    return {"key_path": key_path, "results": results}
+```
+
+[`regipy_mcp_server/server.py:384-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L384-L411)
+
+[7] `run_all_plugins_for_hive`는 맞는 하이브가 없으면 적재한 하이브의 유형을 모아 정렬한다.
+
+```python
+    compatible_hives = _get_hives_by_type(hive_type)
+
+    if not compatible_hives:
+        available_types = {h.hive_type for h in _loaded_hives.values()}
+        return {"error": f"No {hive_type} hive loaded", "available_types": sorted(available_types)}
+```
+
+[`regipy_mcp_server/server.py:306-310`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L306-L310)
+
+[8] (실행 확인) 유형을 판별하지 못한 시험 하이브 `ntuser_software_partial`과 `SYSTEM`을 둔 폴더를 서버 함수로 적재하고 `run_all_plugins_for_hive`에 `unknown`과 `SYSTEM`을 주자 모두 `TypeError: '<' not supported between instances of 'str' and 'NoneType'`로 끝났다.
+`ntuser_software_partial`만 적재한 서버에서 `system`을 주자 `{"error": "No system hive loaded", "available_types": [null]}`가 돌아왔다.
+MCP SDK 클라이언트로 `ntuser_software_partial`이 들어 있는 폴더를 적재한 서버에 `run_all_plugins_for_hive('SYSTEM')`을 보내자 `isError`가 참인 같은 문구가 돌아왔다.
+
+[9] `installed_programs_ntuser`는 찾는 키가 없으면 오류 로그를 남기고 결과를 비운다.
+
+```python
+    def _get_installed_software(self, subkey_path):
+        try:
+            uninstall_sk = self.registry_hive.get_key(subkey_path)
+        except RegistryKeyNotFoundException as ex:
+            logger.error(ex)
+            return
+```
+
+[`regipy/plugins/ntuser/installed_programs_ntuser.py:18-23`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/ntuser/installed_programs_ntuser.py#L18-L23)
+
+[10] regipy 6.5.2의 `NKRecord`가 만들 때 두는 속성이다.
+
+```python
+class NKRecord:
+    """
+    The NKRecord represents a Name Key entry
+    """
+
+    def __init__(self, cell, stream):
+        stream.seek(cell.offset)
+        self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
+        self._stream = stream
+
+        # Sometimes the key names are ASCII and sometimes UTF-16 little endian
+        if self.header.flags.KEY_COMP_NAME:
+            # Compressed (ASCII) key name
+            self.name = self.header.key_name_string.decode("ascii", errors="replace")
+        else:
+            # Unicode (UTF-16) key name
+            self.name = self.header.key_name_string.decode("utf-16-le", errors="replace")
+            logger.debug(f'Unicode key name identified: "{self.name}"')
+
+        self.subkey_count = self.header.subkey_count
+        self.values_count = self.header.values_count
+        self.volatile_subkeys_count = self.header.volatile_subkey_count
+```
+
+[`regipy/registry.py:381-402`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L381-L402)
+
+[11] (실행 확인) 서버 함수를 같은 프로세스에서 불렀다.
+SYSTEM 하이브에 있는 `\ControlSet001\Control\TimeZoneInformation`과 `\`에 `hive_type` `system`을 준 `get_registry_key`는 모두 `found`가 거짓이었다.
+SYSTEM 하이브 두 개와 NTUSER 하이브 두 개를 둔 폴더를 적재하고 `run_plugin('computer_name')`을 부르자 `results`가 `SYSTEM`과 `SYSTEM_2` 두 키였다.
+
+[12] regipy 6.5.2의 `run_relevant_plugins`는 검증 목록 밖 플러그인과 의존 모듈이 없는 플러그인을 결과에 넣지 않고 다른 예외는 다시 내보낸다.
+
+```python
+        # Check validation status
+        if not is_plugin_validated(plugin.NAME):
+            if not include_unvalidated:
+                logger.debug(f"Skipping unvalidated plugin: {plugin.NAME}")
+                continue
+```
+
+[`regipy/plugins/utils.py:119-123`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L119-L123)
+
+```python
+        if plugin.can_run():
+            try:
+                plugin.run()
+                plugin_results[plugin.NAME] = plugin.entries
+            except ModuleNotFoundError as e:
+                logger.error(f"Plugin {plugin.NAME} has missing dependencies")
+                if continue_on_error:
+                    plugin_results[plugin.NAME] = {"error": str(e)}
+            except Exception as e:
+                # Always log the failure for visibility, regardless of continue_on_error setting
+                logger.exception(f"Plugin {plugin.NAME} failed: {e}")
+                if not continue_on_error:
+                    raise
+                # A single failing plugin must not abort the whole run -
+                # record the failure and continue to the next plugin.
+                plugin_results[plugin.NAME] = {"error": str(e)}
+    return plugin_results
+```
+
+[`regipy/plugins/utils.py:127-143`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L127-L143)
+
+[13] (실행 확인) 서버 함수를 같은 프로세스에서 부르기 전에 `pyfwsi`와 `pyfwps`를 불러오지 못하게 했다.
+`run_all_plugins_for_hive('usrclass')`의 `results`는 `{"UsrClass.dat": {}}`이고 `files_analyzed`는 1이었다.
+
+[14] (실행 확인) 손상 하이브 `corrupted_system_hive`를 적재하고 `run_all_plugins_for_hive('system')`을 부르는 같은 호출 목록을 서버 프로세스 다섯 개에서 실행했다.
+`corrupted_system_hive`의 `error`는 세 번은 `Did not find Lsa at ControlSet001`, 두 번은 `No subkey AppCompatCache for b'Session Manager'`였다.

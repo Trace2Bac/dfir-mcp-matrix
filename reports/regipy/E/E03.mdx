@@ -1,46 +1,98 @@
 ---
 cell: E03
 details:
-- id: E03.02
+- id: E03.03
 ---
 
 # E03 원본 변경 방지
 
-### E03.02 서버 코드의 원본 쓰기 제한
+### E03.03 외부 도구·플랫폼에 위임
 
-**구현.** `RegistryHive`는 하이브 파일을 `rb` 모드로 열어 내용 전체를 `BytesIO`에 복사하고 파일을 닫는다 [1].
-헤더 해석부터 플러그인 실행까지 뒤의 모든 파싱은 이 메모리 사본에서 한다 [1].
-서버 코드에는 파일을 쓰는 호출이 없다 [2].
-서버가 import하는 `regipy.plugins.utils`에는 하이브를 JSON 파일로 쓰는 `dump_hive_to_json`이 있지만 어느 도구도 이 함수를 부르지 않는다 [3].
-트랜잭션 로그를 적용해 복원 하이브를 쓰는 `regipy.recovery`는 서버가 import하지 않는다 [2].
-마운트 옵션이나 파일 권한 같은 다른 장치는 없다.
+**구현.** 이 방식은 하이브 파일을 여는 유일한 경로인 regipy `RegistryHive`에 적용된다 [1][2].
+서버 코드는 하이브 파일을 직접 열지 않고 `_load_hives_from_directory`에서 파일 경로를 `RegistryHive`에 넘긴다 [1].
+이 경로에서 원본을 지키는 것은 regipy가 파일을 읽기만 한다는 동작이다.
+regipy 6.5.2의 `RegistryHive`는 하이브를 `rb` 모드로 열어 내용 전체를 `BytesIO`에 복사하고 파일을 닫는다 [2].
+헤더 해석, 키 조회, 플러그인 실행은 모두 이 메모리 사본으로 한다 [2][3].
+`run_plugin`, `run_all_plugins_for_hive`, `get_registry_key`는 불러 둔 `RegistryHive` 객체만 쓰고 하이브 파일을 다시 열지 않는다 [4].
+
+서버 코드에는 파일을 쓰거나 지우거나 이름을 바꾸는 호출이 없다 [5].
+서버가 불러오는 `regipy.plugins.utils`에는 하이브를 JSON 줄 파일로 쓰는 `dump_hive_to_json`이 있지만 서버는 이 함수를 부르지 않는다 [6][7].
+트랜잭션 로그를 적용해 복원한 하이브를 파일로 쓰는 `regipy.recovery`는 서버가 불러오지 않는다 [7][8].
+서버는 하이브 폴더의 트랜잭션 로그를 확장자로 건너뛰고 열지 않는다 [1].
+하이브 10개와 트랜잭션 로그를 둔 폴더로 도구 7개를 부른 뒤 하이브와 로그의 SHA-256과 수정 시각이 바뀌지 않았다 [9].
+
+저장소에는 증거를 읽기 전용으로 연결하거나 서버를 읽기 전용 환경에서 실행하는 실행 구성이 없다 [10].
+README는 클라이언트 설정에서 Python으로 `server.py`를 직접 실행하게 한다 [11].
 
 ### 근거
 
-[1] 하이브를 읽기 모드로 열어 메모리에 복사한다.
+[1] `_load_hives_from_directory`는 확장자로 파일을 빼고 나머지 경로를 `RegistryHive`에 넘긴다.
 
 ```python
+    # Common registry hive file patterns
+    skip_extensions = {".log", ".log1", ".log2", ".sav", ".regtrans-ms", ".blf", ".tmp"}
+
+    for file_path in directory_path.iterdir():
+        if not file_path.is_file():
+            continue
+
+        # Skip transaction logs and backup files
+        if file_path.suffix.lower() in skip_extensions:
+            continue
+
+        try:
+            logger.info(f"Attempting to load hive: {file_path}")
+            hive = RegistryHive(str(file_path))
+            hives[str(file_path)] = hive
+            logger.info(f"Successfully loaded {file_path.name} as {hive.hive_type}")
+        except Exception as e:
+            logger.warning(f"Failed to load {file_path}: {e}")
+            continue
+```
+
+[`regipy_mcp_server/server.py:49-67`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L49-L67)
+
+[2] `RegistryHive`는 하이브를 읽기 모드로 열어 메모리에 복사한 뒤 그 사본을 해석한다.
+
+```python
+        self.partial_hive_path = None
+        self.hive_type = None
+
         with open(hive_path, "rb") as f:
             self._stream = BytesIO(f.read())
+
+        with boomerang_stream(self._stream) as s:
+            self.header = REGF_HEADER.parse_stream(s)  # type: ignore[union-attr]
+
+            # Get the first cell in root HBin, which is the root NKRecord:
+            root_hbin = self.get_hbin_at_offset()
+            root_hbin_cell = next(root_hbin.iter_cells(s))
+            self.root = NKRecord(root_hbin_cell, s)
+        self.name = self.header.file_name
 ```
 
-[`regipy/registry.py:146-147`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy/registry.py#L146-L147)
+[`regipy/registry.py:143-156`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L143-L156)
 
-[2] 서버가 import하는 모듈이다.
-`regipy.recovery`는 없다.
+[3] 키 조회는 메모리 스트림 `_stream`에서 한다.
 
 ```python
-# Import all plugins so they auto-register via __init_subclass__
-import regipy.plugins  # noqa
-from regipy.plugins.plugin import PLUGINS
-from regipy.plugins.utils import run_relevant_plugins
-from regipy.registry import RegistryHive
+    def get_hbin_at_offset(self, offset=0):
+        """
+        This offset is from start of data (meaning that it starts from 4096)
+        If not offset is given, will return the root Hbin
+        :return:
+        """
+        self._stream.seek(REGF_HEADER_SIZE + offset)
+        return HBin(self._stream)
 ```
 
-[`regipy_mcp_server/server.py:17-21`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L17-L21)
+[`regipy/registry.py:270-277`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L270-L277)
 
-[3] 파일을 쓰는 함수: [`regipy/plugins/utils.py:55-71`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy/plugins/utils.py#L55-L71).
-서버가 이 모듈에서 쓰는 것은 `run_relevant_plugins`뿐이다([`regipy_mcp_server/server.py:316`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L316)).
+[4] 도구는 `_loaded_hives`의 객체로 플러그인과 키 조회를 실행한다: [`regipy_mcp_server/server.py:271-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L282), [`regipy_mcp_server/server.py:313-321`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L313-L321), [`regipy_mcp_server/server.py:393-406`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L406).
+
+[5] 서버 파일 전체에 `open`, 파일 삭제, 이름 변경 호출이 없다: [`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431).
+
+[6] `dump_hive_to_json`은 받은 경로를 쓰기 모드로 연다.
 
 ```python
 def dump_hive_to_json(
@@ -62,10 +114,24 @@ def dump_hive_to_json(
     with open(output_path, mode="w") as writer:
 ```
 
-[`regipy/plugins/utils.py:55-71`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy/plugins/utils.py#L55-L71)
+[`regipy/plugins/utils.py:55-71`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L55-L71)
+
+[7] 서버가 regipy에서 불러오는 것은 `regipy.plugins`, `PLUGINS`, `run_relevant_plugins`, `RegistryHive`다.
 
 ```python
-            results = run_relevant_plugins(hive, as_json=True)
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
 ```
 
-[`regipy_mcp_server/server.py:316-316`](https://github.com/mkorman90/regipy/blob/1293544148a4b4dc11d2811e11c9fd7e64fa9c04/regipy_mcp_server/server.py#L316-L316)
+[`regipy_mcp_server/server.py:17-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L17-L21)
+
+[8] (실행 확인) 서버 모듈을 불러 도구를 부른 뒤 `sys.modules`에 `regipy.recovery`가 없었다.
+
+[9] (실행 확인) 네트워크를 끈 컨테이너에서 도구 함수 7개를 부르기 전과 뒤에 하이브 폴더의 파일마다 SHA-256과 수정 시각을 대조했다.
+
+[10] 기준 커밋의 파일 목록에는 Dockerfile이나 컨테이너 구성 파일이 없다: [`c6de929`](https://github.com/mkorman90/regipy/tree/c6de929abc37d8315d1c31aba5e937db636f3303).
+
+[11] README의 클라이언트 설정 예시: [`regipy_mcp_server/README.md:9-26`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/README.md#L9-L26).

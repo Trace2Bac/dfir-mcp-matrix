@@ -1,0 +1,182 @@
+---
+cell: R07
+details:
+- id: R07.01
+- id: R07.02
+---
+
+# R07 증거 내용과 지시 구분
+
+### R07.01 JSON 필드 분리
+
+**구현.** 이 방식은 `dict`를 돌려주는 `run_plugin`과 `run_all_plugins_for_hive`에 적용된다 [1][2].
+두 도구는 하이브에서 읽은 값을 플러그인 결과의 필드 값으로 담고 서버가 정한 `plugin`, `description`, `hive_type`, `error` 같은 필드와 따로 둔다 [1][2].
+MCP Python SDK 1.30.0의 FastMCP는 이 `dict`를 JSON 글로 바꿔 싣는다 [3].
+그래서 증거에서 온 문자열은 JSON 문자열 값으로 따옴표 안에 들어간다 [3][4].
+도구 설명, 응답, 서버 지침 어디에도 증거에서 온 글을 데이터로 다루라는 안내는 없다 [5][4].
+`get_registry_key`의 처리 코드는 키의 값을 필드로 담는 자리를 두지만 키가 있어도 `found`가 거짓인 응답만 돌아와 하이브에서 읽은 값이 실리지 않았다 [6][7].
+
+`set_hive_directory`와 `list_available_hives`는 서버 문구와 하이브 파일 이름, 유형 이름을 한 글에 섞어 돌려준다 [8][9].
+이 글에 들어가는 증거 쪽 값은 폴더 안 파일의 이름과 regipy가 정한 유형 이름이다 [8][9].
+
+**한계.** `error`에는 regipy가 낸 예외 문구가 그대로 들어간다 [1][2].
+regipy의 예외 문구에는 하이브에서 읽은 키 이름이 들어갈 수 있다 [10].
+손상 하이브에 `run_all_plugins_for_hive`를 부른 응답의 `error`는 실행에 따라 `Did not find Lsa at ControlSet001`이거나 `No subkey AppCompatCache for b'Session Manager'`였다 [11].
+
+### R07.02 출처 필드 부여
+
+**구현.** 이 방식은 `run_plugin`과 `run_all_plugins_for_hive`에 적용된다 [1][2].
+`run_plugin`의 응답은 결과를 만든 regipy 플러그인의 이름 `plugin`, 그 설명 `description`, 호환 하이브 유형 `hive_type`을 결과와 함께 싣는다 [1].
+`run_all_plugins_for_hive`의 응답은 하이브 파일마다 플러그인 이름을 키로 결과를 싣는다 [2].
+두 응답에는 신뢰 수준이나 플러그인의 검증 여부를 적는 필드가 없다 [1][2].
+
+### 근거
+
+[1] `run_plugin`의 응답 구성이다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[2] `run_all_plugins_for_hive`의 응답 구성이다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L323)
+
+[3] MCP Python SDK 1.30.0의 FastMCP는 문자열이 아닌 결과를 JSON 글로 바꾼다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:526-560`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/utilities/func_metadata.py#L526-L560).
+
+[4] (실행 확인) MCP SDK 클라이언트로 시험 하이브 8개를 둔 서버에 호출을 보냈다.
+`run_plugin('computer_name')`의 응답 글은 `{"plugin": "computer_name", "description": "Get the computer name", "hive_type": "system", "results": {"SYSTEM": [{"name": "WKS-WIN732BITA", ...}]}}` 꼴의 들여쓴 JSON이었다.
+초기화 응답의 `instructions`는 `null`이었다.
+
+[5] 도구 7개의 docstring과 처리 코드 전체다: [`regipy_mcp_server/server.py:119-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L119-L411).
+
+[6] `get_registry_key`의 응답 구성이다.
+
+```python
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+
+    if not any(r.get("found") for r in results.values()):
+        return {"key_path": key_path, "found": False, "searched_hives": [Path(p).name for p, _ in hives_to_search]}
+
+    return {"key_path": key_path, "results": results}
+```
+
+[`regipy_mcp_server/server.py:393-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L411)
+
+[7] (실행 확인) 서버 함수를 같은 프로세스에서 불러 SYSTEM 하이브에 있는 키 `\ControlSet001\Control\TimeZoneInformation`으로 `get_registry_key`를 부르자 `{"key_path": ..., "found": false, "searched_hives": ["SYSTEM"]}`가 돌아왔다.
+
+[8] `set_hive_directory`의 응답 글이다.
+
+```python
+    # Group by hive type
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(Path(path).name)
+
+    result = [f"Loaded {len(_loaded_hives)} hive(s) from {directory}:\n"]
+    for hive_type, files in sorted(by_type.items()):
+        result.append(f"\n{hive_type}:")
+        for file in files:
+            result.append(f"  - {file}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:138-152`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L138-L152)
+
+[9] `list_available_hives`의 응답 글이다.
+
+```python
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(
+            {"filename": Path(path).name, "path": path, "root_key": hive.root.name if hive.root else "N/A"}
+        )
+
+    result = [f"Available hives ({len(_loaded_hives)} total):\n"]
+    for hive_type, hives in sorted(by_type.items()):
+        result.append(f"\n{hive_type} ({len(hives)} file(s)):")
+        for hive_info in hives:
+            result.append(f"  - {hive_info['filename']}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:166-181`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L166-L181)
+
+[10] regipy 6.5.2의 `get_subkey`는 찾지 못한 하위 키 이름과 부모 키 이름을 예외 문구에 넣는다.
+
+```python
+    def get_subkey(self, key_name, raise_on_missing=True):
+        if not self.subkey_count and raise_on_missing:
+            raise NoRegistrySubkeysException(f"No subkeys for {self.header.key_name_string}")
+
+        for subkey in self.iter_subkeys():
+            # This should not happen
+            if not isinstance(subkey, NKRecord):
+                raise RegipyGeneralException(f"Unknown record type: {subkey}")
+
+            if subkey.name.upper() == key_name.upper():
+                return subkey
+
+        if raise_on_missing:
+            raise NoRegistrySubkeysException(f"No subkey {key_name} for {self.header.key_name_string}")
+```
+
+[`regipy/registry.py:404-417`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L404-L417)
+
+[11] (실행 확인) 저장소 시험 자료의 `corrupted_system_hive`를 적재한 서버에 `run_all_plugins_for_hive('system')`을 보낸 실행 다섯 번 가운데 세 번은 `corrupted_system_hive`의 결과가 `{"error": "Did not find Lsa at ControlSet001"}`, 두 번은 `{"error": "No subkey AppCompatCache for b'Session Manager'"}`였다.

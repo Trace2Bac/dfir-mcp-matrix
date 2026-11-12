@@ -1,0 +1,318 @@
+---
+cell: R01
+details:
+- id: R01.01
+- id: R01.03
+- id: R01.06
+---
+
+# R01 결과 가공
+
+### R01.01 가공 없이 전달
+
+**구현.** 이 방식은 `run_plugin`과 `run_all_plugins_for_hive`에 적용된다 [1][2].
+두 도구는 플러그인이 만든 결과를 `_serialize_plugin_results`에 넣고 그 값을 하이브 파일 이름 아래에 싣는다 [1][2].
+`_serialize_plugin_results`는 `dict`와 `list`를 따라가며 `datetime` 객체만 ISO 8601 문자열로 바꾸고 다른 값은 그대로 둔다 [3].
+서버는 플러그인을 `as_json=True`로 만들고 regipy 6.5.2의 플러그인은 이때 시각을 문자열로 만든다 [1][4].
+시험 하이브로 플러그인 75개를 모두 실행한 결과에는 `datetime`이나 `bytes` 객체가 없었고 서버가 바꾼 값도 없었다 [5].
+MCP Python SDK 1.30.0의 FastMCP는 도구가 돌려준 `dict`를 들여쓰기 2칸의 JSON 글 하나로 바꿔 응답에 싣는다 [6].
+
+`get_registry_key`는 찾은 키에서 경로, 시각, 값마다의 이름·값·형식, 하위 키 수를 골라 `dict`를 만든다 [7].
+regipy 6.5.2의 `get_key`가 돌려주는 객체에는 이 가운데 `path`, `timestamp`, `values` 속성이 없어 이 `dict`를 만드는 중 예외가 난다 [7][8].
+그래서 키가 있는 경로로 불러도 이 필드가 실린 응답은 돌아오지 않았다 [9].
+
+### R01.03 형식 변환·건수 집계
+
+**구현.** 이 방식은 문자열을 돌려주는 `set_hive_directory`, `list_available_hives`, `list_available_plugins`와 `run_all_plugins_for_hive`의 `files_analyzed`에 적용된다 [10][11][12][2].
+`set_hive_directory`와 `list_available_hives`는 적재한 하이브를 regipy가 정한 유형별로 묶고 유형마다 파일 이름을 한 줄씩 늘어놓은 글을 만든다 [10][11].
+유형을 정하지 못한 하이브는 `unknown` 아래에 둔다 [10][11].
+`list_available_hives`는 전체 하이브 수와 유형마다의 파일 수를 글에 싣는다 [11].
+`list_available_hives`는 파일마다 전체 경로와 루트 키 이름도 모으지만 글에는 파일 이름만 싣는다 [11].
+`list_available_plugins`는 플러그인을 호환 유형별로 묶어 전체 플러그인 수, 적재한 하이브로 실행할 수 있는 수, 유형마다의 상태 표시를 글로 싣는다 [12].
+`run_all_plugins_for_hive`의 `files_analyzed`는 결과에 넣은 하이브 파일의 수이고 오류로 끝난 파일도 이 수에 들어간다 [2].
+
+### R01.06 응답 항목 선별
+
+**구현.** 이 방식은 `run_all_plugins_for_hive`가 부르는 regipy 6.5.2의 `run_relevant_plugins`에 적용된다 [2][13].
+`run_relevant_plugins`는 기본값 `include_unvalidated=False`이면 검증 목록 `validated_plugins.json`에 없는 플러그인을 실행하지 않고 결과에 넣지 않는다 [13][14].
+서버는 이 인자를 주지 않으므로 응답에는 검증 목록에 있는 플러그인의 결과만 실린다 [2].
+regipy 6.5.2는 검증 목록을 시험 사례가 있는 플러그인의 이름으로 설명하고 목록 밖 플러그인은 잘못되었거나 불완전한 자료를 돌려줄 수 있다고 적는다 [14].
+플러그인 75개 가운데 13개가 검증 목록에 없다 [15].
+SYSTEM 하이브에 부르자 SYSTEM 플러그인 29개 가운데 `appcert_dlls`, `pending_file_rename`, `shares`를 뺀 26개의 결과가 실렸다 [15].
+응답에는 뺀 플러그인의 이름이나 수, 뺀 규칙을 싣지 않는다 [2].
+`run_plugin`은 이 목록을 보지 않고 이름으로 고른 플러그인을 실행한다 [1].
+
+### 근거
+
+[1] `run_plugin`은 플러그인 결과를 `_serialize_plugin_results`에 넣어 하이브 파일 이름 아래에 싣는다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[2] `run_all_plugins_for_hive`는 `run_relevant_plugins`의 결과를 하이브 파일 이름 아래에 싣고 결과에 넣은 파일 수를 `files_analyzed`로 둔다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L323)
+
+[3] `_serialize_plugin_results`는 `datetime`만 바꾼다.
+
+```python
+def _serialize_plugin_results(results):
+    """Recursively serialize plugin results, converting datetimes to strings."""
+    if isinstance(results, dict):
+        return {k: _serialize_plugin_results(v) for k, v in results.items()}
+    elif isinstance(results, list):
+        return [_serialize_plugin_results(item) for item in results]
+    elif isinstance(results, datetime):
+        return results.isoformat()
+    else:
+        return results
+```
+
+[`regipy_mcp_server/server.py:107-116`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L107-L116)
+
+[4] regipy 6.5.2의 시각 변환 함수는 `as_json`이 참이면 ISO 8601 문자열을 돌려준다.
+
+```python
+def convert_wintime(wintime: int, as_json=False) -> Union[dt.datetime, str]:
+    """
+    Get an integer containing a FILETIME date
+    :param wintime: integer representing a FILETIME timestamp
+    :param as_json: whether to return the date as string or not
+    :return: datetime
+    """
+    # http://stackoverflow.com/questions/4869769/convert-64-bit-windows-date-time-in-python
+    us = wintime / 10
+    try:
+        date = dt.datetime(1601, 1, 1, tzinfo=pytz.utc) + dt.timedelta(microseconds=us)
+    except OverflowError:
+        # If date is too big, it is probably corrupted' let's return the smallest possible windows timestamp.
+        date = dt.datetime(1601, 1, 1, tzinfo=pytz.utc)
+    return date.isoformat() if as_json else date
+```
+
+[`regipy/utils.py:109-123`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/utils.py#L109-L123)
+
+[5] (실행 확인) 시험 하이브 8개를 적재한 서버 함수에서 플러그인 75개를 호환 하이브마다 `as_json=True`로 실행하고 `entries` 안을 모두 따라가며 `datetime`과 `bytes` 객체를 찾았고 하나도 없었다.
+
+[6] MCP Python SDK 1.30.0의 FastMCP는 문자열이 아닌 결과를 `pydantic_core.to_json(..., indent=2)`로 글로 바꾼다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:526-560`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/utilities/func_metadata.py#L526-L560).
+
+[7] `get_registry_key`가 찾은 키에서 고르는 필드다.
+
+```python
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:393-406`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L406)
+
+[8] regipy 6.5.2의 `NKRecord`가 만들 때 두는 속성이다.
+
+```python
+class NKRecord:
+    """
+    The NKRecord represents a Name Key entry
+    """
+
+    def __init__(self, cell, stream):
+        stream.seek(cell.offset)
+        self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
+        self._stream = stream
+
+        # Sometimes the key names are ASCII and sometimes UTF-16 little endian
+        if self.header.flags.KEY_COMP_NAME:
+            # Compressed (ASCII) key name
+            self.name = self.header.key_name_string.decode("ascii", errors="replace")
+        else:
+            # Unicode (UTF-16) key name
+            self.name = self.header.key_name_string.decode("utf-16-le", errors="replace")
+            logger.debug(f'Unicode key name identified: "{self.name}"')
+
+        self.subkey_count = self.header.subkey_count
+        self.values_count = self.header.values_count
+        self.volatile_subkeys_count = self.header.volatile_subkey_count
+```
+
+[`regipy/registry.py:381-402`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L381-L402)
+
+[9] (실행 확인) SYSTEM 하이브에 있는 키 `\ControlSet001\Control\TimeZoneInformation`과 루트 `\`로 `get_registry_key`를 부르자 모두 `found`가 거짓이고 `searched_hives`만 있는 응답이 돌아왔다.
+
+[10] `set_hive_directory`는 적재한 하이브를 유형별로 묶은 글을 만든다.
+
+```python
+    # Group by hive type
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(Path(path).name)
+
+    result = [f"Loaded {len(_loaded_hives)} hive(s) from {directory}:\n"]
+    for hive_type, files in sorted(by_type.items()):
+        result.append(f"\n{hive_type}:")
+        for file in files:
+            result.append(f"  - {file}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:138-152`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L138-L152)
+
+[11] `list_available_hives`는 유형별로 묶고 파일 이름만 글에 싣는다.
+
+```python
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(
+            {"filename": Path(path).name, "path": path, "root_key": hive.root.name if hive.root else "N/A"}
+        )
+
+    result = [f"Available hives ({len(_loaded_hives)} total):\n"]
+    for hive_type, hives in sorted(by_type.items()):
+        result.append(f"\n{hive_type} ({len(hives)} file(s)):")
+        for hive_info in hives:
+            result.append(f"  - {hive_info['filename']}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:166-181`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L166-L181)
+
+[12] `list_available_plugins`는 플러그인 수와 실행할 수 있는 수를 세어 글로 만든다.
+
+```python
+    # Format output
+    result = []
+    total_plugins = sum(len(plugins) for plugins in plugins_by_type.values())
+    runnable = sum(1 for plugins in plugins_by_type.values() for p in plugins if p["can_run"])
+
+    result.append(f"Total plugins: {total_plugins} ({runnable} can run with loaded hives)\n")
+
+    for hive_type_name, plugins in sorted(plugins_by_type.items()):
+        can_run_count = sum(1 for p in plugins if p["can_run"])
+        status = "✓ AVAILABLE" if can_run_count > 0 else "✗ No hive loaded"
+        result.append(f"\n{hive_type_name} ({len(plugins)} plugins) - {status}:")
+
+        for plugin in sorted(plugins, key=lambda x: x["name"]):
+            status_icon = "✓" if plugin["can_run"] else "✗"
+            result.append(f"  {status_icon} {plugin['name']}")
+            result.append(f"      {plugin['description']}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:216-233`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L216-L233)
+
+[13] regipy 6.5.2의 `run_relevant_plugins`는 검증 목록에 없는 플러그인을 건너뛴다.
+
+```python
+    plugin_results = {}
+    for plugin_class in PLUGINS:
+        plugin = plugin_class(registry_hive, as_json=as_json)
+
+        # If the list of plugins is defined, but the plugin is not in the list skip it.
+        if plugins and plugin.NAME not in plugins:
+            continue
+
+        # Check validation status
+        if not is_plugin_validated(plugin.NAME):
+            if not include_unvalidated:
+                logger.debug(f"Skipping unvalidated plugin: {plugin.NAME}")
+                continue
+            # Always warn when running unvalidated plugins
+            warn_unvalidated_plugin(plugin.NAME)
+```
+
+[`regipy/plugins/utils.py:111-125`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L111-L125)
+
+[14] regipy 6.5.2의 검증 목록 설명과 읽는 곳이다.
+
+```python
+"""
+Plugin validation status tracking.
+
+This module tracks which plugins have been validated with test cases.
+Plugins without validation may return invalid or incomplete data.
+
+Validation status is stored in validated_plugins.json, which is generated
+by the validation test framework and shipped with the package.
+"""
+
+import json
+import logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Load validated plugins from JSON file shipped with the package
+_VALIDATED_PLUGINS_FILE = Path(__file__).parent / "validated_plugins.json"
+
+try:
+    with open(_VALIDATED_PLUGINS_FILE) as f:
+        VALIDATED_PLUGINS: set[str] = set(json.load(f))
+except FileNotFoundError:
+    logger.warning(f"Validated plugins file not found: {_VALIDATED_PLUGINS_FILE}")
+    VALIDATED_PLUGINS = set()
+
+
+def is_plugin_validated(plugin_name: str) -> bool:
+    """Check if a plugin has validation test cases."""
+    return plugin_name in VALIDATED_PLUGINS
+```
+
+[`regipy/plugins/validation_status.py:1-30`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/validation_status.py#L1-L30)
+
+[15] (실행 확인) 서버 함수를 같은 프로세스에서 불렀다.
+`PLUGINS`의 75개 가운데 `validated_plugins.json`에 없는 이름은 `appcert_dlls`, `appcompat_flags`, `appinit_dlls`, `appkeys`, `comdlg32`, `muicache`, `pending_file_rename`, `powershell_logging`, `putty`, `recentdocs`, `runmru`, `shares`, `sysinternals`였다.
+`run_all_plugins_for_hive('system')`의 `SYSTEM` 결과 키는 26개였고 SYSTEM 플러그인 가운데 빠진 이름은 `appcert_dlls`, `pending_file_rename`, `shares`였다.

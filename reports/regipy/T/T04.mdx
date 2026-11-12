@@ -1,0 +1,106 @@
+---
+cell: T04
+details:
+- id: T04.01
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 서버의 모든 분석 경로에 적용된다 [1][2].
+서버는 regipy를 Python 모듈로 불러와 하이브 해석과 플러그인 실행을 자기 프로세스 안에서 한다 [1][2].
+서버 코드가 불러오는 모듈은 표준 라이브러리 `logging`, `os`, `datetime`, `pathlib`, `typing`과 MCP SDK, regipy뿐이다 [1].
+regipy 6.5.2의 `RegistryHive`는 하이브 파일을 `rb` 모드로 열어 전체를 읽은 뒤 메모리의 `BytesIO`에서 해석한다 [3].
+서버는 적재한 `RegistryHive` 객체를 `_loaded_hives`에 담아 프로세스가 끝나거나 폴더를 다시 적재할 때까지 쓴다 [4].
+셸백 플러그인이 쓰는 선택 의존성 모듈 `pyfwsi`도 플러그인이 실행될 때 같은 프로세스에 불러온다 [5].
+외부 실행 파일을 실행하거나 원격 API에 작업을 맡기는 경로는 없다 [1].
+그래서 분석은 서버와 같은 계정, 파일, 네트워크 권한으로 실행된다.
+
+### 근거
+
+[1] 서버가 불러오는 모듈 전부다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)
+
+[2] `run_plugin`은 플러그인 객체를 만들어 같은 프로세스에서 실행한다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:271-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L282)
+
+[3] regipy 6.5.2의 `RegistryHive`는 파일 전체를 메모리로 읽는다.
+
+```python
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+
+        with boomerang_stream(self._stream) as s:
+            self.header = REGF_HEADER.parse_stream(s)  # type: ignore[union-attr]
+
+            # Get the first cell in root HBin, which is the root NKRecord:
+            root_hbin = self.get_hbin_at_offset()
+            root_hbin_cell = next(root_hbin.iter_cells(s))
+            self.root = NKRecord(root_hbin_cell, s)
+```
+
+[`regipy/registry.py:146-155`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L146-L155)
+
+[4] 폴더의 파일마다 `RegistryHive`를 만들어 `dict`에 담는다.
+
+```python
+        try:
+            logger.info(f"Attempting to load hive: {file_path}")
+            hive = RegistryHive(str(file_path))
+            hives[str(file_path)] = hive
+            logger.info(f"Successfully loaded {file_path.name} as {hive.hive_type}")
+```
+
+[`regipy_mcp_server/server.py:60-64`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L60-L64)
+
+[5] regipy 6.5.2의 NTUSER 셸백 플러그인은 실행할 때 `pyfwsi`를 불러온다.
+
+```python
+    def run(self, codepage=DEFAULT_CODEPAGE):
+        try:
+            # flake8: noqa
+            import pyfwsi
+        except ModuleNotFoundError as ex:
+            logger.exception(
+                "Plugin `shellbag_plugin` has missing modules, install regipy using"
+                " `pip install regipy[full]` in order to install plugin dependencies. "
+                "This might take some time... "
+            )
+            raise ex
+```
+
+[`regipy/plugins/ntuser/shellbags_ntuser.py:366-376`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/ntuser/shellbags_ntuser.py#L366-L376)

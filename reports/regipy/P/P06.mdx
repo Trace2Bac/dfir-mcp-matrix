@@ -1,0 +1,163 @@
+---
+cell: P06
+details:
+- id: P06.02
+---
+
+# P06 조사 상태 유지
+
+### P06.02 프로세스 메모리에만 보관
+
+**구현.** 서버가 프로세스 메모리에 두는 조사 상태는 불러 둔 하이브 목록 `_loaded_hives`다 [1].
+하이브 폴더 `_hive_directory`도 전역 값으로 두지만 어느 도구도 이 값을 읽지 않는다 [1][2].
+`_loaded_hives`는 하이브 파일 경로를 키로, regipy `RegistryHive` 객체를 값으로 두는 `dict`다 [1].
+`RegistryHive`는 하이브를 열 때 내용 전체를 `BytesIO`에 복사하고 그 뒤의 해석은 모두 이 메모리 사본으로 한다 [3].
+`_loaded_hives`는 모듈 전역 변수라 모든 도구 호출이 함께 쓴다 [1].
+서버는 이 상태를 파일이나 DB에 쓰지 않으므로 프로세스가 끝나면 상태도 사라진다 [4].
+
+상태는 하이브 폴더를 받을 때 한꺼번에 채워진다.
+서버를 시작할 때 `--hives-dir`나 `REGIPY_HIVE_DIRECTORY`가 있으면 그 폴더의 하이브를 불러 두고 둘 다 없으면 빈 목록으로 시작한다 [5].
+실행 중에는 `set_hive_directory`가 목록을 새 폴더의 하이브로 바꾼다 [6].
+다시 시작한 서버는 시작 인자나 환경변수의 폴더를 다시 읽고 실행 중에 `set_hive_directory`로 고른 폴더는 이어받지 않는다 [5].
+
+불러 둔 하이브는 다시 읽지 않는다 [3][7].
+하이브 하나를 불러 둔 서버에서 `computer_name`을 실행한 뒤 같은 경로의 파일을 다른 하이브로 덮어쓰고 다시 실행하자 처음과 같은 컴퓨터 이름이 돌아왔다 [8].
+상태에는 유효 시간이나 개수 한도가 없다 [1][6].
+플러그인 결과는 호출마다 새로 계산하고 담아 두지 않는다 [7].
+
+### 근거
+
+[1] 서버의 전역 상태다.
+
+```python
+# Global state for loaded hives
+_loaded_hives: dict[str, RegistryHive] = {}
+_hive_directory: Optional[str] = None
+```
+
+[`regipy_mcp_server/server.py:30-32`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L30-L32)
+
+[2] `_hive_directory`를 읽는 곳은 시작할 때 부르는 `_initialize_hives`뿐이고 도구 함수는 이 값을 읽지 않는다: [`regipy_mcp_server/server.py:84-90`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L84-L90), [`regipy_mcp_server/server.py:119-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L119-L411).
+
+[3] `RegistryHive`는 하이브 내용 전체를 메모리에 복사한다.
+
+```python
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+```
+
+[`regipy/registry.py:146-147`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L146-L147)
+
+[4] 서버가 불러오는 모듈과 서버 파일 전체다.
+파일을 여는 호출이 없다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)
+
+[`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431)
+
+[5] 시작할 때 시작 인자나 환경변수의 폴더에서 하이브를 불러온다.
+
+```python
+def _initialize_hives(hive_dir: Optional[str] = None):
+    """
+    Initialize hives from the specified directory or environment variable.
+
+    Priority:
+    1. Command-line argument (hive_dir parameter)
+    2. REGIPY_HIVE_DIRECTORY environment variable
+    3. If neither is set, hives must be loaded manually via set_hive_directory tool
+    """
+    global _loaded_hives, _hive_directory
+
+    # Try parameter first, then environment variable
+    _hive_directory = hive_dir or os.getenv("REGIPY_HIVE_DIRECTORY")
+
+    if not _hive_directory:
+        logger.warning("No hive directory specified. Use set_hive_directory tool or pass --hives-dir argument.")
+        return
+
+    logger.info(f"Loading hives from: {_hive_directory}")
+    _loaded_hives = _load_hives_from_directory(_hive_directory)
+    logger.info(f"Loaded {len(_loaded_hives)} hive(s)")
+```
+
+[`regipy_mcp_server/server.py:72-92`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L72-L92)
+
+```python
+if __name__ == "__main__":
+    import argparse
+
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Regipy MCP Server - Windows Registry Analysis")
+    parser.add_argument(
+        "--hives-dir", type=str, help="Directory containing registry hive files (default: from REGIPY_HIVE_DIRECTORY env var)"
+    )
+    args = parser.parse_args()
+
+    # Initialize hives with command-line argument or environment variable
+    _initialize_hives(args.hives_dir)
+
+    # Run the MCP server
+    mcp.run()
+else:
+    # When imported as a module, initialize from environment variable
+    _initialize_hives()
+```
+
+[`regipy_mcp_server/server.py:414-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L414-L431)
+
+[6] `set_hive_directory`는 목록을 통째로 바꾼다.
+
+```python
+    global _loaded_hives, _hive_directory
+
+    _hive_directory = directory
+    _loaded_hives = _load_hives_from_directory(directory)
+```
+
+[`regipy_mcp_server/server.py:130-133`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L130-L133)
+
+[7] `run_plugin`은 불러 둔 객체로 호출마다 플러그인을 새로 만들어 실행한다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[8] (실행 확인) 네트워크를 끈 컨테이너에서 `SYSTEM` 하이브 하나를 둔 폴더를 불러 `run_plugin`을 부른 뒤 그 파일을 다른 시험 하이브 `SYSTEM_2`로 덮어쓰고 다시 불렀다.
+`SYSTEM_2`의 컴퓨터 이름은 `SENSEI`이고 두 응답은 모두 `SYSTEM`의 이름 `WKS-WIN732BITA`와 `WIN-V5T3CSP8U4H`였다.

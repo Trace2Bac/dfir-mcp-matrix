@@ -1,0 +1,142 @@
+---
+cell: P05
+details:
+- id: P05.01
+---
+
+# P05 사건 자료 정리
+
+### P05.01 모델 도구로 삭제·초기화
+
+**구현.** 이 방식은 `set_hive_directory`에 적용된다 [1].
+`set_hive_directory`는 받은 폴더에서 하이브를 새로 읽어 하이브 목록 `_loaded_hives`를 통째로 바꾼다 [1].
+앞서 불러 둔 하이브의 `RegistryHive` 객체와 그 안에 복사해 둔 하이브 내용은 이때 목록에서 빠진다 [1][2].
+받은 폴더가 없거나 그 안에 불러올 하이브가 없으면 `_loaded_hives`는 빈 `dict`가 되고 응답은 `No valid registry hives found in <폴더>`다 [1][3].
+하이브 10개를 불러 둔 서버에서 빈 폴더로 `set_hive_directory`를 부르자 이어서 부른 `list_available_hives`가 `No hives loaded`로 시작하는 문구를 돌려주었다 [4].
+없는 폴더로 불렀을 때도 목록이 비었고 하이브 폴더 값 `_hive_directory`는 그 없는 폴더 경로로 바뀌었다 [4].
+
+서버가 버리는 것은 프로세스 메모리의 상태뿐이다 [1].
+서버 코드에는 파일을 지우는 호출이 없고 하이브 파일과 트랜잭션 로그는 그대로 남는다 [5][4].
+도구 설명은 폴더를 정하고 하이브를 불러온다고만 적고 앞서 불러 둔 하이브를 버린다는 사실은 적지 않는다 [1].
+응답도 버린 하이브를 적지 않는다 [1].
+
+**한계.** 폴더가 아닌 파일 경로를 주면 `set_hive_directory`는 `_hive_directory`만 그 경로로 바꾸고 `NotADirectoryError`로 끝난다 [1][6].
+그래서 앞서 불러 둔 하이브 목록은 그대로 남는다 [1][7].
+하이브 8개를 불러 둔 서버에 파일 경로로 `set_hive_directory`를 보내자 `isError`가 참인 결과가 돌아왔고 이어 부른 `list_available_hives`는 하이브 8개를 보였다 [7].
+
+### 근거
+
+[1] `set_hive_directory`는 `_loaded_hives`를 새로 불러온 `dict`로 바꾸고 불러온 하이브만 응답에 싣는다.
+
+```python
+@mcp.tool()
+def set_hive_directory(directory: str) -> str:
+    """
+    Set the directory containing registry hives and load them.
+
+    Args:
+        directory: Path to directory containing registry hive files
+
+    Returns:
+        Summary of loaded hives
+    """
+    global _loaded_hives, _hive_directory
+
+    _hive_directory = directory
+    _loaded_hives = _load_hives_from_directory(directory)
+```
+
+[`regipy_mcp_server/server.py:119-133`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L119-L133)
+
+```python
+    if not _loaded_hives:
+        return f"No valid registry hives found in {directory}"
+
+    # Group by hive type
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(Path(path).name)
+
+    result = [f"Loaded {len(_loaded_hives)} hive(s) from {directory}:\n"]
+    for hive_type, files in sorted(by_type.items()):
+        result.append(f"\n{hive_type}:")
+        for file in files:
+            result.append(f"  - {file}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:135-152`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L135-L152)
+
+[2] `RegistryHive`는 하이브 내용 전체를 `BytesIO`에 복사해 둔다.
+
+```python
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+```
+
+[`regipy/registry.py:146-147`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L146-L147)
+
+[3] 폴더가 없으면 빈 `dict`를 돌려준다.
+
+```python
+    hives = {}
+    directory_path = Path(directory)
+
+    if not directory_path.exists():
+        logger.error(f"Hive directory does not exist: {directory}")
+        return hives
+```
+
+[`regipy_mcp_server/server.py:42-47`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L42-L47)
+
+[4] (실행 확인) 네트워크를 끈 컨테이너에서 하이브 10개를 불러 둔 뒤 빈 폴더와 없는 폴더로 `set_hive_directory`를 불렀다.
+도구 호출 전후에 시험 하이브와 트랜잭션 로그의 SHA-256을 대조했다.
+
+[5] 서버가 불러오는 모듈과 서버 파일 전체다.
+파일을 지우는 호출이 없다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)
+
+[`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431)
+
+[6] `_load_hives_from_directory`는 경로가 있는지만 보고 `iterdir()`로 항목을 나열한다.
+
+```python
+    hives = {}
+    directory_path = Path(directory)
+
+    if not directory_path.exists():
+        logger.error(f"Hive directory does not exist: {directory}")
+        return hives
+
+    # Common registry hive file patterns
+    skip_extensions = {".log", ".log1", ".log2", ".sav", ".regtrans-ms", ".blf", ".tmp"}
+
+    for file_path in directory_path.iterdir():
+```
+
+[`regipy_mcp_server/server.py:42-52`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L42-L52)
+
+[7] (실행 확인) 하이브 8개를 불러 둔 서버 함수에서 파일 경로로 `set_hive_directory`를 부르자 `NotADirectoryError`가 났다.
+이때 `_hive_directory`는 그 파일 경로로 바뀌었고 불러 둔 하이브는 8개 그대로였다.
+MCP SDK 클라이언트로 같은 호출을 보내자 `isError`가 참이었고 이어 부른 `list_available_hives`는 하이브 8개를 보였다.

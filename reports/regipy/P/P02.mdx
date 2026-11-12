@@ -1,0 +1,319 @@
+---
+cell: P02
+details:
+- id: P02.02
+- id: P02.04
+---
+
+# P02 다음 작업 결정
+
+### P02.02 규칙·조사 상태로 추천
+
+**구현.** 이 방식은 `list_relevant_plugins`, `list_available_plugins`와 하이브를 불러 두지 않았을 때의 도구 응답에 적용된다 [1][2][3].
+`list_relevant_plugins`는 불러 둔 하이브의 유형을 모아 그 유형에 맞는 플러그인만 이름, 설명, 유형과 함께 싣는다 [1].
+응답의 `instruction`은 질문에 맞는 플러그인을 골라 하나씩 `run_plugin`으로 실행하라고 적는다 [1].
+SYSTEM 하이브 하나만 불러 둔 서버에서 `list_relevant_plugins`는 `system` 유형 플러그인 29개를 실었다 [4].
+`list_available_plugins`는 플러그인마다 맞는 유형의 하이브를 불러 두었는지를 `✓`와 `✗`로 표시하고 실행할 수 있는 플러그인 수를 싣는다 [2].
+하이브를 불러 두지 않았으면 `list_available_hives`, `run_plugin`, `run_all_plugins_for_hive`, `list_relevant_plugins`, `get_registry_key`는 `set_hive_directory`를 먼저 쓰라는 문구를 돌려준다 [3].
+이 안내는 응답의 글이고 서버가 다음 호출을 대신 고르거나 따르지 않은 호출을 막지는 않는다.
+서버 지침, 리소스, 프롬프트는 없다 [5].
+
+**한계.** `list_relevant_plugins`의 설명은 질문에 맞는 플러그인을 돌려준다고 적지만 코드는 받은 `question`을 플러그인을 고르는 데 쓰지 않는다 [1].
+목록은 불러 둔 하이브의 유형으로만 정해진다 [1].
+USB 장치를 묻는 질문과 뜻 없는 문자열로 부르자 같은 플러그인 목록이 돌아왔다 [4].
+README는 서버가 자연어 질문을 맞는 플러그인에 대응시킨다고 적는다 [6].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 `run_all_plugins_for_hive`에 적용된다 [7].
+모델이 하이브 유형을 주면 서버는 그 유형의 하이브마다 regipy `run_relevant_plugins`를 불러 플러그인을 한꺼번에 실행한다 [7].
+`run_relevant_plugins`는 등록된 플러그인을 차례로 보며 검증 목록 `validated_plugins.json`에 있고 하이브 유형이 맞는 플러그인만 실행한다 [8][9].
+결과는 플러그인 이름을 키로 한 `dict`로 모인다 [8].
+서버는 그 결과를 하이브 파일 이름 아래에 두고 처리한 하이브 수 `files_analyzed`를 붙여 돌려준다 [7].
+모델은 하이브 유형만 고르고 실행할 플러그인과 결과를 합치는 방법은 서버 코드와 regipy가 정한다 [7][8].
+플러그인을 실행하는 차례는 regipy가 플러그인을 등록해 둔 `set`을 순회하는 차례다 [8][10].
+이 차례는 서버 코드가 정하지 않는다 [7][10].
+같은 호출을 서버 프로세스 다섯 개에서 보내자 손상 하이브의 `error` 문구가 실행마다 두 가지로 갈렸다 [11].
+`SYSTEM` 하이브에서 `system` 유형 플러그인 29개 가운데 검증 목록에 있는 26개의 결과가 돌아왔다 [4].
+
+`run_plugin`은 모델이 고른 플러그인 하나를 맞는 유형의 하이브 모두에서 실행한다 [12].
+서버 안에서 모델을 불러 계획을 세우는 경로는 없다 [13].
+
+### 근거
+
+[1] `list_relevant_plugins`는 불러 둔 유형의 플러그인을 모두 싣고 `question`은 응답에만 옮긴다.
+
+```python
+@mcp.tool()
+def list_relevant_plugins(question: str) -> dict:
+    """
+    List plugins relevant to a forensic question.
+
+    Returns a list of available plugins with their descriptions that could help
+    answer the given question. Use this to discover which plugins to run, then
+    call run_plugin() for each one.
+
+    Args:
+        question: Natural language forensic question
+
+    Returns:
+        Dict with available plugins and their descriptions
+    """
+```
+
+[`regipy_mcp_server/server.py:326-340`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L326-L340)
+
+```python
+    if not _loaded_hives:
+        return {"error": "No hives loaded. Use set_hive_directory first."}
+
+    # Get loaded hive types
+    loaded_types = {hive.hive_type for hive in _loaded_hives.values()}
+
+    # Build list of available plugins with their descriptions
+    available_plugins = []
+    for plugin_class in PLUGINS:
+        if plugin_class.COMPATIBLE_HIVE not in loaded_types:
+            continue
+
+        available_plugins.append(
+            {
+                "name": plugin_class.NAME,
+                "description": plugin_class.DESCRIPTION or "No description",
+                "hive_type": plugin_class.COMPATIBLE_HIVE,
+            }
+        )
+
+    return {
+        "question": question,
+        "available_plugins": available_plugins,
+        "total_count": len(available_plugins),
+        "instruction": "Based on the question, select relevant plugin(s) and call run_plugin() for each one.",
+    }
+```
+
+[`regipy_mcp_server/server.py:341-366`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L341-L366)
+
+[2] `list_available_plugins`는 플러그인마다 실행할 수 있는지 표시한다.
+
+```python
+    # Get loaded hive types
+    loaded_types = {hive.hive_type for hive in _loaded_hives.values()}
+
+    # Group plugins by hive type
+    plugins_by_type = {}
+    for plugin_class in PLUGINS:
+        compat_hive = plugin_class.COMPATIBLE_HIVE or "unknown"
+
+        # Filter by requested hive type if specified
+        if hive_type and compat_hive != hive_type:
+            continue
+
+        if compat_hive not in plugins_by_type:
+            plugins_by_type[compat_hive] = []
+
+        can_run = compat_hive in loaded_types
+        plugins_by_type[compat_hive].append(
+            {"name": plugin_class.NAME, "description": plugin_class.DESCRIPTION or "No description", "can_run": can_run}
+        )
+```
+
+[`regipy_mcp_server/server.py:196-214`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L196-L214)
+
+```python
+    # Format output
+    result = []
+    total_plugins = sum(len(plugins) for plugins in plugins_by_type.values())
+    runnable = sum(1 for plugins in plugins_by_type.values() for p in plugins if p["can_run"])
+
+    result.append(f"Total plugins: {total_plugins} ({runnable} can run with loaded hives)\n")
+
+    for hive_type_name, plugins in sorted(plugins_by_type.items()):
+        can_run_count = sum(1 for p in plugins if p["can_run"])
+        status = "✓ AVAILABLE" if can_run_count > 0 else "✗ No hive loaded"
+        result.append(f"\n{hive_type_name} ({len(plugins)} plugins) - {status}:")
+
+        for plugin in sorted(plugins, key=lambda x: x["name"]):
+            status_icon = "✓" if plugin["can_run"] else "✗"
+            result.append(f"  {status_icon} {plugin['name']}")
+            result.append(f"      {plugin['description']}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:216-233`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L216-L233)
+
+[3] 하이브가 없을 때의 응답 문구다: [`regipy_mcp_server/server.py:163-164`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L163-L164), [`regipy_mcp_server/server.py:251-252`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L251-L252), [`regipy_mcp_server/server.py:303-304`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L303-L304), [`regipy_mcp_server/server.py:341-342`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L341-L342), [`regipy_mcp_server/server.py:381-382`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L381-L382).
+
+[4] (실행 확인) 네트워크를 끈 컨테이너에서 regipy 시험 하이브를 둔 폴더로 서버 함수를 불렀다.
+
+[5] (실행 확인) MCP SDK 클라이언트로 받은 `initialize` 응답의 `instructions`는 `null`이었고 리소스와 프롬프트 목록은 비어 있었다.
+
+[6] README의 동작 설명: [`regipy_mcp_server/README.md:101-106`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/README.md#L101-L106).
+
+[7] `run_all_plugins_for_hive`는 하이브마다 `run_relevant_plugins`를 부른다.
+
+```python
+    if not _loaded_hives:
+        return {"error": "No hives loaded. Use set_hive_directory first."}
+
+    compatible_hives = _get_hives_by_type(hive_type)
+
+    if not compatible_hives:
+        available_types = {h.hive_type for h in _loaded_hives.values()}
+        return {"error": f"No {hive_type} hive loaded", "available_types": sorted(available_types)}
+
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:303-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L303-L323)
+
+[8] `run_relevant_plugins`는 검증 목록과 유형을 보고 플러그인을 실행해 이름별로 모은다.
+
+```python
+    plugin_results = {}
+    for plugin_class in PLUGINS:
+        plugin = plugin_class(registry_hive, as_json=as_json)
+
+        # If the list of plugins is defined, but the plugin is not in the list skip it.
+        if plugins and plugin.NAME not in plugins:
+            continue
+
+        # Check validation status
+        if not is_plugin_validated(plugin.NAME):
+            if not include_unvalidated:
+                logger.debug(f"Skipping unvalidated plugin: {plugin.NAME}")
+                continue
+            # Always warn when running unvalidated plugins
+            warn_unvalidated_plugin(plugin.NAME)
+```
+
+[`regipy/plugins/utils.py:111-125`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L111-L125)
+
+```python
+        if plugin.can_run():
+            try:
+                plugin.run()
+                plugin_results[plugin.NAME] = plugin.entries
+            except ModuleNotFoundError as e:
+                logger.error(f"Plugin {plugin.NAME} has missing dependencies")
+                if continue_on_error:
+                    plugin_results[plugin.NAME] = {"error": str(e)}
+            except Exception as e:
+                # Always log the failure for visibility, regardless of continue_on_error setting
+                logger.exception(f"Plugin {plugin.NAME} failed: {e}")
+                if not continue_on_error:
+                    raise
+                # A single failing plugin must not abort the whole run -
+                # record the failure and continue to the next plugin.
+                plugin_results[plugin.NAME] = {"error": str(e)}
+    return plugin_results
+```
+
+[`regipy/plugins/utils.py:127-143`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L127-L143)
+
+[9] 검증 목록은 패키지에 들어 있는 `validated_plugins.json`에서 읽는다.
+
+```python
+# Load validated plugins from JSON file shipped with the package
+_VALIDATED_PLUGINS_FILE = Path(__file__).parent / "validated_plugins.json"
+
+try:
+    with open(_VALIDATED_PLUGINS_FILE) as f:
+        VALIDATED_PLUGINS: set[str] = set(json.load(f))
+except FileNotFoundError:
+    logger.warning(f"Validated plugins file not found: {_VALIDATED_PLUGINS_FILE}")
+    VALIDATED_PLUGINS = set()
+
+
+def is_plugin_validated(plugin_name: str) -> bool:
+    """Check if a plugin has validation test cases."""
+    return plugin_name in VALIDATED_PLUGINS
+```
+
+[`regipy/plugins/validation_status.py:17-30`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/validation_status.py#L17-L30)
+
+[10] 플러그인은 클래스를 정의할 때 `PLUGINS` `set`에 더해진다.
+
+```python
+PLUGINS: set[type] = set()
+
+logger = logging.getLogger(__name__)
+
+
+class Plugin:
+    NAME: Optional[str] = None
+    DESCRIPTION: Optional[str] = None
+    COMPATIBLE_HIVE: Optional[str] = None
+
+    def __init_subclass__(cls) -> None:
+        PLUGINS.add(cls)
+```
+
+[`regipy/plugins/plugin.py:6-17`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/plugin.py#L6-L17)
+
+[11] (실행 확인) 손상 하이브 `corrupted_system_hive`를 적재하고 `run_all_plugins_for_hive('system')`을 부르는 같은 호출 목록을 서버 프로세스 다섯 개에서 실행했다.
+`corrupted_system_hive`의 `error`는 세 번은 `Did not find Lsa at ControlSet001`, 두 번은 `No subkey AppCompatCache for b'Session Manager'`였다.
+
+[12] `run_plugin`은 맞는 유형의 하이브마다 플러그인을 실행한다.
+
+```python
+    # Get hives of the compatible type
+    compatible_hives = _get_hives_by_type(plugin_class.COMPATIBLE_HIVE)
+
+    if not compatible_hives:
+        return {"error": f"No {plugin_class.COMPATIBLE_HIVE} hive loaded", "required_hive_type": plugin_class.COMPATIBLE_HIVE}
+
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:265-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L265-L289)
+
+[13] 서버가 불러오는 모듈에는 모델 API 클라이언트가 없다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)

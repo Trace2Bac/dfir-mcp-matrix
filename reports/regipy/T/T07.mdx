@@ -1,0 +1,140 @@
+---
+cell: T07
+details:
+- id: T07.08
+---
+
+# T07 도구 부재 처리
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `run_all_plugins_for_hive`가 부르는 regipy 6.5.2의 `run_relevant_plugins`에 적용된다 [1][2].
+`run_relevant_plugins`는 플러그인을 차례로 실행하다 `ModuleNotFoundError`가 나면 그 플러그인의 의존성이 없다는 오류 로그를 남기고 결과에 넣지 않은 채 다음 플러그인을 실행한다 [2].
+서버는 `continue_on_error`를 주지 않으므로 기본값 거짓에서 이 플러그인은 결과에 오류 항목도 남기지 않는다 [1][2].
+regipy 6.5.2에서 선택 의존성이 필요한 플러그인은 NTUSER와 UsrClass의 셸백 플러그인 2개이고 둘 다 `run()` 첫머리에서 `pyfwsi`를 불러온다 [3][4].
+셸백 플러그인은 불러오지 못하면 `pip install regipy[full]`로 설치하라는 로그를 남기고 예외를 다시 낸다 [3][4].
+`pyfwsi`와 `pyfwps`를 불러오지 못하게 한 프로세스에서 `run_all_plugins_for_hive`에 `ntuser`를 주자 셸백 플러그인 키만 빠진 12개 플러그인의 결과가 돌아왔다 [5].
+`usrclass`를 주자 `UsrClass.dat`의 결과는 빈 `dict`였고 `files_analyzed`는 1이었다 [5].
+응답에는 빠진 플러그인이나 없는 모듈을 알리는 필드가 없다 [1][5].
+설치 안내는 서버가 표준 오류로 내보내는 로그에만 남는다 [3][6].
+
+`run_plugin`은 이 방식을 쓰지 않는다 [7].
+`run_plugin`은 플러그인 실행 중 난 예외를 종류와 관계없이 처리해 그 하이브 파일의 결과를 `{"error": <예외 문구>}`로 둔다 [7].
+같은 프로세스에서 `run_plugin`에 `ntuser_shellbag_plugin`을 주자 `NTUSER.DAT`의 결과는 모듈을 불러오지 못했다는 예외 문구를 담은 `error`였다 [5].
+서버는 이 오류를 다른 실행 오류와 구별하지 않는다 [7].
+도구를 실행하기 전에 모듈이 있는지 확인하는 서버 코드는 없다 [1][7].
+
+### 근거
+
+[1] `run_all_plugins_for_hive`는 `run_relevant_plugins`에 `continue_on_error`를 주지 않고 받은 결과를 그대로 싣는다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:312-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L323)
+
+[2] regipy 6.5.2의 `run_relevant_plugins`는 `ModuleNotFoundError`가 난 플러그인을 기본값에서 결과 없이 건너뛴다.
+
+```python
+        if plugin.can_run():
+            try:
+                plugin.run()
+                plugin_results[plugin.NAME] = plugin.entries
+            except ModuleNotFoundError as e:
+                logger.error(f"Plugin {plugin.NAME} has missing dependencies")
+                if continue_on_error:
+                    plugin_results[plugin.NAME] = {"error": str(e)}
+            except Exception as e:
+                # Always log the failure for visibility, regardless of continue_on_error setting
+                logger.exception(f"Plugin {plugin.NAME} failed: {e}")
+                if not continue_on_error:
+                    raise
+                # A single failing plugin must not abort the whole run -
+                # record the failure and continue to the next plugin.
+                plugin_results[plugin.NAME] = {"error": str(e)}
+    return plugin_results
+```
+
+[`regipy/plugins/utils.py:127-143`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L127-L143)
+
+[3] NTUSER 셸백 플러그인은 `run()` 첫머리에서 `pyfwsi`를 불러오고 실패하면 설치 안내를 로그에 남긴 뒤 예외를 다시 낸다.
+
+```python
+    def run(self, codepage=DEFAULT_CODEPAGE):
+        try:
+            # flake8: noqa
+            import pyfwsi
+        except ModuleNotFoundError as ex:
+            logger.exception(
+                "Plugin `shellbag_plugin` has missing modules, install regipy using"
+                " `pip install regipy[full]` in order to install plugin dependencies. "
+                "This might take some time... "
+            )
+            raise ex
+```
+
+[`regipy/plugins/ntuser/shellbags_ntuser.py:366-376`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/ntuser/shellbags_ntuser.py#L366-L376)
+
+[4] UsrClass 셸백 플러그인도 같은 꼴이다.
+
+```python
+    def run(self, codepage=DEFAULT_CODEPAGE):
+        try:
+            # TODO: handle this import requirement in a better way
+            # flake8: noqa
+            import pyfwsi
+        except ModuleNotFoundError as ex:
+            logger.exception(
+                "Plugin `shellbag_plugin` has missing modules, install regipy using"
+                " `pip install regipy[full]` in order to install plugin dependencies. "
+                "This might take some time... "
+            )
+            raise ex
+```
+
+[`regipy/plugins/usrclass/shellbags_usrclass.py:306-317`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/usrclass/shellbags_usrclass.py#L306-L317)
+
+[5] (실행 확인) 서버 함수를 같은 프로세스에서 부르기 전에 `sys.modules`의 `pyfwsi`와 `pyfwps`를 `None`으로 두어 두 모듈을 불러오면 `ModuleNotFoundError`가 나게 했다.
+`run_all_plugins_for_hive('ntuser')`의 `NTUSER.DAT` 결과에는 `ntuser_shellbag_plugin`을 뺀 12개 키가 있었고 `run_all_plugins_for_hive('usrclass')`는 `{"hive_type": "usrclass", "files_analyzed": 1, "results": {"UsrClass.dat": {}}}`였다.
+`run_plugin('ntuser_shellbag_plugin')`의 결과는 `{"NTUSER.DAT": {"error": "import of pyfwsi halted; None in sys.modules"}}`였다.
+
+[6] 서버는 `basicConfig`로 로그 설정을 하고 CPython 3.12.16의 `basicConfig`는 스트림을 주지 않으면 표준 오류에 쓰는 `StreamHandler`를 만든다: [`Lib/logging/__init__.py:2120-2123`](https://github.com/python/cpython/blob/2c2462afc5d978d31f3d073001fc202d269917ff/Lib/logging/__init__.py#L2120-L2123).
+
+```python
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+```
+
+[`regipy_mcp_server/server.py:23-25`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L23-L25)
+
+[7] `run_plugin`은 플러그인 실행에서 난 예외를 모두 문자열로 바꿔 그 파일의 결과에 넣는다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:271-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L282)

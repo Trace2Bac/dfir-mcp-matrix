@@ -1,0 +1,73 @@
+---
+cell: L03
+details:
+- id: L03.03
+---
+
+# L03 기록 실패 처리
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 서버 코드가 로거에 쓰는 모든 항목에 적용된다 [1].
+서버는 `basicConfig`로 표준 오류에 쓰는 `StreamHandler` 하나를 루트 로거에 붙이고 그 처리기의 오류 처리를 바꾸지 않는다 [1][2].
+`FastMCP`를 만들 때 MCP Python SDK 1.30.0이 `configure_logging`으로 `basicConfig`를 한 번 더 부른다 [3].
+CPython 3.12.16의 `basicConfig`는 루트 로거에 처리기가 이미 있으면 처리기를 바꾸지 않으므로 처리기는 서버가 붙인 하나로 남는다 [2].
+CPython 3.12.16의 `StreamHandler.emit`은 쓰기나 비우기에서 난 예외를 `handleError`로 넘긴다 [4].
+`handleError`는 `--- Logging error ---`와 예외를 `sys.stderr`에 쓰려 하고 그 쓰기에서 `OSError`가 나면 아무것도 하지 않는다 [5].
+기록을 받는 곳과 실패를 알리는 곳이 같은 표준 오류여서 표준 오류에 쓰지 못하면 실패를 알리는 글도 남지 않는다 [1][5].
+로거를 부르는 서버 코드는 그 결과를 확인하지 않고 응답을 만든다 [6].
+서버 프로세스의 표준 오류를 `/dev/full`에 연결하고 도구 호출 7번을 보내자 모든 호출의 `isError`가 표준 오류를 파일로 받은 실행과 같았고 6번은 응답 글도 같았다 [7].
+응답에 기록 실패를 알리는 내용은 없었다 [7].
+
+### 근거
+
+[1] 서버는 표준 오류에 쓰는 `basicConfig`를 부른 뒤 `FastMCP`를 만든다.
+
+```python
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize MCP server
+mcp = FastMCP("regipy-forensics")
+```
+
+[`regipy_mcp_server/server.py:23-28`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L23-L28)
+
+[2] CPython 3.12.16의 `basicConfig`는 루트 로거에 처리기가 없을 때만 `StreamHandler`를 만든다: [`Lib/logging/__init__.py:2100-2123`](https://github.com/python/cpython/blob/2c2462afc5d978d31f3d073001fc202d269917ff/Lib/logging/__init__.py#L2100-L2123).
+
+[3] MCP Python SDK 1.30.0의 `FastMCP`는 만들어질 때 `configure_logging`을 부르고 이 함수는 `logging.basicConfig`를 부른다: [`src/mcp/server/fastmcp/server.py:258`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/server.py#L258), [`src/mcp/server/fastmcp/utilities/logging.py:19-42`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/utilities/logging.py#L19-L42).
+
+[4] CPython 3.12.16의 `StreamHandler.emit`은 쓰기 예외를 `handleError`로 넘긴다: [`Lib/logging/__init__.py:1148-1168`](https://github.com/python/cpython/blob/2c2462afc5d978d31f3d073001fc202d269917ff/Lib/logging/__init__.py#L1148-L1168).
+
+[5] `handleError`는 표준 오류에 실패를 쓰고 그 쓰기의 `OSError`는 호출한 쪽으로 넘기지 않는다: [`Lib/logging/__init__.py:1066-1110`](https://github.com/python/cpython/blob/2c2462afc5d978d31f3d073001fc202d269917ff/Lib/logging/__init__.py#L1066-L1110).
+
+[6] 로거를 부른 뒤 그 결과와 관계없이 다음 처리로 간다.
+
+```python
+        try:
+            logger.info(f"Attempting to load hive: {file_path}")
+            hive = RegistryHive(str(file_path))
+            hives[str(file_path)] = hive
+            logger.info(f"Successfully loaded {file_path.name} as {hive.hive_type}")
+        except Exception as e:
+            logger.warning(f"Failed to load {file_path}: {e}")
+            continue
+```
+
+[`regipy_mcp_server/server.py:60-67`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L60-L67)
+
+```python
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:279-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L279-L282)
+
+[7] (실행 확인) MCP SDK 클라이언트의 `stdio_client`에 `/dev/full`을 연 파일을 `errlog`로 넘겨 서버 표준 오류를 그곳에 연결했다.
+손상 하이브 폴더 적재, 손상 하이브의 `run_all_plugins_for_hive`와 `run_plugin('bootkey')`, 없는 폴더, 정상 폴더 다시 적재, `run_plugin('computer_name')`, `get_registry_key` 7번을 보냈다.
+7번 모두 표준 오류를 파일로 받은 실행과 `isError`가 같았고 6번은 응답 글도 같았다.
+손상 하이브의 `run_all_plugins_for_hive`만 응답의 `error` 문구가 달랐다.
+표준 오류를 파일로 받은 실행 네 번 사이에서도 이 문구는 `Did not find Lsa at ControlSet001`과 `No subkey AppCompatCache for b'Session Manager'` 두 가지로 바뀌었다.

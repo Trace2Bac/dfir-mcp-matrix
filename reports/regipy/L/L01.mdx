@@ -1,0 +1,133 @@
+---
+cell: L01
+details:
+- id: L01.02
+---
+
+# L01 기록 방식
+
+### L01.02 도구별 기록 호출
+
+**구현.** 이 방식은 `set_hive_directory`, `run_plugin`, `run_all_plugins_for_hive`의 처리 경로에 적용된다 [1][2][3].
+서버는 `basicConfig(level=logging.INFO)`로 로그를 설정하고 모듈 로거 `logger`에 항목을 쓴다 [4].
+CPython 3.12.16의 `basicConfig`는 스트림을 주지 않으면 표준 오류에 쓰는 처리기를 붙인다 [5].
+`set_hive_directory`가 부르는 `_load_hives_from_directory`는 폴더가 없으면 받은 폴더 경로를 담은 `ERROR` 항목을 쓴다 [1].
+폴더가 있으면 열어 보는 파일마다 `Attempting to load hive: <파일 경로>`를 쓰고 결과에 따라 `Successfully loaded <파일 이름> as <유형>`이나 `Failed to load <파일 경로>: <오류>`를 쓴다 [1].
+`run_plugin`은 하이브 파일에서 플러그인이 예외를 내면 `Error running <plugin_name> on <파일 경로>: <오류>`를 `ERROR`로 쓴다 [2].
+`run_all_plugins_for_hive`는 하이브 파일의 실행이 예외로 끝나면 `Error running plugins on <파일 경로>: <오류>`를 `ERROR`로 쓴다 [3].
+항목에는 도구 이름이 없다 [1][2][3].
+`list_available_hives`, `list_available_plugins`, `list_relevant_plugins`, `get_registry_key`의 처리 경로에는 로그를 쓰는 곳이 없다 [6].
+하이브 폴더 적재, 없는 폴더, 손상 하이브의 플러그인 실행을 보내자 서버 표준 오류에 이 항목들이 남았다 [7].
+
+모든 호출이 지나는 공통 단계에는 도구 이름이나 인자를 담는 항목이 없다.
+MCP Python SDK 1.30.0의 요청 처리기는 요청마다 `Processing request of type CallToolRequest`처럼 요청 종류만 `INFO`로 쓴다 [8].
+목록에 없는 도구 이름이 오면 SDK는 그 이름을 담은 `WARNING` 줄을 쓴다 [8].
+regipy 6.5.2의 모듈도 같은 처리기로 플러그인 실패, 찾지 못한 키, 문자열로 읽지 못한 값 같은 진단 줄을 쓴다 [7].
+
+같은 저장소의 클라이언트 설정과 사용자 시험 스크립트는 MCP 도구 호출을 기록하지 않는다.
+`claude_desktop_config.example.json`은 서버 실행 명령과 인자만 담는다 [9].
+`test_local.py`는 MCP를 거치지 않고 서버 함수를 불러 결과를 화면에 출력한다 [10].
+
+**한계.** 성공한 `run_plugin`과 `run_all_plugins_for_hive` 호출은 항목을 남기지 않는다 [2][3].
+`set_hive_directory`에 파일 경로를 주면 `iterdir()`가 항목을 쓰기 전에 예외를 낸다 [1].
+SDK는 이 예외를 오류 결과로 돌려주고 로그를 쓰지 않는다 [11].
+파일 경로를 준 호출 뒤 서버 표준 오류에는 서버 코드가 쓴 줄이 남지 않았다 [7].
+
+### 근거
+
+[1] `_load_hives_from_directory`가 쓰는 항목이다.
+
+```python
+    hives = {}
+    directory_path = Path(directory)
+
+    if not directory_path.exists():
+        logger.error(f"Hive directory does not exist: {directory}")
+        return hives
+
+    # Common registry hive file patterns
+    skip_extensions = {".log", ".log1", ".log2", ".sav", ".regtrans-ms", ".blf", ".tmp"}
+
+    for file_path in directory_path.iterdir():
+        if not file_path.is_file():
+            continue
+
+        # Skip transaction logs and backup files
+        if file_path.suffix.lower() in skip_extensions:
+            continue
+
+        try:
+            logger.info(f"Attempting to load hive: {file_path}")
+            hive = RegistryHive(str(file_path))
+            hives[str(file_path)] = hive
+            logger.info(f"Successfully loaded {file_path.name} as {hive.hive_type}")
+        except Exception as e:
+            logger.warning(f"Failed to load {file_path}: {e}")
+            continue
+```
+
+[`regipy_mcp_server/server.py:42-67`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L42-L67)
+
+[2] `run_plugin`은 플러그인 예외에만 항목을 쓴다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:271-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L282)
+
+[3] `run_all_plugins_for_hive`도 예외에만 항목을 쓴다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:312-321`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L321)
+
+[4] 서버의 로그 설정이다.
+
+```python
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+```
+
+[`regipy_mcp_server/server.py:23-25`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L23-L25)
+
+[5] CPython 3.12.16의 `basicConfig`는 루트 로거에 처리기가 없을 때 스트림 없이 `StreamHandler`를 만든다: [`Lib/logging/__init__.py:2100-2123`](https://github.com/python/cpython/blob/2c2462afc5d978d31f3d073001fc202d269917ff/Lib/logging/__init__.py#L2100-L2123).
+
+[6] 나머지 도구 4개의 처리 코드에는 `logger`를 부르는 곳이 없다: [`regipy_mcp_server/server.py:155-233`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L155-L233), [`regipy_mcp_server/server.py:326-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L326-L411).
+
+[7] (실행 확인) MCP SDK 클라이언트로 시험 하이브 8개를 둔 서버에 호출을 보내고 서버 표준 오류를 파일로 받았다.
+`set_hive_directory`는 파일마다 `INFO:__main__:Attempting to load hive: /work/hives/corrupt/SAM`과 `INFO:__main__:Successfully loaded SAM as sam` 같은 줄을 남겼고 없는 폴더는 `ERROR:__main__:Hive directory does not exist: /work/hives/nonexistent`를 남겼다.
+손상 하이브의 `run_plugin('bootkey')`는 `ERROR:__main__:Error running bootkey on /work/hives/corrupt/corrupted_system_hive: Did not find Lsa at ControlSet001`를, `run_all_plugins_for_hive('system')`은 `ERROR:__main__:Error running plugins on /work/hives/corrupt/corrupted_system_hive: ...`를 남겼다.
+같은 표준 오류에 `ERROR:regipy.plugins.utils:Plugin bootkey failed: ...`, `ERROR:regipy.plugins.ntuser.installed_programs_ntuser:Did not find Uninstall at ...`, `WARNING:regipy.utils:Could not parse data as string, formating to hex: ...` 같은 regipy의 줄도 있었다.
+성공한 `run_plugin`, `get_registry_key`, `list_available_hives`, 파일 경로를 준 `set_hive_directory`에는 서버 코드가 쓴 줄이 없었고 `INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest` 줄과 regipy의 줄만 있었다.
+
+[8] MCP Python SDK 1.30.0의 요청 처리기가 쓰는 줄이다: [`src/mcp/server/lowlevel/server.py:733`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L733), [`src/mcp/server/lowlevel/server.py:492-494`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L492-L494).
+
+[9] 저장소의 클라이언트 설정 예시다: [`regipy_mcp_server/claude_desktop_config.example.json`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/claude_desktop_config.example.json).
+
+[10] 사용자 시험 스크립트는 서버 모듈의 함수를 직접 불러 출력한다: [`regipy_mcp_server/test_local.py`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/test_local.py).
+
+[11] MCP Python SDK 1.30.0의 저수준 서버는 도구 처리 중 예외를 로그 없이 오류 결과로 바꾼다: [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590), [`src/mcp/server/fastmcp/tools/base.py:116-117`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/tools/base.py#L116-L117).

@@ -1,0 +1,249 @@
+---
+cell: T08
+details:
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 regipy를 불러 하이브를 해석하는 도구 3개 `run_plugin`, `run_all_plugins_for_hive`, `get_registry_key`에 적용된다 [1][2][3].
+세 도구는 하이브 파일마다 regipy 호출을 `try`로 감싸고 예외가 나면 그 파일의 결과를 오류로 둔다 [1][2][3].
+`run_plugin`과 `run_all_plugins_for_hive`는 그 파일의 결과를 `{"error": <예외 문구>}`로 두고 다음 파일을 처리한다 [1][2].
+플러그인의 `run()`이 예외를 내게 바꾸자 두 도구 모두 `SYSTEM`의 결과가 그 예외 문구를 담은 `error`였다 [4].
+`get_registry_key`는 그 파일의 결과를 `{"found": false, "error": <예외 문구>}`로 둔다 [3].
+서버가 처리하지 않은 예외는 MCP Python SDK 1.30.0의 FastMCP가 `Error executing tool <도구>: <문구>` 오류로 바꾸고 응답의 `isError`를 참으로 둔다 [5].
+`set_hive_directory`에 파일 경로를 주어 난 `NotADirectoryError`가 이렇게 돌아왔다 [6].
+서버는 플러그인 실행에 시간 제한을 두지 않는다 [1][2].
+
+**한계.** `get_registry_key`는 찾은 하이브가 하나도 없으면 파일마다의 결과를 버리고 `found`가 거짓인 응답만 돌려준다 [3].
+그래서 예외가 난 경우와 키가 없는 경우가 같은 응답이 된다 [3].
+regipy 6.5.2의 `get_key`가 돌려주는 `NKRecord`에는 `path`, `timestamp`, `values` 속성이 없다 [7].
+`get_registry_key`는 키를 찾으면 이 속성을 읽으므로 `AttributeError`가 나고 키가 있어도 `found`가 거짓인 응답이 된다 [3][7].
+SYSTEM 하이브에 있는 키 `\ControlSet001\Control\TimeZoneInformation`과 루트 `\`로 부르자 모두 `found`가 거짓이었다 [8].
+
+`run_all_plugins_for_hive`가 부르는 `run_relevant_plugins`는 `continue_on_error`가 거짓이면 플러그인 하나의 예외를 다시 내보낸다 [9].
+그래서 같은 하이브에서 앞서 성공한 플러그인의 결과도 응답에 실리지 않고 그 파일의 결과는 오류 하나가 된다 [2][9].
+손상 하이브에 `run_all_plugins_for_hive`를 부르자 결과가 `error` 하나였고 같은 하이브에 `run_plugin`으로 부른 `computer_name`은 결과를 돌려주었다 [6].
+플러그인 목록 `PLUGINS`는 `set`이다 [10].
+같은 호출을 프로세스 다섯 개에서 실행하자 `error`의 문구가 `Did not find Lsa at ControlSet001`과 `No subkey AppCompatCache for b'Session Manager'` 사이에서 바뀌었다 [11].
+
+regipy 6.5.2의 `iter_values`는 값 레코드를 해석하지 못하면 오류 로그만 남기고 그 키의 나머지 값을 돌려주지 않는다 [12].
+플러그인 결과에는 값이 빠졌다는 표시가 없다 [12][1].
+손상 하이브에 `run_all_plugins_for_hive`를 부른 실행에서 서버 표준 오류에 `Could not parse VK at 155686, registry hive is probably corrupted.`가 남았다 [11].
+
+`set_hive_directory`는 `RegistryHive`로 열다 예외가 난 파일을 경고 로그만 남기고 건너뛴다 [13].
+응답은 적재한 파일만 늘어놓고 건너뛴 파일을 적지 않는다 [14].
+하이브가 아닌 파일이 섞인 폴더를 주자 응답에는 적재한 `SAM`만 있었다 [15].
+
+### 근거
+
+[1] `run_plugin`은 하이브 파일마다 플러그인 실행을 감싸고 예외를 그 파일의 `error`로 둔다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:271-282`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L282)
+
+[2] `run_all_plugins_for_hive`도 하이브 파일마다 같은 방식으로 처리한다.
+
+```python
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+```
+
+[`regipy_mcp_server/server.py:312-321`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L312-L321)
+
+[3] `get_registry_key`는 예외를 `found`가 거짓인 결과로 두고 찾은 하이브가 없으면 `found`와 찾아본 파일 이름만 돌려준다.
+
+```python
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+
+    if not any(r.get("found") for r in results.values()):
+        return {"key_path": key_path, "found": False, "searched_hives": [Path(p).name for p, _ in hives_to_search]}
+
+    return {"key_path": key_path, "results": results}
+```
+
+[`regipy_mcp_server/server.py:393-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L411)
+
+[4] (실행 확인) 서버 함수를 같은 프로세스에서 부르기 전에 `ComputerNamePlugin.run`을 `RuntimeError("probe failure")`를 내는 함수로 바꿨다.
+`run_all_plugins_for_hive('system')`은 `{"hive_type": "system", "files_analyzed": 1, "results": {"SYSTEM": {"error": "probe failure"}}}`였고 `run_plugin('computer_name')`의 `results`도 `{"SYSTEM": {"error": "probe failure"}}`였다.
+
+[5] MCP Python SDK 1.30.0의 FastMCP는 도구 함수의 예외를 `ToolError`로 바꾸고 저수준 서버는 이를 `isError`가 참인 결과로 돌려준다: [`src/mcp/server/fastmcp/tools/base.py:93-117`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/fastmcp/tools/base.py#L93-L117), [`src/mcp/server/lowlevel/server.py:473-480`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L473-L480), [`src/mcp/server/lowlevel/server.py:589-590`](https://github.com/modelcontextprotocol/python-sdk/blob/8c2fa6eabacde869d75568e33b9d466b58c2f512/src/mcp/server/lowlevel/server.py#L589-L590).
+
+[6] (실행 확인) MCP SDK 클라이언트로 호출을 보냈다.
+파일 경로를 준 `set_hive_directory`는 `isError`가 참인 `Error executing tool set_hive_directory: [Errno 20] Not a directory: '/work/hives/main/SYSTEM'`였다.
+저장소 시험 자료의 `corrupted_system_hive`를 적재한 서버에서 `run_all_plugins_for_hive('system')`의 `corrupted_system_hive` 결과는 `{"error": "Did not find Lsa at ControlSet001"}`이었고 `run_plugin('computer_name')`은 `GINEVRA`를 돌려주었다.
+
+[7] regipy 6.5.2의 `NKRecord`가 만들 때 두는 속성이다.
+
+```python
+class NKRecord:
+    """
+    The NKRecord represents a Name Key entry
+    """
+
+    def __init__(self, cell, stream):
+        stream.seek(cell.offset)
+        self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
+        self._stream = stream
+
+        # Sometimes the key names are ASCII and sometimes UTF-16 little endian
+        if self.header.flags.KEY_COMP_NAME:
+            # Compressed (ASCII) key name
+            self.name = self.header.key_name_string.decode("ascii", errors="replace")
+        else:
+            # Unicode (UTF-16) key name
+            self.name = self.header.key_name_string.decode("utf-16-le", errors="replace")
+            logger.debug(f'Unicode key name identified: "{self.name}"')
+
+        self.subkey_count = self.header.subkey_count
+        self.values_count = self.header.values_count
+        self.volatile_subkeys_count = self.header.volatile_subkey_count
+```
+
+[`regipy/registry.py:381-402`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L381-L402)
+
+[8] (실행 확인) 같은 프로세스에서 SYSTEM 하이브의 `get_key('\ControlSet001\Control\TimeZoneInformation')`는 `NKRecord`를 돌려주었고 그 `path`를 읽자 `AttributeError("'NKRecord' object has no attribute 'path'")`가 났다.
+서버의 `get_registry_key`는 이 경로와 `\`에 `hive_type` `system`을 주어도 `{"key_path": ..., "found": false, "searched_hives": ["SYSTEM"]}`를 돌려주었다.
+
+[9] regipy 6.5.2의 `run_relevant_plugins`는 `continue_on_error`가 거짓이면 플러그인의 예외를 다시 내보낸다.
+
+```python
+        if plugin.can_run():
+            try:
+                plugin.run()
+                plugin_results[plugin.NAME] = plugin.entries
+            except ModuleNotFoundError as e:
+                logger.error(f"Plugin {plugin.NAME} has missing dependencies")
+                if continue_on_error:
+                    plugin_results[plugin.NAME] = {"error": str(e)}
+            except Exception as e:
+                # Always log the failure for visibility, regardless of continue_on_error setting
+                logger.exception(f"Plugin {plugin.NAME} failed: {e}")
+                if not continue_on_error:
+                    raise
+                # A single failing plugin must not abort the whole run -
+                # record the failure and continue to the next plugin.
+                plugin_results[plugin.NAME] = {"error": str(e)}
+    return plugin_results
+```
+
+[`regipy/plugins/utils.py:127-143`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L127-L143)
+
+[10] `PLUGINS`는 플러그인 클래스를 담는 `set`이다.
+
+```python
+PLUGINS: set[type] = set()
+
+logger = logging.getLogger(__name__)
+
+
+class Plugin:
+    NAME: Optional[str] = None
+    DESCRIPTION: Optional[str] = None
+    COMPATIBLE_HIVE: Optional[str] = None
+
+    def __init_subclass__(cls) -> None:
+        PLUGINS.add(cls)
+```
+
+[`regipy/plugins/plugin.py:6-17`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/plugin.py#L6-L17)
+
+[11] (실행 확인) 손상 하이브를 적재하고 `run_all_plugins_for_hive('system')`을 부르는 같은 호출 목록을 서버 프로세스 다섯 개에서 실행했다.
+세 번은 `Did not find Lsa at ControlSet001`, 두 번은 `No subkey AppCompatCache for b'Session Manager'`였다.
+서버 표준 오류에는 첫 문구 앞에 `Plugin bootkey failed`가 남았다.
+첫 문구가 나온 실행의 서버 표준 오류에는 `ERROR:regipy.registry:Could not parse VK at 155686, registry hive is probably corrupted.`도 있었다.
+
+[12] regipy 6.5.2의 `iter_values`는 값 레코드를 해석하지 못하면 로그를 남기고 끝난다.
+
+```python
+            with boomerang_stream(self._stream) as substream:
+                actual_vk_offset = REGF_HEADER_SIZE + 4 + vk_offset
+                substream.seek(actual_vk_offset)
+                try:
+                    vk = VALUE_KEY.parse_stream(substream)  # type: ignore[union-attr]
+                except (ConstError, StreamError):
+                    logger.error(f"Could not parse VK at {substream.tell()}, registry hive is probably corrupted.")
+                    return
+```
+
+[`regipy/registry.py:568-575`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L568-L575)
+
+[13] 하이브 파일을 열다 예외가 나면 경고 로그만 남기고 건너뛴다.
+
+```python
+        try:
+            logger.info(f"Attempting to load hive: {file_path}")
+            hive = RegistryHive(str(file_path))
+            hives[str(file_path)] = hive
+            logger.info(f"Successfully loaded {file_path.name} as {hive.hive_type}")
+        except Exception as e:
+            logger.warning(f"Failed to load {file_path}: {e}")
+            continue
+```
+
+[`regipy_mcp_server/server.py:60-67`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L60-L67)
+
+[14] `set_hive_directory`의 응답은 적재한 하이브만으로 만든다.
+
+```python
+    if not _loaded_hives:
+        return f"No valid registry hives found in {directory}"
+
+    # Group by hive type
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(Path(path).name)
+
+    result = [f"Loaded {len(_loaded_hives)} hive(s) from {directory}:\n"]
+    for hive_type, files in sorted(by_type.items()):
+        result.append(f"\n{hive_type}:")
+        for file in files:
+            result.append(f"  - {file}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:135-152`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L135-L152)
+
+[15] (실행 확인) SAM 하이브 사본, 글 파일 `notes.txt`, `.LOG1` 파일, 하위 폴더를 둔 폴더로 `set_hive_directory`를 부르자 응답은 `Loaded 1 hive(s) from /work/hives/mixed:`와 `sam: - SAM`뿐이었다.
+`notes.txt`는 표준 오류의 `WARNING` 줄에만 남았다.

@@ -1,0 +1,156 @@
+---
+cell: D01
+details:
+- id: not_implemented
+---
+
+# D01 파생물 보관
+
+### 미구현
+
+**판단.** 서버는 도구 결과를 응답으로 돌려주기만 하고 파일이나 DB에 남기지 않는다.
+도구 7개는 결과를 `str`이나 `dict`로 돌려준다 [1].
+서버 코드에는 파일을 쓰거나 폴더를 만드는 호출이 없다 [2].
+서버 로그는 `logging.basicConfig`에 파일을 주지 않고 설정하므로 파일로 남지 않는다 [3].
+regipy 플러그인은 결과를 플러그인 객체의 `entries`에 담고 서버는 그 값을 응답에 옮긴 뒤 객체를 버린다 [4][5].
+서버가 불러오는 `regipy.plugins.utils`에는 하이브를 JSON 줄 파일로 쓰는 `dump_hive_to_json`이 있지만 서버는 이 함수를 부르지 않는다 [6][7].
+하이브 폴더와 작업 폴더를 둔 컨테이너에서 도구 7개를 모두 부른 뒤 새로 생긴 파일이 없었다 [8].
+
+서버가 호출 사이에 남기는 것은 하이브를 불러올 때 regipy가 메모리에 복사한 하이브 내용과 그 해석 객체다 [9].
+이 사본은 프로세스 메모리에만 있고 서버가 다시 시작하면 사라진다 [9].
+
+### 근거
+
+[1] 도구 7개의 반환형은 `str`이나 `dict`다: [`regipy_mcp_server/server.py:119-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L119-L411).
+
+[2] 서버가 불러오는 모듈과 서버 파일 전체다.
+파일을 여는 호출이 없다.
+
+```python
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
+
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:9-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L9-L21)
+
+[`regipy_mcp_server/server.py:1-431`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L1-L431)
+
+[3] 로그 설정은 수준만 정한다.
+
+```python
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+```
+
+[`regipy_mcp_server/server.py:23-25`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L23-L25)
+
+[4] `run_plugin`은 플러그인 객체를 만들어 실행하고 `entries`를 응답에 옮긴다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[5] regipy 플러그인 기반 클래스는 결과를 `entries`에 둔다.
+
+```python
+    def __init__(self, registry_hive: RegistryHive, as_json=False, trim_values=False):
+        self.registry_hive = registry_hive
+        self.as_json = as_json
+        self.trim_values = trim_values
+
+        self.partial_hive_path = registry_hive.partial_hive_path
+
+        # This variable should always hold the final result - in order to use it in anomaly detection and timeline gen.
+        # Can be either a list of dicts (most plugins) or a dict (some plugins that organize by key path)
+        self.entries: Union[list[dict[str, Any]], dict[str, Any]] = []
+```
+
+[`regipy/plugins/plugin.py:19-28`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/plugin.py#L19-L28)
+
+[6] `dump_hive_to_json`은 받은 경로에 파일을 쓴다.
+
+```python
+def dump_hive_to_json(
+    registry_hive,
+    output_path,
+    name_key_entry: NKRecord,
+    verbose=False,
+    fetch_values=True,
+):
+    """
+    Write the hive subkeys to a JSON-lines file, one line per entry.
+    :param registry_hive: a RegistryHive object
+    :param output_path: Output path to save the JSON
+    :param name_key_entry: The NKRecord to start iterating from
+    :param verbose: verbosity
+    :return: The result, as dict
+    """
+    subkey_count = 0
+    with open(output_path, mode="w") as writer:
+```
+
+[`regipy/plugins/utils.py:55-71`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L55-L71)
+
+[7] 서버가 `regipy.plugins.utils`에서 불러오는 것은 `run_relevant_plugins` 하나다.
+
+```python
+# Import all plugins so they auto-register via __init_subclass__
+import regipy.plugins  # noqa
+from regipy.plugins.plugin import PLUGINS
+from regipy.plugins.utils import run_relevant_plugins
+from regipy.registry import RegistryHive
+```
+
+[`regipy_mcp_server/server.py:17-21`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L17-L21)
+
+[8] (실행 확인) 네트워크를 끈 컨테이너에서 시험 하이브 폴더로 도구 함수 7개를 부르기 전과 뒤에 작업 폴더의 파일 목록과 SHA-256을 대조했다.
+시험 스크립트가 직접 덮어쓴 하이브 하나 말고 바뀌거나 새로 생긴 파일은 없었다.
+
+[9] `_loaded_hives`는 `RegistryHive` 객체를 담고 `RegistryHive`는 하이브 내용 전체를 `BytesIO`에 둔다.
+
+```python
+# Global state for loaded hives
+_loaded_hives: dict[str, RegistryHive] = {}
+_hive_directory: Optional[str] = None
+```
+
+[`regipy_mcp_server/server.py:30-32`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L30-L32)
+
+```python
+        with open(hive_path, "rb") as f:
+            self._stream = BytesIO(f.read())
+```
+
+[`regipy/registry.py:146-147`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L146-L147)

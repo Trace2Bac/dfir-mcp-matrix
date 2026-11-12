@@ -1,0 +1,274 @@
+---
+cell: P03
+details:
+- id: P03.03
+---
+
+# P03 조사 진척 판단
+
+### P03.03 미조사 범위·생략 사유 보고
+
+**구현.** 이 방식은 `run_plugin`·`run_all_plugins_for_hive`의 하이브별 오류, 맞는 하이브가 없을 때의 응답, `get_registry_key`가 키를 찾지 못했을 때의 응답에 적용된다 [1][2][3].
+`run_plugin`과 `run_all_plugins_for_hive`는 하이브 하나에서 예외가 나면 그 하이브 파일 이름 아래에 `error`와 예외 문구를 싣고 다음 하이브를 처리한다 [1][2].
+`run_all_plugins_for_hive`는 처리한 하이브 수를 `files_analyzed`에 싣는다 [2].
+`SYSTEM`과 손상된 시험 하이브 `corrupted_system_hive`를 불러 둔 서버에서 `run_all_plugins_for_hive`에 `system`을 주자 `SYSTEM`에는 플러그인 26개의 결과가, `corrupted_system_hive`에는 `error` 하나가 실렸다 [4].
+맞는 유형의 하이브가 없으면 `run_plugin`은 필요한 유형을 `required_hive_type`에, `run_all_plugins_for_hive`는 불러 둔 유형을 `available_types`에 싣는다 [1][2].
+`get_registry_key`는 키를 어느 하이브에서도 찾지 못하면 찾아본 하이브 파일 이름을 `searched_hives`에 싣는다 [3].
+`list_available_plugins`는 맞는 하이브가 없어 실행할 수 없는 플러그인에 `✗`를 붙인다 [5].
+
+이 보고는 그 호출 한 번의 범위에 그친다.
+서버에는 대상별로 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행 기록을 적는 도구도 없다 [6].
+
+**한계.** `run_all_plugins_for_hive`가 부르는 regipy `run_relevant_plugins`는 검증 목록에 없는 플러그인을 실행하지 않고 그 사실을 결과에 싣지 않는다 [2][7].
+기준 커밋의 플러그인 75개 가운데 13개가 검증 목록에 없고 `system` 유형 29개 가운데 3개가 여기에 속한다 [4].
+
+서버는 `run_relevant_plugins`에 `continue_on_error`를 넘기지 않는다 [2].
+그래서 플러그인 하나가 `ModuleNotFoundError`가 아닌 예외로 끝나면 regipy가 예외를 다시 던지고 그 하이브의 다른 플러그인 결과는 모두 빠진다 [2][7].
+이때 응답의 `error`에는 예외 문구만 실리고 어느 플러그인이 실패했는지는 실리지 않는다 [2].
+`corrupted_system_hive`의 `error`는 실행마다 `Did not find Lsa at ControlSet001`이거나 `No subkey AppCompatCache for b'Session Manager'`였다 [4][8].
+`ModuleNotFoundError`로 끝난 플러그인은 오류 로그만 남기고 결과에서 빠진다 [7].
+응답에는 그 플러그인이 빠졌다는 사실이 실리지 않는다 [2][7].
+의존 모듈을 불러오지 못하게 한 실행에서 `run_all_plugins_for_hive`의 `ntuser` 결과에는 `ntuser_shellbag_plugin` 키만 없었다 [9].
+
+`set_hive_directory`는 확장자로 건너뛴 파일과 하이브로 열지 못한 파일을 응답에 싣지 않는다 [10].
+
+`get_registry_key`는 하이브마다 난 예외 문구를 `results`에 담지만 찾은 키가 하나도 없으면 `results`를 버리고 `searched_hives`만 돌려준다 [3].
+regipy 6.5.2의 `get_key`가 돌려주는 `NKRecord`에는 서버가 읽는 `path` 속성이 없어 키를 찾아도 예외가 난다 [3][11].
+`SYSTEM` 하이브에 있는 키 `\Select`를 주자 `found`가 거짓인 응답이 돌아왔고 예외 문구는 실리지 않았다 [4].
+
+### 근거
+
+[1] `run_plugin`은 맞는 하이브가 없으면 필요한 유형을 싣고 하이브별 예외를 `error`로 싣는다.
+
+```python
+    # Get hives of the compatible type
+    compatible_hives = _get_hives_by_type(plugin_class.COMPATIBLE_HIVE)
+
+    if not compatible_hives:
+        return {"error": f"No {plugin_class.COMPATIBLE_HIVE} hive loaded", "required_hive_type": plugin_class.COMPATIBLE_HIVE}
+
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:265-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L265-L289)
+
+[2] `run_all_plugins_for_hive`는 하이브별 예외를 `error`로 싣고 처리한 하이브 수를 붙인다.
+
+```python
+    if not _loaded_hives:
+        return {"error": "No hives loaded. Use set_hive_directory first."}
+
+    compatible_hives = _get_hives_by_type(hive_type)
+
+    if not compatible_hives:
+        available_types = {h.hive_type for h in _loaded_hives.values()}
+        return {"error": f"No {hive_type} hive loaded", "available_types": sorted(available_types)}
+
+    # Run all plugins on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            results = run_relevant_plugins(hive, as_json=True)
+            serialized_results = _serialize_plugin_results(results)
+            all_results[Path(path).name] = serialized_results
+        except Exception as e:
+            logger.error(f"Error running plugins on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {"hive_type": hive_type, "files_analyzed": len(all_results), "results": all_results}
+```
+
+[`regipy_mcp_server/server.py:303-323`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L303-L323)
+
+[3] `get_registry_key`는 찾은 키가 없으면 하이브별 결과를 버리고 찾아본 하이브 이름만 돌려준다.
+
+```python
+    results = {}
+    for path, hive in hives_to_search:
+        try:
+            subkey = hive.get_key(key_path)
+            if subkey:
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+                    "values": [{"name": v.name, "value": v.value, "type": v.value_type} for v in (subkey.values or [])],
+                    "subkey_count": len(list(subkey.iter_subkeys())) if hasattr(subkey, "iter_subkeys") else 0,
+                }
+        except Exception as e:
+            results[Path(path).name] = {"found": False, "error": str(e)}
+
+    if not any(r.get("found") for r in results.values()):
+        return {"key_path": key_path, "found": False, "searched_hives": [Path(p).name for p, _ in hives_to_search]}
+
+    return {"key_path": key_path, "results": results}
+```
+
+[`regipy_mcp_server/server.py:393-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L393-L411)
+
+[4] (실행 확인) 네트워크를 끈 컨테이너에서 regipy 시험 하이브를 둔 폴더로 서버 함수를 불렀다.
+
+[5] `list_available_plugins`는 맞는 하이브가 없는 플러그인에 `✗`를 붙인다.
+
+```python
+    # Format output
+    result = []
+    total_plugins = sum(len(plugins) for plugins in plugins_by_type.values())
+    runnable = sum(1 for plugins in plugins_by_type.values() for p in plugins if p["can_run"])
+
+    result.append(f"Total plugins: {total_plugins} ({runnable} can run with loaded hives)\n")
+
+    for hive_type_name, plugins in sorted(plugins_by_type.items()):
+        can_run_count = sum(1 for p in plugins if p["can_run"])
+        status = "✓ AVAILABLE" if can_run_count > 0 else "✗ No hive loaded"
+        result.append(f"\n{hive_type_name} ({len(plugins)} plugins) - {status}:")
+
+        for plugin in sorted(plugins, key=lambda x: x["name"]):
+            status_icon = "✓" if plugin["can_run"] else "✗"
+            result.append(f"  {status_icon} {plugin['name']}")
+            result.append(f"      {plugin['description']}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:216-233`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L216-L233)
+
+[6] 서버의 전역 상태와 도구 7개다.
+
+```python
+# Global state for loaded hives
+_loaded_hives: dict[str, RegistryHive] = {}
+_hive_directory: Optional[str] = None
+```
+
+[`regipy_mcp_server/server.py:30-32`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L30-L32)
+
+[`regipy_mcp_server/server.py:119-411`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L119-L411)
+
+[7] `run_relevant_plugins`는 검증 목록에 없는 플러그인을 건너뛰고 `continue_on_error`가 거짓이면 예외를 다시 던진다.
+
+```python
+    plugin_results = {}
+    for plugin_class in PLUGINS:
+        plugin = plugin_class(registry_hive, as_json=as_json)
+
+        # If the list of plugins is defined, but the plugin is not in the list skip it.
+        if plugins and plugin.NAME not in plugins:
+            continue
+
+        # Check validation status
+        if not is_plugin_validated(plugin.NAME):
+            if not include_unvalidated:
+                logger.debug(f"Skipping unvalidated plugin: {plugin.NAME}")
+                continue
+            # Always warn when running unvalidated plugins
+            warn_unvalidated_plugin(plugin.NAME)
+```
+
+[`regipy/plugins/utils.py:111-125`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L111-L125)
+
+```python
+        if plugin.can_run():
+            try:
+                plugin.run()
+                plugin_results[plugin.NAME] = plugin.entries
+            except ModuleNotFoundError as e:
+                logger.error(f"Plugin {plugin.NAME} has missing dependencies")
+                if continue_on_error:
+                    plugin_results[plugin.NAME] = {"error": str(e)}
+            except Exception as e:
+                # Always log the failure for visibility, regardless of continue_on_error setting
+                logger.exception(f"Plugin {plugin.NAME} failed: {e}")
+                if not continue_on_error:
+                    raise
+                # A single failing plugin must not abort the whole run -
+                # record the failure and continue to the next plugin.
+                plugin_results[plugin.NAME] = {"error": str(e)}
+    return plugin_results
+```
+
+[`regipy/plugins/utils.py:127-143`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/utils.py#L127-L143)
+
+[8] (실행 확인) 손상 하이브 `corrupted_system_hive`를 적재하고 `run_all_plugins_for_hive('system')`을 부르는 같은 호출 목록을 서버 프로세스 다섯 개에서 실행했다.
+`corrupted_system_hive`의 `error`는 세 번은 `Did not find Lsa at ControlSet001`, 두 번은 `No subkey AppCompatCache for b'Session Manager'`였다.
+
+[9] (실행 확인) 서버 함수를 같은 프로세스에서 부르기 전에 `pyfwsi`와 `pyfwps`를 불러오지 못하게 했다.
+`run_all_plugins_for_hive('ntuser')`의 결과에는 `ntuser_shellbag_plugin` 키만 없었고 나머지 플러그인 12개의 결과가 있었다.
+빠졌다는 표시는 없었다.
+
+[10] `set_hive_directory`의 응답은 불러온 하이브만 싣는다.
+
+```python
+    _hive_directory = directory
+    _loaded_hives = _load_hives_from_directory(directory)
+
+    if not _loaded_hives:
+        return f"No valid registry hives found in {directory}"
+
+    # Group by hive type
+    by_type = {}
+    for path, hive in _loaded_hives.items():
+        hive_type = hive.hive_type or "unknown"
+        if hive_type not in by_type:
+            by_type[hive_type] = []
+        by_type[hive_type].append(Path(path).name)
+
+    result = [f"Loaded {len(_loaded_hives)} hive(s) from {directory}:\n"]
+    for hive_type, files in sorted(by_type.items()):
+        result.append(f"\n{hive_type}:")
+        for file in files:
+            result.append(f"  - {file}")
+
+    return "\n".join(result)
+```
+
+[`regipy_mcp_server/server.py:132-152`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L132-L152)
+
+[11] `get_key`는 `NKRecord`를 돌려주고 `NKRecord`는 이름, 하위 키 수, 값 수를 속성으로 두며 `path`·`timestamp`·`values` 속성은 두지 않는다.
+
+```python
+class NKRecord:
+    """
+    The NKRecord represents a Name Key entry
+    """
+
+    def __init__(self, cell, stream):
+        stream.seek(cell.offset)
+        self.header = CM_KEY_NODE.parse_stream(stream)  # type: ignore[union-attr]
+        self._stream = stream
+
+        # Sometimes the key names are ASCII and sometimes UTF-16 little endian
+        if self.header.flags.KEY_COMP_NAME:
+            # Compressed (ASCII) key name
+            self.name = self.header.key_name_string.decode("ascii", errors="replace")
+        else:
+            # Unicode (UTF-16) key name
+            self.name = self.header.key_name_string.decode("utf-16-le", errors="replace")
+            logger.debug(f'Unicode key name identified: "{self.name}"')
+
+        self.subkey_count = self.header.subkey_count
+        self.values_count = self.header.values_count
+        self.volatile_subkeys_count = self.header.volatile_subkey_count
+```
+
+[`regipy/registry.py:381-402`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L381-L402)
+
+[`regipy/registry.py:279-315`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/registry.py#L279-L315)

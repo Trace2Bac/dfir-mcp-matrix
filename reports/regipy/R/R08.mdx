@@ -1,0 +1,180 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `run_plugin`과 `run_all_plugins_for_hive`가 싣는 플러그인 결과의 시각 값에 적용된다 [1][2].
+서버는 플러그인을 `as_json=True`로 만든다 [1].
+regipy 6.5.2의 시각 변환 함수 `convert_wintime`은 FILETIME 정수를 UTC `datetime`으로 바꾸고 `as_json`이 참이면 그 ISO 8601 문자열을 돌려준다 [3].
+서버의 `_serialize_plugin_results`는 결과 안의 `datetime` 객체만 `isoformat()` 문자열로 바꾸고 문자열은 그대로 둔다 [2].
+시험 하이브로 플러그인 75개를 실행한 결과에는 `datetime` 객체가 없어 서버가 바꾼 시각 값이 없었다 [4].
+그래서 응답의 시각은 regipy가 만든 문자열 그대로다 [2][4].
+같은 결과에서 이름에 `time`, `date`, `last`, `first`가 들어간 필드에 FILETIME 크기의 정수는 없었다 [4].
+
+`get_registry_key`는 키의 마지막 기록 시각을 `_serialize_datetime`으로 바꿔 싣도록 짜여 있다 [5].
+키가 있는 경로로 불러도 이 값이 실린 응답은 돌아오지 않았다 [6].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 regipy 6.5.2의 `convert_wintime`으로 만든 시각 값에 적용된다 [3].
+`convert_wintime`은 UTC 시간대가 붙은 `datetime`을 만들므로 그 ISO 8601 문자열 끝에 `+00:00`이 붙는다 [3].
+시험 하이브로 플러그인을 실행한 결과에서 51개 플러그인의 시각 값이 `+00:00`이 붙은 ISO 8601 문자열이었다 [4].
+`samparse`는 자기 변환 함수에서 시간대 없는 UTC 시각 문자열 끝에 `+00:00`을 붙인다 [7].
+
+**한계.** 시간대 표기가 없는 시각 값을 싣는 플러그인이 있다.
+regipy 6.5.2의 `convert_filetime2`는 FILETIME을 `%Y-%m-%d %H:%M:%S` 꼴로 바꾸어 시간대와 초 아래 자리를 싣지 않는다 [8].
+`shutdown`의 `date`는 이 함수로 만든 값이다 [9].
+시험 하이브 결과에서 `diag_sr`, `shutdown`, `susclient_plugin`, `winver_plugin`의 일부 시각 값은 시간대 없는 `YYYY-MM-DD HH:MM:SS` 꼴이었다 [4].
+`usrclass_shellbag_plugin`의 `access_time`, `creation_time`, `modification_time`은 시간대 없는 ISO 8601 꼴이었다 [4].
+응답은 이 값이 어느 시간대인지 적지 않는다 [1][2].
+
+### 근거
+
+[1] `run_plugin`은 플러그인을 `as_json=True`로 만들고 결과를 그대로 싣는다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[2] `_serialize_plugin_results`는 `datetime`만 바꾼다.
+
+```python
+def _serialize_plugin_results(results):
+    """Recursively serialize plugin results, converting datetimes to strings."""
+    if isinstance(results, dict):
+        return {k: _serialize_plugin_results(v) for k, v in results.items()}
+    elif isinstance(results, list):
+        return [_serialize_plugin_results(item) for item in results]
+    elif isinstance(results, datetime):
+        return results.isoformat()
+    else:
+        return results
+```
+
+[`regipy_mcp_server/server.py:107-116`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L107-L116)
+
+[3] regipy 6.5.2의 `convert_wintime`이다.
+
+```python
+def convert_wintime(wintime: int, as_json=False) -> Union[dt.datetime, str]:
+    """
+    Get an integer containing a FILETIME date
+    :param wintime: integer representing a FILETIME timestamp
+    :param as_json: whether to return the date as string or not
+    :return: datetime
+    """
+    # http://stackoverflow.com/questions/4869769/convert-64-bit-windows-date-time-in-python
+    us = wintime / 10
+    try:
+        date = dt.datetime(1601, 1, 1, tzinfo=pytz.utc) + dt.timedelta(microseconds=us)
+    except OverflowError:
+        # If date is too big, it is probably corrupted' let's return the smallest possible windows timestamp.
+        date = dt.datetime(1601, 1, 1, tzinfo=pytz.utc)
+    return date.isoformat() if as_json else date
+```
+
+[`regipy/utils.py:109-123`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/utils.py#L109-L123)
+
+[4] (실행 확인) 시험 하이브 8개를 적재한 서버 함수에서 플러그인 75개를 실행하고 `run_all_plugins_for_hive`를 유형마다 불러 결과의 문자열 값을 꼴별로 나눴다.
+결과 안에 `datetime` 객체는 없었고 이름에 `time`, `date`, `last`, `first`가 들어간 필드의 10^15보다 큰 정수도 없었다.
+`+00:00`이 붙은 ISO 8601 값이 있는 플러그인은 51개였다.
+시간대 없는 `YYYY-MM-DD HH:MM:SS` 값은 `diag_sr`의 `SrCreateRp (Enter)`·`SrCreateRp (Leave)`, `shutdown`의 `date`, `susclient_plugin`의 `LastRestorePointSetTime`, `winver_plugin`의 `InstallDate`에 있었다.
+시간대 없는 ISO 8601 값은 `usrclass_shellbag_plugin`의 `access_time`, `creation_time`, `modification_time`에 있었다.
+
+[5] `get_registry_key`는 키의 `timestamp`를 바꿔 싣도록 짜여 있다.
+
+```python
+def _serialize_datetime(obj):
+    """Convert datetime objects to ISO format strings."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+```
+
+[`regipy_mcp_server/server.py:100-104`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L100-L104)
+
+```python
+                results[Path(path).name] = {
+                    "found": True,
+                    "path": subkey.path,
+                    "timestamp": _serialize_datetime(subkey.timestamp),
+```
+
+[`regipy_mcp_server/server.py:398-401`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L398-L401)
+
+[6] (실행 확인) 같은 프로세스에서 SYSTEM 하이브에 있는 `\ControlSet001\Control\TimeZoneInformation`으로 `get_registry_key`를 부르자 `found`가 거짓이고 `timestamp`가 없는 응답이 돌아왔다.
+
+[7] regipy 6.5.2의 `samparse`가 쓰는 시각 변환 함수다.
+
+```python
+def filetime_to_datetime(filetime: int) -> Optional[str]:
+    """Convert Windows FILETIME to ISO datetime string"""
+    if filetime == 0 or filetime == 0x7FFFFFFFFFFFFFFF:
+        return None
+    try:
+        # FILETIME is 100-nanosecond intervals since January 1, 1601
+        epoch_diff = 116444736000000000  # Difference between 1601 and 1970 in 100-ns
+        timestamp = (filetime - epoch_diff) / 10000000
+        dt = datetime.utcfromtimestamp(timestamp)
+        return dt.isoformat() + "+00:00"
+    except (ValueError, OSError, OverflowError):
+        return None
+```
+
+[`regipy/plugins/sam/samparse.py:47-58`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/sam/samparse.py#L47-L58)
+
+[8] regipy 6.5.2의 `convert_filetime2`다.
+
+```python
+def convert_filetime2(dte):
+    try:
+        epoch = dt.datetime(1601, 1, 1, 0, 0, 0)
+        nt_timestamp = struct.unpack("<Q", binascii.unhexlify(dte))[0]
+        epoch = dt.datetime(1601, 1, 1, 0, 0, 0)
+        nt_datetime = epoch + dt.timedelta(microseconds=nt_timestamp / 10)
+
+        return nt_datetime.strftime("%Y-%m-%d %H:%M:%S")
+
+    except OverflowError:
+        return None
+```
+
+[`regipy/utils.py:96-106`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/utils.py#L96-L106)
+
+[9] regipy 6.5.2의 `shutdown`은 `ShutdownTime` 값을 `convert_filetime2`로 바꾼다.
+
+```python
+            ts: datetime = convert_wintime(shutdown.header.last_modified)  # type: ignore[assignment]
+            self.entries[shutdown_subkey] = {"last_write": ts.isoformat()}
+            for val in shutdown.iter_values():
+                if val.name == "ShutdownTime":
+                    self.entries[shutdown_subkey]["date"] = convert_filetime2(val.value)
+```
+
+[`regipy/plugins/system/shutdown.py:29-33`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/system/shutdown.py#L29-L33)

@@ -1,0 +1,124 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 서버는 regipy 플러그인의 결과를 가리거나 필드를 빼지 않고 응답에 싣는다 [1][2].
+서버 코드에 값을 가리는 함수는 없다 [1][2].
+regipy 6.5.2의 `bootkey` 플러그인은 SYSTEM 하이브의 LSA 키에서 부트 키를 모아 16진 문자열 `key`로 돌려준다 [3].
+regipy 코드 주석은 부트 키를 AD 데이터베이스나 컴퓨터 계정 비밀번호 같은 민감한 정보를 암호화하는 데 쓰는 키로 설명한다 [3].
+시험 SYSTEM 하이브에 `run_plugin`으로 `bootkey`를 부르자 부트 키 16진 문자열이 그대로 돌아왔다 [4].
+`run_all_plugins_for_hive`에 `system`을 주었을 때도 응답의 `bootkey` 아래에 같은 값이 실렸다 [4].
+
+`winscp_saved_sessions`는 WinSCP 세션 키의 값을 이름으로 가리지 않고 모두 결과 항목에 펼쳐 싣는다 [5].
+시험 하이브의 WinSCP 세션 값에는 `HostName`, `UserName` 같은 접속 정보가 있었고 비밀번호 값은 없었다 [6].
+
+### 근거
+
+[1] `run_plugin`은 플러그인 결과를 바꾸지 않고 싣는다.
+
+```python
+    # Run plugin on all compatible hives
+    all_results = {}
+    for path, hive in compatible_hives:
+        try:
+            plugin = plugin_class(hive, as_json=True)
+            if plugin.can_run():
+                plugin.run()
+                results = _serialize_plugin_results(plugin.entries)
+                all_results[Path(path).name] = results
+        except Exception as e:
+            logger.error(f"Error running {plugin_name} on {path}: {e}")
+            all_results[Path(path).name] = {"error": str(e)}
+
+    return {
+        "plugin": plugin_name,
+        "description": plugin_class.DESCRIPTION,
+        "hive_type": plugin_class.COMPATIBLE_HIVE,
+        "results": all_results,
+    }
+```
+
+[`regipy_mcp_server/server.py:271-289`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L271-L289)
+
+[2] 서버가 결과에 하는 처리는 `datetime`을 문자열로 바꾸는 것뿐이다.
+
+```python
+def _serialize_plugin_results(results):
+    """Recursively serialize plugin results, converting datetimes to strings."""
+    if isinstance(results, dict):
+        return {k: _serialize_plugin_results(v) for k, v in results.items()}
+    elif isinstance(results, list):
+        return [_serialize_plugin_results(item) for item in results]
+    elif isinstance(results, datetime):
+        return results.isoformat()
+    else:
+        return results
+```
+
+[`regipy_mcp_server/server.py:107-116`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy_mcp_server/server.py#L107-L116)
+
+[3] regipy 6.5.2의 `bootkey` 플러그인 설명과 결과다.
+
+```python
+"""
+The boot key is an encryption key that is stored in
+the Windows SYSTEM registry hive.
+
+This key is used by several Windows components to encrypt
+sensitive information like the AD database,
+machine account password or system certificates etc.
+"""
+```
+
+[`regipy/plugins/system/bootkey.py:1-8`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/system/bootkey.py#L1-L8)
+
+```python
+    def run(self):
+        logger.debug("Started BootKey Plugin...")
+
+        for subkey_path in self.registry_hive.get_control_sets(LSA_KEY_PATH):
+            lsa_key = self.registry_hive.get_key(subkey_path)
+
+            bootkey = _descramble_bootkey(_collect_bootkey(lsa_key))
+
+            self.entries.append(
+                {
+                    "key": bootkey.hex() if self.as_json else bootkey,
+                    "timestamp": convert_wintime(lsa_key.header.last_modified, as_json=self.as_json),
+                }
+            )
+```
+
+[`regipy/plugins/system/bootkey.py:81-94`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/system/bootkey.py#L81-L94)
+
+[4] (실행 확인) MCP SDK 클라이언트로 시험 하이브 8개를 둔 서버에 `run_plugin('bootkey')`를 보내자 `results`의 `SYSTEM` 아래 `key`에 32자 16진 문자열이 들어간 항목 두 개가 돌아왔다.
+`run_all_plugins_for_hive('system')`의 응답도 `bootkey` 아래 같은 항목 두 개를 담았다.
+
+[5] regipy 6.5.2의 `winscp_saved_sessions`는 세션 키의 값을 모두 결과 항목에 넣는다.
+
+```python
+        for winscp_saved_session in sessions_sk.iter_subkeys():
+            values = (
+                {x.name: x.value for x in winscp_saved_session.iter_values(as_json=self.as_json)}
+                if winscp_saved_session.values_count
+                else {}
+            )
+            self.entries.append(  # type: ignore[union-attr]
+                {
+                    "timestamp": convert_wintime(winscp_saved_session.header.last_modified, as_json=self.as_json),
+                    "hive_name": "HKEY_CURRENT_USER",
+                    "key_path": rf"HKEY_CURRENT_USER{subkey_path}\{winscp_saved_session.name}",
+                    **values,
+                }
+            )
+```
+
+[`regipy/plugins/ntuser/winscp_saved_sessions.py:25-38`](https://github.com/mkorman90/regipy/blob/c6de929abc37d8315d1c31aba5e937db636f3303/regipy/plugins/ntuser/winscp_saved_sessions.py#L25-L38)
+
+[6] (실행 확인) 시험 자료 `NTUSER_with_winscp.DAT`를 적재한 서버 함수에서 `run_plugin('winscp_saved_sessions')`를 부르자 항목의 필드는 `FSProtocol`, `Ftps`, `HostName`, `IsWorkspace`, `LocalDirectory`, `PortNumber`, `RemoteDirectory`, `UserName`, `hive_name`, `key_path`, `timestamp`였다.
