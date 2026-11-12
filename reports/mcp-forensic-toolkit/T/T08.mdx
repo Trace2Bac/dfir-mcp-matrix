@@ -1,0 +1,201 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.03
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 macOS에서 `scan_syslog`가 실행하는 `log`에 적용된다 [1].
+`returncode`가 0이 아니면 표준 출력을 읽지 않고 `log show error: <표준 오류>` 한 줄을 돌려준다 [1].
+시험용 `log`가 표준 오류에 글을 쓰고 종료 코드 1로 끝나게 하자 `log show error: ` 뒤에 그 글이 붙은 한 줄이 돌아왔다 [2].
+종료 코드가 0이면 표준 오류를 보지 않는다 [1].
+표준 오류에 글을 쓰고 종료 코드 0으로 끝나게 하자 표준 출력의 줄만 돌아왔다 [2].
+`subprocess.run`에 `timeout`을 주지 않으므로 서버는 `log`가 끝날 때까지 기다린다 [1][3].
+다른 도구는 외부 프로그램을 실행하지 않는다 [4].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 `scan_syslog`의 빈 결과 판정과 두 묶음 도구의 `error` 키 확인에 적용된다 [1][5][6].
+`scan_syslog`는 macOS에서 `log`의 표준 출력을 줄로 나누고 빈 줄과 `Timestamp`로 시작하는 줄을 뺀다 [1].
+남은 줄이 없으면 `No matching entries found.` 한 줄을 돌려준다 [1].
+`Timestamp`로 시작하는 줄 하나만 출력하는 시험용 `log`로 부르자 이 한 줄이 돌아왔다 [2].
+Linux에서도 키워드가 들어 있는 줄이 없으면 같은 문구를 돌려준다 [5].
+`correlate_file_and_logs`는 `file_metadata`의 결과에 `error` 키가 있으면 `File error: `를 붙인 `error`만 돌려준다 [6].
+`generate_forensic_report`는 그 결과에 `error` 키가 있으면 `status`를 `error`로 두고 없으면 `ok`로 둔다 [7].
+
+**한계.** `correlate_file_and_logs`는 `scan_syslog`가 돌려준 줄이 오류 문구인지 보지 않는다 [6].
+로그 파일이 없거나 읽지 못했거나 OS를 지원하지 않아 돌아온 한 줄도 `log_hits`에 들어가고 `generate_forensic_report`의 `status`는 `ok`가 된다 [6][7].
+`correlation_found`도 파일 이름이 이 오류 줄에 들어 있는지로 계산된다 [6].
+`/var/log/syslog`가 없는 컨테이너와 읽을 수 없게 둔 컨테이너에서 이름이 `syslog`인 파일로 `generate_forensic_report`를 부르자 두 경우 모두 `status`가 `ok`, `correlation_found`가 참이었다 [8].
+맞는 줄이 없을 때의 `No matching entries found.`도 `log_hits`에 로그 줄처럼 들어간다 [6][8].
+실제 macOS `log show`의 출력에 `Timestamp`로 시작하는 머리 줄 말고 다른 안내 줄이 있는지는 실행하지 않아 확인하지 못했다 [1].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 서버 프로세스 안에서 로그와 파일을 읽는 `scan_syslog`, `file_metadata`, `hash_directory`에 적용된다 [9][10][11].
+`scan_syslog`는 어느 OS 경로에서 난 예외든 처리해 `Error reading logs: <문구>` 한 줄을 돌려준다 [9].
+`file_metadata`는 `os.stat`, 파일 읽기, 해시 계산에서 난 예외를 처리해 `error`에 예외 문구를 담은 `dict`를 돌려준다 [10].
+`hash_directory`는 파일마다 읽기 예외를 처리해 그 파일의 값에 `Error: <문구>`를 넣고 다음 파일을 읽는다 [11].
+읽기 권한이 없는 파일로 `file_metadata`를 부르자 `error`가 `[Errno 13] Permission denied`로 시작했다 [8].
+같은 파일이 있는 폴더로 `hash_directory`를 부르자 그 파일의 값만 `Error: [Errno 13]`으로 시작했고 다른 파일은 해시가 실렸다 [8].
+`scan_syslog`는 `/var/log/syslog`를 인코딩을 정하지 않고 열어 현재 로캘 인코딩으로 디코딩한다 [5][12].
+로캘 인코딩이 UTF-8인 시험 컨테이너에서 UTF-8로 디코딩할 수 없는 바이트가 한 줄에 들어 있는 `/var/log/syslog`로 `scan_syslog`를 부르자 맞는 줄 대신 `codec can't decode` 문구가 담긴 오류 한 줄만 돌아왔다 [8][9].
+이 오류들은 모두 도구가 정상으로 돌려준 값이라 MCP 응답의 `isError`는 거짓이다 [8].
+서버는 분석 실행에 시간 제한을 두지 않는다 [9][10][11].
+
+**한계.** `hash_directory`가 쓰는 `os.walk`는 `onerror`를 주지 않아 폴더 목록을 읽다 난 오류를 무시한다 [11][13].
+그래서 서버 계정이 목록을 읽을 수 없는 하위 폴더 아래 파일은 결과에서 빠지고 빠졌다는 표시도 없다 [11][13].
+목록을 읽을 수 없게 둔 하위 폴더가 있는 폴더로 부르자 다른 하위 폴더의 파일만 실리고 오류 항목은 없었다 [14].
+받은 폴더 자체의 목록을 읽지 못하면 오류 항목 없이 빈 `dict`가 돌아오고 이 값은 빈 폴더의 결과와 같다 [11][13].
+
+### 근거
+
+[1] `scan_syslog`는 macOS에서 종료 코드를 보고 머리 줄과 빈 줄을 뺀 뒤 빈 결과를 판정한다.
+
+```python
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:51-63`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L51-L63)
+
+[2] (실행 확인) `platform.system`을 `Darwin`을 돌려주는 함수로 바꾼 서버 프로세스에서 출력과 종료 코드를 시험마다 정하는 시험용 실행 파일 `log`를 `PATH` 앞에 두고 `scan_syslog`를 불렀다.
+
+[3] Python 3.11.9 문서의 `subprocess.run`은 명령이 끝날 때까지 기다리고 `timeout`의 기본값이 `None`이다: [`Doc/library/subprocess.rst:38-44`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/subprocess.rst#L38-L44).
+
+[4] 서버 코드에서 외부 프로그램을 실행하는 곳은 macOS 경로의 `subprocess.run` 하나다: [`mcp_forensic_toolkit/server.py:1-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L1-L227).
+
+[5] Linux에서 맞는 줄이 없으면 같은 문구를 돌려준다.
+
+```python
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:43-49`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L43-L49)
+
+[6] `correlate_file_and_logs`는 `file_metadata`의 `error`만 보고 `scan_syslog`의 줄은 그대로 담는다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+
+    if "error" in file_info:
+        return {"error": f"File error: {file_info['error']}"}
+
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:125-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L143)
+
+[7] `generate_forensic_report`는 `error` 키로 `status`를 정한다.
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+    if "error" in result:
+        return {
+            "status": "error",
+            "message": result["error"],
+            "filename": filename,
+            "keyword": keyword
+        }
+
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:161-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L177)
+
+[8] (실행 확인) 컨테이너 안에 만든 시험 파일과 시험 `/var/log/syslog`로 MCP 클라이언트 세션에서 도구를 불렀다.
+`/var/log/syslog`를 지운 실행, 권한을 600으로 둔 실행, UTF-8이 아닌 바이트를 한 줄에 넣은 실행을 따로 했고 서버는 비루트 계정으로 실행했다.
+
+[9] `scan_syslog`는 모든 예외를 한 줄로 돌려준다.
+
+```python
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+```
+
+[`mcp_forensic_toolkit/server.py:68-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L68-L69)
+
+[10] `file_metadata`는 예외 문구를 `error`에 담는다.
+
+```python
+    try:
+        stat = os.stat(path)
+        with open(path, "rb") as f:
+            content = f.read()
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+[`mcp_forensic_toolkit/server.py:79-90`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L79-L90)
+
+[11] `hash_directory`는 파일마다 예외를 처리하고 `os.walk`에 `onerror`를 주지 않는다.
+
+```python
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:100-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L100-L110)
+
+[12] Python 3.11.9 문서는 텍스트 모드에서 `encoding`을 주지 않으면 `locale.getencoding()`이 돌려주는 현재 로캘 인코딩을 쓴다고 적는다: [`Doc/library/functions.rst:1184-1186`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/functions.rst#L1184-L1186).
+
+[13] Python 3.11.9 문서는 `os.walk`가 기본값으로 `scandir` 오류를 무시한다고 적는다: [`Doc/library/os.rst:3290-3294`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/os.rst#L3290-L3294).
+
+[14] (실행 확인) 컨테이너 안에 권한을 000으로 둔 하위 폴더와 읽을 수 있는 하위 폴더를 만들고 비루트 계정으로 실행한 서버에서 `hash_directory`를 불렀다.

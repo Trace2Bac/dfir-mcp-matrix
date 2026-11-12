@@ -1,0 +1,115 @@
+---
+cell: R05
+details:
+- id: R05.02
+---
+
+# R05 결과 출처 표시
+
+### R05.02 증거 내부 경로
+
+**구현.** 이 방식은 `hash_directory`, `correlate_file_and_logs`, `generate_forensic_report`에 적용된다 [1][2].
+이 서버가 조사하는 대상 시스템은 서버를 실행한 호스트이고 세 도구는 결과에 그 호스트 안의 파일 경로를 싣는다 [1][2].
+`hash_directory`는 `os.walk`가 낸 폴더 경로와 파일 이름을 이어 붙인 경로를 결과의 키로 쓴다 [1].
+이 경로는 모델이 준 `path`로 시작하므로 상대 경로를 주면 키도 상대 경로다 [1].
+상대 경로로 부르자 키가 그 상대 경로로 시작했다 [3].
+두 묶음 도구는 모델이 준 `filename`을 바꾸지 않고 `filename`에 싣는다 [2].
+
+`file_metadata`의 응답에는 경로가 없다 [4].
+`scan_syslog`의 응답에는 줄을 읽은 원천(`/var/log/syslog`나 `log show`)을 적는 값이 없다 [5].
+Linux의 줄에는 syslog 형식의 호스트 이름과 프로세스 이름이 들어 있을 수 있지만 이는 로그 줄의 글이고 서버가 붙인 값이 아니다 [5][3].
+로그 줄의 줄 번호, 레코드 번호, 오프셋은 싣지 않는다 [5].
+
+**한계.** `hash_directory`의 키와 두 묶음 도구의 `filename`은 서버가 실제 경로로 바꾸지 않은 값이다 [1][2].
+그래서 심볼릭 링크를 거쳐 읽은 결과에는 링크의 경로가 실리고 내용을 읽은 파일의 경로는 실리지 않는다 [1][2].
+밖의 파일을 가리키는 링크가 있는 폴더로 `hash_directory`를 부르자 링크 경로를 키로 그 파일의 해시가 실렸다 [3].
+
+### 근거
+
+[1] `hash_directory`는 `os.walk`의 경로로 키를 만든다.
+
+```python
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:100-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L100-L110)
+
+[2] 두 묶음 도구는 받은 `filename`을 싣는다.
+
+```python
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:137-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L137-L143)
+
+```python
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:170-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L170-L177)
+
+[3] (실행 확인) 컨테이너 안에 만든 시험 폴더, 밖의 파일을 가리키는 심볼릭 링크, `testhost` 호스트 이름을 넣은 시험 `/var/log/syslog`로 MCP 클라이언트 세션에서 도구를 불렀다.
+
+[4] `file_metadata`의 응답 필드다.
+
+```python
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+```
+
+[`mcp_forensic_toolkit/server.py:83-88`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L83-L88)
+
+[5] `scan_syslog`는 줄만 돌려준다.
+
+```python
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:43-63`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L43-L63)

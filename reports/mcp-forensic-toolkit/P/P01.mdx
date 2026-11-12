@@ -1,0 +1,115 @@
+---
+cell: P01
+details:
+- id: P01.04
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.04 방법과 형식·OS 대조
+
+**구현.** 이 방식은 `scan_syslog`와 이를 부르는 `correlate_file_and_logs`·`generate_forensic_report`에 적용된다 [1][2].
+`scan_syslog`는 `platform.system()`으로 서버를 실행한 호스트의 OS 이름을 읽는다 [1].
+값이 `Linux`이면 `/var/log/syslog`를 읽고 `Darwin`이면 `log show`를 실행한다 [1].
+그 밖의 값이면 로그를 읽지 않고 `Unsupported OS: <OS 이름>` 한 줄을 담은 목록을 돌려준다 [1].
+`platform.system()`이 `Windows`를 돌려주게 바꾼 시험에서 `scan_syslog`는 `Unsupported OS: Windows`를 돌려주었다 [3].
+`Darwin`을 돌려주게 바꾸고 시험용 `log` 실행 파일을 둔 시험에서는 그 실행 파일이 실행되었다 [3].
+`file_metadata`와 `hash_directory`는 파일 형식을 판별하지 않고 어떤 파일이든 바이트로 읽어 해시한다 [4].
+
+**한계.** OS 판별은 `platform.system()`이 돌려주는 이름에 그친다 [1].
+Linux에서는 배포판이나 로그 설정을 보지 않고 늘 `/var/log/syslog`를 읽는다 [1].
+
+### 근거
+
+[1] `scan_syslog`는 OS 이름으로 로그 출처를 고른다.
+
+```python
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+
+        else:
+            return [f"Unsupported OS: {system}"]
+
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+```
+
+[`mcp_forensic_toolkit/server.py:40-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L69)
+
+[2] `correlate_file_and_logs`는 `scan_syslog`의 결과를 오류 확인 없이 받는다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+
+    if "error" in file_info:
+        return {"error": f"File error: {file_info['error']}"}
+
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+```
+
+[`mcp_forensic_toolkit/server.py:125-135`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L135)
+
+[3] (실행 확인) 같은 프로세스에서 `platform.system`을 바꿔 `scan_syslog`를 불렀다.
+
+[4] 두 도구는 형식 확인 없이 파일을 읽는다.
+
+```python
+    try:
+        stat = os.stat(path)
+        with open(path, "rb") as f:
+            content = f.read()
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+```
+
+[`mcp_forensic_toolkit/server.py:79-88`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L79-L88)
+
+```python
+    if not os.path.isdir(path):
+        return {"error": "Provided path is not a directory."}
+
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:97-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L97-L110)

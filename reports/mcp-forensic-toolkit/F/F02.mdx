@@ -1,0 +1,144 @@
+---
+cell: F02
+details:
+- id: F02.01
+---
+
+# F02 발견사항·결론 도출
+
+### F02.01 규칙·키 기반 판정·상관
+
+**구현.** 이 방식은 `correlate_file_and_logs`와 이를 부르는 `generate_forensic_report`에 적용된다 [1][2].
+`correlate_file_and_logs`는 `scan_syslog`로 키워드가 들어간 로그 줄 목록을 얻는다 [1].
+파일 경로에서 이름만 떼어 소문자로 바꾸고 그 이름이 목록의 어느 줄에든 부분 문자열로 들어 있으면 `correlation_found`를 참으로 둔다 [1].
+파일 이름이 파일과 로그 줄을 잇는 키다 [1].
+응답은 `filename`, `keyword`, 수정 시각 `file_modified_time`, 로그 줄 앞 10개 `log_hits`, `correlation_found`를 싣는다 [1].
+대조에서 이름이 들어 있던 줄은 응답에서 따로 표시하지 않는다 [1].
+`generate_forensic_report`는 이 결과에 `status` `ok`를 붙이고 `file_metadata`가 오류를 내면 `status` `error`와 오류 문구를 돌려준다 [2].
+`data.txt`가 들어간 줄이 앞 10줄 밖에 있는 시험용 `/var/log/syslog`에서 `a.txt`로 부르자 `correlation_found`는 참이었고 `log_hits`에는 그 줄이 없었다 [3].
+
+다른 도구는 판정 값을 싣지 않는다.
+`scan_syslog`는 모델이 준 키워드로 줄을 고르고 `file_metadata`와 `hash_directory`는 상태 값과 해시를 싣는다 [4].
+
+**한계.** `generate_forensic_report`의 설명은 파일의 수정 시각이 키워드가 들어간 로그 줄과 맞는지 확인한다고 적는다 [2].
+코드는 시각을 비교하지 않고 파일 이름이 줄에 들어 있는지만 본다 [1].
+대조에 쓰는 줄은 Linux에서는 시각과 관계없이 `/var/log/syslog`에서 키워드에 맞는 줄의 마지막 100개이고 macOS에서는 최근 10분의 기록 가운데 키워드에 맞는 줄의 마지막 100개다 [5].
+그래서 이름이 들어간 줄이 마지막 100줄에 포함되지 않으면 대조에 쓰이지 않는다 [5].
+키워드에 맞는 줄 151개 가운데 31번째 줄에만 파일 이름을 둔 시험에서 `correlation_found`는 거짓이었다 [3].
+이름은 부분 문자열로 대조하므로 다른 파일 이름의 일부여도 참이 된다 [1].
+`scan_syslog`가 돌려준 안내와 오류 문구도 로그 줄과 같은 목록으로 대조한다 [1][5].
+`No matching entries found.`나 `Log file '/var/log/syslog' not found.` 같은 문구에 파일 이름이 들어 있으면 `correlation_found`가 참이 된다 [5].
+키워드에 맞는 줄이 없을 때 이름이 `found`인 파일로 부르자 `log_hits`는 `No matching entries found.` 한 줄이었고 `correlation_found`는 참이었다 [3].
+이때 `generate_forensic_report`의 `status`는 `ok`였다 [3].
+
+### 근거
+
+[1] `correlate_file_and_logs`는 파일 이름이 로그 줄에 들어 있는지로 상관을 정한다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+
+    if "error" in file_info:
+        return {"error": f"File error: {file_info['error']}"}
+
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:125-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L143)
+
+[2] `generate_forensic_report`의 설명과 결과다.
+
+```python
+    """
+    Generate a structured forensic report by combining file metadata and log analysis.
+
+    This tool uses both `file_metadata` and `scan_syslog` to check whether the specified file's
+    modification time aligns with log entries containing the provided keyword. It outputs
+    a structured dictionary summarizing findings for programmatic consumption.
+
+    Parameters:
+        filename (str): Full path to the file to investigate.
+        keyword (str): Keyword to search in system logs (default is 'modified').
+
+    Returns:
+        dict: A structured forensic report with file info, logs, and correlation status.
+    """
+```
+
+[`mcp_forensic_toolkit/server.py:147-160`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L147-L160)
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+    if "error" in result:
+        return {
+            "status": "error",
+            "message": result["error"],
+            "filename": filename,
+            "keyword": keyword
+        }
+
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:161-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L177)
+
+[3] (실행 확인) 컨테이너 안에 키워드에 맞는 줄 151개를 둔 시험용 `/var/log/syslog`와 시험 파일을 만들고 도구 함수를 불렀다.
+
+[4] 세 도구는 줄, 상태 값, 해시를 돌려준다: [`mcp_forensic_toolkit/server.py:40-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L69), [`mcp_forensic_toolkit/server.py:76-90`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L76-L90), [`mcp_forensic_toolkit/server.py:97-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L97-L110).
+
+[5] `scan_syslog`가 돌려주는 줄과 문구다.
+
+```python
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+
+        else:
+            return [f"Unsupported OS: {system}"]
+
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+```
+
+[`mcp_forensic_toolkit/server.py:40-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L69)

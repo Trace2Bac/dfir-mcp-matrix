@@ -1,0 +1,114 @@
+---
+cell: E03
+details:
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 서버 코드가 파일을 직접 여는 `scan_syslog`의 Linux 경로, `file_metadata`, `hash_directory`에 적용된다 [1][2][3].
+이 서버에서 원본은 서버를 실행한 호스트의 시스템 로그와 도구 인자로 받은 파일이다 [1][2][3].
+`scan_syslog`는 `/var/log/syslog`를 `"r"`로 열어 줄마다 키워드를 찾는다 [1].
+`file_metadata`와 `hash_directory`는 파일을 `"rb"`로 열어 내용 전체를 읽는다 [2][3].
+`correlate_file_and_logs`와 `generate_forensic_report`는 `scan_syslog`와 `file_metadata`를 불러 같은 방식으로 읽는다 [4].
+서버 코드에는 파일을 쓰거나 지우거나 이름을 바꾸는 호출이 없다 [5].
+시험 파일과 시험용 `/var/log/syslog`로 도구를 모두 부른 뒤 새로 생기거나 바뀐 파일이 없었다 [6].
+저장소에는 증거를 읽기 전용으로 연결하거나 서버를 읽기 전용 환경에서 실행하는 실행 구성이 없다 [7].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 macOS에서 `scan_syslog`가 실행하는 `log` 명령에 적용된다 [8].
+서버는 `log show`에 술어 `--predicate`와 `--last 10m`을 붙인 인자 목록을 셸 없이 `subprocess.run`에 넘긴다 [8].
+하위 명령 `show`와 다른 인자는 코드에 정해 두었고 모델이 준 `keyword`는 술어 문자열 안에만 들어간다 [8].
+`platform.system()`이 `Darwin`을 돌려주게 바꾸고 시험용 `log` 실행 파일을 둔 시험에서 그 실행 파일이 받은 인자는 `show`, `--predicate`, 술어 문자열, `--last`, `10m`의 5개였다 [9].
+통합 로그 저장소를 바꾸지 않는 것은 `log` 명령의 동작에 맡긴다 [8].
+
+**한계.** Apple 문서는 `log` 도구가 명령줄에서 로그 메시지를 가져온다고만 적는다 [10].
+`log`는 소스가 공개되지 않았고 `log show`가 통합 로그 저장소를 읽기만 하는지는 확인하지 못했다(실제 보호 미확인) [10].
+
+### 근거
+
+[1] `scan_syslog`는 Linux에서 시스템 로그를 읽기 모드로 연다.
+
+```python
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:43-49`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L43-L49)
+
+[2] `file_metadata`는 파일을 `rb`로 연다.
+
+```python
+    try:
+        stat = os.stat(path)
+        with open(path, "rb") as f:
+            content = f.read()
+```
+
+[`mcp_forensic_toolkit/server.py:79-82`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L79-L82)
+
+[3] `hash_directory`도 파일을 `rb`로 연다.
+
+```python
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:100-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L100-L110)
+
+[4] 두 도구는 다른 도구 함수를 불러 읽는다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+```
+
+[`mcp_forensic_toolkit/server.py:125-126`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L126)
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+```
+
+[`mcp_forensic_toolkit/server.py:161-161`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L161)
+
+[5] 서버 코드 전체다: [`mcp_forensic_toolkit/server.py:1-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L1-L227).
+
+[6] (실행 확인) 컨테이너 안에 시험용 `/var/log/syslog`와 시험 파일을 만들고 도구 함수를 모두 부른 전후로 작업 폴더, `/tmp`, 서버 설치 폴더의 파일과 수정 시각을 대조했다.
+
+[7] 기준 커밋의 파일 목록에는 컨테이너나 실행 구성 파일이 없다: [`b81db06`](https://github.com/axdithyaxo/mcp-forensic-toolkit/tree/b81db06088b2b5a3003549c98592fde40f8f3c58).
+
+[8] macOS에서는 `log show`를 인자 목록으로 실행한다.
+
+```python
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+```
+
+[`mcp_forensic_toolkit/server.py:51-57`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L51-L57)
+
+[9] (실행 확인) 받은 인자를 파일에 적는 시험용 `log` 실행 파일을 `PATH` 앞에 두고 `scan_syslog("modified")`를 불렀다.
+
+[10] Apple 문서 「Viewing Log Messages」는 `log` 도구로 명령줄에서 로그 메시지를 가져온다고 적는다: [developer.apple.com/documentation/os/viewing-log-messages](https://developer.apple.com/documentation/os/viewing-log-messages).

@@ -1,0 +1,153 @@
+---
+cell: T06
+details:
+- id: not_implemented
+---
+
+# T06 실행 환경정보 표시
+
+### 미구현
+
+**판단.** 서버는 결과를 내지만 응답 어디에도 분석에 쓴 도구나 실행 환경의 버전을 싣지 않는다.
+`file_metadata`의 응답은 `size_bytes`, `created_at`, `modified_at`, `sha256`만 담는다 [1].
+`hash_directory`의 응답은 파일 경로와 SHA-256만 담는다 [2].
+`correlate_file_and_logs`와 `generate_forensic_report`의 응답에도 버전 필드가 없다 [3].
+`scan_syslog`는 로그 줄만 돌려주고 macOS에서 실행한 `log`나 OS의 버전, 어느 OS 경로로 읽었는지를 싣지 않는다 [4].
+서버는 호출 기록과 파생물 파일을 남기지 않는다 [5].
+버전을 알려 주는 별도 도구도 없다 [5].
+
+서버 자신의 버전도 싣지 않는다.
+서버는 `FastMCP`를 이름만 주어 만들고 MCP Python SDK 1.9.3은 버전이 없으면 초기화 응답 `serverInfo.version`에 `mcp` 패키지의 버전을 넣는다 [6][7].
+초기화 응답의 `serverInfo`는 이름 `ForensicToolkit`, 버전 `1.9.3`이었고 `pyproject.toml`의 서버 버전은 0.1.0이다 [8][9].
+
+서버는 모델을 부르지 않는다 [5].
+
+### 근거
+
+[1] `file_metadata`의 응답 필드다.
+
+```python
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+```
+
+[`mcp_forensic_toolkit/server.py:83-88`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L83-L88)
+
+[2] `hash_directory`는 경로와 해시만 담는다.
+
+```python
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:100-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L100-L110)
+
+[3] 두 묶음 도구의 응답 필드다.
+
+```python
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:137-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L137-L143)
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+    if "error" in result:
+        return {
+            "status": "error",
+            "message": result["error"],
+            "filename": filename,
+            "keyword": keyword
+        }
+
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:161-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L177)
+
+[4] `scan_syslog`는 고른 줄이나 한 줄의 문구만 돌려준다.
+
+```python
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+
+        else:
+            return [f"Unsupported OS: {system}"]
+
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+```
+
+[`mcp_forensic_toolkit/server.py:40-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L69)
+
+[5] 서버 코드 전체에 파일을 쓰는 곳, 버전을 읽는 곳, 모델을 부르는 곳이 없다: [`mcp_forensic_toolkit/server.py:1-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L1-L227).
+
+[6] 서버는 `FastMCP`에 이름만 준다.
+
+```python
+mcp = FastMCP("ForensicToolkit")
+```
+
+[`mcp_forensic_toolkit/server.py:21-21`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L21-L21)
+
+[7] MCP Python SDK 1.9.3은 서버 버전이 없으면 `mcp` 패키지 버전을 쓴다: [`src/mcp/server/lowlevel/server.py:159-171`](https://github.com/modelcontextprotocol/python-sdk/blob/544176770b53e6a0ae8c413d3b6c5116421f67df/src/mcp/server/lowlevel/server.py#L159-L171).
+
+[8] (실행 확인) MCP 클라이언트 세션으로 초기화하자 `serverInfo`는 `ForensicToolkit`, `1.9.3`이었다.
+
+[9] `pyproject.toml`의 서버 버전이다.
+
+```toml
+[project]
+name = "mcp-forensic-toolkit"
+version = "0.1.0"
+```
+
+[`pyproject.toml:30-32`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/pyproject.toml#L30-L32)

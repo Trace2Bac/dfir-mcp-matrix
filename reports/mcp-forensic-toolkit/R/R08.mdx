@@ -1,0 +1,111 @@
+---
+cell: R08
+details:
+- id: R08.01
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `scan_syslog`의 로그 줄과 두 묶음 도구의 `log_hits`에 적용된다 [1][2].
+서버는 로그 줄 안의 시각을 읽거나 바꾸지 않고 줄 전체를 그대로 싣는다 [1].
+시험 로그의 `Jun 10 10:00:00` 꼴 시각이 줄 안에 그대로 돌아왔다 [3].
+
+`file_metadata`는 시각을 바꾼 값만 싣는다 [4].
+`os.stat`의 `st_ctime`과 `st_mtime`을 `datetime.fromtimestamp`로 바꾸고 `isoformat()`의 글을 `created_at`과 `modified_at`에 싣는다 [4].
+Python 3.11의 `fromtimestamp`는 `tz`가 없으면 서버 호스트의 지역 시각으로 바꾼 naive `datetime`을 돌려준다 [5].
+`isoformat()`은 UTC 오프셋이 없는 `datetime`에 오프셋을 붙이지 않는다 [5].
+원래 epoch 값과 시간대는 싣지 않는다 [4].
+같은 파일을 `TZ`만 바꾼 두 서버로 보자 `modified_at`이 `2020-01-01T00:00:00`과 `2020-01-01T09:00:00`으로 달랐고 두 값 모두 오프셋이 없었다 [3].
+`correlate_file_and_logs`와 `generate_forensic_report`는 이 `modified_at`을 `file_modified_time`에 옮긴다 [2].
+
+`created_at`은 `st_ctime`이다 [4].
+Python 3.11 문서는 `st_ctime`을 Unix에서 마지막 메타데이터 변경 시각, Windows에서 생성 시각으로 적는다 [6].
+수정 시각을 2020년으로 바꾼 파일의 `created_at`은 바꾼 시점의 시각이었고 `modified_at`보다 늦었다 [3].
+
+### 근거
+
+[1] `scan_syslog`는 줄을 바꾸지 않고 돌려준다.
+
+```python
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:43-63`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L43-L63)
+
+[2] 두 묶음 도구는 로그 줄과 `modified_at`을 옮긴다.
+
+```python
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:131-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L131-L143)
+
+```python
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:170-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L170-L177)
+
+[3] (실행 확인) 컨테이너 안의 시험 파일 수정 시각을 `os.utime`으로 2020-01-01T00:00:00Z로 바꾸고 환경변수 `TZ`를 주지 않은 서버와 `KST-9`로 준 서버에서 `file_metadata`를 불렀다.
+같은 실행에서 시험 `/var/log/syslog`로 `scan_syslog`도 불렀다.
+
+[4] `file_metadata`는 시각을 지역 시각의 ISO 글로 바꾼다.
+
+```python
+        stat = os.stat(path)
+        with open(path, "rb") as f:
+            content = f.read()
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+```
+
+[`mcp_forensic_toolkit/server.py:80-88`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L80-L88)
+
+[5] Python 3.11.9 문서의 `datetime.fromtimestamp`와 `datetime.isoformat`이다: [`Doc/library/datetime.rst:895-900`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/datetime.rst#L895-L900), [`Doc/library/datetime.rst:1430-1442`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/datetime.rst#L1430-L1442).
+
+[6] Python 3.11.9 문서의 `st_ctime`이다: [`Doc/library/os.rst:2839-2844`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/os.rst#L2839-L2844).

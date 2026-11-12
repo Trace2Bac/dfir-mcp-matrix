@@ -1,0 +1,154 @@
+---
+cell: P02
+details:
+- id: P02.01
+- id: P02.04
+---
+
+# P02 다음 작업 결정
+
+### P02.01 고정 문서·프로필 반환
+
+**구현.** 이 방식은 MCP 프롬프트 4개와 리소스 `toolkit://about`에 적용된다 [1][2].
+프롬프트는 받은 파일 이름과 키워드를 넣은 글 하나를 돌려준다 [1].
+
+- `investigate-file`은 `file_metadata`로 크기, 생성 시각, 수정 시각, SHA-256을 얻으라고 적는다 [1].
+- `triage-system-logs`는 `scan_syslog`로 키워드를 찾아 오류, 경고, 보안 관련 줄을 요약하라고 적는다 [1].
+- `correlate-log-and-file`은 `scan_syslog`를 먼저 부르고 그다음 `file_metadata`를 부른 뒤 수정 시각이 의심스러운 로그 줄과 맞는지 분석하라고 적는다 [1].
+- `explain-correlation`은 `correlate_file_and_logs`를 부른 뒤 로그 줄과 메타데이터를 해석하라고 적는다 [1].
+
+MCP SDK 클라이언트로 받은 네 프롬프트의 글에 이 문구가 그대로 실렸다 [3].
+리소스 `toolkit://about`은 기능 3가지와 `SAFE_BASE` 설정 방법을 적고 내장 프롬프트나 도구를 쓰라고 적는다 [2].
+리소스는 작업의 차례를 적지 않는다 [2].
+서버 지침은 없고 `initialize` 응답의 `instructions`는 `null`이었다 [3].
+프롬프트는 사용자가 클라이언트에서 고를 때만 모델에게 가고 서버는 모델이 그 차례를 따르는지 보지 않는다.
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 `correlate_file_and_logs`와 `generate_forensic_report`에 적용된다 [4][5].
+`correlate_file_and_logs`는 `scan_syslog`로 키워드가 들어간 로그 줄을 얻고 `file_metadata`로 파일 상태 값과 해시를 얻는다 [4].
+그다음 파일 이름이 로그 줄에 들어 있는지로 `correlation_found`를 정하고 수정 시각, 로그 줄 앞 10개와 함께 돌려준다 [4].
+`generate_forensic_report`는 `correlate_file_and_logs`를 부르고 결과에 `status`를 붙인다 [5].
+모델은 파일 경로와 키워드만 고르고 두 단계의 차례와 결과를 합치는 방법은 서버 코드가 정한다 [4].
+서버 안에서 모델을 불러 계획을 세우는 경로는 없다.
+
+**한계.** `correlate_file_and_logs`는 `file_metadata`의 오류만 확인하고 `scan_syslog`가 돌려준 오류 문구는 로그 줄로 받아 다음 단계를 실행한다 [4].
+`/var/log/syslog`가 없는 컨테이너에서 `generate_forensic_report`의 `status`는 `ok`였고 `log_hits`에는 파일을 찾지 못했다는 문구가 실렸다 [3].
+
+### 근거
+
+[1] 프롬프트 4개는 부를 도구와 차례를 적는다.
+
+```python
+@mcp.prompt("investigate-file")
+def investigate_file_prompt(filename: str) -> str:
+    return (
+        f"You are a digital forensic analyst. Use the `file_metadata` tool on '{filename}' "
+        f"to retrieve its size, creation time, modification time, and SHA-256 hash. "
+        "Based on the timestamps and size, assess whether the file shows signs of tampering, "
+        "suspicious timing, or unexpected characteristics."
+    )
+
+@mcp.prompt("triage-system-logs")
+def triage_logs_prompt(keyword: str = "error") -> str:
+    return (
+        f"Search the system log for the keyword '{keyword}' using the `scan_syslog` tool. "
+        "Summarize the most relevant lines that indicate errors, warnings, or security-related events. "
+        "Explain whether immediate action may be necessary."
+    )
+```
+
+[`mcp_forensic_toolkit/server.py:180-195`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L180-L195)
+
+```python
+@mcp.prompt("correlate-log-and-file")
+def correlate_log_and_file_prompt(filename: str, keyword: str = "modified") -> str:
+    return (
+        f"First, use `scan_syslog` to search for the keyword '{keyword}' in the system log. "
+        f"Then use `file_metadata` on the file '{filename}'. "
+        "Analyze whether the file modification time matches any suspicious log entries. "
+        "If so, explain the correlation and what it may imply."
+    )
+
+@mcp.prompt("explain-correlation")
+def explain_correlation_prompt(filename: str, keyword: str = "modified") -> str:
+    return (
+        f"Use the `correlate_file_and_logs` tool with filename '{filename}' and keyword '{keyword}'. "
+        "Interpret the log hits and file metadata, and explain whether there's likely tampering or suspicious timing. "
+        "Summarize your forensic reasoning in under 100 words."
+    )
+```
+
+[`mcp_forensic_toolkit/server.py:197-212`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L197-L212)
+
+[2] 리소스는 기능과 설정을 적는다.
+
+```python
+@mcp.resource("toolkit://about")
+def about_toolkit() -> str:
+    return (
+        "🔍 MCP Forensic Toolkit — a secure, AI-integrated server for digital forensics.\n\n"
+        " Key Features:\n"
+        "- Log file triage using keyword-based search\n"
+        "- File metadata and integrity checks via SHA-256\n"
+        "- Cross-correlation between log entries and file activity\n\n"
+        " Configuration:\n"
+        "Set a safe base directory using the SAFE_BASE variable in a `.env` file to limit file access.\n"
+        "Default base directory: ~/Desktop\n\n"
+        " Use built-in prompts or tools via MCP Inspector or any LLM-compatible interface."
+    )
+```
+
+[`mcp_forensic_toolkit/server.py:215-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L215-L227)
+
+[3] (실행 확인) 네트워크를 끈 컨테이너에서 MCP SDK 클라이언트로 서버를 stdio로 실행해 `initialize`, 프롬프트 목록과 글, 리소스 글, 도구 응답을 받았다.
+
+[4] `correlate_file_and_logs`는 두 도구 함수를 차례로 부르고 결과를 합친다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+
+    if "error" in file_info:
+        return {"error": f"File error: {file_info['error']}"}
+
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:125-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L143)
+
+[5] `generate_forensic_report`는 `correlate_file_and_logs`의 결과에 `status`를 붙인다.
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+    if "error" in result:
+        return {
+            "status": "error",
+            "message": result["error"],
+            "filename": filename,
+            "keyword": keyword
+        }
+
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:161-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L177)

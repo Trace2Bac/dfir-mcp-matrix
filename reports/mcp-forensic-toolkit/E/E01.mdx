@@ -1,0 +1,112 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 증거를 등록하는 도구를 두지 않고 증거를 식별하는 목록이나 등록 정보를 남기지 않는다.
+`file_metadata`, `hash_directory`, `correlate_file_and_logs`, `generate_forensic_report`는 파일이나 폴더의 경로를 호출마다 인자로 받아 그 호출에서만 읽는다 [1].
+`scan_syslog`는 Linux에서 코드에 정한 `/var/log/syslog`를 읽고 macOS에서 `log show`의 출력을 읽는다 [2].
+`file_metadata`가 받는 경로는 환경변수 `SAFE_BASE`와 대조되지만 이 값은 읽을 수 있는 범위를 정하는 설정이고 증거 항목을 적은 것이 아니다 [3].
+
+`file_metadata`는 파일 하나의 크기, 두 시각, SHA-256을 응답으로만 돌려준다 [4].
+`hash_directory`는 받은 폴더 아래 파일마다 전체 경로를 키로 SHA-256을 담은 `dict`를 응답으로만 돌려준다 [5].
+서버 코드에는 파일을 쓰는 호출이 없어 이 목록은 서버에 남지 않는다 [6][7].
+같은 파일을 다시 넘기면 서버는 파일을 다시 읽어 새 응답을 만들고 앞선 호출을 가리키는 값을 싣지 않는다 [4][5].
+
+### 근거
+
+[1] 네 도구는 경로를 인자로 받는다: [`mcp_forensic_toolkit/server.py:71-72`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L71-L72), [`mcp_forensic_toolkit/server.py:92-93`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L92-L93), [`mcp_forensic_toolkit/server.py:112-113`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L112-L113), [`mcp_forensic_toolkit/server.py:145-146`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L145-L146).
+
+[2] `scan_syslog`는 OS에 따라 정해 둔 로그 출처를 읽는다.
+
+```python
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+```
+
+[`mcp_forensic_toolkit/server.py:40-55`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L55)
+
+[3] `SAFE_BASE`는 경로를 대조하는 기준 폴더다.
+
+```python
+SAFE_BASE = os.getenv("SAFE_BASE")
+if not SAFE_BASE:
+    raise RuntimeError("SAFE_BASE is not set. Please define it in your .env file.")
+
+# -------------------- Helpers --------------------
+def is_safe_path(path: str, base_dir: str = SAFE_BASE) -> bool:
+    return os.path.abspath(path).startswith(os.path.abspath(base_dir))
+```
+
+[`mcp_forensic_toolkit/server.py:12-18`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L12-L18)
+
+[4] `file_metadata`는 상태 값과 해시를 `dict`로 돌려준다.
+
+```python
+    if not is_safe_path(path):
+        return {"error": "Access denied: path is outside the allowed directory scope."}
+
+    try:
+        stat = os.stat(path)
+        with open(path, "rb") as f:
+            content = f.read()
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+[`mcp_forensic_toolkit/server.py:76-90`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L76-L90)
+
+[5] `hash_directory`는 파일마다 해시를 담은 `dict`를 돌려준다.
+
+```python
+@mcp.tool()
+def hash_directory(path: str) -> dict:
+    """
+    Recursively compute SHA-256 hashes for all files in a directory.
+    """
+    if not os.path.isdir(path):
+        return {"error": "Provided path is not a directory."}
+
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:92-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L92-L110)
+
+[6] (실행 확인) 시험 파일과 폴더로 도구를 모두 부른 뒤 작업 폴더, `/tmp`, 서버 설치 폴더에 새로 생기거나 바뀐 파일이 없었다.
+
+[7] 서버 코드 전체다: [`mcp_forensic_toolkit/server.py:1-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L1-L227).

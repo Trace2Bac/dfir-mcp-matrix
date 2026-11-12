@@ -1,0 +1,99 @@
+---
+cell: P03
+details:
+- id: P03.03
+---
+
+# P03 조사 진척 판단
+
+### P03.03 미조사 범위·생략 사유 보고
+
+**구현.** 이 방식은 `hash_directory`에 적용된다 [1].
+`hash_directory`는 읽지 못한 파일을 결과에서 빼지 않고 그 경로의 값에 `Error: `와 예외 문구를 싣는다 [1].
+읽기 권한이 없는 파일과 대상이 없는 링크를 둔 시험 폴더에서 두 경로의 값은 `Permission denied`와 `No such file or directory`가 들어간 문구였다 [2].
+
+이 보고는 그 호출 한 번의 범위에 그친다.
+서버에는 대상별로 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행 기록을 적는 도구도 없다 [3].
+
+다음 도구는 다루지 못한 범위를 응답에 싣지 않는다.
+
+- `scan_syslog`는 키워드에 맞는 줄이 100개를 넘으면 마지막 100줄만 돌려주고 뺀 줄 수를 싣지 않는다 [4].
+- `correlate_file_and_logs`는 대조에 쓴 로그 줄 가운데 앞 10개만 `log_hits`에 싣고 나머지를 뺐다는 사실을 싣지 않는다 [5].
+- 키워드에 맞는 줄 151개를 둔 시험에서 `scan_syslog`는 100줄을 돌려주었고 `log_hits`는 10줄이었다 [2].
+
+**한계.** `hash_directory`는 `os.walk`를 기본 인자로 부른다 [1].
+Python 3.11.9의 `os.walk`는 기본 인자에서 목록을 읽지 못한 폴더를 오류 없이 건너뛰고 폴더를 가리키는 링크를 따라가지 않는다 [6].
+그래서 그런 폴더 아래 파일은 결과에 없고 건너뛴 사실도 실리지 않는다 [1][6].
+권한을 없앤 하위 폴더와 폴더 링크를 둔 시험 폴더에서 두 곳은 오류 문구 없이 결과에서 빠졌다 [2].
+받은 폴더 자체의 목록을 읽지 못해도 `hash_directory`는 거부하지 않고 빈 `dict`를 돌려준다 [1][6].
+목록을 읽을 수 없게 둔 폴더를 주자 빈 폴더를 준 경우와 같은 빈 `dict`가 돌아왔다 [7].
+
+### 근거
+
+[1] `hash_directory`는 파일마다 해시나 오류 문구를 싣는다.
+
+```python
+@mcp.tool()
+def hash_directory(path: str) -> dict:
+    """
+    Recursively compute SHA-256 hashes for all files in a directory.
+    """
+    if not os.path.isdir(path):
+        return {"error": "Provided path is not a directory."}
+
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:92-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L92-L110)
+
+[2] (실행 확인) 컨테이너 안에 시험 폴더와 시험용 `/var/log/syslog`를 만들고 권한을 낮춘 사용자로 도구 함수를 불렀다.
+
+[3] 서버가 등록한 도구 5개다: [`mcp_forensic_toolkit/server.py:24-25`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L24-L25), [`mcp_forensic_toolkit/server.py:71-72`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L71-L72), [`mcp_forensic_toolkit/server.py:92-93`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L92-L93), [`mcp_forensic_toolkit/server.py:112-113`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L112-L113), [`mcp_forensic_toolkit/server.py:145-146`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L145-L146).
+
+[4] `scan_syslog`는 맞는 줄의 마지막 100개를 돌려준다.
+
+```python
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:47-49`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L47-L49)
+
+```python
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:59-63`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L59-L63)
+
+[5] `correlate_file_and_logs`는 로그 줄 앞 10개를 싣는다.
+
+```python
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:137-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L137-L143)
+
+[6] Python 3.11.9의 `os.walk`는 `onerror`가 없으면 목록을 읽지 못한 폴더를 건너뛰고 `followlinks`가 거짓이면 폴더 링크 아래로 내려가지 않는다: [`Lib/os.py:282`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Lib/os.py#L282), [`Lib/os.py:358-362`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Lib/os.py#L358-L362), [`Lib/os.py:414-419`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Lib/os.py#L414-L419).
+
+[7] (실행 확인) 컨테이너 안에 서버 계정이 목록을 읽을 수 없게 둔 폴더와 빈 폴더를 만들고 비루트 계정으로 `hash_directory`를 불러 두 결과를 대조했다.

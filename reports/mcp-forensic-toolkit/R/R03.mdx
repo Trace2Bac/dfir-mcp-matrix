@@ -1,0 +1,173 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.03
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 `generate_forensic_report`의 `status`와 `file_metadata`, `hash_directory`, `correlate_file_and_logs`의 `error` 필드에 적용된다 [1][2][3][4].
+`generate_forensic_report`는 `status`를 `ok`나 `error`로 두고 `error`이면 `message`에 오류 문구를 싣는다 [1].
+`file_metadata`와 `correlate_file_and_logs`는 실패하면 `error` 키 하나에 문구를 담은 `dict`를 돌려주고 성공하면 `error` 키를 두지 않는다 [2][4].
+`hash_directory`는 받은 경로가 폴더가 아닐 때만 `error` 키 하나에 문구를 담은 `dict`를 돌려준다 [3].
+이 응답들은 도구가 정상으로 돌려준 값이라 MCP 응답의 `isError`는 거짓이다 [5][6].
+인자가 입력 schema에 맞지 않으면 MCP Python SDK 1.9.3이 도구 함수를 부르지 않고 `isError`가 참인 결과를 돌려준다 [5][7].
+`scan_syslog`를 `keyword` 없이 부르자 `isError`가 참이고 `Error executing tool scan_syslog`로 시작하는 결과가 돌아왔다 [6].
+
+`scan_syslog`에는 상태 필드가 없다 [8].
+로그를 읽지 못했을 때, OS를 지원하지 않을 때, 맞는 줄이 없을 때 모두 로그 줄과 같은 꼴의 문자열 한 줄을 돌려주고 이 셋은 문장으로만 구별된다 [8].
+
+**한계.** `generate_forensic_report`의 `status`는 `file_metadata`의 결과만 반영한다 [1][4].
+`scan_syslog`가 로그를 읽지 못해 오류 문구를 돌려줘도 `status`는 `ok`이고 그 문구는 `log_hits`에 들어간다 [1][4].
+`/var/log/syslog`가 없거나 읽을 수 없는 컨테이너에서 `generate_forensic_report`를 부르자 `status`가 `ok`였고 `log_hits`에 찾지 못함이나 권한 오류 문구가 한 줄 들어 있었다 [6].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `hash_directory`에 적용된다 [3].
+파일마다 경로를 키로 두고 읽으면 SHA-256을, 읽지 못하면 `Error: <문구>`를 값으로 싣는다 [3].
+읽기 권한이 없는 파일이 있는 폴더로 부르자 그 파일의 값만 `Error: [Errno 13] Permission denied`로 시작하는 문구였고 다른 파일은 해시였다 [6].
+
+**한계.** 실패는 해시가 들어갈 자리의 문구로만 구분되고 따로 된 상태 필드나 실패 수는 없다 [3].
+`os.walk`가 목록을 읽지 못한 하위 폴더 아래 파일은 항목 없이 빠진다 [3][9].
+목록을 읽을 수 없게 둔 하위 폴더가 있는 폴더로 부르자 그 폴더 아래 파일의 항목은 없었다 [10].
+받은 폴더 자체의 목록을 읽지 못하면 항목이 하나도 없는 `dict`가 돌아오고 빈 폴더의 결과와 구별되지 않는다 [3][9].
+
+### 근거
+
+[1] `generate_forensic_report`는 `error` 키로 `status`를 정한다.
+
+```python
+    result = correlate_file_and_logs(filename, keyword)
+    if "error" in result:
+        return {
+            "status": "error",
+            "message": result["error"],
+            "filename": filename,
+            "keyword": keyword
+        }
+
+    return {
+        "status": "ok",
+        "filename": result["filename"],
+        "keyword": result["keyword"],
+        "file_modified_time": result["file_modified_time"],
+        "log_hits": result["log_hits"],
+        "correlation_found": result["correlation_found"]
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:161-177`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L161-L177)
+
+[2] `file_metadata`는 실패하면 `error`를 돌려준다.
+
+```python
+    if not is_safe_path(path):
+        return {"error": "Access denied: path is outside the allowed directory scope."}
+```
+
+[`mcp_forensic_toolkit/server.py:76-77`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L76-L77)
+
+```python
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+[`mcp_forensic_toolkit/server.py:89-90`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L89-L90)
+
+[3] `hash_directory`는 폴더가 아니면 `error`를, 파일마다 해시나 `Error:` 문구를 싣는다.
+
+```python
+    if not os.path.isdir(path):
+        return {"error": "Provided path is not a directory."}
+
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:97-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L97-L110)
+
+[4] `correlate_file_and_logs`는 `file_metadata`의 `error`만 보고 `scan_syslog`의 줄은 그대로 담는다.
+
+```python
+    log_results = scan_syslog(keyword)
+    file_info = file_metadata(filename)
+
+    if "error" in file_info:
+        return {"error": f"File error: {file_info['error']}"}
+
+    mod_time = file_info.get("modified_at")
+    basename = os.path.basename(filename).lower()
+
+    # Match if filename appears in any log line
+    correlation_found = any(basename in line.lower() for line in log_results)
+
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:125-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L125-L143)
+
+[5] MCP Python SDK 1.9.3은 도구 함수가 낸 예외와 인자 검사 실패를 `isError`가 참인 결과로 바꾸고 정상 반환은 `isError`를 거짓으로 둔다: [`src/mcp/server/lowlevel/server.py:415-427`](https://github.com/modelcontextprotocol/python-sdk/blob/544176770b53e6a0ae8c413d3b6c5116421f67df/src/mcp/server/lowlevel/server.py#L415-L427), [`src/mcp/server/fastmcp/tools/base.py:85-101`](https://github.com/modelcontextprotocol/python-sdk/blob/544176770b53e6a0ae8c413d3b6c5116421f67df/src/mcp/server/fastmcp/tools/base.py#L85-L101).
+
+[6] (실행 확인) 컨테이너 안에 만든 시험 파일과 시험 `/var/log/syslog`로 MCP 클라이언트 세션에서 도구를 불렀다.
+`/var/log/syslog`를 지운 실행과 권한을 600으로 둔 실행을 따로 했고 서버는 비루트 계정으로 실행했다.
+
+[7] MCP Python SDK 1.9.3은 함수를 부르기 전에 인자를 pydantic 모델로 검사한다: [`src/mcp/server/fastmcp/utilities/func_metadata.py:45-69`](https://github.com/modelcontextprotocol/python-sdk/blob/544176770b53e6a0ae8c413d3b6c5116421f67df/src/mcp/server/fastmcp/utilities/func_metadata.py#L45-L69).
+
+[8] `scan_syslog`는 모든 경우에 문자열 목록을 돌려준다.
+
+```python
+    system = platform.system()
+
+    try:
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+
+        else:
+            return [f"Unsupported OS: {system}"]
+
+    except Exception as e:
+        return [f"Error reading logs: {str(e)}"]
+```
+
+[`mcp_forensic_toolkit/server.py:40-69`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L40-L69)
+
+[9] Python 3.11.9 문서는 `os.walk`가 기본값으로 `scandir` 오류를 무시한다고 적는다: [`Doc/library/os.rst:3290-3294`](https://github.com/python/cpython/blob/de54cf5be371a6f5e2e9f208c38def5f81d3ef02/Doc/library/os.rst#L3290-L3294).
+
+[10] (실행 확인) 컨테이너 안에 권한을 000으로 둔 하위 폴더와 읽을 수 있는 하위 폴더를 만들고 비루트 계정으로 실행한 서버에서 `hash_directory`를 불렀다.

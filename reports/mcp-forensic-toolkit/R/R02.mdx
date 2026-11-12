@@ -1,0 +1,103 @@
+---
+cell: R02
+details:
+- id: R02.01
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 `scan_syslog`와 `correlate_file_and_logs`·`generate_forensic_report`의 `log_hits`에 적용된다 [1][2].
+`scan_syslog`는 키워드가 들어 있는 줄을 모두 모은 뒤 마지막 100줄(`lines[-100:]`)만 돌려준다 [1].
+Linux에서는 `/var/log/syslog`를 처음부터 끝까지 읽어 맞는 줄을 모두 메모리에 모은다 [1].
+macOS에서는 `log show`에 `--last 10m`을 넘기고 받은 줄에 같은 100줄 상한을 적용한다 [1].
+`correlate_file_and_logs`는 그 100줄 가운데 다시 앞 10줄(`log_hits[:10]`)만 싣고 `generate_forensic_report`는 그 값을 옮긴다 [2].
+키워드가 들어 있는 줄이 150줄인 시험 로그로 부르자 `scan_syslog`는 51번째부터 150번째 줄까지 100줄을 돌려주었다 [3].
+같은 키워드로 `correlate_file_and_logs`를 부르자 `log_hits`는 51번째부터 60번째 줄까지 10줄이었다 [3].
+두 응답에는 잘렸다는 표시나 전체 건수가 없다 [1][2][3].
+줄 하나의 길이에는 상한이 없다 [1].
+나머지 결과를 이어서 읽는 도구나 보관한 파일은 없다 [4].
+
+`hash_directory`에는 상한이 없다 [5].
+파일 500개가 있는 폴더로 부르자 키 500개를 담은 48,394자의 JSON 글 하나가 돌아왔다 [3].
+`file_metadata`의 응답은 필드 4개로 정해진 꼴이다 [6].
+
+### 근거
+
+[1] `scan_syslog`는 모은 줄의 마지막 100줄만 돌려준다.
+
+```python
+        if system == "Linux":
+            log_path = "/var/log/syslog"
+            if not os.path.exists(log_path):
+                return [f"Log file '{log_path}' not found."]
+            with open(log_path, "r") as f:
+                lines = [line for line in f if keyword.lower() in line.lower()]
+                return lines[-100:] if lines else ["No matching entries found."]
+
+        elif system == "Darwin":  # macOS
+            result = subprocess.run(
+                ["log", "show", "--predicate", f'eventMessage contains[c] "{keyword}"', "--last", "10m"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if result.returncode != 0:
+                return [f"log show error: {result.stderr.strip()}"]
+            # Filter out header or empty lines
+            lines = [
+                line for line in result.stdout.splitlines()
+                if line.strip() and not line.strip().startswith("Timestamp")
+            ]
+            return lines[-100:] if lines else ["No matching entries found."]
+```
+
+[`mcp_forensic_toolkit/server.py:43-63`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L43-L63)
+
+[2] `correlate_file_and_logs`는 앞 10줄만 `log_hits`에 싣는다.
+
+```python
+    return {
+        "filename": filename,
+        "keyword": keyword,
+        "file_modified_time": mod_time,
+        "log_hits": log_results[:10],
+        "correlation_found": correlation_found
+    }
+```
+
+[`mcp_forensic_toolkit/server.py:137-143`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L137-L143)
+
+[3] (실행 확인) 컨테이너 안에 키워드가 들어 있는 줄 150줄을 넣은 시험 `/var/log/syslog`와 파일 500개가 있는 시험 폴더를 만들고 MCP 클라이언트 세션에서 도구를 불렀다.
+
+[4] 서버 코드에는 결과를 보관하거나 이어서 읽는 도구가 없다: [`mcp_forensic_toolkit/server.py:1-227`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L1-L227).
+
+[5] `hash_directory`는 폴더 아래 모든 파일을 결과에 넣는다.
+
+```python
+    results = {}
+    for root, _, files in os.walk(path):
+        for f in files:
+            full_path = os.path.join(root, f)
+            try:
+                with open(full_path, "rb") as fp:
+                    content = fp.read()
+                    results[full_path] = hashlib.sha256(content).hexdigest()
+            except Exception as e:
+                results[full_path] = f"Error: {str(e)}"
+    return results
+```
+
+[`mcp_forensic_toolkit/server.py:100-110`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L100-L110)
+
+[6] `file_metadata`의 응답 필드다.
+
+```python
+        return {
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified_at": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+```
+
+[`mcp_forensic_toolkit/server.py:83-88`](https://github.com/axdithyaxo/mcp-forensic-toolkit/blob/b81db06088b2b5a3003549c98592fde40f8f3c58/mcp_forensic_toolkit/server.py#L83-L88)
