@@ -1,0 +1,363 @@
+---
+cell: P01
+details:
+- id: P01.01
+- id: P01.02
+- id: P01.03
+---
+
+# P01 분석 방법 적합성 확인
+
+### P01.01 이름·확장자 판별
+
+**구현.** 이 방식은 `findevil-mcp`의 디스크 이미지 도구 `case_open`·`disk_mount`·`disk_extract_artifacts`와 `yara_scan`·`zeek_summary`에 적용된다 [1][2][3].
+`is_first_ewf_segment`는 확장자의 글자 부분이 `E`·`Ex`이고 숫자가 1이면 분할 EWF의 첫 조각으로 본다 [1].
+`disk_mount`는 자동 모드에서 이 판별로 EWF 경로(`ewfmount`와 `ntfs3` loop 마운트)와 raw 경로(`mount -o ro,loop`)를 고른다 [2].
+`case_open`과 `disk_extract_artifacts`도 같은 판별로 옆 조각을 모아 해시하거나 Sleuth Kit에 넘긴다 [1][4].
+`disk_extract_artifacts`는 이미지 안 파일의 경로와 이름을 `classify_artifact_path`로 `mft`, `registry`, `evtx`, `prefetch` 같은 종류로 나누고 종류마다 꺼낼지 정한다 [3].
+`classify_artifact_path`는 Windows 고유 이름을 먼저 보고 Linux 경로, macOS 경로, Windows 일반 경로 차례로 본다 [3].
+`yara_scan`은 규칙 폴더에서 확장자가 `.yar`·`.yara`·`.yarx`인 파일만 규칙으로 모은다 [5].
+`zeek_summary`는 폴더에서 확장자가 `.log`인 파일만 Zeek 로그로 모은다 [6].
+
+`findevil-agent-mcp`에는 증거 형식이나 OS를 판별하는 도구가 없다 [7].
+같은 저장소의 `findevil_agent/playbook.py`는 확장자와 이름으로 증거 유형과 아티팩트 종류를 정하는 `detect_evidence_type`·`classify_artifact_path`를 두고 사용자 CLI `scripts/find_evil_auto.py`가 이 모듈을 불러 쓴다 [8][9].
+`findevil-agent-mcp` 프로세스를 시작한 뒤 불러온 `findevil_agent` 하위 모듈 30개에 `findevil_agent.playbook`은 없었다 [10].
+
+**한계.** `is_first_ewf_segment`는 확장자만 보고 파일 내용이 EWF인지 확인하지 않는다 [1].
+확장자가 `.E01`인 raw 이미지는 EWF 경로로 처리되고 확장자가 `.s01`·`.L01`인 분할 이미지는 raw 경로로 처리된다 [1][2].
+`classify_artifact_path`는 이름이 `system`·`software`·`sam` 같은 파일을 경로와 관계없이 레지스트리 하이브로 분류한다 [3].
+`yara_scan`은 규칙 경로에 파일 하나를 주면 확장자를 보지 않는다 [5].
+
+### P01.02 메타데이터 조회
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_mount`·`disk_extract_artifacts`에 적용된다 [11][12].
+두 도구는 이미지에 `mmls`를 실행하고 파티션 표에서 대소문자를 가리지 않고 `ntfs`, `fat`, `linux`, `hfs`, `apfs`가 들어간 행만 파일 시스템 파티션으로 본다 [12].
+분석 대상 파티션은 그 가운데 길이가 가장 긴 파티션으로 정한다 [12].
+`disk_mount`는 이 파티션의 시작 위치로 loop 마운트를 다시 시도하고 응답의 `partitions`에 파일 시스템 파티션 전체를 싣는다 [11][13].
+`disk_extract_artifacts`는 같은 시작 위치를 `fls`·`icat`의 `-o` 인자로 넘긴다 [14].
+파티션 표 행 3개를 내는 시험용 `mmls`에서 `disk_mount`는 가장 긴 파티션의 시작 위치로 마운트했고 `fls`·`icat`도 그 위치를 받았다 [15].
+
+**한계.** 다른 파일 시스템 파티션은 `partitions`에만 실리고 꺼내기 대상이 되지 않는다 [12][14].
+`mmls`를 실행하지 못하거나 파티션 표가 없으면 시작 위치 0으로 읽는다 [12][14].
+Sleuth Kit 4.15.0의 `mmls`는 DOS 파티션 표의 스왑 파티션과 LVM 파티션 설명에도 `Linux`를 넣으므로 두 도구는 이 행도 파일 시스템 파티션으로 본다 [12][16].
+이 행이 가장 길면 두 도구는 그 시작 위치로 마운트하고 파일을 꺼낸다 [12].
+파티션의 파일 시스템 종류나 OS를 보고 꺼낼 아티팩트 종류를 바꾸지는 않는다 [3].
+
+### P01.03 내용·헤더 검사
+
+**구현.** 이 방식은 `findevil-mcp`의 `thumbcache_parse`·`bits_parse`·`browser_history`·`hashset_lookup`에 적용된다 [17][18][19][20].
+`thumbcache_parse`는 파일 앞 바이트가 OLE 복합 파일 서명이면 XP `Thumbs.db` 해석 경로를, `CMMM`이면 Vista 이후 해석 경로를 고른다 [17].
+`bits_parse`는 5~8번째 바이트가 ESE 서명이면 문자열을 찾지 않고 형식만 알리는 경로로 간다 [18].
+`browser_history`는 SQLite 파일에 `urls`·`visits` 표가 있으면 Chrome으로, `moz_places` 표가 있으면 Firefox로 보고 각 형식의 질의를 실행한다 [19].
+두 구조가 모두 없으면 `UnknownSchema` 오류로 끝난다 [19].
+참조 해시 목록을 받는 `hashset_lookup`은 파일 앞 16바이트가 SQLite 서명이면 SQLite 목록으로, 아니면 글 목록으로 읽는다 [20].
+
+볼륨 섀도 복사본, 메모리, 이벤트 로그 도구는 받은 경로의 형식을 서버가 따로 확인하지 않고 외부 도구나 해석 라이브러리에 넘긴다.
+`vol_run`은 허용 목록에 Windows, Linux, macOS 플러그인을 함께 두고 메모리 이미지의 OS와 고른 플러그인을 대조하지 않는다 [21].
+`findevil-agent-mcp`의 도구는 발견사항, 호출 기록, 기억 저장소를 다루며 증거 형식을 확인하지 않는다 [7].
+
+### 근거
+
+[1] 분할 EWF 첫 조각을 확장자로 판별한다.
+
+```rust
+fn first_segment_extension(path: &Path) -> Option<SegmentExtension> {
+    let ext = path.extension()?.to_str()?;
+    let parsed = parse_segment_extension(ext)?;
+    (parsed.number == 1).then_some(parsed)
+}
+
+fn parse_segment_extension(ext: &str) -> Option<SegmentExtension> {
+    let digit_start = ext.find(|c: char| c.is_ascii_digit())?;
+    let (prefix, digits) = ext.split_at(digit_start);
+    if prefix.is_empty() || digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let prefix_lower = prefix.to_ascii_lowercase();
+    if prefix_lower != "e" && prefix_lower != "ex" {
+        return None;
+    }
+    let number = digits.parse::<u32>().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(SegmentExtension {
+        prefix: prefix.to_string(),
+        number,
+        width: digits.len(),
+    })
+}
+```
+
+[`services/mcp/src/tools/ewf_segments.rs:159-184`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ewf_segments.rs#L159-L184)
+
+[2] `disk_mount`의 자동 모드는 첫 조각 판별로 EWF와 raw 경로를 고른다.
+
+```rust
+fn auto_mount(
+    image_paths: &[PathBuf],
+    mount_point: &Path,
+) -> Result<(String, PathBuf, Vec<String>, String, String), DiskError> {
+    if cfg!(windows) {
+        return Err(DiskError::UnsupportedPlatform);
+    }
+    let image_path = image_paths
+        .first()
+        .ok_or_else(|| DiskError::ImageNotFound(PathBuf::from("<empty image set>")))?;
+    if is_first_ewf_segment(image_path) {
+        return auto_mount_ewf(image_paths, mount_point);
+    }
+    auto_mount_raw(image_path, mount_point)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:489-503`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L489-L503)
+
+[3] `classify_artifact_path`는 경로와 이름으로 아티팩트 종류를 정한다: [`services/mcp/src/tools/disk.rs:1503-1635`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1503-L1635).
+
+[4] `disk_extract_artifacts`는 기록된 이미지의 조각 목록을 다시 만들어 Sleuth Kit에 넘긴다.
+
+```rust
+    let image_path = mount
+        .image_path
+        .ok_or_else(|| DiskError::MountNotMounted(input.mount_id.clone()))?;
+    if !image_path.is_file() {
+        return Err(DiskError::ImageNotFound(image_path));
+    }
+    let image_paths = segment_paths_for_image(&image_path)
+        .map_err(|err| DiskError::EwfSegmentSet(err.to_string()))?;
+```
+
+[`services/mcp/src/tools/disk.rs:326-333`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L326-L333)
+
+[5] `yara_scan`은 규칙 폴더에서 확장자로 규칙 파일을 고른다.
+
+```rust
+pub fn path_looks_like_yara_rules(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        e.eq_ignore_ascii_case("yar")
+            || e.eq_ignore_ascii_case("yara")
+            || e.eq_ignore_ascii_case("yarx")
+    })
+}
+```
+
+[`services/mcp/src/tools/yara_scan.rs:135-141`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L135-L141)
+
+```rust
+fn collect_rule_files(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return vec![path.to_path_buf()];
+    }
+    let mut out = Vec::new();
+    walk_dir(path, true, &mut |p| {
+        if p.is_file() && path_looks_like_yara_rules(p) {
+            out.push(p.to_path_buf());
+        }
+    });
+    out
+}
+```
+
+[`services/mcp/src/tools/yara_scan.rs:210-221`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L210-L221)
+
+[6] `zeek_summary`는 확장자가 `.log`인 파일만 모은다.
+
+```rust
+fn collect_logs(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_logs(&path, files)?;
+        } else if path_looks_like_zeek_log(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+```
+
+[`services/mcp/src/tools/zeek_summary.rs:111-121`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L111-L121)
+
+```rust
+pub fn path_looks_like_zeek_log(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("log"))
+}
+```
+
+[`services/mcp/src/tools/zeek_summary.rs:232-236`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L232-L236)
+
+[7] `findevil-agent-mcp`가 등록하는 도구 모듈 14개의 목록이다.
+
+```python
+_MODULES: tuple[str, ...] = (
+    "audit_append",
+    "audit_verify",
+    "manifest_finalize",
+    "manifest_verify",
+    "verify_finding",
+    "detect_contradictions",
+    "judge_findings",
+    "correlate_findings",
+    "memory_remember",
+    "memory_recall",
+    "pool_handoff",
+    "expert_miss_capture",
+    "accuracy_compare",
+    "find_ai_signatures",
+)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/__init__.py:18-33`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/__init__.py#L18-L33)
+
+[8] `playbook.py`는 증거 유형 판별과 도구 차례를 두는 모듈이고 대화형 경로와 사용자 CLI가 불러 쓴다고 적는다.
+
+```python
+"""Canonical DFIR detection rules, tool sequences, and self-score criteria.
+
+This module is the single source of truth for:
+- evidence-type detection (``detect_evidence_type``)
+- artifact-class classification (``classify_artifact_path``)
+- per-evidence-type tool sequences (``TOOL_SEQUENCES``)
+- pre-submission self-assessment criteria (``JUDGE_SELFSCORE_CRITERIA``)
+
+Both the interactive (Claude Code) path and the headless
+(``scripts/find_evil_auto.py``) path import from here.  The in-VM
+embedded script (which cannot import this package) receives these
+rules serialised as a JSON argument instead.
+"""
+
+```
+
+[`services/agent/findevil_agent/playbook.py:1-14`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/playbook.py#L1-L14)
+
+[9] 사용자 CLI가 `findevil_agent.playbook`을 불러 쓴다.
+
+```python
+try:
+    from findevil_agent.playbook import (
+        MEMORY_EXTS as _PLAYBOOK_MEMORY_EXTS,
+        RAW_DISK_EXTS as _PLAYBOOK_RAW_DISK_EXTS,
+        REGISTRY_HIVE_NAMES as _PLAYBOOK_REGISTRY_HIVE_NAMES,
+        classify_artifact_path as _playbook_classify,
+        detect_evidence_type as _playbook_detect,
+    )
+```
+
+[`scripts/find_evil_auto.py:55-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L55-L62)
+
+[10] (실행 확인) `findevil-agent-mcp`의 `build_server`를 부른 프로세스에서 불러온 `findevil_agent` 모듈 목록에 `findevil_agent.playbook`이 없었다.
+
+[11] `disk_mount`는 파티션 표 전체를 응답에 싣는다.
+
+```rust
+    // Best-effort full partition table so multi-volume disks are visible; never
+    // gates the mount (empty in mock mode / bare volume / no mmls).
+    let partitions = match input.mode {
+        DiskMode::Mock => Vec::new(),
+        DiskMode::Auto => enumerate_partitions(&image_paths),
+    };
+```
+
+[`services/mcp/src/tools/disk.rs:266-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L266-L271)
+
+[12] 파일 시스템 파티션만 모으고 가장 긴 파티션의 시작 위치를 고른다: [`services/mcp/src/tools/disk.rs:811-943`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L811-L943).
+
+[13] raw 이미지의 loop 마운트가 실패하면 고른 파티션의 시작 위치로 다시 마운트한다: [`services/mcp/src/tools/disk.rs:710-809`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L710-L809).
+
+[14] `fls`·`icat`에 넘길 섹터 위치를 정한다.
+
+```rust
+/// Sector offset of the primary (largest) filesystem partition for
+/// `fls`/`icat -o`, or None for a bare volume image (TSK reads it at offset 0).
+/// mmls reports the start
+/// sector; the byte helper multiplies by 512, so divide it back to sectors.
+fn primary_partition_sector_offset(image_paths: &[PathBuf]) -> Option<u64> {
+    primary_partition_byte_offset(image_paths).map(|bytes| bytes / 512)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1056-1062`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1056-L1062)
+
+[15] (실행 확인) 시험용 `mmls`·`mount`·`fls`·`icat`으로 `disk_mount` 자동 모드와 `disk_extract_artifacts`를 실행하자 가장 긴 파티션의 시작 위치가 마운트 옵션과 `-o` 인자로 쓰였다.
+
+[16] Sleuth Kit 4.15.0의 DOS 파티션 설명은 스왑과 LVM 유형에도 `Linux`를 넣는다: [`tsk/vs/dos.c:304-336`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/vs/dos.c#L304-L336).
+
+[17] `thumbcache_parse`는 앞 바이트로 해석 경로를 고른다.
+
+```rust
+/// Detect the format by magic and parse. `None` means the bytes are not a
+/// recognizable thumbnail cache.
+fn parse_bytes(data: &[u8]) -> Option<ParsedCache> {
+    if data.len() >= CFB_MAGIC.len() && data[..CFB_MAGIC.len()] == CFB_MAGIC {
+        return parse_olecfb(data);
+    }
+    if data.len() >= CMMM_MAGIC.len() && data[..CMMM_MAGIC.len()] == CMMM_MAGIC {
+        return Some(parse_cmmm(data));
+    }
+    None
+```
+
+[`services/mcp/src/tools/thumbcache_parse.rs:213-222`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L213-L222)
+
+[18] `bits_parse`는 ESE 서명이면 형식만 알린다.
+
+```rust
+/// Pure parse over the raw bytes — unit-tested without IO.
+fn parse_bytes(data: &[u8]) -> BitsParseOutput {
+    // Win10 1709+ ESE store: detect and report format only, surface no strings.
+    if data.len() >= 8 && data[4..8] == ESE_SIGNATURE {
+        return BitsParseOutput {
+            format: "ese_qmgr_db".to_string(),
+            is_bits: true,
+            ese_requires_external_tool: true,
+            url_count: 0,
+            urls: Vec::new(),
+            local_path_count: 0,
+            local_paths: Vec::new(),
+```
+
+[`services/mcp/src/tools/bits_parse.rs:139-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bits_parse.rs#L139-L150)
+
+[19] `browser_history`는 표 구조로 브라우저 종류를 정한다.
+
+```rust
+fn detect_family(conn: &Connection, path: &Path) -> Result<Family, BrowserHistoryError> {
+    let map_err = |source| BrowserHistoryError::ParseFailed {
+        path: path.to_path_buf(),
+        source,
+    };
+    if has_table(conn, "urls").map_err(map_err)? && has_table(conn, "visits").map_err(map_err)? {
+        return Ok(Family::Chrome);
+    }
+    if has_table(conn, "moz_places").map_err(map_err)? {
+        return Ok(Family::Firefox);
+    }
+    Err(BrowserHistoryError::UnknownSchema(path.to_path_buf()))
+}
+```
+
+[`services/mcp/src/tools/browser_history.rs:187-199`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L187-L199)
+
+[20] `hashset_lookup`은 앞 16바이트로 목록 형식을 정한다.
+
+```rust
+/// Content-based container detection: a `SQLite` file starts with the
+/// 16-byte magic; anything shorter or different streams as text.
+fn detect_container(path: &Path) -> Result<Container, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open failed: {e}"))?;
+    let mut magic = [0u8; 16];
+    match file.read_exact(&mut magic) {
+        Ok(()) if &magic == SQLITE_MAGIC => Ok(Container::Sqlite),
+        Ok(()) => Ok(Container::Text),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(Container::Text),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:377-388`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L377-L388)
+
+[21] `vol_run`의 허용 목록은 OS별 플러그인을 함께 둔다: [`services/mcp/src/tools/vol_run.rs:50-103`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L50-L103).

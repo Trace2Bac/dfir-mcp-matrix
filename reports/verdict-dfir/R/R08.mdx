@@ -1,0 +1,327 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `findevil-mcp`에서 외부 도구나 파일의 시각 문자열을 바꾸지 않고 싣는 도구에 적용된다 [1][2][3][4][5][6].
+Volatility 도구는 `CreateTime`과 `ExitTime` 문자열을 `create_time_iso`와 `exit_time_iso`에 그대로 싣는다 [1].
+`evtx_query`와 `sysmon_network_query`는 레코드의 `SystemTime` 속성 문자열을 `ts`에 그대로 싣는다 [2].
+`vss_list`의 `creation_time`, `pst_parse`의 `delivery_time`, `exif_parse`의 `datetime_original`과 `datetime`은 도구나 파일이 낸 문자열 그대로다 [3].
+`login_accounting`은 `last -F`가 출력한 시각 문자열을 `login_iso`와 `logout_iso`에 싣고 원래 줄을 `raw`에 함께 싣는다 [4].
+`suricata_eve`, `vol_run`, `nfdump_query`, `journalctl_query`, `vel_collect`, `cloud_audit`, `ez_parse`, `mac_triage`, `indx_parse`, `plaso_parse`는 외부 도구 출력이나 원래 레코드의 시각 값을 바꾸지 않는다 [5].
+`zeek_summary`는 Zeek 기록의 `ts` 문자열을 그대로 싣는다 [6].
+시험에서 `vol_pslist`는 시험용 Volatility 실행 파일이 낸 `2026-01-02 03:04:05.123456`을 `create_time_iso`에 그대로 실었다 [7].
+
+**한계.** Volatility 도구와 `login_accounting`의 필드 이름은 `_iso`로 끝나지만 값은 바꾸지 않은 문자열이라 ISO 8601이 아닐 수 있다 [1][4][7].
+`pst_parse`는 전달 시각이 없으면 제출 시각을 `delivery_time`에 싣고 어느 값인지 적지 않는다 [8].
+`evtx_query`는 `SystemTime`이 없으면 빈 문자열을 싣는다 [2].
+`ausearch`는 기록의 `msg=audit(…)` 시각을 공백으로 나눈 낱말 가운데 날짜 부분만 `msg`에 싣고 전체 시각은 `raw`에만 남는다 [9].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 `findevil-mcp`에서 서버가 시각을 바꿔 싣는 도구에 적용된다 [10][11][12][13][14][15].
+`prefetch_parse`, `registry_query`, `thumbcache_parse`는 Windows FILETIME을 UTC로 바꿔 `Z`를 붙인 `%Y-%m-%dT%H:%M:%SZ` 문자열로 싣는다 [10].
+`mft_timeline`과 `usnjrnl_query`도 시각을 같은 꼴로 싣는다 [11].
+`browser_history`는 Chrome의 1601년 기준 마이크로초와 Firefox의 1970년 기준 마이크로초를 같은 꼴로 바꾼다 [12].
+`hayabusa_scan`은 Hayabusa의 ISO 8601 값을 UTC 마이크로초 RFC 3339 문자열(`Z`)로 다시 쓴다 [13].
+`email_parse`는 mail-parser 0.11.4의 `to_rfc3339`로 날짜 머리글의 시간대 오프셋을 붙인 문자열을 싣고 오프셋이 0이면 `Z`를 붙인다 [14][15].
+변환한 필드의 이름은 `_iso`로 끝난다 [10][11][12][13].
+
+**한계.** 서버가 바꾼 FILETIME 값은 초 아래를 버리고 원래 정수를 싣지 않는다 [10][11].
+`browser_history`도 초 아래를 버리고 원래 마이크로초 값을 싣지 않는다 [12].
+그래서 응답의 시각 정밀도가 원래 값보다 낮고 응답에는 그 사실이 없다.
+`prefetch_parse`는 1970년 이전이거나 바꿀 수 없는 실행 시각을 목록에서 빼고 `registry_query`와 `thumbcache_parse`는 같은 경우에 값을 비워 싣는다 [10].
+`browser_history`는 0 이하의 값을 비워 싣는다 [12].
+`hayabusa_scan`은 Hayabusa가 낸 소수 7자리 시각을 마이크로초 6자리로 줄이고 원래 값을 싣지 않는다 [16].
+`hayabusa_scan`은 RFC 3339로 읽지 못한 값을 바꾸지 않고 `timestamp_iso`에 싣는다 [13].
+`email_parse`는 날짜 머리글을 해석하지 못하면 값을 비우고 원래 머리글을 싣지 않는다 [14].
+`pcap_triage`는 HTTP 요청의 첫 시각과 마지막 시각을 소수 세 자리 epoch 초 문자열로 싣고 필드 이름과 값에 단위를 적지 않는다 [17].
+
+### 근거
+
+[1] `vol_pslist`는 `CreateTime`과 `ExitTime` 문자열을 바꾸지 않고 `create_time_iso`와 `exit_time_iso`에 넣는다.
+
+```rust
+    VolProcess {
+        pid: pick_u32(&["PID", "pid"]),
+        ppid: pick_u32(&["PPID", "ppid"]),
+        image_name: pick_str(&["ImageFileName", "ImageName", "image_name"]).unwrap_or_default(),
+        create_time_iso: pick_str(&["CreateTime", "create_time", "CreatedTime"]),
+        exit_time_iso: pick_str(&["ExitTime", "exit_time"]),
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:276-281`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L276-L281)
+
+[2] `extract_row`는 `SystemTime` 속성을 문자열 그대로 꺼내고 없으면 빈 문자열을 넣는다.
+
+```rust
+    let ts = system
+        .pointer("/TimeCreated/#attributes/SystemTime")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+```
+
+[`services/mcp/src/tools/evtx_query.rs:191-195`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L191-L195)
+
+[3] `vss_list`, `pst_parse`, `exif_parse`의 시각 필드는 바꾸지 않은 문자열이다: [`services/mcp/src/tools/vss.rs:61-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L61-L62), [`services/mcp/src/tools/pst_parse.rs:104-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L104-L106), [`services/mcp/src/tools/exif_parse.rs:59-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L59-L62).
+
+[4] `LoginRecord`의 시각 필드는 `last -F`가 출력한 문자열이고 원래 줄을 `raw`에 둔다.
+
+```rust
+    /// Login time as the absolute string `last -F` printed, when parsed.
+    /// `None` for malformed or pseudo rows.
+    pub login_iso: Option<String>,
+
+    /// Logout time as the absolute string `last -F` printed, when
+    /// parsed. `None` for still-logged-in / crashed / pseudo rows.
+    pub logout_iso: Option<String>,
+
+    /// The full original `last` line, kept verbatim so nothing the
+    /// positional parse dropped is lost to the agent.
+    pub raw: String,
+```
+
+[`services/mcp/src/tools/login_accounting.rs:74-84`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/login_accounting.rs#L74-L84)
+
+[5] 외부 도구 출력이나 원래 레코드를 담는 필드는 시각을 바꾸지 않는다: [`services/mcp/src/tools/suricata_eve.rs:229-249`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L229-L249), [`services/mcp/src/tools/vol_run.rs:330-335`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L330-L335), [`services/mcp/src/tools/cloud_audit.rs:68-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/cloud_audit.rs#L68-L94), [`services/mcp/src/tools/ez_parse.rs:329-351`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L329-L351).
+
+[6] `zeek_summary`는 `ts` 칸 문자열을 그대로 넣는다.
+
+```rust
+    if out.notable_connections.len() < 50 {
+        out.notable_connections.push(ZeekConnection {
+            ts: row.get("ts").copied().unwrap_or("").to_string(),
+```
+
+[`services/mcp/src/tools/zeek_summary.rs:197-199`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L197-L199)
+
+[7] (실행 확인) 시험용 Volatility 실행 파일이 낸 `CreateTime` 값 `2026-01-02 03:04:05.123456`과 `2026-01-02T03:04:05+00:00`은 `vol_pslist` 응답의 `create_time_iso`에 그대로 실렸고 `null`은 `null`로 실렸다.
+
+[8] `pst_parse`는 전달 시각이 없으면 제출 시각을 같은 필드에 넣는다.
+
+```rust
+        from: from_name.or(from_email),
+        to,
+        subject,
+        delivery_time: delivery.or(submit),
+        folder: None,
+```
+
+[`services/mcp/src/tools/pst_parse.rs:426-430`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L426-L430)
+
+[9] `parse_record_line`은 공백으로 나눈 낱말 가운데 `=`가 있는 것만 필드로 만들고 원래 줄을 `raw`에 둔다.
+
+```rust
+fn parse_record_line(line: &str) -> AuditRow {
+    let mut map = serde_json::Map::new();
+    for token in line.split_whitespace() {
+        if let Some((key, value)) = token.split_once('=') {
+            if !key.is_empty() {
+                map.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+        }
+    }
+    map.insert(
+        "raw".to_string(),
+        serde_json::Value::String(line.to_string()),
+    );
+    map
+}
+```
+
+[`services/mcp/src/tools/ausearch.rs:229-246`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ausearch.rs#L229-L246)
+
+[10] `prefetch_parse`, `registry_query`, `thumbcache_parse`의 `filetime_to_iso`는 FILETIME을 초 단위 UTC 문자열로 바꾸고 바꾸지 못하면 `None`을 돌려준다.
+
+```rust
+fn filetime_to_iso(ft: &forensic_rs::utils::time::Filetime) -> Option<String> {
+    let raw = ft.filetime();
+    if raw == 0 {
+        return None;
+    }
+    let unix_100ns = i64::try_from(raw).ok()? - FILETIME_UNIX_EPOCH_TICKS;
+    let secs = unix_100ns / 10_000_000;
+    let nanos = u32::try_from((unix_100ns % 10_000_000) * 100).ok()?;
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)?;
+    Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+```
+
+[`services/mcp/src/tools/prefetch_parse.rs:184-194`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/prefetch_parse.rs#L184-L194)
+```rust
+    let last_run_times_iso = p
+        .last_run_times
+        .iter()
+        .filter_map(filetime_to_iso)
+        .collect();
+```
+
+[`services/mcp/src/tools/prefetch_parse.rs:145-149`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/prefetch_parse.rs#L145-L149)
+
+[11] `mft_timeline`과 `usnjrnl_query`는 시각을 초 단위 `Z` 문자열로 바꾼다.
+
+```rust
+fn iso(dt: &DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+```
+
+[`services/mcp/src/tools/mft_timeline.rs:297-299`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mft_timeline.rs#L297-L299)
+```rust
+        entries.push(UsnJrnlEntry {
+            usn: record.usn,
+            timestamp_iso: record.timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            mft_entry: record.mft_entry,
+```
+
+[`services/mcp/src/tools/usnjrnl_query.rs:215-218`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/usnjrnl_query.rs#L215-L218)
+
+[12] `browser_history`는 마이크로초 값을 초 단위 `Z` 문자열로 바꾸고 0 이하이면 `None`을 돌려준다.
+
+```rust
+/// `WebKit` microseconds (since 1601) -> UTC ISO-8601Z. Zero/negative -> None.
+fn webkit_micros_to_iso(webkit_micros: i64) -> Option<String> {
+    if webkit_micros <= 0 {
+        return None;
+    }
+    let unix_micros = webkit_micros - WEBKIT_UNIX_OFFSET_SECS * 1_000_000;
+    unix_micros_to_iso(unix_micros)
+}
+
+/// Unix microseconds (since 1970) -> UTC ISO-8601Z. Zero/negative -> None.
+fn unix_micros_to_iso(unix_micros: i64) -> Option<String> {
+    if unix_micros <= 0 {
+        return None;
+    }
+    let secs = unix_micros.div_euclid(1_000_000);
+    let nanos = u32::try_from(unix_micros.rem_euclid(1_000_000) * 1_000).unwrap_or(0);
+    chrono::DateTime::from_timestamp(secs, nanos)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+```
+
+[`services/mcp/src/tools/browser_history.rs:269-287`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L269-L287)
+
+[13] `normalize_iso8601`은 RFC 3339 값을 UTC 마이크로초 문자열로 바꾸고 읽지 못하면 원래 값을 돌려준다.
+
+```rust
+fn normalize_iso8601(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw).map_or_else(
+        |_| raw.to_string(),
+        |dt| {
+            dt.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        },
+    )
+}
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:474-482`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L474-L482)
+
+[14] `email_parse`는 날짜를 mail-parser의 `to_rfc3339`로 바꾼다.
+
+```rust
+    let date = msg.date().map(mail_parser::DateTime::to_rfc3339);
+```
+
+[`services/mcp/src/tools/email_parse.rs:209-209`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/email_parse.rs#L209-L209)
+
+[15] mail-parser 0.11.4의 `to_rfc3339`는 시간대 오프셋이 있으면 `+hh:mm`이나 `-hh:mm`을, 없으면 `Z`를 붙인다: [`src/parsers/fields/date.rs:143-167`](https://github.com/stalwartlabs/mail-parser/blob/250f3a1cf4c7c44d552ee9e87878c6b28adf13f9/src/parsers/fields/date.rs#L143-L167).
+
+[16] `hayabusa_scan`은 Hayabusa의 소수 7자리 시각을 마이크로초 6자리로 다시 쓰고 원래 시각 키를 `details`에 넣지 않는다.
+
+```rust
+/// Normalize a timestamp to strict ISO-8601 UTC with microsecond precision so
+/// the downstream timeline accepts it. Even with `--ISO-8601`, hayabusa emits
+/// 100-ns (7-digit) fractions (`2022-02-22T10:10:10.1234567Z`); Python 3.10's
+/// `datetime.fromisoformat` (which the engine runs) rejects more than 6
+/// fractional digits, so the alert is dropped. Re-emit as
+/// `2022-02-22T10:10:10.123456Z`. Unparseable input is returned unchanged so a
+/// future format change degrades gracefully instead of losing the field.
+fn normalize_iso8601(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw).map_or_else(
+        |_| raw.to_string(),
+        |dt| {
+            dt.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        },
+    )
+}
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:467-482`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L467-L482)
+```rust
+    // Anything not in the canonical fields gets dumped into details
+    // so the agent can still see context-specific data.
+    let mut details = serde_json::Map::new();
+    let canonical: &[&str] = &[
+        "Timestamp",
+        "timestamp",
+        "@timestamp",
+        "ts",
+        "RuleTitle",
+        "RuleName",
+        "rule",
+        "title",
+        "Level",
+        "level",
+        "severity",
+        "Channel",
+        "channel",
+        "Computer",
+        "computer",
+        "Hostname",
+        "EventID",
+        "EventId",
+        "event_id",
+        "EID",
+    ];
+    for (k, v) in &map {
+        if !canonical.contains(&k.as_str()) {
+            details.insert(k.clone(), v.clone());
+        }
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:425-454`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L425-L454)
+
+[17] `fmt_ts`는 epoch 초를 소수 세 자리 문자열로 만든다.
+
+```rust
+fn fmt_ts(ts: f64) -> String {
+    if ts > 0.0 {
+        format!("{ts:.3}")
+    } else {
+        String::new()
+    }
+}
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:394-400`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L394-L400)
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PcapHttpRequest {
+    pub src: String,
+    pub host: String,
+    pub method: String,
+    pub uri: String,
+    pub has_cookie: bool,
+    pub count: usize,
+    // Epoch seconds (string, to keep the struct Eq) of the first/last packet for
+    // this (src, host, method) — lets the playbook correlate activity in time.
+    pub first_ts: String,
+    pub last_ts: String,
+}
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:42-54`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L42-L54)

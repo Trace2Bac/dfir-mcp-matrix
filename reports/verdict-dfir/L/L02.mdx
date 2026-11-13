@@ -1,0 +1,594 @@
+---
+cell: L02
+details:
+- id: L02.01
+- id: L02.02
+- id: L02.05
+- id: L02.06
+---
+
+# L02 기록 구성
+
+### L02.01 MCP 요청 기록
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `memory_remember`, `memory_recall`, `pool_handoff`, `expert_miss_capture`가 도구 본문에서 쓰는 해시 체인 항목에 적용된다 [1][2][3][4].
+항목은 `seq`, `ts`, `kind`, `prev_hash`, `payload` 다섯 필드로 이루어진다 [5].
+`memory_remember`는 `payload`에 받은 `case_id`, `kind`, `key`, `sha256`을 그대로 넣는다 [1].
+`memory_recall`은 받은 `query`와 `kind`를 넣는다 [2].
+`pool_handoff`는 받은 `from_role`, `to_role`, `payload`를 넣는다 [3].
+`expert_miss_capture`는 받은 `case_id`, `finding_id`, `edit_type`, `edit_text`, `expert_name`을 넣는다 [4].
+`memory_remember`와 `memory_recall` 항목의 `kind`는 도구 이름과 같고 `pool_handoff`와 `expert_miss_capture` 항목의 `kind`는 각각 `acp_handoff`와 `expert_miss`다 [1][2][3][4].
+`memory_remember`, `memory_recall`, `pool_handoff`를 부르자 `audit.jsonl`의 항목에 받은 인자 값이 바뀌지 않고 남았다 [6].
+
+`findevil-agent-mcp`의 `call_tool`이 표준 오류에 쓰는 항목은 도구 이름을 담는다 [7].
+입력 모델 검사에서 거부한 항목은 pydantic 오류 목록 `errors`를 함께 담고 이 목록의 `input`에는 거부된 인자 값이 들어간다 [7][8].
+나머지 두 항목은 인자를 따로 담지 않는다 [7].
+두 서버가 쓰는 `injection_alerts.jsonl`의 줄에도 인자가 없다 [9][10].
+두 서버 모두 외부 프로그램에 넘긴 실행 인자를 호출 기록에 남기지 않는다.
+`disk_mount`와 `disk_unmount`가 실행한 명령 목록은 자원 상태 파일 `session_resources.json`의 `command`에 남는다 [11].
+서버는 도구 호출을 처리하며 모델 API를 부르지 않는다.
+
+**한계.** 도구 본문이 받은 인자 가운데 일부만 항목에 넣는다.
+
+- `memory_remember`는 기억 저장소에 쓴 값 `value`와 `store_path`, `ts`, `case_path`를 넣지 않는다 [1].
+- `memory_recall`은 `store_path`와 `limit`를 넣지 않는다 [2].
+- `pool_handoff`는 `audit_path`를, `expert_miss_capture`는 `ledger_path`를 넣지 않는다 [3][4].
+
+`memory_remember`의 항목에는 저장소에 쓴 `value` 값이 없었다 [6].
+그래서 항목만으로는 모델이 보낸 요청을 모두 되살릴 수 없다.
+
+### L02.02 서버가 변환한 연산·인자 기록
+
+**구현.** 이 방식은 `pool_handoff`와 `accuracy_compare`가 쓰는 항목에 적용된다 [3][12].
+`pool_handoff`는 `correlation_id`를 받지 않으면 메시지 모델 `ACPMessage`가 만든 UUID4 값을 항목의 `payload`에 넣는다 [3].
+메시지 시각 `ts`도 서버가 정한 값을 `payload`와 항목의 `ts`에 넣는다 [3].
+`correlation_id` 없이 부른 `pool_handoff`의 항목에는 서버가 만든 `correlation_id`와 응답과 같은 시각이 남았다 [6].
+`accuracy_compare`는 `golden_path`를 받지 않으면 사건 폴더 `verdict.json`의 `case_id`로 찾은 정답 파일 경로를 `golden`에 넣는다 [12][13].
+`accuracy_compare`의 항목에는 모델이 `golden_path`를 주었는지가 따로 남지 않는다 [12].
+
+### L02.05 결과 상태·실행 시점 기록
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `call_tool`이 표준 오류에 쓰는 항목에 적용된다 [7].
+항목의 `event`는 결과 상태를 나타낸다 [7].
+
+- `agent_mcp_unknown_tool`은 등록되지 않은 도구 이름으로 거부한 호출이다 [7].
+- `agent_mcp_validation_error`는 입력 모델 검사에서 거부한 호출이다 [7].
+- `agent_mcp_handler_exception`은 처리기가 예외로 끝난 호출이고 예외 종류 `exc_type`과 문구 `exc`를 함께 담는다 [7].
+
+structlog 설정은 항목마다 수준 `level`과 UTC 시각 `timestamp`를 붙인다 [14].
+처리기가 예외로 끝난 `audit_append`와 `memory_remember` 호출은 `level`이 `error`이고 시각이 붙은 항목을 남겼다 [6].
+성공한 호출은 이 항목을 남기지 않는다 [7].
+
+도구 본문이 쓰는 해시 체인 항목에는 결과 상태 필드가 없고 항목을 쓴 시각 `ts`만 있다 [5][15].
+`injection_alerts.jsonl`의 줄에도 결과 상태가 없고 쓴 시각과 무력화 건수만 있다 [9][10].
+
+**한계.** MCP Python SDK 1.27.0의 `Server`가 입력 스키마로 거부한 호출은 `call_tool`에 닿지 않아 이 항목을 남기지 않는다 [16][6].
+`FINDEVIL_LOG_LEVEL`을 `ERROR`로 올리면 `WARNING` 수준인 등록되지 않은 도구 항목과 입력 검사 항목은 출력되지 않는다 [14][7].
+
+### L02.06 결과 참조·요약값 기록
+
+**구현.** 이 방식은 두 서버의 `injection_alerts.jsonl` 줄과 `memory_recall`, `accuracy_compare`의 항목에 적용된다 [9][10][2][12].
+`injection_alerts.jsonl` 줄은 `output_sha256`에 결과 글의 SHA-256을 담고 `patterns`와 `total`에 무력화한 패턴별 건수와 합계를 담는다 [9][10].
+`findevil-mcp`의 `output_sha256`은 무력화를 마친 결과 JSON을 직렬화한 글의 해시이고 응답의 `_meta.output_sha256`과 같은 값이다 [17].
+`findevil-agent-mcp`의 `output_sha256`은 무력화를 마친 결과를 키 정렬 JSON으로 바꾼 응답 글의 해시다 [18].
+그래서 두 해시는 분석 도구의 원래 출력이 아니라 서버가 파싱해 돌려준 결과 글의 해시다 [17][18].
+`email_parse` 호출이 남긴 줄의 `output_sha256`은 그 응답의 `_meta.output_sha256`과 같았다 [19].
+`findevil-agent-mcp`의 줄에는 `tool_call_id` 필드가 있지만 서버는 이 값을 넘기지 않아 `null`로 남았다 [10][18][6].
+
+`memory_recall` 항목은 찾은 건수 `hit_count`와 찾은 항목마다 `case_id`, `ts`, `confidence`를 담고 `key`와 `value`는 담지 않는다 [2].
+`accuracy_compare` 항목은 재현율, 정밀도, F1, 통과 여부 같은 점수 요약값을 담는다 [12].
+
+**한계.** `findevil-agent-mcp`의 건수는 정리 함수가 토큰을 찾은 횟수이고 원래 글의 토큰을 실제로 바꾼 횟수와 다를 수 있다 [20].
+정리 함수는 소문자로 바꾼 글에서 찾은 위치를 원래 글에 그대로 쓰므로 소문자로 바꿀 때 길이가 달라지는 글에서는 위치가 어긋난다 [20].
+그런 문자가 토큰 앞에 있는 파일을 읽은 시험에서 토큰은 응답에 그대로 실렸고 장부 줄에는 `im_start` 1회가 남았다 [21].
+
+### 근거
+
+[1] `memory_remember`는 `case_id`, `kind`, `key`, `sha256`만 항목에 넣는다.
+
+```python
+async def _handle(inp: BaseModel) -> MemoryRememberOutput:
+    assert isinstance(inp, MemoryRememberInput)
+    with MemoryStore(Path(inp.store_path)) as store:
+        store.remember(
+            case_id=inp.case_id,
+            kind=inp.kind,
+            key=inp.key,
+            value=inp.value,
+            sha256=inp.sha256,
+            ts=inp.ts,
+            case_path=inp.case_path,
+        )
+    if inp.audit_log_path is not None:
+        # Record THAT a write happened — process provenance, never evidence.
+        # Kind 'memory_remember' is excluded from Merkle leaves (build_manifest)
+        # and the payload carries no tool_call_id.
+        AuditLog(Path(inp.audit_log_path)).append(
+            "memory_remember",
+            {
+                "case_id": inp.case_id,
+                "kind": inp.kind,
+                "key": inp.key,
+                "sha256": inp.sha256,
+            },
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:51-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L51-L75)
+
+[2] `memory_recall`은 `query`, `kind`, 찾은 건수와 찾은 항목의 `case_id`, `ts`, `confidence`를 항목에 넣는다.
+
+```python
+def _append_recall_provenance(audit_log_path: str, inp: MemoryRecallInput, hits: list) -> None:
+    """Record THAT a recall happened — process provenance, never evidence.
+
+    The 'memory_recall' kind falls into the "other kinds" branch of
+    ``build_manifest`` so it is hash-chained but never a Merkle leaf, and the
+    payload carries no ``tool_call_id`` so it cannot masquerade as tool-call
+    evidence (the "memory is never evidence" invariant).
+    """
+    AuditLog(Path(audit_log_path)).append(
+        "memory_recall",
+        {
+            "query": inp.query,
+            "kind": inp.kind,
+            "hit_count": len(hits),
+            "hits": [{"case_id": h.case_id, "ts": h.ts, "confidence": h.confidence} for h in hits],
+        },
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:53-69`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L53-L69)
+
+[3] `pool_handoff`는 `ACPMessage`를 만들어 그 전체를 `acp_handoff` 항목으로 쓰고 `correlation_id`와 `ts`는 비어 있으면 서버가 채운다.
+
+```python
+async def _handle(inp: BaseModel) -> PoolHandoffOutput:
+    assert isinstance(inp, PoolHandoffInput)
+    log = AuditLog(Path(inp.audit_path))
+    msg = handoff(
+        log=log,
+        from_role=inp.from_role,
+        to_role=inp.to_role,
+        payload=inp.payload,
+        correlation_id=inp.correlation_id,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py:37-46`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py#L37-L46)
+
+```python
+class ACPMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    acp_version: str = Field(default="1.0")
+    from_role: Role
+    to_role: Role
+    correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    payload: dict[str, Any]
+    ts: str = Field(default_factory=lambda: datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"))
+
+
+def handoff(
+    *,
+    log: AuditLog,
+    from_role: Role,
+    to_role: Role,
+    payload: dict[str, Any],
+    correlation_id: str | None = None,
+) -> ACPMessage:
+    msg = ACPMessage(
+        from_role=from_role,
+        to_role=to_role,
+        payload=payload,
+        **({"correlation_id": correlation_id} if correlation_id else {}),
+    )
+    log.append("acp_handoff", msg.model_dump(), ts=msg.ts)
+    return msg
+```
+
+[`services/agent/findevil_agent/acp/handoff.py:22-48`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/acp/handoff.py#L22-L48)
+
+[4] `expert_miss_capture`는 `ledger_path`를 뺀 인자를 항목에 넣는다.
+
+```python
+async def _handle(inp: BaseModel) -> ExpertMissCaptureOutput:
+    assert isinstance(inp, ExpertMissCaptureInput)
+    payload = {
+        "case_id": inp.case_id,
+        "finding_id": inp.finding_id,
+        "edit_type": inp.edit_type,
+        "edit_text": inp.edit_text,
+        "expert_name": inp.expert_name,
+    }
+    log = AuditLog(Path(inp.ledger_path))
+    record = log.append("expert_miss", payload)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:98-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L98-L108)
+
+[5] 해시 체인 항목은 `seq`, `ts`, `kind`, `prev_hash`, `payload`로 이루어진다.
+
+```python
+@dataclass(frozen=True)
+class AuditRecord:
+    """One line of the audit log before hashing.
+
+    ``seq`` is 0-based and monotonic. ``prev_hash`` is the SHA-256
+    of the preceding line (empty string for the first record). The
+    ``payload`` dict is the domain-specific event body — tool calls,
+    findings, contradictions, etc.
+    """
+
+    seq: int
+    ts: str  # UTC ISO-8601Z
+    kind: str
+    prev_hash: str
+    payload: dict[str, Any]
+
+    def to_canonical_dict(self) -> dict[str, Any]:
+        """Dict shape written to disk. Field order matters for audit readability
+        but doesn't affect hashing — JCS canonicalization sorts anyway.
+        """
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "kind": self.kind,
+            "prev_hash": self.prev_hash,
+            "payload": self.payload,
+        }
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:78-104`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L78-L104)
+
+[6] (실행 확인) `findevil-agent-mcp`를 시작 스크립트로 실행하고 MCP SDK 클라이언트로 도구 호출 19개를 보낸 뒤 표준 오류와 `audit.jsonl`을 받았다.
+`memory_remember` 항목의 `payload`에는 `case_id`, `kind`, `key`, `sha256`만 있었고 `value`는 없었다.
+`memory_recall` 항목에는 `query`, `kind`, `hit_count`, `hits`가 있었다.
+`correlation_id` 없이 부른 `pool_handoff` 항목에는 응답과 같은 `correlation_id`와 시각이 있었다.
+처리기가 예외로 끝난 호출 2개는 `agent_mcp_handler_exception`, `level`, `timestamp`를 담은 항목을 남겼다.
+스키마에 없는 인자를 준 호출은 `isError` 결과만 받았고 표준 오류 항목은 없었다.
+`injection_alerts.jsonl` 줄의 `tool_call_id`는 `null`이었다.
+
+[7] `call_tool`은 결과 상태별로 다른 `event`의 항목을 쓰고 도구 이름과 예외 정보를 담는다.
+
+```python
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        spec = specs.get(name)
+        if spec is None:
+            log.warning("agent_mcp_unknown_tool", tool=name)
+            return _error_content(f"unknown tool: {name!r}", kind="unknown_tool")
+
+        try:
+            validated = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            log.warning(
+                "agent_mcp_validation_error",
+                tool=name,
+                errors=exc.errors(include_url=False),
+            )
+            return _error_content(f"input validation failed: {exc}", kind="validation")
+
+        try:
+            result = await spec.handler(validated)
+        except Exception as exc:
+            log.error(
+                "agent_mcp_handler_exception",
+                tool=name,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+            )
+            return _error_content(f"{type(exc).__name__}: {exc}", kind="handler")
+
+        return _to_text_content(result, tool=name)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:170-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L170-L198)
+
+[8] pydantic 2.13.3에 들어 있는 pydantic-core 2.46.3의 `ValidationError.errors()`는 기본값으로 오류마다 입력 값을 담는다: [`pydantic-core/python/pydantic_core/_pydantic_core.pyi:693-702`](https://github.com/pydantic/pydantic/blob/9e9a11132c980c4ec84ff6d2df06d4c1a55ca8f3/pydantic-core/python/pydantic_core/_pydantic_core.pyi#L693-L702).
+
+[9] `findevil-mcp`의 `injection_alerts.jsonl` 줄은 시각, 종류, 도구 이름, 결과 해시, 패턴별 건수, 합계로 이루어진다.
+
+```rust
+fn build_record(tool: &str, output_sha256: &str, counts: &Counts, ts: &str) -> Value {
+    json!({
+        "ts": ts,
+        "kind": RECORD_KIND,
+        "tool": tool,
+        "output_sha256": output_sha256,
+        "patterns": counts.to_json(),
+        "total": counts.total(),
+    })
+}
+```
+
+[`services/mcp/src/server/injection_ledger.rs:62-71`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server/injection_ledger.rs#L62-L71)
+
+[10] `findevil-agent-mcp`의 `injection_alerts.jsonl` 줄은 같은 필드에 `tool_call_id`를 더한다.
+
+```python
+def build_record(
+    counts: Mapping[str, int],
+    *,
+    tool: str | None = None,
+    tool_call_id: str | None = None,
+    output_sha256: str | None = None,
+    ts: str | None = None,
+) -> dict[str, Any]:
+    """Build one counts-only ledger record (pure; no I/O).
+
+    ``counts`` maps each neutralized pattern id (a role-token id or
+    ``invisible_unicode``) to how many times it fired -- exactly the tally
+    :func:`findevil_agent_mcp.sanitize.sanitize_value` returns. The payload is
+    never included.
+    """
+    patterns = {str(k): int(v) for k, v in counts.items()}
+    return {
+        "ts": ts or _now_iso(),
+        "kind": RECORD_KIND,
+        "tool": tool,
+        "tool_call_id": tool_call_id,
+        "output_sha256": output_sha256,
+        "patterns": patterns,
+        "total": sum(patterns.values()),
+    }
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/injection_ledger.py:68-93`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/injection_ledger.py#L68-L93)
+
+[11] `disk_mount`는 실행한 명령 목록을 자원 항목의 `command`에 넣고 `disk_unmount`는 해제 명령으로 고쳐 쓴다.
+
+```rust
+    let now = now_iso();
+    let resource = SessionResource {
+        id: mount_id.clone(),
+        resource_type: "disk_mount".to_string(),
+        status: status.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(input.image_path.clone()),
+        mount_point: Some(mount_point.clone()),
+        fs_root: Some(fs_root.clone()),
+        parent_id: None,
+        output_dir: None,
+        artifacts: vec![],
+        command: command.clone(),
+        note: note.clone(),
+    };
+    upsert_resource(&ledger_path, resource)?;
+```
+
+[`services/mcp/src/tools/disk.rs:273-289`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L273-L289)
+```rust
+    ledger.resources[idx].status.clone_from(&status);
+    ledger.resources[idx].updated_at = now_iso();
+    ledger.resources[idx].command.clone_from(&command);
+    write_ledger(&ledger_path, &ledger)?;
+```
+
+[`services/mcp/src/tools/disk.rs:474-477`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L474-L477)
+
+[12] `accuracy_compare`는 서버가 찾은 정답 파일 경로와 점수 요약값을 항목에 넣는다.
+
+```python
+    golden_path = _resolve_golden(case_dir, inp.golden_path)
+    if golden_path is None:
+        raise FileNotFoundError(
+            f"no expected-findings.json golden found for {case_dir}; pass golden_path explicitly"
+        )
+
+    result = score(case_dir, golden_path)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:184-190`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L184-L190)
+
+```python
+    audit_record_kind: str | None = None
+    if inp.audit_log_path:
+        # Append a NON-Finding diagnostic record. Scalar scores only — no
+        # finding_id / tool_call_id, so it can never be mistaken for or satisfy a
+        # Finding citation.
+        payload = {
+            "case_id": result["case_id"],
+            "case_dir": result["case_dir"],
+            "golden": result["golden"],
+            "expected_n": result["expected_n"],
+            "recalled_n": result["recalled_n"],
+            "recall_percent": result["recall_percent"],
+            "precision_percent": result["precision_percent"],
+            "f1": result["f1"],
+            "hallucination_rate": result["hallucination_rate"],
+            "fp_planted": result["fp_planted"],
+            "negative_coverage": result["negative_coverage"],
+            "verdict_match": result["verdict_match"],
+            "pass": result["pass"],
+        }
+        AuditLog(Path(inp.audit_log_path)).append(DIAGNOSTIC_KIND, payload)
+        audit_record_kind = DIAGNOSTIC_KIND
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:196-217`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L196-L217)
+
+[`services/agent/findevil_agent/accuracy.py:797-798`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/accuracy.py#L797-L798)
+
+[13] `_resolve_golden`은 `golden_path`가 없으면 `verdict.json`의 `case_id`로 정답 파일을 찾는다.
+
+```python
+def _resolve_golden(case_dir: Path, override: str | None) -> Path | None:
+    """Resolve the golden without depending on the process CWD.
+
+    The shared ``resolve_golden`` looks under a relative ``goldens/`` directory.
+    An MCP server's CWD is not guaranteed to be the repo root, so when no explicit
+    override is given we also try the repo's ``goldens/`` resolved from this
+    module's location (services/agent_mcp/.../tools -> repo root).
+    """
+    found = resolve_golden(case_dir, override)
+    if found is not None or override is not None:
+        return found
+    # Fallback: anchor goldens/ at the repo root relative to this file.
+    repo_root = Path(__file__).resolve().parents[4]
+    verdict = case_dir / "verdict.json"
+    if not verdict.is_file():
+        return None
+    try:
+        import json
+
+        cid = json.loads(verdict.read_text(encoding="utf-8")).get("case_id")
+    except (OSError, ValueError):
+        cid = None
+    if cid:
+        cand = repo_root / "goldens" / str(cid) / "expected-findings.json"
+        if cand.is_file():
+            return cand
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:149-174`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L149-L174)
+
+[14] structlog 설정은 수준과 UTC 시각을 붙이고 `FINDEVIL_LOG_LEVEL`로 수준을 정한다.
+
+```python
+def _configure_logging() -> structlog.BoundLogger:
+    """Send logs to stderr — stdio is the JSON-RPC channel.
+
+    Stdout pollution corrupts the protocol stream; this function is
+    the single place that controls log destination. Tests can
+    monkeypatch the returned logger.
+    """
+    level_name = os.environ.get("FINDEVIL_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(stream=sys.stderr, level=level, format="%(message)s")
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.WriteLoggerFactory(file=sys.stderr),
+        cache_logger_on_first_use=True,
+    )
+    return structlog.get_logger(SERVER_NAME)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:44-64`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L44-L64)
+
+[15] `AuditLog.append`는 `ts`가 없으면 항목을 쓰는 때의 UTC 시각을 넣는다.
+
+```python
+    def append(self, kind: str, payload: dict[str, Any], *, ts: str | None = None) -> AuditRecord:
+        """Append one record. Thread-safe. fsyncs before returning."""
+        with self._lock:
+            record = AuditRecord(
+                seq=self._next_seq,
+                ts=ts or _utc_iso(),
+                kind=kind,
+                prev_hash=self._last_hash,
+                payload=payload,
+            )
+            line = canonicalize_json(record.to_canonical_dict())
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("ab") as f:
+                f.write(line + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._last_hash = hash_line(line)
+            self._next_seq += 1
+            return record
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:172-190`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L172-L190)
+
+[16] MCP Python SDK 1.27.0의 `Server`는 처리기를 부르기 전에 입력 스키마로 인자를 검사한다.
+[`src/mcp/server/lowlevel/server.py:521-532`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L521-L532)
+
+[17] `finalize_tool_output`은 무력화한 결과를 직렬화한 글로 해시를 계산하고 같은 해시를 `record_neutralization`에 넘긴다.
+
+```rust
+fn finalize_tool_output(name: &str, payload: &Value) -> Result<Value, ToolError> {
+    let (payload, sanitized) = crate::sanitize::sanitize_value(payload);
+    let payload_text = serde_json::to_string(&payload)
+        .map_err(|e| ToolError::Internal(format!("serialize tool output: {e}")))?;
+    let sha = sha256_hex(payload_text.as_bytes());
+
+    let mut meta = json!({
+        "tool": name,
+        "output_sha256": sha,
+    });
+    if !sanitized.is_empty() {
+        meta["sanitized"] = sanitized.to_json();
+        // Mirror the `_meta.sanitized` counts into the best-effort, counts-only
+        // injection-alert SIDECAR ledger. This runs AFTER hashing and never
+        // touches `payload`, `sha`, or `meta`, so the sealed output and a
+        // verify_finding replay are unaffected — the ledger is not the audit
+        // chain. `sha` is recorded as the correlation key (the same sanitized
+        // -output digest the audit chain stores), never the payload.
+        injection_ledger::record_neutralization(name, &sha, &sanitized);
+    }
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": payload_text,
+            }
+        ],
+        "_meta": meta,
+    }))
+}
+```
+
+[`services/mcp/src/server.rs:1544-1573`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1544-L1573)
+
+[18] `_to_text_content`는 무력화한 결과의 키 정렬 JSON 글을 `record_neutralization`에 넘기고 `tool_call_id`는 넘기지 않는다.
+
+```python
+    # Neutralize attacker-controlled evidence text (chat/role tokens, invisible
+    # Unicode) before it crosses the boundary to the model -- the Python half of
+    # the MCP-output->LLM sanitizer (mirrors services/mcp/src/sanitize.rs). Log
+    # what was neutralized as counts only, never the payload.
+    body, sanitized = sanitize_value(body)
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    if sanitized:
+        structlog.get_logger(SERVER_NAME).warning(
+            "agent_mcp_sanitized_tool_output",
+            patterns=sanitized,
+            total=sum(sanitized.values()),
+        )
+        # Mirror the warning into the counts-only injection-alert ledger (a
+        # best-effort SIDECAR, never the audit chain). output_text is the already
+        # -sanitized canonical JSON, so its digest matches what the model saw and
+        # is the correlation key the judge escalation maps back to a tool_call_id.
+        injection_ledger.record_neutralization(sanitized, tool=tool, output_text=text)
+    return [TextContent(type="text", text=text)]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:91-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L91-L108)
+
+[19] (실행 확인) `findevil-mcp`에서 제목에 모델 지시 토큰이 있는 `.eml`로 `email_parse`를 부르자 응답의 `_meta.output_sha256`과 `injection_alerts.jsonl` 줄의 `output_sha256`이 같은 값이었다.
+
+[20] `sanitize_str`는 소문자로 바꾼 글에서 토큰을 찾고 그 위치로 원래 글을 옮겨 쓰며 찾을 때마다 건수를 올린다.
+
+```python
+    # 2) Replace chat/role control tokens (case-insensitive) with an inert marker.
+    lower = stripped.lower()
+    out: list[str] = []
+    i = 0
+    n = len(stripped)
+    while i < n:
+        matched = False
+        for token_id, token in ROLE_TOKENS:
+            if lower.startswith(token, i):
+                out.append(f"[neutralized:{token_id}]")
+                _bump(counts, token_id)
+                i += len(token)
+                matched = True
+                break
+        if not matched:
+            out.append(stripped[i])
+            i += 1
+    return "".join(out)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/sanitize.py:68-85`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/sanitize.py#L68-L85)
+
+[21] (실행 확인) 소문자로 바꾸면 길이가 늘어나는 문자를 역할 토큰 앞에 둔 파일로 `find_ai_signatures`를 부르자 응답에는 토큰이 그대로 실렸고 `injection_alerts.jsonl` 줄에는 `im_start` 1회가 남았다.

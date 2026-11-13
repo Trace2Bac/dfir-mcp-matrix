@@ -1,0 +1,424 @@
+---
+cell: L03
+details:
+- id: L03.01
+- id: L03.03
+- id: L03.05
+---
+
+# L03 기록 실패 처리
+
+### L03.01 실행 후 응답 차단
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `memory_remember`, `memory_recall`, `accuracy_compare`, `pool_handoff`, `expert_miss_capture`가 해시 체인 항목을 쓰는 호출에 적용된다 [1][2][3][4][5].
+`AuditLog.append`는 파일을 열고 쓰고 `fsync`하는 동안 난 예외를 처리하지 않는다 [6].
+`AuditLog`는 만들어질 때 기존 파일의 마지막 줄이 JSON이 아니거나 줄 수와 마지막 `seq`가 맞지 않으면 `AuditLogError`를 올린다 [7].
+도구 본문도 이 예외를 처리하지 않는다 [1][2][3][4][5].
+그래서 예외는 `call_tool`까지 올라가고 `call_tool`은 도구 결과 대신 `kind`가 `handler`인 오류 결과를 돌려주며 표준 오류에 항목을 쓴다 [8].
+
+`memory_remember`, `memory_recall`, `accuracy_compare`는 실행을 마친 뒤 항목을 쓴다 [1][2][3].
+`pool_handoff`는 항목을 쓰는 일이 곧 실행이다 [4].
+`expert_miss_capture`도 항목을 쓰는 일이 곧 기록 도구의 실행이다 [5].
+`audit_log_path`에 폴더 경로를 준 `memory_remember`는 `IsADirectoryError`를 담은 오류 결과를 받았다 [9].
+중간 줄 하나를 지운 기록 파일로 `audit_append`를 부르자 `seq-count mismatch`를 담은 오류 결과를 받았고 파일에 줄이 더해지지 않았다 [10].
+이 오류 결과는 `isError`가 거짓인 보통 결과이고 글이 `error` 객체다 [8][9].
+엔진 `scripts/find_evil_auto.py`의 MCP 클라이언트는 이 모양의 결과를 따로 `_error`로 바꿔 처리한다 [11].
+
+**한계.** 항목을 쓰기 전에 실행을 마친 도구는 결과를 돌려주지 않아도 실행한 효과가 남는다.
+`memory_remember`는 기억 저장소에 행을 쓴 뒤 항목을 쓰므로 항목 쓰기가 실패해도 그 행은 남는다 [1].
+`audit_log_path`에 폴더 경로를 주어 오류 결과를 받은 `memory_remember` 호출 뒤에 같은 키로 `memory_recall`을 부르자 그 행이 찾아졌다 [9].
+
+### L03.03 알림 없이 계속
+
+**구현.** 이 방식은 두 서버가 `injection_alerts.jsonl`에 줄을 쓰는 호출에 적용된다 [12][13].
+`findevil-mcp`의 `append_record`는 폴더를 만들거나 파일을 열지 못하면 아무것도 하지 않고 돌아가고 쓰기 결과도 버린다 [12].
+`findevil-agent-mcp`의 `record_neutralization`은 쓰기에서 `OSError`가 나면 `None`을 돌려준다 [13].
+이 함수를 부르는 `_to_text_content`는 돌려받은 값을 쓰지 않는다 [14].
+두 경로 모두 응답과 서버 로그에 쓰기 실패를 남기지 않고 결과를 그대로 돌려준다 [12][13][14].
+`FINDEVIL_INJECTION_LEDGER`에 폴더 경로를 준 두 서버에서 무력화가 일어나는 호출을 보내자 응답은 정상으로 돌아왔고 줄은 쓰이지 않았다 [15].
+두 서버의 표준 오류에는 쓰기 실패를 알리는 줄이 없었다 [15].
+`findevil-agent-mcp`의 표준 오류에는 쓰기 전에 남긴 `agent_mcp_sanitized_tool_output` 항목만 있었다 [15].
+
+### L03.05 실행 전 중단
+
+**구현.** 이 방식은 `FINDEVIL_MISS_GH_ENABLED`가 `1`일 때 `findevil-agent-mcp`의 `expert_miss_capture`가 GitHub 이슈를 만드는 경로에 적용된다 [16].
+`expert_miss_capture`는 받은 요청 값을 담은 `expert_miss` 항목을 먼저 쓰고 그 뒤에 `gh issue create`를 실행한다 [5][16].
+항목 쓰기에서 예외가 나면 `gh`를 실행하지 않고 `call_tool`이 `kind`가 `handler`인 오류 결과를 돌려준다 [5][8].
+
+### 근거
+
+[1] `memory_remember`는 저장소에 쓴 뒤 예외 처리 없이 항목을 쓴다.
+
+```python
+async def _handle(inp: BaseModel) -> MemoryRememberOutput:
+    assert isinstance(inp, MemoryRememberInput)
+    with MemoryStore(Path(inp.store_path)) as store:
+        store.remember(
+            case_id=inp.case_id,
+            kind=inp.kind,
+            key=inp.key,
+            value=inp.value,
+            sha256=inp.sha256,
+            ts=inp.ts,
+            case_path=inp.case_path,
+        )
+    if inp.audit_log_path is not None:
+        # Record THAT a write happened — process provenance, never evidence.
+        # Kind 'memory_remember' is excluded from Merkle leaves (build_manifest)
+        # and the payload carries no tool_call_id.
+        AuditLog(Path(inp.audit_log_path)).append(
+            "memory_remember",
+            {
+                "case_id": inp.case_id,
+                "kind": inp.kind,
+                "key": inp.key,
+                "sha256": inp.sha256,
+            },
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:51-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L51-L75)
+
+[2] `memory_recall`은 조회를 마친 뒤 예외 처리 없이 항목을 쓴다.
+
+```python
+async def _handle(inp: BaseModel) -> MemoryRecallOutput:
+    assert isinstance(inp, MemoryRecallInput)
+    with MemoryStore(Path(inp.store_path)) as store:
+        rows = store.recall(inp.query, kind=inp.kind, limit=inp.limit)
+    output = MemoryRecallOutput(
+        hits=[
+            RecallHitOut(
+                case_id=r.case_id,
+                kind=r.kind,
+                key=r.key,
+                value=r.value,
+                sha256=r.sha256,
+                ts=r.ts,
+                confidence=r.confidence,
+            )
+            for r in rows
+        ]
+    )
+    if inp.audit_log_path is not None:
+        _append_recall_provenance(inp.audit_log_path, inp, output.hits)
+    return output
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:72-92`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L72-L92)
+
+[3] `accuracy_compare`는 점수를 계산한 뒤 예외 처리 없이 항목을 쓴다.
+
+```python
+    audit_record_kind: str | None = None
+    if inp.audit_log_path:
+        # Append a NON-Finding diagnostic record. Scalar scores only — no
+        # finding_id / tool_call_id, so it can never be mistaken for or satisfy a
+        # Finding citation.
+        payload = {
+            "case_id": result["case_id"],
+            "case_dir": result["case_dir"],
+            "golden": result["golden"],
+            "expected_n": result["expected_n"],
+            "recalled_n": result["recalled_n"],
+            "recall_percent": result["recall_percent"],
+            "precision_percent": result["precision_percent"],
+            "f1": result["f1"],
+            "hallucination_rate": result["hallucination_rate"],
+            "fp_planted": result["fp_planted"],
+            "negative_coverage": result["negative_coverage"],
+            "verdict_match": result["verdict_match"],
+            "pass": result["pass"],
+        }
+        AuditLog(Path(inp.audit_log_path)).append(DIAGNOSTIC_KIND, payload)
+        audit_record_kind = DIAGNOSTIC_KIND
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:196-217`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L196-L217)
+
+[4] `pool_handoff`는 `handoff`가 항목을 쓰게 하고 그 결과로 응답을 만든다.
+
+```python
+async def _handle(inp: BaseModel) -> PoolHandoffOutput:
+    assert isinstance(inp, PoolHandoffInput)
+    log = AuditLog(Path(inp.audit_path))
+    msg = handoff(
+        log=log,
+        from_role=inp.from_role,
+        to_role=inp.to_role,
+        payload=inp.payload,
+        correlation_id=inp.correlation_id,
+    )
+    return PoolHandoffOutput(
+        acp_version=msg.acp_version,
+        from_role=msg.from_role,
+        to_role=msg.to_role,
+        correlation_id=msg.correlation_id,
+        ts=msg.ts,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py:37-53`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py#L37-L53)
+
+[5] `expert_miss_capture`는 항목을 쓴 뒤 GitHub 이슈를 만든다.
+
+```python
+async def _handle(inp: BaseModel) -> ExpertMissCaptureOutput:
+    assert isinstance(inp, ExpertMissCaptureInput)
+    payload = {
+        "case_id": inp.case_id,
+        "finding_id": inp.finding_id,
+        "edit_type": inp.edit_type,
+        "edit_text": inp.edit_text,
+        "expert_name": inp.expert_name,
+    }
+    log = AuditLog(Path(inp.ledger_path))
+    record = log.append("expert_miss", payload)
+    github_issue_url = _maybe_create_github_issue(inp)
+    return ExpertMissCaptureOutput(
+        seq=record.seq,
+        ts=record.ts,
+        line_hash=log.last_hash,
+        prev_hash=record.prev_hash,
+        github_issue_url=github_issue_url,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:98-116`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L98-L116)
+
+[6] `AuditLog.append`는 쓰기 예외를 처리하지 않는다.
+
+```python
+    def append(self, kind: str, payload: dict[str, Any], *, ts: str | None = None) -> AuditRecord:
+        """Append one record. Thread-safe. fsyncs before returning."""
+        with self._lock:
+            record = AuditRecord(
+                seq=self._next_seq,
+                ts=ts or _utc_iso(),
+                kind=kind,
+                prev_hash=self._last_hash,
+                payload=payload,
+            )
+            line = canonicalize_json(record.to_canonical_dict())
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("ab") as f:
+                f.write(line + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._last_hash = hash_line(line)
+            self._next_seq += 1
+            return record
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:172-190`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L172-L190)
+
+[7] `AuditLog`는 만들어질 때 마지막 줄과 줄 수를 확인하고 맞지 않으면 예외를 올린다.
+
+```python
+    def _load_tail(self) -> None:
+        """Populate ``_next_seq`` + ``_last_hash`` from any existing file."""
+        if not self.path.is_file():
+            return
+        last_line: bytes | None = None
+        count = 0
+        with self.path.open("rb") as f:
+            for raw in f:
+                raw = raw.rstrip(b"\n")
+                if not raw:
+                    continue
+                last_line = raw
+                count += 1
+        if last_line is None:
+            return
+        try:
+            obj = json.loads(last_line)
+        except json.JSONDecodeError as exc:
+            raise AuditLogError(
+                f"audit log {self.path}: last line is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(obj, dict) or "seq" not in obj:
+            raise AuditLogError(f"audit log {self.path}: last line is not an audit record")
+        self._next_seq = int(obj["seq"]) + 1
+        self._last_hash = hash_line(last_line)
+        if count != self._next_seq:
+            raise AuditLogError(
+                f"audit log {self.path}: seq-count mismatch "
+                f"(file has {count} lines but last seq is {obj['seq']})"
+            )
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:137-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L137-L166)
+
+[8] `call_tool`은 처리기 예외를 받아 표준 오류에 항목을 쓰고 `kind`가 `handler`인 오류 글을 돌려준다.
+
+```python
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        spec = specs.get(name)
+        if spec is None:
+            log.warning("agent_mcp_unknown_tool", tool=name)
+            return _error_content(f"unknown tool: {name!r}", kind="unknown_tool")
+
+        try:
+            validated = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            log.warning(
+                "agent_mcp_validation_error",
+                tool=name,
+                errors=exc.errors(include_url=False),
+            )
+            return _error_content(f"input validation failed: {exc}", kind="validation")
+
+        try:
+            result = await spec.handler(validated)
+        except Exception as exc:
+            log.error(
+                "agent_mcp_handler_exception",
+                tool=name,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+            )
+            return _error_content(f"{type(exc).__name__}: {exc}", kind="handler")
+
+        return _to_text_content(result, tool=name)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:170-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L170-L198)
+
+```python
+def _error_content(message: str, *, kind: str) -> list[TextContent]:
+    """Stable error shape returned to the MCP client.
+
+    ``kind`` is one of:
+      - ``"validation"``: input failed pydantic validation.
+      - ``"unknown_tool"``: name not in the registry.
+      - ``"handler"``: the handler raised an unexpected exception.
+    """
+    # Error messages interpolate exception/validation text that can echo raw
+    # evidence bytes, so the error path is an injection channel just like a
+    # successful tool body. The success path neutralizes via ``_to_text_content``;
+    # route the human-readable message through the SAME sanitizer here so
+    # attacker-controlled chat/role tokens and invisible Unicode never reach the
+    # model un-neutralized (mirrors ``make_error_response`` in
+    # services/mcp/src/server.rs). Only the message string is sanitized -- the
+    # ``kind`` and the error shape are unchanged, and a JSON-RPC error is a
+    # protocol error, not a hashed tool output, so no audit-chain or
+    # ``_meta.sanitized`` accounting is touched. The tally is intentionally
+    # discarded.
+    counts: dict[str, int] = {}
+    safe_message = sanitize_str(message, counts)
+    payload = {"error": {"kind": kind, "message": safe_message}}
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+    ]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:111-138`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L111-L138)
+
+[9] (실행 확인) `findevil-agent-mcp`에 `audit_log_path`로 폴더 경로를 준 `memory_remember`를 보내자 `isError`가 거짓이고 글이 `{"error":{"kind":"handler","message":"IsADirectoryError: …"}}`인 결과가 돌아왔다.
+이어서 같은 키로 부른 `memory_recall`은 그 행을 찾아 돌려줬다.
+
+[10] (실행 확인) `audit.jsonl`에서 중간 줄 하나를 지운 사본으로 `audit_append`를 부르자 `AuditLogError: … seq-count mismatch`를 담은 오류 결과가 돌아왔고 사본의 줄 수는 그대로였다.
+
+[11] 엔진의 MCP 클라이언트는 `error` 객체를 담은 결과를 `_error`로 바꾼다.
+
+```python
+                err = body.get("error")
+                if isinstance(err, dict) and "message" in err:
+                    return {
+                        "_error": {
+                            "message": err.get("message"),
+                            "kind": err.get("kind"),
+                        }
+```
+
+[`scripts/find_evil_auto.py:919-925`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L919-L925)
+
+[12] `findevil-mcp`의 `append_record`는 실패하면 별도 처리 없이 돌아간다.
+
+```rust
+fn append_record(path: &Path, record: &Value) {
+    let Ok(line) = serde_json::to_string(record) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+```
+
+[`services/mcp/src/server/injection_ledger.rs:90-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server/injection_ledger.rs#L90-L106)
+
+[13] `findevil-agent-mcp`의 `record_neutralization`은 `OSError`가 나면 `None`을 돌려준다.
+[`services/agent_mcp/findevil_agent_mcp/injection_ledger.py:95-133`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/injection_ledger.py#L95-L133)
+
+[14] `_to_text_content`는 `record_neutralization`의 반환값을 쓰지 않고 결과를 돌려준다.
+
+```python
+    body, sanitized = sanitize_value(body)
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    if sanitized:
+        structlog.get_logger(SERVER_NAME).warning(
+            "agent_mcp_sanitized_tool_output",
+            patterns=sanitized,
+            total=sum(sanitized.values()),
+        )
+        # Mirror the warning into the counts-only injection-alert ledger (a
+        # best-effort SIDECAR, never the audit chain). output_text is the already
+        # -sanitized canonical JSON, so its digest matches what the model saw and
+        # is the correlation key the judge escalation maps back to a tool_call_id.
+        injection_ledger.record_neutralization(sanitized, tool=tool, output_text=text)
+    return [TextContent(type="text", text=text)]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:95-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L95-L108)
+
+[15] (실행 확인) `FINDEVIL_INJECTION_LEDGER`를 폴더 경로로 정하고 `findevil-mcp`에는 제목에 모델 지시 토큰이 있는 `.eml`로 `email_parse`를, `findevil-agent-mcp`에는 `kind`에 같은 토큰을 넣은 `audit_append`를 보냈다.
+두 응답은 정상 결과였고 그 폴더에 줄이 쓰이지 않았으며 두 서버의 표준 오류에는 쓰기 실패를 알리는 줄이 없었다.
+
+[16] `_maybe_create_github_issue`는 `FINDEVIL_MISS_GH_ENABLED`가 `1`이고 `gh`가 있을 때만 `gh issue create`를 실행한다.
+
+```python
+def _maybe_create_github_issue(args: ExpertMissCaptureInput) -> str | None:
+    if os.environ.get("FINDEVIL_MISS_GH_ENABLED") != "1":
+        return None
+    gh = shutil.which("gh")
+    if gh is None:
+        return None
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:55-60`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L55-L60)
+```python
+    try:
+        result = subprocess.run(
+            [
+                gh,
+                "issue",
+                "create",
+                "--label",
+                f"miss/{args.edit_type}",
+                "--title",
+                title,
+                "--body",
+                "\n".join(body_lines),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:72-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L72-L89)

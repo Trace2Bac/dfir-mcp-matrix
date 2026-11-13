@@ -1,0 +1,421 @@
+---
+cell: E03
+details:
+- id: E03.01
+- id: E03.02
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.01 실행 환경의 읽기 전용 강제
+
+**구현.** 이 방식은 사용자 CLI `scripts/verdict`의 `--docker` 실행과 `--sift` 실행, `findevil-mcp`의 `disk_mount`에 적용된다 [1][2][3].
+`--docker` 실행이 부르는 `scripts/run-dfir-container.sh`는 증거 경로를 컨테이너의 `/evidence`에 `:ro`로 연결하고 두 서버를 그 컨테이너 안에서 실행한다 [1][4].
+`--sift` 실행은 SIFT 가상 머신 안의 증거 경로를 그대로 쓸 때 `findmnt`로 그 경로가 읽기 전용 마운트 위에 있는지 확인하고 아니면 실행을 멈춘다 [2][5].
+`disk_mount`는 raw 이미지를 `ro,loop` 옵션으로, EWF 안의 NTFS 볼륨을 `ntfs3` 드라이버의 `ro,loop` 옵션으로 마운트한다 [3][6].
+도구 설명은 `registry_query`·`mac_triage` 같은 도구에 마운트한 이미지 안의 파일을 주라고 적는다 [7].
+시험용 `mount`로 `disk_mount` 자동 모드를 실행하자 `-o ro,loop`와 `-o ro,loop,offset=…` 인자가 넘어갔다 [8].
+
+**한계.** 저장소의 기본 클라이언트 설정 `.mcp.json`은 두 서버를 같은 호스트에서 `scripts/run-mcp-rust.sh`·`scripts/run-mcp-python.sh`로 실행하고 증거를 읽기 전용으로 연결하지 않는다 [9].
+`run-dfir-container.sh`는 증거 인자를 주지 않으면 `/evidence`를 연결하지 않는다 [1].
+저장소 폴더는 컨테이너의 `/workspace`에 읽고 쓰기로 연결되므로 저장소 안에 둔 증거는 `/workspace` 경로로 읽으면 읽기 전용이 적용되지 않는다 [1].
+`--sift` 실행에서 호스트의 증거는 가상 머신의 작업 폴더로 복사되고 그 사본에는 읽기 전용 확인을 하지 않는다 [10].
+`disk_extract_artifacts`는 마운트를 쓰지 않고 기록된 이미지 파일을 `fls`·`icat`으로 직접 읽는다 [11].
+`disk_mount`를 `mode: mock`으로 부르면 서버는 마운트하지 않고 호출 인자 `mount_point`의 폴더를 자원의 `fs_root`로 적는다 [12].
+`disk_extract_artifacts`는 이 자원의 이미지를 Sleuth Kit으로 읽지 못하면 `fs_root` 폴더의 파일을 아티팩트로 복사한다 [13].
+`ewfmount`가 없으면 `disk_mount`는 마운트 없이 `mounted` 항목만 등록한다 [14].
+
+### E03.02 서버 코드의 원본 쓰기 제한
+
+**구현.** 이 방식은 `findevil-mcp`의 `case_open`, `browser_history`·`hashset_lookup`, 서버 코드가 증거를 직접 열어 해석하는 도구, 작업 폴더를 쓰는 `srum_parse`·`pst_parse`·`bulk_extract`·`disk_extract_artifacts`에 적용된다 [15][16][17][18][19][20][21].
+`case_open`은 증거를 `File::open`으로 읽기 모드로 열어 해시하고 링크인 경로는 일반 파일이 아니라며 거부한다 [15].
+`browser_history`는 SQLite 기록 파일을 `immutable=1` URI와 읽기 전용 플래그로 연다 [16].
+`hashset_lookup`도 SQLite 해시 목록을 같은 방식으로 연다 [17].
+`usnjrnl_query`·`bits_parse`·`oe_dbx_parse`·`email_parse`·`exif_parse`·`wmi_persist_parse`는 외부 도구 없이 증거를 `File::open`으로 읽기 모드로 연다 [18].
+`thumbcache_parse`·`registry_query`는 `fs::read`로, `zeek_summary`·`cloud_audit`는 `fs::read_to_string`으로 증거 파일 내용을 읽기만 한다 [19].
+`srum_parse`·`pst_parse`·`bulk_extract`는 외부 도구의 출력 위치를 사건 폴더 아래 작업 폴더로 정하고 증거 경로는 입력 인자로만 넘긴다 [20].
+`disk_extract_artifacts`는 이미지 안 파일을 사건 폴더의 `extracted/` 아래에 쓰고 이미지 안 경로의 `..`와 빈 조각을 버린 뒤 붙인다 [21].
+`mode: mock` 마운트의 폴더에서 꺼내기를 두 번 실행한 뒤 그 폴더의 파일 목록은 실행 전과 같았다 [22].
+
+**한계.** `disk_mount`·`vss_mount`는 모델이 준 `mount_point`를 증거 경로와 대조하지 않고 그 위치에 폴더를 만든다 [23].
+`findevil-agent-mcp`의 `audit_append`·`memory_remember`·`manifest_finalize`·`expert_miss_capture`는 모델이 준 경로에 파일을 만들거나 덧붙이고 그 경로를 증거 경로와 대조하지 않는다 [24].
+`argsafe`의 `validate_passthrough_args`는 출력 옵션 값이 증거 폴더 아래이면 거부하는 함수지만 이 함수를 부르는 도구는 없다 [25].
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 `findevil-mcp`가 실행하는 Volatility 3, Sleuth Kit, Hayabusa, Plaso, EZ 도구, `ewfmount`, `vshadowmount`, `bulk_extractor`, `esedbexport`, `pffexport` 같은 외부 도구에 적용된다 [26][11].
+서버는 이 도구들에 증거 경로를 입력 인자로 넘기고 도구가 원본을 여는 방식에는 관여하지 않는다 [26][11].
+
+**한계.** 서버 개요의 버전 기준으로 Volatility 3 2.11.0과 Sleuth Kit 4.15.0의 소스를 확인했다.
+Volatility 3 2.11.0의 `FileLayer`는 이미지를 `rb` 모드로 연다 [27].
+Sleuth Kit 4.15.0은 raw 이미지를 `O_RDONLY`로 열고 EWF 이미지는 libewf의 `LIBEWF_OPEN_READ`로 연다 [28][29].
+Hayabusa, Plaso, EZ 도구, `ewfmount`, `vshadowmount`, `bulk_extractor`, `esedbexport`, `pffexport`, `mac_apt`, Suricata, Zeek, tshark, `journalctl`, `last`, `ausearch`, `nfdump`, Velociraptor는 원본을 읽기 모드로 여는지 확인하지 못해 실제 보호 미확인이다 [26].
+
+### 근거
+
+[1] `run-dfir-container.sh`는 증거를 `/evidence`에 읽기 전용으로, 저장소를 `/workspace`에 연결한다.
+
+```bash
+# 2. (Re)start the container. Evidence is mounted read-only when supplied.
+mounts=(-v "${REPO_ROOT}:/workspace")
+if [[ -n "${EVIDENCE}" ]]; then
+  EVIDENCE_ABS="$(cd "$(dirname "${EVIDENCE}")" && pwd)/$(basename "${EVIDENCE}")"
+  [[ -e "${EVIDENCE_ABS}" ]] || { log "evidence path not found: ${EVIDENCE}"; exit 1; }
+  mounts+=(-v "${EVIDENCE_ABS}:/evidence:ro")
+  log "evidence mounted read-only: ${EVIDENCE_ABS} -> /evidence"
+```
+
+[`scripts/run-dfir-container.sh:52-58`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/run-dfir-container.sh#L52-L58)
+
+[2] `--sift` 실행은 가상 머신 안의 증거 경로가 읽기 전용 마운트인지 확인한다.
+
+```text
+if [ '${require_readonly}' = '1' ]; then
+  command -v findmnt >/dev/null 2>&1 || { echo 'findmnt missing; cannot verify read-only mount' >&2; exit 1; }
+  opts=\$(findmnt -T ${qpath} -no OPTIONS 2>/dev/null || true)
+  case ",\${opts}," in
+    *,ro,*) ;;
+    *) echo 'SIFT mounted evidence path is not on a read-only mount' >&2; exit 1 ;;
+  esac
+```
+
+[`scripts/verdict:801-807`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/verdict#L801-L807)
+
+[3] `disk_mount`의 raw 이미지 마운트 옵션이다.
+
+```rust
+fn auto_mount_raw(
+    image_path: &Path,
+    mount_point: &Path,
+) -> Result<(String, PathBuf, Vec<String>, String, String), DiskError> {
+    let bin = std::env::var("FINDEVIL_MOUNT_BIN").unwrap_or_else(|_| "mount".to_string());
+    let args = vec![
+        "-o".to_string(),
+        "ro,loop".to_string(),
+        image_path.to_string_lossy().to_string(),
+        mount_point.to_string_lossy().to_string(),
+    ];
+    let result = run_fixed(&bin, &args)?;
+```
+
+[`services/mcp/src/tools/disk.rs:710-721`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L710-L721)
+
+[4] `.mcp.json.docker`는 두 서버를 컨테이너 안에서 실행하는 클라이언트 설정이다.
+
+```text
+  "mcpServers": {
+    "findevil-mcp": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "findevil-dfir",
+        "/workspace/target/release/findevil-mcp"
+      ]
+    },
+```
+
+[`.mcp.json.docker:4-14`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/.mcp.json.docker#L4-L14)
+
+[5] 가상 머신 안의 증거 경로를 쓸 때 읽기 전용 확인을 요구한다.
+
+```text
+  else
+    verify_sift_guest_evidence_readable "${EVIDENCE}" 1
+    sift_remote_evidence_identity "${EVIDENCE}" >/dev/null
+```
+
+[`scripts/verdict:2129-2131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/verdict#L2129-L2131)
+
+[6] NTFS 볼륨은 `ntfs3`의 `ro,loop` 옵션으로 마운트한다.
+
+```rust
+fn mount_ntfs_ro(device: &Path, mount_point: &Path) -> Result<(Vec<String>, String), DiskError> {
+    let mount_bin = std::env::var("FINDEVIL_MOUNT_BIN").unwrap_or_else(|_| "mount".to_string());
+    let mut offsets = vec![0u64];
+    if let Some(offset) = primary_partition_byte_offset_sudo(device) {
+        offsets.push(offset);
+    }
+    let mut last_status = String::new();
+    let mut last_stderr = String::new();
+    for offset in offsets {
+        let opts = if offset == 0 {
+            "ro,loop".to_string()
+        } else {
+            format!("ro,loop,offset={offset}")
+        };
+        let args = vec![
+            "-t".to_string(),
+            "ntfs3".to_string(),
+            "-o".to_string(),
+            opts,
+            device.to_string_lossy().to_string(),
+            mount_point.to_string_lossy().to_string(),
+        ];
+```
+
+[`services/mcp/src/tools/disk.rs:634-655`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L634-L655)
+
+[7] `registry_query`의 설명은 마운트한 이미지 안의 하이브 경로를 주라고 적는다.
+
+```rust
+            name: "registry_query",
+            description: "Read keys + values from an offline Windows Registry hive (NTUSER.DAT, \
+                 SOFTWARE, SYSTEM, SECURITY, SAM, USRCLASS.DAT). PRIMARY POOL A persistence \
+                 surface — Run / RunOnce / IFEO / Services / WMI subscription consumers / \
+                 ScheduledTasks all live here. Use AFTER case_open with the hive_path \
+                 pointing at the file inside the mounted image. \
+```
+
+[`services/mcp/src/server.rs:415-420`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L415-L420)
+
+[8] (실행 확인) 시험용 `mmls`·`mount`로 `disk_mount` 자동 모드를 실행하자 `mount`가 받은 인자에 `ro,loop`가 들어 있었다.
+
+[9] 기본 클라이언트 설정은 두 서버를 저장소의 시작 스크립트로 실행한다.
+
+```json
+  "mcpServers": {
+    "findevil-mcp": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "scripts/run-mcp-rust.sh"
+      ],
+      "cwd": "."
+    },
+    "findevil-agent-mcp": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "scripts/run-mcp-python.sh"
+      ],
+      "cwd": "."
+    },
+```
+
+[`.mcp.json:3-19`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/.mcp.json#L3-L19)
+
+[10] 호스트 증거는 가상 머신의 작업 폴더로 복사된다: [`scripts/verdict:2058-2128`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/verdict#L2058-L2128).
+
+[11] `disk_extract_artifacts`는 마운트가 아닌 기록된 이미지 경로를 읽는다.
+
+```rust
+    // Read artifacts straight from the image with The Sleuth Kit (fls/icat)
+    // instead of walking a live mount: libtsk reads EWF + raw images directly,
+    // so extraction is stateless and survives --sift mode's per-tool SSH
+    // sessions (a FUSE mount's daemon does not). The filesystem mount, if any,
+    // is irrelevant here — only the image path disk_mount recorded matters.
+    let image_path = mount
+        .image_path
+        .ok_or_else(|| DiskError::MountNotMounted(input.mount_id.clone()))?;
+    if !image_path.is_file() {
+        return Err(DiskError::ImageNotFound(image_path));
+    }
+    let image_paths = segment_paths_for_image(&image_path)
+        .map_err(|err| DiskError::EwfSegmentSet(err.to_string()))?;
+```
+
+[`services/mcp/src/tools/disk.rs:321-333`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L321-L333)
+
+[12] `mode: mock`의 `disk_mount`는 마운트 명령을 실행하지 않고 `mount_point`를 `fs_root`로 적는다.
+
+```rust
+    let (status, fs_root, command, stderr_tail, note) = match input.mode {
+        DiskMode::Mock => (
+            "mounted".to_string(),
+            mount_point.clone(),
+            vec!["mock".to_string(), "disk_mount".to_string()],
+            String::new(),
+            "mock mount registered; no privileged filesystem operation ran".to_string(),
+        ),
+```
+
+[`services/mcp/src/tools/disk.rs:255-262`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L255-L262)
+
+[13] `mock` 자원은 Sleuth Kit 목록이 실패하거나 비면 `fs_root` 폴더를 훑어 파일을 복사하고 폴더 기준 경로를 `source_path`로 둔다.
+
+```rust
+    let mock_root: Option<PathBuf> = (mount.command.first().map(String::as_str) == Some("mock"))
+        .then(|| mount.fs_root.clone())
+        .flatten();
+    let (listed, via_walk) = match tsk_list(&image_paths, sector_offset) {
+        Ok(files) if !files.is_empty() => (files, false),
+        tsk_result => match &mock_root {
+            Some(root) => (mock_list(root)?, true),
+            None => (tsk_result?, false),
+        },
+    };
+```
+
+[`services/mcp/src/tools/disk.rs:357-366`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L357-L366)
+
+```rust
+    out.push(ExtractedDiskArtifact {
+        artifact_class: class.to_string(),
+        source_path: PathBuf::from(rel_path),
+        extracted_path: dest,
+        size_bytes: size,
+        recovered_deleted: false,
+    });
+```
+
+[`services/mcp/src/tools/disk.rs:1187-1193`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1187-L1193)
+
+[14] `ewfmount`가 없으면 마운트 없이 이미지를 직접 읽는 항목을 등록한다.
+
+```rust
+fn direct_tsk_mount(
+    image_path: &Path,
+    reason: &str,
+) -> (String, PathBuf, Vec<String>, String, String) {
+    (
+        "mounted".to_string(),
+        image_path.to_path_buf(),
+        vec![DIRECT_TSK_COMMAND.to_string()],
+        String::new(),
+        format!("registered direct Sleuth Kit read of the image (no FUSE/loop mount): {reason}"),
+    )
+}
+```
+
+[`services/mcp/src/tools/disk.rs:597-608`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L608)
+
+[15] `case_open`은 링크를 거부하고 파일을 읽기 모드로 연다.
+
+```rust
+    let image_path = &input.image_path;
+    let meta = fs::symlink_metadata(image_path)
+        .map_err(|_| CaseOpenError::ImageNotFound(image_path.clone()))?;
+    if !meta.is_file() {
+        return Err(CaseOpenError::ImageNotRegular(image_path.clone()));
+    }
+```
+
+[`services/mcp/src/tools/case_open.rs:145-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L145-L150)
+
+```rust
+fn sha256_files(paths: &[PathBuf]) -> Result<String, CaseOpenError> {
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; SHA_BUFFER_SIZE];
+    for path in paths {
+        let file = File::open(path).map_err(|source| CaseOpenError::ImageUnreadable {
+            path: path.clone(),
+            source,
+        })?;
+        let mut reader = BufReader::with_capacity(SHA_BUFFER_SIZE, file);
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|source| CaseOpenError::ImageUnreadable {
+                    path: path.clone(),
+                    source,
+                })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    let digest = hasher.finalize();
+    Ok(hex_encode(&digest))
+}
+```
+
+[`services/mcp/src/tools/case_open.rs:247-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L247-L271)
+
+[16] `browser_history`는 읽기 전용, 변경 불가 모드로 연다.
+
+```rust
+    // Read-only + immutable so we never write a -wal/-journal next to the
+    // evidence file, and a stale WAL header can't block the open.
+    let uri = format!("file:{}?immutable=1", path.to_string_lossy());
+    let conn = Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|source| BrowserHistoryError::Unreadable {
+        path: path.clone(),
+```
+
+[`services/mcp/src/tools/browser_history.rs:139-147`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L139-L147)
+
+[17] `hashset_lookup`도 같은 모드로 연다.
+
+```rust
+    // Read-only + immutable so we never write a -wal/-journal next to the
+    // set file, and a stale WAL header can't block the open.
+    let uri = format!("file:{}?mode=ro&immutable=1", path.to_string_lossy());
+    let conn = match Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:498-505`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L498-L505)
+
+[18] 외부 도구 없이 증거를 `File::open`으로 여는 해석 도구다: [`services/mcp/src/tools/usnjrnl_query.rs:178-178`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/usnjrnl_query.rs#L178-L178), [`services/mcp/src/tools/bits_parse.rs:125-125`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bits_parse.rs#L125-L125), [`services/mcp/src/tools/oe_dbx_parse.rs:106-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/oe_dbx_parse.rs#L106-L106), [`services/mcp/src/tools/email_parse.rs:121-121`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/email_parse.rs#L121-L121), [`services/mcp/src/tools/exif_parse.rs:124-124`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L124-L124), [`services/mcp/src/tools/wmi_persist_parse.rs:141-141`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/wmi_persist_parse.rs#L141-L141).
+
+[19] 증거 파일 내용을 `fs::read`나 `fs::read_to_string`으로 읽는 해석 도구다: [`services/mcp/src/tools/thumbcache_parse.rs:179-179`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L179-L179), [`services/mcp/src/tools/regf.rs:109-109`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/regf.rs#L109-L109), [`services/mcp/src/tools/zeek_summary.rs:131-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L131-L131), [`services/mcp/src/tools/cloud_audit.rs:128-128`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/cloud_audit.rs#L128-L128).
+
+[20] 외부 도구의 출력은 사건 폴더 아래 작업 폴더로 간다: [`services/mcp/src/tools/srum_parse.rs:460-473`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L460-L473), [`services/mcp/src/tools/pst_parse.rs:193-203`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L193-L203), [`services/mcp/src/tools/bulk_extract.rs:307-320`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L307-L320).
+
+[21] 이미지 안 경로를 출력 폴더 아래에 붙일 때 `..`와 빈 조각을 버린다.
+
+```rust
+/// Join an image-internal path under `base`, keeping only normal components so a
+/// hostile image filename can't escape the output directory.
+fn safe_join(base: &Path, rel: &str) -> PathBuf {
+    let mut dest = base.to_path_buf();
+    for part in rel.replace('\\', "/").split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        dest.push(part);
+    }
+    dest
+}
+
+```
+
+[`services/mcp/src/tools/disk.rs:1486-1498`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1486-L1498)
+
+[22] (실행 확인) `mode: mock` 마운트의 폴더를 대상으로 `disk_extract_artifacts`를 두 번 실행한 뒤 폴더의 파일 10개가 그대로 있었다.
+
+[23] `disk_mount`는 받은 `mount_point`에 폴더를 만든다.
+
+```rust
+    let mount_point = input
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| case_dir.join("mounts").join(&mount_id));
+    create_dir(&mount_point)?;
+```
+
+[`services/mcp/src/tools/disk.rs:244-248`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L244-L248)
+
+[24] `findevil-agent-mcp`의 쓰기 도구는 모델이 준 경로를 쓴다: [`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:20-26`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L20-L26), [`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:17-17`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L17-L17), [`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:74-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L74-L75), [`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:26-33`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L26-L33).
+
+[25] `validate_passthrough_args`는 지금 노출된 도구에 연결되지 않았다고 적는다.
+
+```rust
+//!   * [`validate_passthrough_args`] is the contract for any *future* free-form
+//!     arg field: it rejects shell-metacharacter / command-substitution /
+//!     redirection constructs, embedded NULs, and tool-native write/output flags
+//!     (`-o`, `--output`, `--output-dir`, `--outdir`, `--dump`, `-C`, plus the
+//!     `-oPATH` / `--output=PATH` glue forms) whose value resolves under an
+//!     evidence/mount root. No live tool exposes such a field today; wiring this
+//!     helper in is mandatory the moment one does.
+```
+
+[`services/mcp/src/tools/argsafe.rs:20-26`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/argsafe.rs#L20-L26)
+
+[26] 외부 도구는 증거 경로를 인자로 받아 실행된다: [`services/mcp/src/tools/vol_run.rs:193-207`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L193-L207), [`services/mcp/src/tools/hayabusa_scan.rs:254-260`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L254-L260), [`services/mcp/src/tools/ez_parse.rs:165-172`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L165-L172).
+
+[27] Volatility 3 2.11.0의 `FileLayer`는 `rb` 모드로 연다: [`volatility3/framework/layers/physical.py:118-125`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/layers/physical.py#L118-L125).
+
+[28] Sleuth Kit 4.15.0의 raw 이미지 열기다: [`tsk/img/raw.c:104-107`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/raw.c#L104-L107).
+
+[29] Sleuth Kit 4.15.0의 EWF 이미지 열기다: [`tsk/img/ewf.cpp:345-353`](https://github.com/sleuthkit/sleuthkit/blob/01de0345edaa1ebf21dba6939a7c6bc7129e6e7d/tsk/img/ewf.cpp#L345-L353).

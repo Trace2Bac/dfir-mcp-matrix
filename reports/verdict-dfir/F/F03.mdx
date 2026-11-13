@@ -1,0 +1,148 @@
+---
+cell: F03
+details:
+- id: not_applicable
+---
+
+# F03 서버 안 모델 입력 구성
+
+### 비적용
+
+**판단.** 두 서버는 도구를 처리하는 중에 모델을 부르지 않는다.
+`findevil-mcp`는 MCP SDK와 HTTP 클라이언트 없이 stdio로 JSON-RPC를 처리하고 외부 프로그램은 분석 도구만 실행한다 [1][2].
+`findevil-agent-mcp`의 도구 14개가 불러오는 `findevil_agent` 모듈은 판정, 검증, 서명, 기억 저장 모듈이고 모델 API를 부르지 않는다 [3][4].
+`findevil_agent` 패키지에는 모델을 부르는 `llm`과 `agentloop`이 있고 의존성에 `anthropic`이 있다 [5][6].
+서버를 시작한 뒤 불러온 모듈에는 `findevil_agent.llm`, `findevil_agent.agentloop`, `anthropic`이 없었다 [4].
+`findevil-agent-mcp`는 MCP sampling으로 클라이언트 모델에게 생성을 요청하지 않는다 [7].
+판정과 검증 모듈은 모델 없이 정해 둔 규칙과 다시 실행한 도구 출력만 쓴다 [8][9].
+
+### 근거
+
+[1] `findevil-mcp`의 의존성은 분석 형식 파서, 직렬화, 비동기 실행, 기록 크레이트이고 HTTP 클라이언트와 MCP SDK가 없다: [`services/mcp/Cargo.toml:23-139`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/Cargo.toml#L23-L139).
+
+[2] (실행 확인) `findevil-mcp`를 시작하자 `initialize` 응답은 프로토콜 `2024-11-05`와 `tools` capability만 담았다.
+
+[3] 서버가 등록하는 도구 모듈 목록이다.
+```python
+_MODULES: tuple[str, ...] = (
+    "audit_append",
+    "audit_verify",
+    "manifest_finalize",
+    "manifest_verify",
+    "verify_finding",
+    "detect_contradictions",
+    "judge_findings",
+    "correlate_findings",
+    "memory_remember",
+    "memory_recall",
+    "pool_handoff",
+    "expert_miss_capture",
+    "accuracy_compare",
+    "find_ai_signatures",
+)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/__init__.py:18-33`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/__init__.py#L18-L33)
+
+[4] (실행 확인) `findevil-agent-mcp`의 `build_server`를 실행한 뒤 `sys.modules`를 보자 도구 14개가 등록됐고 `findevil_agent.llm`, `findevil_agent.agentloop`, `anthropic`, `openai`는 불러오지 않았다.
+
+[5] `findevil_agent.llm`은 모델 제공자를 골라 대화 모델을 만드는 모듈이다.
+
+```python
+"""Provider-agnostic LLM and embedding factory backed by esperanto.
+
+Usage:
+    from findevil_agent.llm import get_language_model, get_embedding_model
+
+    lm = get_language_model()          # uses FINDEVIL_LLM_PROVIDER + FINDEVIL_MODEL
+    response = lm.chat_complete([{"role": "user", "content": "hello"}])
+
+    em = get_embedding_model()         # uses FINDEVIL_EMBEDDING_PROVIDER + FINDEVIL_EMBEDDING_MODEL
+    result = em.embed(["text to embed"])
+
+Provider is selected from env vars at call time so tests can monkey-patch
+os.environ without reloading the module. The returned objects are
+esperanto LanguageModel / EmbeddingModel instances; callers use
+``.chat_complete()`` / ``.achat_complete()`` / ``.embed()`` / ``.aembed()``
+directly — no wrapper class needed.
+
+Supported providers (non-exhaustive):
+    ``anthropic``   — ANTHROPIC_API_KEY
+    ``openrouter``  — OPENROUTER_API_KEY
+    ``openai``      — OPENAI_API_KEY
+    ``groq``        — GROQ_API_KEY
+    ``ollama``      — no key needed (local)
+    ``gemini``      — GOOGLE_API_KEY
+"""
+```
+
+[`services/agent/findevil_agent/llm.py:1-25`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/llm.py#L1-L25)
+
+[6] `findevil_agent` 패키지는 `anthropic`에 의존한다.
+```toml
+dependencies = [
+  # Claude Agent SDK — still here because the `anthropic` types
+  # (Tool, Message, etc.) appear in shared type definitions even
+  # though the orchestrator no longer makes API calls itself.
+  "anthropic>=0.45,<1.0",
+```
+
+[`services/agent/pyproject.toml:25-29`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/pyproject.toml#L25-L29)
+
+[7] 서버는 `list_tools`와 `call_tool` 처리기만 등록하고 처리기는 도구 처리 함수를 부를 뿐이다.
+```python
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        spec = specs.get(name)
+        if spec is None:
+            log.warning("agent_mcp_unknown_tool", tool=name)
+            return _error_content(f"unknown tool: {name!r}", kind="unknown_tool")
+
+        try:
+            validated = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            log.warning(
+                "agent_mcp_validation_error",
+                tool=name,
+                errors=exc.errors(include_url=False),
+            )
+            return _error_content(f"input validation failed: {exc}", kind="validation")
+
+        try:
+            result = await spec.handler(validated)
+        except Exception as exc:
+            log.error(
+                "agent_mcp_handler_exception",
+                tool=name,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+            )
+            return _error_content(f"{type(exc).__name__}: {exc}", kind="handler")
+
+        return _to_text_content(result, tool=name)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:170-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L170-L198)
+
+[8] 판정 모듈은 모델을 부르지 않는다고 적는다: [`services/agent/findevil_agent/correlator.py:46-47`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator.py#L46-L47), [`services/agent/findevil_agent/contradiction.py:29-32`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/contradiction.py#L29-L32), [`services/agent/findevil_agent/verifier.py:26-29`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L26-L29).
+
+[9] 검증 모듈의 가져오기 문이다.
+```python
+from __future__ import annotations
+
+import os
+from posixpath import basename as _posix_basename
+from typing import Any
+
+from findevil_agent.entailment import check_entailment, check_expectation, entailment_slice
+from findevil_agent.events import Finding, VerifierAction
+from findevil_agent.mcp_client import McpClient
+from findevil_agent.replay import (
+    ReplayArtifact,
+    ReplayPool,
+    missing_replay_artifact,
+    replay_tool_call,
+)
+```
+
+[`services/agent/findevil_agent/verifier.py:32-46`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L32-L46)

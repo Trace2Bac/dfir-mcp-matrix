@@ -1,0 +1,219 @@
+---
+cell: I02
+details:
+- id: not_implemented
+---
+
+# I02 분석 도구 통신 차단
+
+### 미구현
+
+**판단.** `findevil-mcp`는 Volatility 3, Velociraptor, `tshark`, Zeek, Sleuth Kit, Plaso 같은 분석 도구를 하위 프로세스로 실행하고 그 통신을 끊거나 끄는 옵션이나 장치를 두지 않는다 [1][2][3].
+저장소에는 분석 도구를 네트워크 없는 컨테이너나 network namespace에서 실행하는 구성이 없다.
+컨테이너 실행 스크립트 `scripts/run-dfir-container.sh`의 `docker run`에도 네트워크를 끊는 옵션이 없다 [4].
+컨테이너 이미지 정의 `docker/dfir.Dockerfile`은 Volatility 3가 처음 쓸 때 Windows PDB 심볼을 내려받는다고 주석에 적고 심볼 폴더에 모든 사용자의 쓰기 권한을 준다 [5].
+
+Volatility 3는 통신을 끄지 않은 채 실행된다.
+
+- `vol_pslist`, `vol_psscan`, `vol_psxview`, `vol_malfind`, `vol_run`은 `vol`에 `-f`, `-r json`, `-q`, 플러그인 이름만 넘기고 `--offline`을 붙이지 않는다 [1][6].
+- 시험용 `vol`을 두고 `vol_pslist`를 부르자 받은 인자는 `-f <파일> -r json -q windows.pslist`뿐이었다 [7].
+- 버전 기준인 Volatility 3 2.11.0에서 온라인 여부를 정하는 `constants.OFFLINE`의 기본값은 거짓이고 명령 행의 `--offline`이 이 값을 켠다 [8][9].
+- 이 값이 꺼져 있으면 Volatility 3는 Windows 커널의 심볼 표가 로컬 캐시에 없을 때 `http://msdl.microsoft.com/download/symbols`에서 PDB를 받아 변환한다 [10].
+- Volatility 3 2.11.0의 오프라인 처리기는 `OFFLINE`이 켜졌을 때만 http·https 요청을 막는다 [11].
+- Volatility 3 2.11.0의 명령 행은 사용자 홈의 `.config/volatility3/vol.json`을 인자 기본값으로 읽으므로 그 파일이 `offline`을 정하면 동작이 달라진다 [12].
+
+`vel_collect`는 모델이 고른 Velociraptor 아티팩트 이름과 인자를 `velociraptor artifacts collect`에 넘기고 아티팩트를 목록과 대조하지 않는다 [2].
+서버는 이 도구의 `openWorldHint`를 참으로 알리고 코드 주석은 일부 아티팩트가 외부 시스템에 닿는다고 적는다 [13].
+이 표시는 클라이언트에 알리는 값이고 Velociraptor의 통신을 막지 않는다 [13][2].
+
+`pcap_triage`는 `tshark`에 이름 해석을 끄는 `-n`을 붙이지 않는다 [3].
+시험용 `tshark`가 받은 인자에도 `-n`이 없었다 [7].
+`login_accounting`은 `last`에 `-f`, `-F`, `-w`만 넘기고 코드 주석은 `last`가 `-d`를 주지 않으면 DNS 조회를 하지 않는다고 적는다 [14].
+`argsafe`의 실행 금지 목록에는 `curl`, `wget`, `ssh` 같은 네트워크 프로그램이 있지만 이 목록은 실행할 프로그램 이름만 검사하고 실행한 분석 도구의 통신은 막지 않는다 [15].
+
+`findevil-agent-mcp`는 분석 도구를 직접 실행하지 않는다 [16].
+`findevil-agent-mcp`의 `verify_finding`은 호출 인자 `findevil_mcp_command`로 `findevil-mcp`를 하위 프로세스로 실행해 근거 도구 호출을 다시 실행하므로 이때도 `findevil-mcp`의 같은 명령으로 분석 도구가 실행된다 [17].
+이 서버가 쓰는 sigstore 라이브러리의 연결은 서버 코드가 인자로 켜는 서명과 투명성 기록 연결이다 [18].
+Volatility 3 말고 서버가 실행하는 분석 도구와 서버에 링크한 라이브러리가 스스로 통신하는지는 확인하지 않았다.
+
+### 근거
+
+[1] `vol_pslist`는 `vol`에 `-f`, `-r json`, `-q`, 플러그인 이름만 넘긴다.
+
+```rust
+    let mut cmd = Command::new(&binary);
+    cmd.arg("-f")
+        .arg(&input.memory_path)
+        .arg("-r")
+        .arg("json")
+        .arg("-q") // quiet — suppress progress on stderr where possible
+        .arg("windows.pslist");
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:139-145`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L139-L145)
+
+[2] `vel_collect`는 아티팩트 이름의 모양만 검사하고 이름과 인자를 Velociraptor에 넘긴다.
+
+```rust
+pub fn vel_collect(input: &VelCollectInput) -> Result<VelCollectOutput, VelCollectError> {
+    if !is_valid_artifact_name(&input.artifact) {
+        return Err(VelCollectError::InvalidArtifactName(input.artifact.clone()));
+    }
+    if let Some(args) = input.args.as_ref() {
+        for key in args.keys() {
+            if !is_valid_arg_name(key) {
+                return Err(VelCollectError::InvalidArgName(key.clone()));
+            }
+        }
+    }
+
+    let binary = resolve_binary()?;
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+
+    let mut cmd = Command::new(&binary);
+    cmd.arg("artifacts")
+        .arg("collect")
+        .arg(&input.artifact)
+        .arg("--format")
+        .arg("jsonl");
+
+    if let Some(args) = input.args.as_ref() {
+        for (key, value) in args {
+            cmd.arg("--args").arg(format!("{key}={value}"));
+        }
+    }
+
+```
+
+[`services/mcp/src/tools/vel_collect.rs:130-157`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L130-L157)
+
+[3] `pcap_triage`가 `tshark`에 넘기는 인자에는 `-n`이 없다.
+[`services/mcp/src/tools/pcap_triage.rs:124-160`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L124-L160)
+
+[4] 컨테이너 실행 스크립트의 `docker run`은 네트워크 옵션 없이 컨테이너를 시작한다.
+
+```bash
+docker run -d --name "${CTR}" \
+  --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined \
+  "${mounts[@]}" \
+  "${IMAGE}" sleep infinity >/dev/null
+```
+
+[`scripts/run-dfir-container.sh:66-69`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/run-dfir-container.sh#L66-L69)
+
+[5] `docker/dfir.Dockerfile`은 Volatility 3가 내려받은 심볼을 저장하도록 심볼 폴더에 모든 사용자의 쓰기 권한을 준다.
+
+```dockerfile
+# Volatility 3 — pinned to SIFT Workstation parity (requirements.txt).
+# Make the symbols dirs writable: vol downloads Windows PDB symbols on first use
+# and must cache them, but the non-root user cannot write the root-owned package
+# dir otherwise (windows.info et al. fail with an unsatisfied-symbol error).
+# hadolint ignore=DL3013
+RUN pip install --no-cache-dir 'volatility3==2.27.0' \
+ && vol_dir="$(python3 -c 'import volatility3,os;print(os.path.dirname(volatility3.__file__))')" \
+ && mkdir -p "${vol_dir}/symbols" "${vol_dir}/framework/symbols" \
+ && chmod -R a+rwX "${vol_dir}/symbols" "${vol_dir}/framework/symbols"
+```
+
+[`docker/dfir.Dockerfile:71-79`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/docker/dfir.Dockerfile#L71-L79)
+
+[6] 나머지 Volatility 도구도 `--offline` 없이 명령을 만든다.
+[`services/mcp/src/tools/vol_run.rs:193-207`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L193-L207), [`services/mcp/src/tools/vol_psscan.rs:131-137`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_psscan.rs#L131-L137), [`services/mcp/src/tools/vol_psxview.rs:89-95`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_psxview.rs#L89-L95), [`services/mcp/src/tools/vol_malfind.rs:131-137`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_malfind.rs#L131-L137)
+
+[7] (실행 확인) `VOLATILITY_BIN`과 `TSHARK_BIN`에 받은 인자를 파일에 적는 시험용 실행 파일을 두고 `findevil-mcp`를 `unshare -rn`으로 실행한 뒤 `vol_pslist`와 `pcap_triage`를 불렀다.
+`vol`은 `-f <파일> -r json -q windows.pslist`를 받았다.
+`tshark`는 `-r <파일> -c 500000 -T fields -E separator=<탭>`과 `-e` 필드 11개를 받았고 `-n`은 없었다.
+
+[8] Volatility 3 2.11.0에서 `OFFLINE`의 기본값은 거짓이고 원격 ISF 목록 주소의 기본값은 `None`이다.
+[`volatility3/framework/constants/__init__.py:110-113`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/constants/__init__.py#L110-L113)
+
+[9] Volatility 3 2.11.0의 명령 행은 `--offline`으로 `OFFLINE`을 켠다.
+[`volatility3/cli/__init__.py:238-252`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/cli/__init__.py#L238-L252), [`volatility3/cli/__init__.py:331-334`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/cli/__init__.py#L331-L334)
+
+[10] Volatility 3 2.11.0은 심볼 표가 캐시에 없으면 PDB를 내려받아 ISF로 바꾸고 내려받는 주소는 Microsoft 심볼 서버다.
+[`volatility3/framework/symbols/windows/pdbutil.py:76-125`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/symbols/windows/pdbutil.py#L76-L125), [`volatility3/framework/symbols/windows/pdbutil.py:238-276`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/symbols/windows/pdbutil.py#L238-L276), [`volatility3/framework/symbols/windows/pdbconv.py:944-952`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/symbols/windows/pdbconv.py#L944-L952)
+
+[11] Volatility 3 2.11.0의 오프라인 처리기는 `OFFLINE`이 켜졌을 때만 http·https 요청을 막는다.
+[`volatility3/framework/layers/resources.py:316-321`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/framework/layers/resources.py#L316-L321)
+
+[12] Volatility 3 2.11.0의 명령 행은 사용자 설정 폴더의 `vol.json`을 읽어 인자 기본값으로 둔다: [`volatility3/cli/__init__.py:117`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/cli/__init__.py#L117), [`volatility3/cli/__init__.py:268`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/cli/__init__.py#L268), [`volatility3/cli/__init__.py:521-534`](https://github.com/volatilityfoundation/volatility3/blob/5e75cff62898042f0737e87407049d08df798262/volatility3/cli/__init__.py#L521-L534).
+
+[13] `vel_collect`의 annotation은 `open_world`를 참으로 두고 주석은 일부 아티팩트가 외부 시스템에 닿는다고 적는다.
+
+```rust
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                // Some Velociraptor artifacts (e.g. uploads, network probes)
+                // do touch external systems. Conservative: mark openWorld
+                // so the agent UI can prompt before auto-approving.
+                open_world: true,
+```
+
+[`services/mcp/src/server.rs:1338-1344`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1338-L1344)
+
+[14] `login_accounting`의 주석은 `last`에 넘기는 인자와 `-d`를 주지 않을 때의 DNS 조회를 적는다.
+
+```rust
+//! `last` invocation (deliberately minimal, FIXED argv):
+//!   `last -f <wtmp_path> -F -w`
+//!     -f  read this accounting file instead of /var/log/wtmp
+//!     -F  full login/logout times (so we get a parseable absolute date)
+//!     -w  wide — never truncate the user / host columns
+//!
+//! We deliberately do NOT pass `-R` (`--nohostname`): that flag suppresses the
+//! host field entirely, which would discard the remote SSH/RDP source host that
+//! is the whole point of this tool (an interactive login from an unexpected
+//! host is the lateral-movement signal). `last` displays the host string AS
+//! RECORDED in `wtmp` and does no live DNS lookup by default (that is opt-in via
+//! `-d`), so keeping the host column is both useful and network-safe.
+```
+
+[`services/mcp/src/tools/login_accounting.rs:12-23`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/login_accounting.rs#L12-L23)
+
+[15] `argsafe`의 실행 금지 목록은 실행할 프로그램의 이름과 대조한다.
+[`services/mcp/src/tools/argsafe.rs:34-109`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/argsafe.rs#L34-L109)
+
+[16] `findevil-agent-mcp`의 서버 경로에서 하위 프로세스를 실행하는 곳은 `expert_miss_capture`의 `gh`, 시각 인증 요청을 만드는 `openssl`, `findevil-mcp`를 실행하는 MCP 클라이언트뿐이다: [`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:72-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L72-L89), [`services/agent/findevil_agent/crypto/anchor.py:398-406`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L398-L406), [`services/agent/findevil_agent/mcp_client.py:143-153`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/mcp_client.py#L143-L153).
+
+[17] `verify_finding`은 `findevil_mcp_command`로 MCP 클라이언트를 만들어 근거 도구 호출을 다시 실행한다.
+
+```python
+def _make_mcp_client(command: list[str]) -> McpClient:
+    return StdioMcpClient(command, request_timeout_s=_REPLAY_TIMEOUT_S)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:109-110`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L109-L110)
+```python
+    client = _make_mcp_client(list(inp.findevil_mcp_command))
+    try:
+        action, replay = reverify_finding(
+            finding,
+            mcp=client,
+            tool_call_index=inp.tool_call_index,
+            force_fresh=inp.force_fresh_replay,
+            downgrade_on_drift=inp.downgrade_on_drift,
+        )
+    finally:
+        client.close()
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:138-148`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L138-L148)
+
+[18] `manifest_finalize`는 `signer`와 `anchor_transparency` 인자에 따라 sigstore 연결을 연다.
+
+```python
+    requested, coerce_reason = _resolve_signer_request(inp.signer)
+    if requested == "stub":
+        signer: Signer = StubSigner(run_id=inp.run_id)
+    elif requested == "ed25519":
+        signer = FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id))
+    else:  # sigstore
+        signer = FallbackSigner(
+            make_signer(kind="sigstore"),
+            FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id)),
+        )
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:161-171`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L161-L171)

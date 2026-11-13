@@ -1,0 +1,267 @@
+---
+cell: E02
+details:
+- id: E02.01
+- id: E02.04
+- id: E02.05
+---
+
+# E02 증거 무결성 검증
+
+### E02.01 등록 시 기준값 자동 계산
+
+**구현.** 이 방식은 `findevil-mcp`의 `case_open`에 적용된다 [1].
+`case_open`은 모델이 요청하지 않아도 등록할 이미지 전체의 SHA-256을 1 MiB씩 읽어 계산한다 [1][2].
+분할 EWF는 찾은 조각을 번호 차례로 이어 읽은 바이트 전체를 해시 하나로 계산한다 [1][2].
+기준값은 응답의 `image_hash`와 사건 폴더 `case.json`의 `image_hash`에 남는다 [1][3].
+기준값 계산 전에 받은 경로와 조각이 링크가 아닌 일반 파일인지 확인한다 [1].
+`case_open`으로 E01·E02 조각을 등록하자 두 조각을 이은 바이트의 해시가 `image_hash`에 실렸다 [4].
+
+**한계.** 기준값은 등록할 때 보이는 조각으로만 계산한다.
+마지막 조각이 빠진 분할 이미지는 남은 조각만으로 해시를 계산하고 알리지 않는다 [5].
+`findevil-mcp`의 다른 도구는 증거를 읽을 때 이 기준값과 대조하지 않는다 [6].
+`findevil-agent-mcp`의 `verify_finding`은 도구를 다시 실행해 도구 출력의 해시를 대조할 뿐 증거의 기준값을 읽지 않는다 [7].
+`manifest_finalize`의 `extra`에 이미지 해시를 넣을 수 있지만 서버는 그 값을 `case.json`과 대조하지 않는다 [8].
+
+### E02.04 도구를 요청해 검증
+
+**구현.** 이 방식은 `case_open`의 선택 인자 `expected_sha256`에 적용된다 [1][9].
+모델이 `expected_sha256`을 주면 계산한 해시와 대소문자를 가리지 않고 대조한다 [1].
+기준값은 모델이 준 값이고 서버가 앞서 `case.json`에 남긴 값을 꺼내 대조하는 도구는 없다 [1][6].
+사용자 CLI `scripts/find_evil_auto.py`는 폴더 증거의 디스크 이미지를 등록할 때 자기 목록에서 계산한 해시를 `expected_sha256`으로 넘긴다 [10].
+
+### E02.05 불일치 시 중단·경고
+
+**구현.** 이 방식은 `case_open`의 해시 대조에 적용된다 [1].
+해시가 다르면 사건 폴더를 만들기 전에 `ImageHashMismatch` 오류로 끝나고 서버는 이를 JSON-RPC 오류 코드 `-32602`로 돌려준다 [1][11].
+오류 문구에는 기대값과 계산한 값이 함께 실린다 [12].
+`expected_sha256`을 `00`으로 주자 `image hash mismatch: expected 00, got …` 오류가 돌아왔다 [4].
+
+**한계.** 대조가 실패해도 서버는 그 사실을 파일에 남기지 않는다 [1].
+같은 이미지를 `expected_sha256` 없이 다시 등록하면 대조 없이 사건이 만들어진다 [1].
+
+### 근거
+
+[1] `case_open`은 해시를 계산하고 기대값이 있으면 대조한다.
+
+```rust
+    // 2. Stream-hash the full evidence input.
+    let actual_hash = sha256_files(&image_segments)?;
+    if let Some(expected) = &input.expected_sha256 {
+        if expected.eq_ignore_ascii_case(&actual_hash) {
+            // ok — match
+        } else {
+            return Err(CaseOpenError::ImageHashMismatch {
+                expected: expected.to_lowercase(),
+                actual: actual_hash,
+            });
+        }
+    }
+
+    // 3. Allocate a case_id.
+    let case_id = Uuid::new_v4().to_string();
+
+    // 4. Resolve FINDEVIL_HOME + create case dir.
+    let home = resolve_findevil_home()?;
+    let case_dir = home.join("cases").join(&case_id);
+    fs::create_dir_all(&case_dir).map_err(|source| CaseOpenError::CaseDirCreate {
+        path: case_dir.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/case_open.rs:167-189`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L167-L189)
+
+경로와 조각의 일반 파일 확인은 [`services/mcp/src/tools/case_open.rs:145-165`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L145-L165)에 있다.
+
+[2] 조각을 차례로 이어 1 MiB 단위로 해시한다.
+
+```rust
+fn sha256_files(paths: &[PathBuf]) -> Result<String, CaseOpenError> {
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; SHA_BUFFER_SIZE];
+    for path in paths {
+        let file = File::open(path).map_err(|source| CaseOpenError::ImageUnreadable {
+            path: path.clone(),
+            source,
+        })?;
+        let mut reader = BufReader::with_capacity(SHA_BUFFER_SIZE, file);
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|source| CaseOpenError::ImageUnreadable {
+                    path: path.clone(),
+                    source,
+                })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    let digest = hasher.finalize();
+    Ok(hex_encode(&digest))
+}
+```
+
+[`services/mcp/src/tools/case_open.rs:247-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L247-L271)
+
+[3] `case.json`에 해시를 적는다.
+
+```rust
+#[derive(Serialize)]
+struct CaseManifest<'a> {
+    id: &'a str,
+    image_path: &'a Path,
+    image_hash: &'a str,
+    image_size_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    image_segments: &'a Vec<PathBuf>,
+    registered_at: &'a str,
+    label: &'a Option<String>,
+}
+
+impl<'a> CaseManifest<'a> {
+    fn from_handle(h: &'a CaseHandle, inp: &'a CaseOpenInput) -> Self {
+        Self {
+            id: &h.id,
+            image_path: &inp.image_path,
+            image_hash: &h.image_hash,
+            image_size_bytes: h.image_size_bytes,
+            image_segments: &h.image_segments,
+            registered_at: &h.registered_at,
+            label: &inp.label,
+        }
+    }
+}
+```
+
+[`services/mcp/src/tools/case_open.rs:221-245`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L221-L245)
+
+[4] (실행 확인) 시험용 파일과 E01·E02 조각으로 `case_open`을 부르고 기대값을 틀리게 준 호출의 오류와 `case.json`을 확인했다.
+
+[5] 조각 탐색은 보이는 가장 큰 번호까지만 빈 번호를 찾는다.
+
+```rust
+    segments
+        .entry(1)
+        .or_insert_with(|| image_path.to_path_buf());
+    let max_segment = segments.keys().next_back().copied().unwrap_or(1);
+    for number in 1..=max_segment {
+        if segments.contains_key(&number) {
+            continue;
+        }
+        let found_later_segment = segments.range((number + 1)..).next().map_or_else(
+            || expected_segment_path(image_path, &first_ext, max_segment),
+            |(_, path)| path.clone(),
+        );
+        return Err(EwfSegmentError::MissingSegment {
+            missing_segment: expected_segment_path(image_path, &first_ext, number),
+            found_later_segment,
+        });
+    }
+
+    Ok((1..=max_segment)
+        .filter_map(|number| {
+            if number == 1 {
+                Some(image_path.to_path_buf())
+            } else {
+                segments.get(&number).cloned()
+            }
+        })
+        .collect())
+```
+
+[`services/mcp/src/tools/ewf_segments.rs:130-156`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ewf_segments.rs#L130-L156)
+
+[6] 디스크 도구는 이미지가 파일인지만 보고 꺼내기를 시작한다: [`services/mcp/src/tools/disk.rs:236-248`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L236-L248), [`services/mcp/src/tools/disk.rs:326-333`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L326-L333), [`services/mcp/src/tools/evtx_query.rs:36-44`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L36-L44).
+
+[7] `verify_finding`은 다시 실행한 출력의 해시를 기록된 값과 비교한다.
+
+```python
+def classify_drift(
+    *, expected_sha256: str | None, actual_sha256: str | None, error: str | None = None
+) -> tuple[DriftClass, str]:
+    """Classify replay outcome without severity escalation.
+
+    Track 3b's policy changes intentionally do not live here; this only labels
+    determinism state for the existing approve/downgrade/reject behavior.
+    """
+
+    if error:
+        return "replay_error", error
+    if expected_sha256 and actual_sha256 and expected_sha256 == actual_sha256:
+        return "exact_match", "replay output_sha256 matches audit log"
+    return "material_drift", "replay output_sha256 differs from audit log"
+```
+
+[`services/agent/findevil_agent/replay.py:70-83`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L70-L83)
+
+[8] `manifest`의 `extra`는 자유 형식이고 Merkle leaf에 포함되지 않는다.
+
+```python
+
+    extra: dict[str, Any] = field(default_factory=dict)
+    """Free-form metadata: image_path, image_hash, model name,
+    agent version, etc. Captured but not part of Merkle leaves —
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:105-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L105-L108)
+
+[9] `expected_sha256` 입력 필드다.
+
+```rust
+    /// Optional pinned SHA-256 (hex). When supplied, the computed
+    /// hash must match byte-for-byte or `case_open` returns
+    /// [`CaseOpenError::ImageHashMismatch`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+```
+
+[`services/mcp/src/tools/case_open.rs:47-51`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L47-L51)
+
+[10] 사용자 CLI는 자기 목록의 해시를 `expected_sha256`으로 넘긴다.
+
+```python
+        if str(disk_case_id).startswith("dir-"):
+            case_open_args = {
+                "image_path": evidence_path,
+                "label": Path(evidence_path).name,
+            }
+            if disk_inventory_entry and disk_inventory_entry.get("sha256"):
+                case_open_args["expected_sha256"] = str(disk_inventory_entry["sha256"])
+            opened = rust.call_tool("case_open", case_open_args)
+```
+
+[`scripts/find_evil_auto.py:11170-11177`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L11170-L11177)
+
+[11] `ImageHashMismatch`는 `InvalidParams`로 바뀐다.
+
+```rust
+fn dispatch_case_open(args: Value) -> Result<Value, ToolError> {
+    let input: CaseOpenInput = parse_args(args)?;
+    match case_open::case_open(&input) {
+        Ok(handle) => {
+            serde_json::to_value(handle).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(
+            e @ (crate::tools::CaseOpenError::ImageNotFound(_)
+            | crate::tools::CaseOpenError::ImageNotRegular(_)
+            | crate::tools::CaseOpenError::ImageHashMismatch { .. }
+            | crate::tools::CaseOpenError::EwfSegmentSet(_)),
+        ) => Err(ToolError::InvalidParams(format!("{e}"))),
+        Err(e) => Err(ToolError::Internal(format!("case_open: {e}"))),
+    }
+}
+```
+
+[`services/mcp/src/server.rs:1580-1594`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1580-L1594)
+
+[12] 오류 문구에 두 값을 싣는다.
+
+```rust
+    #[error("image hash mismatch: expected {expected}, got {actual}")]
+    ImageHashMismatch { expected: String, actual: String },
+```
+
+[`services/mcp/src/tools/case_open.rs:106-107`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L106-L107)

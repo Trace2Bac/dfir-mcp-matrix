@@ -1,0 +1,484 @@
+---
+cell: D01
+details:
+- id: D01.01
+- id: D01.02
+---
+
+# D01 파생물 보관
+
+### D01.01 파생물 파일 보관
+
+**구현.** 이 방식은 `findevil-mcp`의 `case_open`·`disk_mount`·`disk_extract_artifacts`·`bulk_extract`·`pst_parse`와 `findevil-agent-mcp`의 `audit_append`·`manifest_finalize`·`expert_miss_capture`에 적용된다 [1][2][3][4][5][6][7][8].
+`findevil-mcp`의 사건 폴더는 `$FINDEVIL_HOME/cases/<case_id>/`이고 `case_open`이 이 폴더를 만든다 [1].
+`case_open`은 증거 경로, 증거 SHA-256, 크기, 등록 시각, `label`을 사건 폴더의 `case.json`에 쓴다 [1].
+`disk_mount`와 `disk_extract_artifacts`는 마운트와 추출을 사건 폴더의 `session_resources.json`에 JSON 목록으로 남긴다 [2].
+`disk_unmount`는 이 파일에서 마운트 항목의 상태, 갱신 시각, 실행 명령을 해제할 때의 값으로 고쳐 쓴다 [2].
+그래서 마운트할 때 실행한 명령은 해제 뒤 이 파일에 남지 않는다 [2].
+`disk_extract_artifacts`는 Sleuth Kit `icat`이 증거 이미지에서 꺼낸 파일을 사건 폴더의 `extracted/disk/<extract_id>/<분류>/` 아래에 이미지 안 경로대로 둔다 [3].
+삭제된 항목에서 복구한 파일은 같은 분류 폴더의 `__deleted__/<inode>/` 아래에 둔다 [3].
+꺼낸 파일이 `max_artifact_bytes`(기본 512 MiB)보다 크면 그 파일을 지우고 개수만 응답에 싣는다 [3].
+`bulk_extract`는 `bulk_extractor`의 출력 폴더를 사건 폴더의 `extracted/bulk_extract/<이미지 파일 이름>/out/`으로 정하고 호출이 끝나도 지우지 않는다 [4].
+이 폴더에는 `bulk_extractor`가 쓴 특징 파일과 `report.xml`이 남고 그 위 폴더에는 서버가 정규식 인자를 적은 `find_regexes.txt`가 남는다 [4][9].
+`pst_parse`는 `pffexport`의 내보내기 결과를 사건 폴더의 `extracted/pst/pst-export-<UUID>/`에 두고 성공한 호출에서는 지우지 않는다 [5].
+시험용 실행 파일로 네 도구를 부르자 사건 폴더에 `case.json`, `session_resources.json`, 꺼낸 파일, 특징 파일, 내보내기 폴더가 남았다 [10].
+
+`findevil-agent-mcp`의 `audit_append`는 호출 인자 `path`의 JSONL 파일에 호출한 쪽이 준 `kind`와 `payload`를 해시 체인 한 줄로 덧붙인다 [6][11].
+같은 저장소의 사용자 CLI `find_evil_auto.py`는 발견사항 전체를 `finding_approved` 기록의 `payload`로 이 파일에 쓰므로 발견사항 기록은 이 JSONL 파일에 남는다 [12].
+`manifest_finalize`는 서명한 manifest를 호출 인자 `output_path`에 JSON 파일로 쓴다 [7][13].
+`expert_miss_capture`는 검토자가 고친 보고서 내용을 호출 인자 `ledger_path`의 JSONL 파일에 같은 해시 체인 형식으로 덧붙인다 [8].
+`pool_handoff`는 호출 인자 `audit_path`의 JSONL 파일에, `memory_remember`·`memory_recall`·`accuracy_compare`는 선택 인자 `audit_log_path`를 줄 때만 그 파일에 역할 사이 메시지나 조회·점수 기록을 같은 형식으로 덧붙인다 [14].
+에이전트 서버를 실행해 `audit_append`, `manifest_finalize`, `expert_miss_capture`를 부르자 받은 경로에 `audit.jsonl`, `run.manifest.json`, `expert_misses.jsonl`이 생겼다 [15].
+
+`ez_parse`, `mac_triage`, `pcap_triage`, `suricata_eve`, `hayabusa_scan`, `plaso_parse`는 분석 도구의 출력을 임시 폴더에 쓰고 읽은 뒤 지운다 [16].
+`srum_parse`는 사건 폴더의 `_xartifact/srum-<pid>-<나노초>/`에 내보낸 뒤 호출이 끝나면 지운다 [17].
+두 서버의 나머지 도구는 결과를 응답으로만 돌려준다.
+두 서버는 응답에서 주입 문자열을 바꾼 호출이 있으면 도구 이름, 응답 SHA-256, 바꾼 개수를 `injection_alerts.jsonl`에 덧붙이고 응답 내용은 남기지 않는다 [18].
+보관 기간이나 보관 대상을 정하는 설정과 코드는 없고 보관한 파일을 지우는 MCP 도구도 없다.
+
+`find_evil_auto.py`는 실행마다 자기 실행 폴더를 정하고 그 안의 `audit.jsonl`과 `run.manifest.json` 경로를 위 도구의 인자로 넘긴다 [19].
+같은 CLI가 직접 쓰는 `verdict.json`, `status.json` 같은 파일은 사용자 CLI의 동작이라 서버 구현으로 보지 않는다 [19].
+
+**한계.** `case_open`은 응답의 `db_path`에 사건 폴더의 `evidence.ddb`를 적지만 이 파일을 만드는 코드는 두 서버에 없다 [20].
+`disk_mount`를 `mode: mock`으로 부르면 서버는 마운트하지 않고 호출 인자 `mount_point`의 폴더를 자원의 `fs_root`로 적는다 [21].
+`disk_extract_artifacts`는 이 자원의 이미지를 Sleuth Kit으로 읽지 못하면 `fs_root` 폴더의 파일을 아티팩트로 복사한다 [21].
+
+### D01.02 객체 저장소·DB 보관
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `memory_remember`에 적용된다 [22].
+`memory_remember`는 호출 인자 `store_path`의 SQLite 파일을 열고 FTS5 가상 테이블 `memories`에 사건 ID, 종류, 키, 값, `sha256`, 시각을 한 행으로 넣는다 [22][23].
+행의 시각 `ts`는 호출자가 주면 그 값이고 주지 않으면 서버가 정한 시각이다 [22][23].
+같은 호출에서 `meta` 테이블에 사건 ID별 사건 경로와 처음·마지막 기록 시각을 남긴다 [23].
+넣는 값은 호출 인자로 받은 IOC, 해시, 공격 기법, 호스트 이름, 발견사항 요약이고 서버가 도구 출력에서 뽑은 값이 아니다 [22].
+`find_evil_auto.py`는 CONFIRMED 발견사항마다 이 도구를 불러 요약을 넣는다 [24].
+같은 키로 두 번 부르자 두 행이 모두 남았고 `memory_recall`이 둘을 시각과 함께 돌려주었다 [15].
+
+`findevil-mcp`는 DB를 쓰지 않는다 [20].
+
+### 근거
+
+[1] `case_open`은 사건 폴더를 만들고 `case.json`을 쓴다.
+
+```rust
+    // 4. Resolve FINDEVIL_HOME + create case dir.
+    let home = resolve_findevil_home()?;
+    let case_dir = home.join("cases").join(&case_id);
+    fs::create_dir_all(&case_dir).map_err(|source| CaseOpenError::CaseDirCreate {
+        path: case_dir.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/case_open.rs:183-189`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L183-L189)
+
+```rust
+    // 5. Persist a minimal manifest for later tools + audit.
+    let manifest_path = case_dir.join("case.json");
+    let manifest = serde_json::to_string_pretty(&CaseManifest::from_handle(&handle, input))?;
+    fs::write(&manifest_path, manifest).map_err(|source| CaseOpenError::ManifestWrite {
+        path: manifest_path,
+        source,
+    })?;
+
+    Ok(handle)
+}
+
+#[derive(Serialize)]
+struct CaseManifest<'a> {
+    id: &'a str,
+    image_path: &'a Path,
+    image_hash: &'a str,
+    image_size_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    image_segments: &'a Vec<PathBuf>,
+    registered_at: &'a str,
+    label: &'a Option<String>,
+}
+```
+
+[`services/mcp/src/tools/case_open.rs:210-231`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L210-L231)
+
+[2] 마운트와 추출 기록은 사건 폴더의 `session_resources.json`에 쓴다: [`services/mcp/src/tools/disk.rs:22`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L22), [`services/mcp/src/tools/disk.rs:273-289`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L273-L289), [`services/mcp/src/tools/disk.rs:396-412`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L396-L412), [`services/mcp/src/tools/disk.rs:474-477`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L474-L477), [`services/mcp/src/tools/disk.rs:1749-1762`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1749-L1762).
+
+[3] `tsk_extract`는 분류 폴더와 삭제 항목 폴더 아래에 `icat` 출력을 쓰고 크기 상한을 넘으면 지운다: [`services/mcp/src/tools/disk.rs:335-337`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L335-L337), [`services/mcp/src/tools/disk.rs:1421-1430`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1421-L1430), [`services/mcp/src/tools/disk.rs:1449-1472`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1449-L1472).
+
+[4] `bulk_extract`는 이미지 파일 이름으로 정한 사건 폴더 아래 폴더를 출력 폴더로 쓴다.
+
+```rust
+    // Deterministic, uuid-free staging path so the recorded
+    // (case-relative) path is stable across runs of the same image.
+    let stem = sanitize_stem(&input.image_path);
+    let staging = case_dir.join("extracted").join("bulk_extract").join(&stem);
+    // bulk_extractor refuses a non-empty output dir; re-runs re-derive.
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|source| BulkExtractError::Io {
+            path: staging.clone(),
+            source,
+        })?;
+    }
+    create_dir(&staging)?;
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:309-320`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L309-L320)
+
+```rust
+    let feature_dir = staging.join("out");
+    let args = build_bulk_args(
+        &feature_dir,
+        &input.image_path,
+        &input.scanners,
+        &find_files,
+    );
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:337-343`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L337-L343)
+
+[5] `pst_parse`는 사건 폴더 아래 UUID 폴더에 내보내고 성공하면 폴더를 남긴다.
+
+```rust
+    // Stage the export UNDER THE CASE DIR — never beside the evidence.
+    let case_dir = case_dir(&input.case_id)?;
+    let staging = case_dir
+        .join("extracted")
+        .join("pst")
+        .join(format!("pst-export-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&staging).map_err(|source| PstError::StagingCreate {
+        path: staging.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/pst_parse.rs:193-202`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L193-L202)
+
+```rust
+    if !proc.status.success() {
+        let stderr = truncate_to(String::from_utf8_lossy(&proc.stderr).into_owned(), 4096);
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(PstError::SubprocessFailed {
+            exit_code: proc.status.code().unwrap_or(-1),
+            stderr,
+        });
+    }
+
+    let messages = summarize_export(&staging).map_err(PstError::OutputWalk)?;
+    Ok(build_output(messages, true))
+```
+
+[`services/mcp/src/tools/pst_parse.rs:235-245`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L235-L245)
+
+[6] `audit_append`는 받은 `path`로 `AuditLog`를 열어 한 줄을 덧붙인다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[7] `manifest_finalize`는 받은 `output_path`에 manifest를 쓴다.
+
+```python
+    manifest = build_manifest(
+        case_id=inp.case_id,
+        run_id=inp.run_id,
+        started_at=inp.started_at,
+        audit_log=log,
+        signer=signer,
+        extra=inp.extra,
+    )
+    out_path = write_manifest(manifest, Path(inp.output_path))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:172-180`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L172-L180)
+
+[8] `expert_miss_capture`는 받은 `ledger_path`의 해시 체인에 수정 내용을 덧붙인다.
+
+```python
+async def _handle(inp: BaseModel) -> ExpertMissCaptureOutput:
+    assert isinstance(inp, ExpertMissCaptureInput)
+    payload = {
+        "case_id": inp.case_id,
+        "finding_id": inp.finding_id,
+        "edit_type": inp.edit_type,
+        "edit_text": inp.edit_text,
+        "expert_name": inp.expert_name,
+    }
+    log = AuditLog(Path(inp.ledger_path))
+    record = log.append("expert_miss", payload)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:98-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L98-L108)
+
+[9] `find_regexes`는 출력 폴더 위의 `find_regexes.txt`에 쓴다.
+
+```rust
+fn write_find_regexes(
+    regexes: &[String],
+    staging: &Path,
+) -> Result<Option<PathBuf>, BulkExtractError> {
+    if regexes.is_empty() {
+        return Ok(None);
+    }
+    for (index, regex) in regexes.iter().enumerate() {
+        if regex.contains('\n') || regex.contains('\r') || regex.contains('\0') {
+            return Err(BulkExtractError::InvalidRegex { index });
+        }
+    }
+    let path = staging.join("find_regexes.txt");
+    let body = regexes.join("\n");
+    std::fs::write(&path, body).map_err(|source| BulkExtractError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(Some(path))
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:593-612`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L593-L612)
+
+[10] (실행 확인) 시험용 `fls`·`icat`·`bulk_extractor`·`pffexport` 실행 파일을 두고 `findevil-mcp`를 MCP 클라이언트로 실행해 `case_open`, `disk_mount`(`mode: mock`), `disk_extract_artifacts`, `bulk_extract`, `pst_parse`를 부른 뒤 사건 폴더를 나열했다.
+
+[11] `AuditLog.append`는 상위 폴더를 만들고 정규화한 한 줄을 덧붙인 뒤 `fsync`한다.
+
+```python
+    def append(self, kind: str, payload: dict[str, Any], *, ts: str | None = None) -> AuditRecord:
+        """Append one record. Thread-safe. fsyncs before returning."""
+        with self._lock:
+            record = AuditRecord(
+                seq=self._next_seq,
+                ts=ts or _utc_iso(),
+                kind=kind,
+                prev_hash=self._last_hash,
+                payload=payload,
+            )
+            line = canonicalize_json(record.to_canonical_dict())
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("ab") as f:
+                f.write(line + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._last_hash = hash_line(line)
+            self._next_seq += 1
+            return record
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:172-190`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L172-L190)
+
+[12] 사용자 CLI는 발견사항 전체를 `finding_approved` 기록으로 `audit_append`에 넘긴다.
+
+```python
+    def _audit(self, py: SshMcpClient, kind: str, payload: dict[str, Any]) -> None:
+        py.call_tool(
+            "audit_append",
+            {
+                "path": self.audit_path,
+                "kind": kind,
+                "payload": payload,
+            },
+        )
+```
+
+[`scripts/find_evil_auto.py:9590-9598`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L9590-L9598)
+
+```python
+    def _emit_final_findings(
+        self, py: SshMcpClient, merged: list[dict[str, Any]]
+    ) -> None:
+        for index, finding in enumerate(merged, 1):
+            finding_id = _finding_id(finding, index)
+            self._audit(
+                py,
+                "finding_approved",
+                {
+                    "finding_id": finding_id,
+                    "confidence": finding.get("confidence"),
+                    "tool_call_id": finding.get("tool_call_id"),
+                    "finding_sha256": self._hash_obj(finding),
+                    "finding": finding,
+                },
+```
+
+[`scripts/find_evil_auto.py:15807-15821`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L15807-L15821)
+
+[13] `write_manifest`는 받은 경로에 JSON을 쓴다.
+
+```python
+def write_manifest(manifest: RunManifest, path: Path) -> Path:
+    """Write the manifest to ``path`` as canonical pretty JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_to_json_safe(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:264-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L264-L271)
+
+[14] 다른 도구도 받은 경로의 해시 체인 파일에 기록을 덧붙인다: [`services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py:37-46`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/pool_handoff.py#L37-L46), [`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:63-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L63-L75), [`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:53-69`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L53-L69), [`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:197-216`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L197-L216).
+
+[15] (실행 확인) `findevil-agent-mcp`를 MCP 클라이언트로 실행해 `audit_append`, `manifest_finalize`, `expert_miss_capture`, `memory_remember`(같은 키 두 번), `memory_recall`을 부른 뒤 만든 파일과 응답을 확인했다.
+
+[16] 임시 폴더를 쓰는 도구는 결과를 읽은 뒤 지운다: [`services/mcp/src/tools/ez_parse.rs:205-259`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L205-L259), [`services/mcp/src/tools/mac_triage.rs:155-204`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mac_triage.rs#L155-L204), [`services/mcp/src/tools/pcap_triage.rs:267-305`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L267-L305), [`services/mcp/src/tools/suricata_eve.rs:130-175`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L130-L175), [`services/mcp/src/tools/hayabusa_scan.rs:242-305`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L242-L305), [`services/mcp/src/tools/plaso_parse.rs:217-264`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L217-L264).
+
+[17] `srum_parse`는 사건 폴더 아래 임시 폴더를 만들고 호출 끝에 지운다.
+
+```rust
+/// Create a fresh per-case staging directory under
+/// `$FINDEVIL_HOME/cases/<case_id>/_xartifact/srum-<pid>-<nanos>`. Derived
+/// entirely at runtime; never beside the read-only evidence.
+fn prepare_staging_dir(case_id: &str) -> Result<PathBuf, SrumError> {
+    let case = case_dir(case_id)?;
+    let staging =
+        case.join("_xartifact")
+            .join(format!("srum-{}-{}", std::process::id(), nanosecond_tag()));
+    std::fs::create_dir_all(&staging).map_err(|source| SrumError::Staging {
+        path: staging.clone(),
+        source,
+    })?;
+    Ok(staging)
+}
+```
+
+[`services/mcp/src/tools/srum_parse.rs:459-472`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L459-L472)
+
+```rust
+
+    let result = decode_export(&export_dir);
+    let _ = std::fs::remove_dir_all(&staging);
+```
+
+[`services/mcp/src/tools/srum_parse.rs:262-264`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L262-L264)
+
+[18] 주입 문자열 기록은 개수와 응답 해시만 담는다: [`services/mcp/src/server.rs:1554-1563`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1554-L1563), [`services/mcp/src/server/injection_ledger.rs:45-86`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server/injection_ledger.rs#L45-L86), [`services/agent_mcp/findevil_agent_mcp/injection_ledger.py:95-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/injection_ledger.py#L95-L131).
+
+[19] 사용자 CLI가 자기 실행 폴더 안의 경로를 정한다.
+
+```python
+        if LOCAL_MODE:
+            self.case_dir = str(LOCAL_RUNS_DIR / self.case_id)
+        elif DOCKER_MODE:
+            # /workspace is the repo bind-mounted read-write, so the container's
+            # case dir IS the host dir REPO_ROOT/tmp/auto-runs/<case> — the exact
+            # path fetch_artifacts_to_host resolves on the host. The in-container
+            # MCP servers write audit.jsonl / run.manifest.json straight there,
+            # so the host reads them with no copy step.
+            self.case_dir = f"{GUEST_REPO}/tmp/auto-runs/{self.case_id}"
+        else:
+            self.case_dir = f"{GUEST_REPO}/tmp/{self.case_id}"
+        self.audit_path = f"{self.case_dir}/audit.jsonl"
+        self.manifest_path = f"{self.case_dir}/run.manifest.json"
+        self.verdict_path = f"{self.case_dir}/verdict.json"
+```
+
+[`scripts/find_evil_auto.py:9467-9480`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L9467-L9480)
+
+[20] `db_path`는 자리만 정하고 파일은 만들지 않는다.
+
+```rust
+    // Reserve the DuckDB path; not created yet.
+    let db_path = case_dir.join("evidence.ddb");
+```
+
+[`services/mcp/src/tools/case_open.rs:191-192`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L191-L192)
+
+[21] `mode: mock` 자원은 `mount_point` 폴더를 `fs_root`로 적고 추출은 Sleuth Kit 목록이 실패하거나 비면 그 폴더의 파일을 복사한다: [`services/mcp/src/tools/disk.rs:244-262`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L244-L262), [`services/mcp/src/tools/disk.rs:351-383`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L351-L383), [`services/mcp/src/tools/disk.rs:1159-1195`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1159-L1195).
+
+[22] `memory_remember`는 받은 `store_path`의 저장소에 받은 값을 넣는다.
+
+```python
+async def _handle(inp: BaseModel) -> MemoryRememberOutput:
+    assert isinstance(inp, MemoryRememberInput)
+    with MemoryStore(Path(inp.store_path)) as store:
+        store.remember(
+            case_id=inp.case_id,
+            kind=inp.kind,
+            key=inp.key,
+            value=inp.value,
+            sha256=inp.sha256,
+            ts=inp.ts,
+            case_path=inp.case_path,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:51-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L51-L62)
+
+[23] `MemoryStore`는 FTS5 테이블과 `meta` 테이블에 행을 넣는다.
+
+```python
+    def _init_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(
+                case_id UNINDEXED,
+                kind,
+                key,
+                value,
+                sha256 UNINDEXED,
+                ts UNINDEXED,
+                tokenize='porter unicode61'
+            );
+            CREATE TABLE IF NOT EXISTS meta (
+                case_id TEXT PRIMARY KEY,
+                case_path TEXT,
+                first_seen_ts TEXT,
+                last_updated_ts TEXT
+            );
+            """
+        )
+        self._conn.commit()
+```
+
+[`services/agent/findevil_agent/memory/store.py:41-61`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L41-L61)
+
+```python
+        now = ts or datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+        self._conn.execute(
+            "INSERT INTO memories(case_id, kind, key, value, sha256, ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (case_id, kind, key, value, sha256, now),
+        )
+        self._conn.execute(
+            "INSERT INTO meta(case_id, case_path, first_seen_ts, last_updated_ts) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(case_id) DO UPDATE SET last_updated_ts=excluded.last_updated_ts, "
+            "case_path=COALESCE(excluded.case_path, meta.case_path)",
+            (case_id, case_path, now, now),
+        )
+        self._conn.commit()
+```
+
+[`services/agent/findevil_agent/memory/store.py:74-86`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L74-L86)
+
+[24] 사용자 CLI는 CONFIRMED 발견사항마다 `memory_remember`를 부른다.
+
+```python
+        store_path = self._memory_store_path()
+        if store_path is None:
+            return
+        remembered = 0
+        for finding in mem_confirmed_for_remember(merged):
+            payload = mem_remember_payload(finding)
+            if payload is None:
+                continue
+            out = py.call_tool(
+                "memory_remember",
+                {
+                    "store_path": store_path,
+                    "case_id": self.handle["id"],
+                    **payload,
+                    "audit_log_path": self.audit_path,
+                },
+            )
+```
+
+[`scripts/find_evil_auto.py:15201-15217`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L15201-L15217)

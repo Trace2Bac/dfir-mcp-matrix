@@ -1,0 +1,358 @@
+---
+cell: R06
+details:
+- id: not_implemented
+---
+
+# R06 증거에서 추출한 민감정보 노출 제어
+
+### 미구현
+
+**판단.** 두 서버는 증거에서 나온 비밀 값을 응답에 싣고 그 값을 가리거나 빼는 처리를 두지 않는다 [1][2].
+두 서버가 응답에 공통으로 적용하는 정리 처리는 보이지 않는 문자와 정해 둔 역할 토큰만 바꾸고 값의 종류를 가리지 않는다 [3].
+
+`findevil-mcp`의 여러 도구가 비밀 값을 그대로 싣는다 [4][5][6].
+`vol_run`의 허용 목록에는 `windows.registry.hashdump`, `windows.registry.lsadump`, `windows.registry.cachedump`가 들어 있고 도구 설명은 이 플러그인을 자격증명 항목으로 적는다 [4][5].
+`vol_run`은 이 플러그인의 행을 열을 고르지 않고 `rows`에 싣는다 [6].
+시험용 Volatility 실행 파일이 낸 `hashdump` 행의 해시 열은 응답에 그대로 실렸다 [7].
+`registry_query`는 SAM과 SECURITY 하이브를 받고 이진 값을 4,096바이트까지 16진 문자열로 싣는다 [8][9].
+`bulk_extract`의 `accts` 스캐너가 찾은 계좌 번호 같은 값은 `feature`와 `context`에 그대로 실린다 [10].
+`cloud_audit`은 원래 레코드 전체를 `raw`에 싣고 `ausearch`는 Linux audit 기록 줄 전체를 `raw`에 싣는다 [11][12].
+`pcap_triage`는 HTTP 쿠키 값을 싣지 않고 쿠키가 있었는지만 `has_cookie`에 싣는다 [13].
+같은 도구는 질의 문자열이 들어간 요청 URI를 뒤쪽 256바이트까지 싣는다 [13].
+
+`findevil-agent-mcp`의 `find_ai_signatures`는 읽은 파일의 일치 부분을 최대 400자 너비의 미리보기로 싣고 미리보기 안의 값을 가리지 않는다 [14].
+`audit_append`는 모델이 넘긴 `payload`를 가리지 않고 호출 기록에 남긴다 [15].
+사용자 CLI와 보고서 생성 스크립트가 있는 `scripts/*.py`에도 비밀 값을 가리는 함수가 없다 [16].
+`scripts/regenerate-sample-run.py`의 `scrub_text`는 표본 실행 결과를 옮길 때 실행 폴더 접두어와 사용자 폴더 경로만 바꾼다 [17].
+
+### 근거
+
+[1] `findevil-mcp`의 응답 조립 함수는 정리 처리 뒤 출력을 그대로 싣는다.
+
+```rust
+fn finalize_tool_output(name: &str, payload: &Value) -> Result<Value, ToolError> {
+    let (payload, sanitized) = crate::sanitize::sanitize_value(payload);
+    let payload_text = serde_json::to_string(&payload)
+        .map_err(|e| ToolError::Internal(format!("serialize tool output: {e}")))?;
+    let sha = sha256_hex(payload_text.as_bytes());
+
+    let mut meta = json!({
+        "tool": name,
+        "output_sha256": sha,
+    });
+    if !sanitized.is_empty() {
+        meta["sanitized"] = sanitized.to_json();
+        // Mirror the `_meta.sanitized` counts into the best-effort, counts-only
+        // injection-alert SIDECAR ledger. This runs AFTER hashing and never
+        // touches `payload`, `sha`, or `meta`, so the sealed output and a
+        // verify_finding replay are unaffected — the ledger is not the audit
+        // chain. `sha` is recorded as the correlation key (the same sanitized
+        // -output digest the audit chain stores), never the payload.
+        injection_ledger::record_neutralization(name, &sha, &sanitized);
+    }
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": payload_text,
+            }
+        ],
+        "_meta": meta,
+    }))
+}
+```
+
+[`services/mcp/src/server.rs:1544-1573`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1544-L1573)
+
+[2] `findevil-agent-mcp`의 `_to_text_content`는 정리 처리 뒤 출력 모델 전체를 싣는다.
+
+```python
+    if hasattr(payload, "model_dump"):
+        body = payload.model_dump()
+    elif isinstance(payload, dict):
+        body = payload
+    else:
+        body = {"value": payload}
+    # Neutralize attacker-controlled evidence text (chat/role tokens, invisible
+    # Unicode) before it crosses the boundary to the model -- the Python half of
+    # the MCP-output->LLM sanitizer (mirrors services/mcp/src/sanitize.rs). Log
+    # what was neutralized as counts only, never the payload.
+    body, sanitized = sanitize_value(body)
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    if sanitized:
+        structlog.get_logger(SERVER_NAME).warning(
+            "agent_mcp_sanitized_tool_output",
+            patterns=sanitized,
+            total=sum(sanitized.values()),
+        )
+        # Mirror the warning into the counts-only injection-alert ledger (a
+        # best-effort SIDECAR, never the audit chain). output_text is the already
+        # -sanitized canonical JSON, so its digest matches what the model saw and
+        # is the correlation key the judge escalation maps back to a tool_call_id.
+        injection_ledger.record_neutralization(sanitized, tool=tool, output_text=text)
+    return [TextContent(type="text", text=text)]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:85-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L85-L108)
+
+[3] 정리 함수는 보이지 않는 문자를 지우고 정해 둔 역할 토큰만 바꾼다.
+
+```rust
+/// Neutralize one string: strip invisible code points, then replace role tokens.
+pub fn sanitize_str(input: &str, counts: &mut Counts) -> String {
+    // 1) Remove invisible/control code points first, so a token cannot be split
+    //    by a zero-width character to evade step 2.
+    let mut stripped = String::with_capacity(input.len());
+    for c in input.chars() {
+        if is_invisible_control(c) {
+            counts.bump("invisible_unicode");
+        } else {
+            stripped.push(c);
+        }
+    }
+    // 2) Replace chat/role control tokens (case-insensitive) with an inert marker.
+    neutralize_tokens(&stripped, counts)
+}
+```
+
+[`services/mcp/src/sanitize.rs:121-135`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/sanitize.rs#L121-L135)
+
+[4] `vol_run`의 허용 목록에는 자격증명 플러그인 세 개가 들어 있다.
+
+```rust
+    // Windows — credentials
+    "windows.registry.hashdump",
+    "windows.registry.lsadump",
+    "windows.registry.cachedump",
+```
+
+[`services/mcp/src/tools/vol_run.rs:67-70`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L67-L70)
+
+[5] `vol_run`의 설명은 이 플러그인을 자격증명 항목으로 적는다.
+
+```rust
+                 windows.registry.{hashdump,lsadump,cachedump} (credentials), \
+```
+
+[`services/mcp/src/server.rs:727-727`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L727-L727)
+
+[6] `vol_run`은 Volatility 행을 열을 고르지 않고 싣는다.
+
+```rust
+    let rows_seen = raw.len();
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = raw
+        .into_iter()
+        .take(limit)
+        .map(|v| v.as_object().cloned().unwrap_or_default())
+        .collect();
+```
+
+[`services/mcp/src/tools/vol_run.rs:330-335`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L330-L335)
+
+[7] (실행 확인) 시험용 Volatility 실행 파일이 `windows.registry.hashdump`에 시험용 해시 문자열을 담은 행을 내자 `vol_run` 응답의 `rows`에 그 열이 그대로 실렸다.
+
+[8] `registry_query`는 SAM과 SECURITY 하이브 이름을 받는다.
+
+```rust
+    };
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "SOFTWARE" | "SYSTEM" | "SECURITY" | "SAM" | "DEFAULT" | "NTUSER.DAT" | "USRCLASS.DAT"
+    )
+}
+```
+
+[`services/mcp/src/tools/registry_query.rs:155-160`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L155-L160)
+
+[9] `format_value`는 이진 값을 16진 문자열로 싣는다.
+
+```rust
+        // REG_BINARY and any unknown type → hex (capped, like before).
+        _ => {
+            const MAX_HEX: usize = 4096;
+            if data.len() <= MAX_HEX {
+                ("REG_BINARY".into(), hex::encode(data))
+            } else {
+                let suffix = format!("…[truncated, full {} bytes]", data.len());
+                let mut out = hex::encode(&data[..MAX_HEX]);
+                out.push_str(&suffix);
+                ("REG_BINARY".into(), out)
+            }
+        }
+```
+
+[`services/mcp/src/tools/registry_query.rs:355-366`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L355-L366)
+
+[10] `accts` 스캐너는 계좌 번호 같은 값을 찾고 `BulkFeature`는 찾은 값과 주변 글을 그대로 담는다.
+
+```rust
+    /// Account numbers (credit-card / track2 / SSN-style).
+    Accts,
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:84-85`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L84-L85)
+```rust
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct BulkFeature {
+    /// Feature file this row came from (`email`, `url`, `rfc822`, …).
+    pub feature_type: String,
+    /// Forensic byte offset (or `bulk_extractor` decoded-path offset,
+    /// e.g. `1234-GZIP-56`), verbatim.
+    pub offset: String,
+    /// The recovered feature text.
+    pub feature: String,
+    /// Surrounding context `bulk_extractor` captured, verbatim.
+    pub context: String,
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:183-194`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L183-L194)
+
+[11] `cloud_audit`은 원래 레코드를 `raw`에 넣는다.
+
+```rust
+    CloudEvent {
+        timestamp,
+        actor,
+        source_ip,
+        action,
+        resource,
+        outcome,
+        raw: record,
+    }
+}
+```
+
+[`services/mcp/src/tools/cloud_audit.rs:455-464`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/cloud_audit.rs#L455-L464)
+
+[12] `ausearch`는 Linux audit 기록 줄을 `raw`에 넣는다.
+
+```rust
+fn parse_record_line(line: &str) -> AuditRow {
+    let mut map = serde_json::Map::new();
+    for token in line.split_whitespace() {
+        if let Some((key, value)) = token.split_once('=') {
+            if !key.is_empty() {
+                map.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+        }
+    }
+    map.insert(
+        "raw".to_string(),
+        serde_json::Value::String(line.to_string()),
+    );
+    map
+}
+```
+
+[`services/mcp/src/tools/ausearch.rs:229-246`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ausearch.rs#L229-L246)
+
+[13] `pcap_triage`는 쿠키를 `has_cookie` 참거짓으로만 싣고 URI는 잘라 싣는다.
+
+```rust
+                .or_default();
+            if entry.uri.is_empty() && !cols[8].is_empty() {
+                entry.uri = truncate_to(cols[8].to_string(), MAX_URI_LEN);
+            }
+            entry.has_cookie |= !cols[9].is_empty();
+            entry.count += 1;
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:236-241`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L236-L241)
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PcapHttpRequest {
+    pub src: String,
+    pub host: String,
+    pub method: String,
+    pub uri: String,
+    pub has_cookie: bool,
+    pub count: usize,
+    // Epoch seconds (string, to keep the struct Eq) of the first/last packet for
+    // this (src, host, method) — lets the playbook correlate activity in time.
+    pub first_ts: String,
+    pub last_ts: String,
+}
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:42-54`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L42-L54)
+
+[14] `_make_preview`는 일치 앞뒤를 정한 너비로 잘라 공백만 줄인다.
+
+```python
+def _make_preview(text: str, start: int, end: int, preview_chars: int) -> str:
+    """Bounded, whitespace-collapsed snippet centered on a match.
+
+    Newlines/tabs are collapsed to single spaces so a multi-line match renders
+    as one inert line. The snippet is purely informational; the MCP output
+    boundary still neutralizes any chat/role control tokens it contains.
+    """
+    width = max(0, min(preview_chars, MAX_PREVIEW_CHARS))
+    pad = max(0, (width - (end - start)) // 2)
+    lo = max(0, start - pad)
+    hi = min(len(text), end + pad)
+    snippet = text[lo:hi]
+    return re.sub(r"\s+", " ", snippet).strip()
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:261-273`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L261-L273)
+
+[15] `audit_append`는 받은 `payload`를 그대로 `AuditLog.append`에 넘긴다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[16] 기준 커밋의 `scripts/*.py`에서 `redact`와 `mask`를 찾으면 주석과 설명 문장만 나온다: [`scripts/divergence-smoke.py:98`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/divergence-smoke.py#L98), [`scripts/find_evil_auto.py:9804`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L9804), [`scripts/render_report.py:2331`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/render_report.py#L2331), [`scripts/report-policy-smoke.py:1435`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/report-policy-smoke.py#L1435).
+
+[17] `scrub_text`는 실행 폴더 접두어와 사용자 폴더 경로만 바꾼다.
+
+```python
+    """Relativize machine-specific paths in TEXT. Returns ``(scrubbed, count)``.
+
+    Two passes, in order:
+
+    1. Replace the literal absolute ``--from`` run-dir prefix (``run_dir_abs``)
+       with the repo-relative destination (``dest_rel``), so the run's own
+       case-id temp path becomes a stable repo-relative reference.
+    2. Replace each ``/home/<user>`` / ``/Users/<user>`` prefix (evidence paths,
+       case-home mounts, etc.) with ``home_placeholder``.
+
+    Only those two path classes are touched. SHA digests, ISO-8601 timestamps,
+    and enum tokens carry no such substring, so they pass through unchanged. Pure
+    and deterministic: the same input always yields the same output.
+    """
+    count = 0
+    if run_dir_abs and dest_rel:
+        hits = text.count(run_dir_abs)
+        if hits:
+            text = text.replace(run_dir_abs, dest_rel)
+            count += hits
+
+    def _replace(_match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return home_placeholder
+
+    text = HOME_PREFIX_RE.sub(_replace, text)
+    return text, count
+```
+
+[`scripts/regenerate-sample-run.py:144-171`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/regenerate-sample-run.py#L144-L171)

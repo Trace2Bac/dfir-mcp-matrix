@@ -1,0 +1,267 @@
+---
+cell: I03
+details:
+- id: I03.01
+- id: I03.05
+---
+
+# I03 외부 전송 범위 구성
+
+### I03.01 해시 전송
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `manifest_finalize`가 여는 Sigstore 서명 연결, Rekor 투명성 기록 연결, RFC 3161 시각 인증 서버 연결에 적용된다 [1][2].
+`signer`가 `sigstore`이면 서명자는 manifest 본문을 정규화한 바이트를 sigstore 3.6.7의 `sign_artifact`에 넘긴다 [3][4].
+`sign_artifact`는 이 바이트의 SHA-256 다이제스트에 서명하고 Rekor에는 다이제스트, 서명, 서명 인증서를 담은 `hashedrekord` 항목을 보낸다 [5].
+Fulcio에는 임시 공개 키와 토큰의 신원을 담은 인증서 요청과 토큰을 보낸다 [6].
+manifest 본문 자체는 보내지 않는다 [5].
+`anchor_transparency`를 켜면 `_build_statement`가 Merkle 루트를 `subject`의 다이제스트로, 고정 문구를 `predicate`로 둔 in-toto 문장을 만들어 Rekor에 올린다 [7].
+Rekor에 올리지 못하면 `openssl ts -query`로 Merkle 루트 다이제스트의 시각 인증 요청을 만들어 시각 인증 서버에 보낸다 [8].
+Merkle 루트는 도구 출력 해시와 승인된 발견사항 항목 해시를 잎으로 만든 값이다 [9].
+그래서 바깥으로 나가는 조사 자료는 해시 값뿐이다 [5][7][8].
+manifest의 `extra`에 들어가는 이미지 경로 같은 값은 서명한 본문의 다이제스트에만 반영된다 [4][5].
+바깥 네트워크가 없는 상태에서 두 경로를 실행하자 TUF 저장소와 시각 인증 서버의 이름 해석에서 멈췄고 보낸 내용은 코드로만 확인했다 [10].
+
+### I03.05 민감 값 빼기·가림 후 전송
+
+**구현.** 이 방식은 `expert_miss_capture`가 `gh issue create`로 GitHub 이슈를 만드는 경로에 적용된다 [11].
+서버는 이슈 제목과 본문에 사건을 가리키는 값을 `_github_case_label`로 만든다 [11].
+환경변수 `FINDEVIL_MISS_GH_REDACT`가 `1`이면 `case_id` 대신 `case_id`의 SHA-256 앞 12자리를 `case_sha256_prefix=`로 넣는다 [11].
+`FINDEVIL_MISS_GH_REDACT`를 `1`로 두고 기록용 시험 실행 파일 `gh`를 부르자 제목과 본문의 사건 값이 `case_sha256_prefix=02905559c06a`였다 [12].
+
+본문에는 사건 값 말고 `edit_type`, `finding_id`, `expert_name`, `edit_text`가 들어간다 [13].
+`edit_text`는 호출한 쪽이 쓴 수정 글이고 서버가 고르거나 가리지 않고 그대로 본문 끝에 넣는다 [13][12].
+
+**한계.** `FINDEVIL_MISS_GH_REDACT`가 `1`이 아니면 가림이 적용되지 않고 `case_id=<값>`을 그대로 넣는다 [11].
+`FINDEVIL_MISS_GH_REDACT` 없이 기록용 시험 실행 파일 `gh`를 부르자 제목과 본문의 사건 값이 `case_id=case-123`이었다 [12].
+가림은 `case_id`에만 적용되고 `finding_id`와 전문가 이름 `expert_name`은 `FINDEVIL_MISS_GH_REDACT`가 켜져 있어도 그대로 보낸다 [13][12].
+
+### 근거
+
+[1] `manifest_finalize`는 `signer`에 따라 서명자를 고른다.
+
+```python
+    requested, coerce_reason = _resolve_signer_request(inp.signer)
+    if requested == "stub":
+        signer: Signer = StubSigner(run_id=inp.run_id)
+    elif requested == "ed25519":
+        signer = FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id))
+    else:  # sigstore
+        signer = FallbackSigner(
+            make_signer(kind="sigstore"),
+            FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id)),
+        )
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:161-171`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L161-L171)
+
+[2] `anchor_transparency`가 참이면 Merkle 루트를 외부에 올린다.
+
+```python
+    transparency_anchored = False
+    transparency_kind: str | None = None
+    if inp.anchor_transparency:
+        require_rekor_enabled()  # fail-closed when the network action lacks the opt-in
+        block = anchor_merkle_root(manifest.merkle_root_hex)
+        if block is not None:
+            manifest = replace(manifest, transparency_log=block)
+            out_path = write_manifest(manifest, Path(inp.output_path))
+            transparency_kind = str(block.get("kind") or "none")
+            transparency_anchored = bool(block.get("anchored"))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:189-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L189-L198)
+
+[3] `SigstoreSigner.sign`은 받은 바이트를 `sign_artifact`에 넘긴다.
+
+```python
+    def sign(self, payload: bytes) -> SignedBundle:
+        """Sign ``payload`` (canonical JSON bytes). Returns a SignedBundle."""
+        ctx = self._ensure_ctx()
+        # The exact API differs across sigstore-python versions;
+        # this code path is defensive and pinned to sigstore 3.x
+        # per Spec #2 §16.
+        from sigstore.oidc import IdentityToken  # type: ignore[import-not-found]
+
+        if self._identity_token is None:
+            raise RuntimeError(
+                "SigstoreSigner requires identity_token in non-interactive mode. "
+                "Acquire one via Sigstore's OIDC flow before instantiation."
+            )
+        identity = IdentityToken(self._identity_token)
+        with ctx.signer(identity) as signer_session:
+            bundle = signer_session.sign_artifact(payload)
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:110-125`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L110-L125)
+
+[4] `build_manifest`는 `signature`를 뺀 본문을 정규화한 바이트를 서명자에 넘긴다.
+[`services/agent/findevil_agent/crypto/manifest.py:180-261`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L180-L261)
+
+[5] sigstore 3.6.7의 `sign_artifact`는 입력의 SHA-256 다이제스트에 서명하고 다이제스트, 서명, 인증서로 `hashedrekord` 항목을 만들어 Rekor에 보낸다.
+[`sigstore/sign.py:238-296`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/sign.py#L238-L296), [`sigstore/sign.py:175-199`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/sign.py#L175-L199)
+
+[6] sigstore 3.6.7은 토큰의 신원을 담은 인증서 요청을 토큰과 함께 Fulcio에 보낸다.
+[`sigstore/sign.py:117-171`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/sign.py#L117-L171)
+
+[7] Rekor에 올리는 문장은 Merkle 루트 다이제스트와 고정 문구로 이루어진다.
+
+```python
+    statement = _build_statement(merkle_root_hex)
+    ctx = SigningContext.production()
+    identity = IdentityToken(token)
+    with ctx.signer(identity) as signer:
+        bundle = signer.sign_dsse(statement)
+    entry = bundle.log_entry
+    return entry, str(entry.body)
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:189-195`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L189-L195)
+
+```python
+def _build_statement(merkle_root_hex: str) -> Any:
+    """Build the in-toto DSSE Statement whose subject is the Merkle root."""
+    from sigstore.dsse import StatementBuilder, Subject  # type: ignore[import-not-found]
+
+    return StatementBuilder(
+        subjects=[Subject(name=_SUBJECT_NAME, digest={"sha256": merkle_root_hex})],
+        predicate_type=_PREDICATE_TYPE,
+        predicate={
+            "tool": "verdict-dfir",
+            "note": "audit-chain Merkle root transparency anchor",
+        },
+    ).build()
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:198-209`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L198-L209)
+
+[8] 시각 인증 요청은 Merkle 루트 다이제스트로 `openssl ts -query`가 만든 질의다.
+
+```python
+def _rfc3161_timestamp(merkle_root_hex: str, tsa_url: str) -> str:
+    """Return a base64 RFC-3161 timestamp token over the root digest.
+
+    Builds an ``openssl ts`` query over the SHA-256 imprint (the Merkle root is
+    already a SHA-256 digest) and POSTs it to the TSA. Requires ``openssl`` +
+    network; raises otherwise so the caller degrades to a ``none`` block.
+    """
+    if not _openssl_available():
+        raise RuntimeError("openssl not found on PATH; cannot build an RFC-3161 token")
+    with tempfile.TemporaryDirectory() as td:
+        tsq = Path(td) / "request.tsq"
+        _run_openssl(
+            [
+                "ts",
+                "-query",
+                "-digest",
+                merkle_root_hex,
+                "-sha256",
+                "-cert",
+                "-out",
+                str(tsq),
+            ]
+        )
+        tsr_bytes = _post_timestamp(tsa_url, tsq.read_bytes())
+    return base64.b64encode(tsr_bytes).decode("ascii")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:310-334`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L310-L334)
+
+```python
+def _post_timestamp(tsa_url: str, request_bytes: bytes) -> bytes:
+    # Fixed https TSA URL + RFC-3161 content type; only fires on the opt-in path.
+    req = urllib.request.Request(
+        tsa_url,
+        data=request_bytes,
+        headers={"Content-Type": "application/timestamp-query"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=_OPENSSL_TIMEOUT_S) as resp:
+        return resp.read()
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:372-381`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L372-L381)
+
+[9] Merkle 잎은 `tool_call_output`의 `output_hash`와 `finding_approved` 줄의 해시다.
+
+```python
+
+        # Identify Merkle-eligible records.
+        if record.kind == "tool_call_output":
+            digest = _payload_digest(record.payload, "output_hash") or _record_digest(
+                canonical_line
+            )
+            leaves.append(
+                ManifestLeaf(
+                    seq=record.seq,
+                    kind="tool_call_output",
+                    digest_hex=digest,
+                    record_id=str(record.payload.get("tool_call_id", "")),
+                )
+            )
+        elif record.kind == "finding_approved":
+            digest = _record_digest(canonical_line)
+            leaves.append(
+                ManifestLeaf(
+                    seq=record.seq,
+                    kind="finding",
+                    digest_hex=digest,
+                    record_id=str(record.payload.get("finding_id", "")),
+                )
+            )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:150-173`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L150-L173)
+
+[10] (실행 확인) `findevil-agent-mcp`를 `unshare -rn`으로 실행하고 `signer`를 `sigstore`로 준 `manifest_finalize`와 `FINDEVIL_REKOR_ENABLE=1`에서 `anchor_transparency`를 켠 `manifest_finalize`를 불렀다.
+앞의 호출은 `tuf-repo-cdn.sigstore.dev` 이름 해석 실패 뒤 `ed25519`로 서명했고 뒤의 호출은 토큰이 없어 Rekor를 건너뛴 뒤 시각 인증 서버 이름 해석에 실패해 `transparency_kind`가 `none`이었다.
+
+[11] `_github_case_label`은 `FINDEVIL_MISS_GH_REDACT`가 `1`이면 `case_id`의 SHA-256 앞 12자리를 쓴다.
+
+```python
+def _github_case_label(case_id: str) -> str:
+    if os.environ.get("FINDEVIL_MISS_GH_REDACT") == "1":
+        digest = hashlib.sha256(case_id.encode("utf-8")).hexdigest()[:12]
+        return f"case_sha256_prefix={digest}"
+    return f"case_id={case_id}"
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:48-52`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L48-L52)
+
+[12] (실행 확인) `FINDEVIL_MISS_GH_ENABLED=1`로 실행한 `findevil-agent-mcp`의 `PATH` 앞에 받은 인자를 파일에 적는 시험용 `gh`를 두고 `expert_miss_capture`를 `FINDEVIL_MISS_GH_REDACT` 없이 한 번, `1`로 한 번 불렀다.
+두 번 모두 본문에 `Finding: F-9`, `Expert: ex1`, 수정 글 `rule text`가 들어갔고 사건 값만 `case_id=case-123`과 `case_sha256_prefix=02905559c06a`로 달랐다.
+
+[13] `_maybe_create_github_issue`는 제목과 본문을 만들어 `gh issue create`에 넘긴다.
+
+```python
+    case_label = _github_case_label(args.case_id)
+    title = f"Expert miss: {args.edit_type} for {case_label}"
+    body_lines = [
+        f"Edit type: {args.edit_type}",
+        f"Case: {case_label}",
+        f"Finding: {args.finding_id or 'case-level'}",
+        f"Expert: {args.expert_name or 'unspecified'}",
+        "",
+        args.edit_text,
+    ]
+    try:
+        result = subprocess.run(
+            [
+                gh,
+                "issue",
+                "create",
+                "--label",
+                f"miss/{args.edit_type}",
+                "--title",
+                title,
+                "--body",
+                "\n".join(body_lines),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:62-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L62-L89)

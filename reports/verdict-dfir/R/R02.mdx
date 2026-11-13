@@ -1,0 +1,767 @@
+---
+cell: R02
+details:
+- id: R02.01
+- id: R02.02
+- id: R02.06
+- id: R02.07
+---
+
+# R02 대량 결과 전달
+
+### R02.01 문자·항목 상한
+
+**구현.** 이 방식은 `findevil-mcp`의 결과 목록을 돌려주는 도구 대부분과 `findevil-agent-mcp`의 `find_ai_signatures`, `memory_recall`에 적용된다 [1][2][3][4][5].
+`findevil-mcp`는 응답 전체의 크기를 제한하지 않고 도구마다 결과 항목 수를 제한한다 [6].
+
+모델이 인자 `limit`으로 바꿀 수 있는 상한이 여러 도구에 있다 [1][7].
+- 외부 도구나 파서의 레코드를 싣는 도구 대부분은 기본 10,000개에서 목록을 자른다 [1].
+- `yara_scan`은 규칙 일치 1,000개에서 파일 검사를 멈춘다 [7].
+- `thumbcache_parse`와 `disk_extract_artifacts`의 기본 상한은 500개다 [2].
+- `pcap_triage`는 tshark에 `-c`로 기본 500,000개 패킷만 읽게 한다 [8].
+- `zeek_summary`는 모든 기록 파일을 합쳐 기본 100,000줄에서 읽기를 멈춘다 [9].
+
+`findevil-mcp`는 이 `limit` 값의 최댓값을 두지 않는다 [1].
+`findevil-agent-mcp`는 pydantic 입력 검사로 `find_ai_signatures`의 `limit`을 1~10,000, `memory_recall`의 `limit`을 1~100으로 제한한다 [4][5].
+`find_ai_signatures`의 기본 상한은 500개이고 `memory_recall`은 10개다 [3][5].
+
+코드에 정해 둔 상한도 있다.
+- `pcap_triage`는 대화 50개, DNS 질의 25개, HTTP 호스트 25개, HTTP 요청 300개까지 싣는다 [8].
+- `zeek_summary`는 상위 값 목록을 10개씩, `notable_connections`를 50개까지 싣는다 [9].
+- `email_parse`는 메시지 5,000개까지 해석하고 목록마다 200개까지 싣는다 [10].
+- `pst_parse`는 메시지와 집계 목록을 500개까지 싣는다 [11].
+- `srum_parse`는 행 5,000개와 상위 앱 20개까지 싣는다 [12].
+- `oe_dbx_parse`는 목록마다 50개, `wmi_persist_parse`는 50개, `bits_parse`는 200개, `exif_parse`의 `other_fields`는 100개, `vss_list`는 저장소 256개까지 싣는다 [13].
+
+결과 목록을 만드는 데 읽는 입력의 크기에도 상한이 있다.
+`email_parse`는 256 MiB, `bits_parse`와 `oe_dbx_parse`는 64 MiB, `exif_parse`는 128 MiB, `wmi_persist_parse`는 512 MiB까지만 파일을 읽는다 [10][13].
+`find_ai_signatures`는 파일마다 8,000,000바이트까지만 읽는다 [3].
+
+**한계.** 다음 도구의 결과 목록에는 항목 수 상한이 없다.
+`yara_scan`은 규칙 하나의 패턴 일치를 모두 싣는다 [7].
+`vss_mount`의 경로 목록과 `findevil-agent-mcp`의 `detect_contradictions`, `judge_findings`, `correlate_findings` 결과 목록도 상한 없이 싣는다 [14][15].
+`zeek_summary`의 100,000줄 상한과 `pst_parse`의 폴더 항목 500,000개 상한은 닿아도 응답에 표시되지 않는다 [9][11].
+`email_parse`, `exif_parse`, `bits_parse`, `oe_dbx_parse`, `wmi_persist_parse`는 파일이 읽기 상한을 넘으면 앞부분만 해석하고 응답에 표시하지 않는다 [10][13][16].
+`pcap_triage`의 패킷 상한과 `registry_query`의 재귀 깊이 상한 16도 닿아도 응답에 표시되지 않는다 [8][17].
+
+### R02.02 전체·반환 건수 표시
+
+**구현.** 이 방식은 `findevil-mcp`에서 상한 앞의 전체 수를 따로 싣는 도구에 적용된다 [18][19][20].
+Volatility 도구는 `*_seen`에, `suricata_eve`는 `events_seen`에, `vol_run`·`nfdump_query`·`journalctl_query`·`login_accounting`·`ausearch`·`mac_triage`·`vel_collect`·`ez_parse`·`indx_parse`는 `rows_seen`에 상한 앞의 전체 행 수를 싣는다 [18][19].
+`hayabusa_scan`의 `alerts_seen`, `cloud_audit`과 `plaso_parse`의 `events_seen`, `bulk_extract`의 `features_seen`, `thumbcache_parse`의 `entries_seen`도 상한 앞의 수다 [20].
+`email_parse`와 `pst_parse`는 `message_count`에, `srum_parse`는 `row_count`에, `vss_list`는 `store_count`에 상한 앞의 전체 수를 싣는다 [10][11][12][21].
+`bits_parse`는 `url_count`와 `local_path_count`에 상한 앞의 고유 값 수를 싣는다 [13].
+돌려준 수는 응답 목록의 길이로 알 수 있고 잘렸다는 필드는 따로 없다 [18].
+시험에서 객체 3줄과 목록 1줄을 둔 `eve.json`으로 `suricata_eve`에 `limit` 1을 주자 `events`에는 1개, `events_seen`에는 4가 실렸다 [22].
+
+응답에 싣지 않은 나머지 결과를 이어서 읽는 인자나 도구는 없다 [6].
+`bulk_extract`가 사건 폴더에 남긴 특성 파일과 `disk_extract_artifacts`가 꺼낸 파일의 경로는 응답에 실리지만 그 파일 내용을 그대로 돌려주는 MCP 도구는 없다 [6][23].
+
+**한계.** 전체 수 필드 가운데 상한 앞의 전체 수가 아닌 것이 있다.
+`evtx_query`, `mft_timeline`, `usnjrnl_query`, `sysmon_network_query`는 `limit`에 닿으면 레코드 읽기를 멈추므로 `records_seen`은 멈춘 곳까지 읽은 수다 [24].
+`browser_history`는 SQL `LIMIT`을 건 뒤 돌려준 행 수를 `rows_seen`에 싣는다 [25].
+`disk_extract_artifacts`의 `artifacts_seen`은 꺼낸 파일 수다 [26].
+`suricata_eve`의 `events_seen`은 객체가 아닌 JSON 줄도 세고 그 줄은 `events`에 싣지 않는다 [19].
+그래서 이 도구들에서는 응답만으로 결과가 잘렸는지 알 수 없다.
+
+`limit` 0의 처리가 도구마다 다르다 [18][24].
+Volatility 도구 4개, `evtx_query`, `mft_timeline`, `usnjrnl_query`, `sysmon_network_query`는 항목을 넣은 뒤 상한을 비교하므로 `limit` 0에도 1개를 싣는다 [18][24].
+시험에서 `vol_pslist`에 `limit` 0을 주자 `processes`에 1개가 실렸다 [27].
+`vol_run`과 `suricata_eve`는 `limit` 0이면 빈 목록과 전체 수를 싣는다 [22][27].
+
+다음 집계 값은 전체 수를 싣지 않는다.
+`pst_parse`는 보낸 사람과 제목의 고유 값 수를, `email_parse`는 받는 사람과 첨부 이름의 고유 값 수를 싣지 않는다 [10][11].
+`wmi_persist_parse`는 상한 설명과 달리 명령 문자열과 스크립트 문자열의 전체 수를 싣지 않는다 [13].
+`exif_parse`의 `field_count`는 `other_fields`에서 뺀 전용 필드까지 센 수라 `other_fields`의 전체 수와 다르다 [28].
+
+### R02.06 값 단위 잘림
+
+**구현.** 이 방식은 `findevil-mcp`의 `stderr_tail`, `registry_query`, `vol_malfind`, `yara_scan`, `pcap_triage`, `wmi_persist_parse`, `bits_parse`와 `findevil-agent-mcp`의 `find_ai_signatures`에 적용된다 [29][30][31][32][33][13][34].
+외부 도구를 실행하는 도구 대부분은 표준 오류를 4,096바이트까지 `stderr_tail`에 싣는다 [29].
+`pcap_triage`는 표준 오류를 응답에 싣지 않는다 [35].
+`registry_query`는 이진 값을 4,096바이트까지 16진 문자열로 싣고 뒤에 `…[truncated, full N bytes]`를 붙인다 [30].
+`vol_malfind`는 표본을 16진 128자까지, `yara_scan`은 일치한 바이트를 64바이트까지 16진으로 싣는다 [31][32].
+`yara_scan`은 잘린 표본과 함께 일치 길이 `length`를 싣는다 [32].
+`pcap_triage`는 HTTP 요청 URI를 뒤쪽 256바이트만 남기고 앞에 `…`를 붙인다 [33].
+`wmi_persist_parse`와 `bits_parse`는 2,048자를 넘는 문자열을 그 길이에서 자른다 [13].
+`find_ai_signatures`는 일치한 곳 앞뒤를 `preview_chars`(기본 80, 최대 400) 너비로 잘라 미리보기를 만든다 [34].
+시험에서 `pcap_triage`에 300바이트가 넘는 ASCII URI를 주자 `…`와 뒤쪽 256자가 실렸다 [36].
+
+**한계.** `vol_malfind`, `yara_scan`, `wmi_persist_parse`, `bits_parse`의 잘림에는 잘렸다는 표시가 없다 [31][32][13].
+`pcap_triage`의 URI 자르기 함수는 자르는 곳이 문자 경계인지 확인하지 않는다 [33].
+시험에서 2바이트 문자로 된 긴 URI를 주자 자르는 곳이 문자 안에 놓여 처리기가 중단되었고 호출 전체가 JSON-RPC 오류 `-32603`으로 끝났다 [36].
+`pst_parse`는 머리글 파일을 256 KiB까지만 읽고 그 뒤를 알리지 않는다 [11].
+`bulk_extract`, `disk_mount`, `disk_unmount`는 표준 오류의 뒤쪽 4,096바이트만 남기고 잘렸다는 표시를 붙이지 않는다 [37].
+
+### R02.07 건수 없는 잘림 표시
+
+**구현.** 이 방식은 `findevil-mcp`의 `stderr_tail`, `thumbcache_parse`와 `findevil-agent-mcp`의 `find_ai_signatures`에 적용된다 [29][38][3].
+`truncate_to`를 쓰는 도구의 `stderr_tail`은 4,096바이트를 넘으면 앞부분만 남기고 `…[truncated]`를 붙이며 원래 길이는 적지 않는다 [29].
+`thumbcache_parse`는 레코드 100,000개에서 검사를 멈추면 `parse_errors`에 상한에 닿았다는 문장을 싣는다 [38].
+`find_ai_signatures`는 일치 수가 `limit`에 닿으면 `truncated`를 참으로 싣고 남은 파일을 검사하지 않는다 [3].
+같은 도구는 8,000,000바이트를 넘는 파일을 앞부분만 검사하고 `read_errors`에 잘랐다는 문장을 싣는다 [3].
+시험에서 `limit` 1로 일치가 둘 이상인 파일을 검사하자 `matches` 1개와 `truncated` 참이 실렸다 [39].
+
+**한계.** `find_ai_signatures`의 `truncated`는 상한을 넘는 일치를 하나 더 찾았을 때만 참이 된다 [3].
+그래서 일치 수가 `limit`과 같으면 남은 파일을 검사하지 않았어도 거짓으로 실린다 [3].
+`thumbcache_parse`는 XP 형식에서 같은 상한에 닿으면 문장 없이 멈춘다 [38].
+
+### 근거
+
+[1] 레코드를 싣는 도구는 `limit`을 `unwrap_or`로 기본값 10,000에 맞추고 최댓값을 두지 않는다: [`services/mcp/src/tools/vol_pslist.rs:27`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L27), [`services/mcp/src/tools/suricata_eve.rs:31`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L31), [`services/mcp/src/tools/suricata_eve.rs:126`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L126), [`services/mcp/src/tools/evtx_query.rs:32`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L32), [`services/mcp/src/tools/vol_run.rs:34`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L34).
+
+[2] `thumbcache_parse`의 기본 상한은 500개이고 `disk_extract_artifacts`의 `limit`도 기본값 함수로 정한다: [`services/mcp/src/tools/thumbcache_parse.rs:46-47`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L46-L47), [`services/mcp/src/tools/disk.rs:95-98`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L95-L98), [`services/mcp/src/tools/disk.rs:1775-1777`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1775-L1777).
+
+[3] `scan_sources`는 일치 수가 상한에 닿으면 `truncated`를 세우고 남은 경로를 건너뛰며 큰 파일은 앞부분만 읽고 `read_errors`에 적는다.
+
+```python
+    def _absorb(blob: str, source: str) -> None:
+        nonlocal sources_scanned, chars_scanned, truncated
+        sources_scanned += 1
+        chars_scanned += len(blob)
+        for hit in scan_text(
+            blob, source=source, categories=categories, preview_chars=preview_chars
+        ):
+            if len(collected) >= capped:
+                truncated = True
+                return
+            collected.append(hit)
+
+    if text is not None:
+        _absorb(text, "<inline>")
+
+    for path in paths:
+        if truncated:
+            break
+        blob, err = _read_text_file(path)
+        if err is not None:
+            read_errors.append(err)
+        if blob is None:
+            continue
+        _absorb(blob, path)
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:362-385`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L362-L385)
+```python
+# Bounds so a noisy artifact cannot blow the MCP token budget or memory.
+DEFAULT_LIMIT = 500
+DEFAULT_PREVIEW_CHARS = 80
+MAX_PREVIEW_CHARS = 400
+MAX_FILE_BYTES = 8_000_000
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:52-56`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L52-L56)
+
+[4] `find_ai_signatures`의 입력 모델은 `limit`과 `preview_chars`의 범위를 정한다.
+
+```python
+    limit: int = Field(
+        default=DEFAULT_LIMIT,
+        ge=1,
+        le=10_000,
+        description="Hard cap on total matches emitted across all sources.",
+    )
+    preview_chars: int = Field(
+        default=DEFAULT_PREVIEW_CHARS,
+        ge=0,
+        le=MAX_PREVIEW_CHARS,
+        description="Approximate width of the whitespace-collapsed match preview.",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/find_ai_signatures.py:68-79`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/find_ai_signatures.py#L68-L79)
+
+[5] `memory_recall`의 `limit`은 기본 10, 범위 1~100이다.
+
+```python
+    limit: int = Field(default=10, ge=1, le=100)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:23-23`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L23-L23)
+
+[6] `findevil-mcp`의 응답 조립 함수는 출력 크기를 제한하지 않고 등록된 도구에는 저장한 출력을 읽는 도구가 없다: [`services/mcp/src/server.rs:1544-1573`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1544-L1573), [`services/mcp/src/server.rs:226-1421`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L226-L1421).
+
+```rust
+fn finalize_tool_output(name: &str, payload: &Value) -> Result<Value, ToolError> {
+    let (payload, sanitized) = crate::sanitize::sanitize_value(payload);
+    let payload_text = serde_json::to_string(&payload)
+        .map_err(|e| ToolError::Internal(format!("serialize tool output: {e}")))?;
+    let sha = sha256_hex(payload_text.as_bytes());
+
+    let mut meta = json!({
+        "tool": name,
+        "output_sha256": sha,
+    });
+    if !sanitized.is_empty() {
+        meta["sanitized"] = sanitized.to_json();
+        // Mirror the `_meta.sanitized` counts into the best-effort, counts-only
+        // injection-alert SIDECAR ledger. This runs AFTER hashing and never
+        // touches `payload`, `sha`, or `meta`, so the sealed output and a
+        // verify_finding replay are unaffected — the ledger is not the audit
+        // chain. `sha` is recorded as the correlation key (the same sanitized
+        // -output digest the audit chain stores), never the payload.
+        injection_ledger::record_neutralization(name, &sha, &sanitized);
+    }
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": payload_text,
+            }
+        ],
+        "_meta": meta,
+    }))
+}
+```
+
+[`services/mcp/src/server.rs:1544-1573`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1544-L1573)
+
+[7] `yara_scan`은 일치 수가 `limit`에 닿으면 파일 검사를 멈추고 규칙 하나의 패턴 일치는 모두 넣는다: [`services/mcp/src/tools/yara_scan.rs:28-29`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L28-L29), [`services/mcp/src/tools/yara_scan.rs:178-194`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L178-L194), [`services/mcp/src/tools/yara_scan.rs:275-290`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L275-L290).
+
+[8] `pcap_triage`는 패킷 수 기본값과 목록별 상한을 코드에 둔다.
+
+```rust
+const DEFAULT_LIMIT: usize = 500_000;
+// Keep the per-request list bounded; dedup is by (src, host, method).
+const MAX_HTTP_REQUESTS: usize = 300;
+const MAX_URI_LEN: usize = 256;
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:17-20`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L17-L20)
+```rust
+    Ok(PcapTriageOutput {
+        analyzer: "tshark".to_string(),
+        packets_seen,
+        conversations: top_conversations(&conv, 50),
+        dns_queries: top_counts(&dns, 25),
+        http_hosts: top_counts(&http, 25),
+        http_requests: top_http_requests(&reqs, MAX_HTTP_REQUESTS),
+        zeek: None,
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:252-259`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L252-L259)
+
+[9] `zeek_summary`는 읽은 줄 수가 `limit`에 닿으면 표시 없이 멈추고 상위 값을 10개씩 싣는다.
+
+```rust
+    let mut dns: HashMap<String, usize> = HashMap::new();
+    let mut http: HashMap<String, usize> = HashMap::new();
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+    for file in files {
+        if out.rows_seen >= limit {
+            break;
+        }
+        parse_log_file(&file, limit, &mut out, &mut hosts, &mut dns, &mut http)?;
+    }
+    out.top_hosts = top_counts(&hosts, 10);
+    out.top_dns_queries = top_counts(&dns, 10);
+    out.top_http_hosts = top_counts(&http, 10);
+    Ok(out)
+```
+
+[`services/mcp/src/tools/zeek_summary.rs:96-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L96-L108)
+```rust
+    let mut fields: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if out.rows_seen >= limit {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("#fields") {
+```
+
+[`services/mcp/src/tools/zeek_summary.rs:140-145`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/zeek_summary.rs#L140-L145)
+
+[10] `email_parse`는 읽는 바이트, 해석하는 메시지, 목록 길이에 상한을 둔다.
+
+```rust
+/// Upper bound on bytes read from one artifact. Loose `.eml` are small; an mbox
+/// can be large, so the cap is generous but still bounds memory. Anything past
+/// the cap is truncated rather than read.
+const MAX_BYTES: usize = 256 * 1024 * 1024;
+/// Cap on the number of mbox messages actually parsed. The true total message
+/// count is reported separately and is never capped.
+const MAX_MESSAGES: usize = 5_000;
+/// Cap on the length of any surfaced Vec so a huge mailbox cannot bloat output.
+/// Counts are reported separately and are not capped.
+const MAX_ITEMS: usize = 200;
+```
+
+[`services/mcp/src/tools/email_parse.rs:35-44`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/email_parse.rs#L35-L44)
+
+[11] `pst_parse`는 메시지와 집계 목록, 머리글 파일 바이트, 폴더 항목 수에 상한을 둔다.
+
+```rust
+
+/// Hard cap on surfaced messages / aggregate entries. The true total is
+/// always reported in `message_count`.
+const MAX_MESSAGES: usize = 500;
+
+/// Cap on bytes read from a single `OutlookHeaders.txt` (metadata is tiny;
+/// this only bounds a pathological/hostile file).
+const MAX_HEADER_BYTES: u64 = 256 * 1024;
+
+/// Cap on directory entries walked in the export tree (defense against a
+/// pathologically deep/wide export).
+const MAX_WALK_ENTRIES: usize = 500_000;
+```
+
+[`services/mcp/src/tools/pst_parse.rs:64-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L64-L75)
+
+[12] `srum_parse`는 행을 정렬한 뒤 5,000개로 자르고 전체 수와 합계는 자르기 전에 계산한다.
+
+```rust
+/// in [`SrumParseOutput::row_count`], so a cap never hides how much the
+/// table actually held.
+const MAX_ROWS: usize = 5_000;
+
+/// How many top egress applications to surface in `top_talkers`.
+const MAX_TOP_TALKERS: usize = 20;
+```
+
+[`services/mcp/src/tools/srum_parse.rs:60-65`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L60-L65)
+```rust
+fn assemble_output(mut rows: Vec<SrumNetworkRow>) -> SrumParseOutput {
+    rows.sort_by(|a, b| {
+        a.app_id
+            .cmp(&b.app_id)
+            .then_with(|| a.timestamp.cmp(&b.timestamp))
+            .then_with(|| a.bytes_sent.cmp(&b.bytes_sent))
+            .then_with(|| a.bytes_recvd.cmp(&b.bytes_recvd))
+    });
+
+    let row_count = rows.len();
+    let (total_bytes_sent, total_bytes_recvd, top_talkers) = aggregate(&rows);
+    rows.truncate(MAX_ROWS);
+
+```
+
+[`services/mcp/src/tools/srum_parse.rs:334-346`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L334-L346)
+
+[13] `oe_dbx_parse`, `wmi_persist_parse`, `bits_parse`, `exif_parse`, `vss_list`는 읽는 바이트, 목록 길이, 문자열 길이에 상한을 둔다: [`services/mcp/src/tools/oe_dbx_parse.rs:36-42`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/oe_dbx_parse.rs#L36-L42), [`services/mcp/src/tools/wmi_persist_parse.rs:34-42`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/wmi_persist_parse.rs#L34-L42), [`services/mcp/src/tools/wmi_persist_parse.rs:74-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/wmi_persist_parse.rs#L74-L94), [`services/mcp/src/tools/wmi_persist_parse.rs:245-251`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/wmi_persist_parse.rs#L245-L251), [`services/mcp/src/tools/bits_parse.rs:49-55`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bits_parse.rs#L49-L55), [`services/mcp/src/tools/bits_parse.rs:176-199`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bits_parse.rs#L176-L199), [`services/mcp/src/tools/exif_parse.rs:34-38`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L34-L38), [`services/mcp/src/tools/vss.rs:33-34`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L33-L34).
+
+[14] `vss_mount`는 마운트 폴더의 `vss` 항목을 모두 싣는다.
+
+```rust
+fn collect_vss_files(mount_point: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(mount_point) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("vss"))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+```
+
+[`services/mcp/src/tools/vss.rs:264-279`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L264-L279)
+
+[15] `detect_contradictions`와 `judge_findings`는 만든 기록을 모두 목록에 싣는다: [`services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py:100-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py#L100-L106), [`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:184-211`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L184-L211), [`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:63-73`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L63-L73).
+
+[16] 다섯 도구는 파일을 `take`로 읽기 상한까지만 읽는다: [`services/mcp/src/tools/email_parse.rs:119-133`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/email_parse.rs#L119-L133), [`services/mcp/src/tools/exif_parse.rs:122-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L122-L136), [`services/mcp/src/tools/bits_parse.rs:123-137`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bits_parse.rs#L123-L137), [`services/mcp/src/tools/oe_dbx_parse.rs:104-118`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/oe_dbx_parse.rs#L104-L118), [`services/mcp/src/tools/wmi_persist_parse.rs:139-153`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/wmi_persist_parse.rs#L139-L153).
+
+[17] `registry_query`는 재귀 깊이가 16을 넘으면 표시 없이 돌아간다.
+
+```rust
+const MAX_RECURSION_DEPTH: usize = 16;
+```
+
+[`services/mcp/src/tools/registry_query.rs:31-31`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L31-L31)
+```rust
+    if output.entries.len() >= limit || depth > MAX_RECURSION_DEPTH {
+        return;
+    }
+```
+
+[`services/mcp/src/tools/registry_query.rs:234-236`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L234-L236)
+
+[18] `vol_pslist`는 필터와 상한을 적용하기 전의 행 수를 `processes_seen`에 넣고 항목을 넣은 뒤 상한을 비교한다.
+
+```rust
+        serde_json::from_str(trimmed).map_err(|e| VolError::OutputParse(e.to_string()))?;
+
+    let processes_seen = raw.len();
+    let mut out = Vec::with_capacity(processes_seen.min(limit));
+    for value in raw {
+        let proc = json_value_to_process(&value);
+        if let Some(filter) = pid_filter {
+            if !filter.contains(&proc.pid) {
+                continue;
+            }
+        }
+        out.push(proc);
+        if out.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(VolPslistOutput {
+        processes: out,
+        processes_seen,
+        stderr_tail,
+    })
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:218-239`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L218-L239)
+
+[19] `vol_run`, `suricata_eve`, `nfdump_query`, `journalctl_query`, `vel_collect`, `ez_parse`, `mac_triage`의 `*_seen` 필드는 상한 앞의 수다: [`services/mcp/src/tools/vol_run.rs:142-143`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L142-L143), [`services/mcp/src/tools/suricata_eve.rs:229-249`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L229-L249), [`services/mcp/src/tools/nfdump_query.rs:57-58`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/nfdump_query.rs#L57-L58), [`services/mcp/src/tools/journalctl_query.rs:71-72`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/journalctl_query.rs#L71-L72), [`services/mcp/src/tools/vel_collect.rs:85-86`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L85-L86), [`services/mcp/src/tools/ez_parse.rs:340-349`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L340-L349), [`services/mcp/src/tools/mac_triage.rs:84-85`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mac_triage.rs#L84-L85).
+
+[20] `hayabusa_scan`, `bulk_extract`는 전체 수를 센 뒤 목록을 자른다.
+
+```rust
+    let alerts_seen = alerts.len();
+    let mut out = Vec::with_capacity(alerts_seen.min(limit));
+    for value in alerts.into_iter().take(limit) {
+        out.push(json_value_to_alert(&value));
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:371-375`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L371-L375)
+```rust
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+    let (mut features, staged_files) = collect_outputs(&feature_dir, &case_dir)?;
+    let features_seen = features.len();
+    sort_features(&mut features);
+    features.truncate(limit);
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:390-394`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L390-L394)
+
+[21] `vss_list`는 자르기 전 저장소 수를 `store_count`에 싣는다.
+
+```rust
+    Ok(VssListOutput {
+        vshadowinfo_available: true,
+        has_shadow_store: !stores.is_empty(),
+        store_count: stores.len(),
+        stores: stores.into_iter().take(MAX_STORES).collect(),
+    })
+```
+
+[`services/mcp/src/tools/vss.rs:155-160`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L155-L160)
+
+[22] (실행 확인) 객체 3줄과 목록 1줄을 쓰는 시험용 `suricata` 실행 파일로 `suricata_eve`를 부르자 `limit` 1에서는 `events` 1개와 `events_seen` 4가, `limit` 0에서는 빈 `events`와 `events_seen` 4가 실렸다.
+
+[23] `disk_extract_artifacts`는 꺼낸 파일의 경로를, `bulk_extract`는 특성 파일의 경로를 응답에 싣는다.
+
+```rust
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ExtractedDiskArtifact {
+    pub artifact_class: String,
+    pub source_path: PathBuf,
+    pub extracted_path: PathBuf,
+    pub size_bytes: u64,
+    /// True when this artifact was recovered from a deleted (unallocated)
+    /// directory entry rather than a live file. Default keeps pre-existing
+    /// ledgers deserializing.
+    #[serde(default)]
+    pub recovered_deleted: bool,
+}
+```
+
+[`services/mcp/src/tools/disk.rs:138-149`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L138-L149)
+
+```rust
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct StagedFeatureFile {
+    /// Feature file stem (`email`, `url`, `email_histogram`, …).
+    pub feature_type: String,
+    /// Path RELATIVE to the case directory — never an absolute
+    /// `/home/...` path, so the hashed body stays host-independent.
+    pub path: PathBuf,
+    /// SHA-256 of the exact bytes `bulk_extractor` wrote.
+    pub sha256: String,
+    /// Data lines (comment/header lines excluded).
+    pub line_count: usize,
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:197-208`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L197-L208)
+
+[24] `evtx_query`는 상한에 닿으면 레코드 읽기를 멈추고 항목을 넣은 뒤 상한을 비교한다.
+
+```rust
+                    if !eids.contains(&row.event_id) {
+                        continue;
+                    }
+                }
+                let row = EvtxRow {
+                    record_id: r.event_record_id,
+                    ..row
+                };
+                rows.push(row);
+                if rows.len() >= limit {
+                    break;
+                }
+```
+
+[`services/mcp/src/tools/evtx_query.rs:150-161`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L150-L161)
+```rust
+    /// Count of records returned. Equal to `rows.len()`; present
+    /// for callers that don't want to recompute.
+    pub row_count: usize,
+    /// Count of records seen by the parser before filtering. Useful
+    /// for sanity checks against external row counts (e.g. wevtutil).
+    pub records_seen: usize,
+```
+
+[`services/mcp/src/tools/evtx_query.rs:74-79`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L74-L79)
+
+[25] `browser_history`는 돌려준 행 수를 `rows_seen`에 넣는다.
+
+```rust
+    Ok(BrowserHistoryOutput {
+        browser_family: family.as_str().to_string(),
+        rows_seen: rows.len(),
+        rows,
+    })
+```
+
+[`services/mcp/src/tools/browser_history.rs:157-161`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L157-L161)
+
+[26] `disk_extract_artifacts`는 꺼낸 목록의 길이를 `artifacts_seen`에 넣는다.
+
+```rust
+        case_id: input.case_id.clone(),
+        mount_id: input.mount_id.clone(),
+        extract_id,
+        output_dir,
+        artifacts_seen: artifacts.len(),
+        artifacts_skipped_oversize: stats.skipped_oversize,
+        max_artifact_bytes: input.max_artifact_bytes,
+```
+
+[`services/mcp/src/tools/disk.rs:415-421`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L415-L421)
+
+[27] (실행 확인) 시험용 Volatility 실행 파일로 `vol_pslist`에 `limit` 0을 주자 `processes` 1개와 `processes_seen` 3이 실렸고 `vol_run`에 `limit` 0을 주자 빈 `rows`와 `rows_seen` 1이 실렸다.
+
+[28] `exif_parse`의 `field_count`는 모든 필드를 센다.
+
+```rust
+    let mut other: BTreeSet<String> = BTreeSet::new();
+    let mut field_count = 0usize;
+    for field in exif.fields() {
+        field_count += 1;
+        if SURFACED_TAGS.contains(&field.tag) {
+            continue;
+        }
+        let value = field.display_value().with_unit(&exif).to_string();
+        let value = value.trim();
+        if !value.is_empty() {
+            other.insert(format!("{}={}", field.tag, value));
+        }
+    }
+
+    ExifParseOutput {
+        has_exif: true,
+        camera_make: ascii_field(&exif, exif::Tag::Make),
+        camera_model: ascii_field(&exif, exif::Tag::Model),
+        software: ascii_field(&exif, exif::Tag::Software),
+        datetime_original: ascii_field(&exif, exif::Tag::DateTimeOriginal),
+        datetime: ascii_field(&exif, exif::Tag::DateTime),
+        gps_decimal: gps_decimal(&exif),
+        artist: ascii_field(&exif, exif::Tag::Artist),
+        copyright: ascii_field(&exif, exif::Tag::Copyright),
+        other_fields: other.into_iter().take(MAX_ITEMS).collect(),
+```
+
+[`services/mcp/src/tools/exif_parse.rs:162-186`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L162-L186)
+
+[29] `truncate_to`는 4,096바이트를 넘는 표준 오류를 문자 경계에서 자르고 `…[truncated]`를 붙인다.
+
+```rust
+fn truncate_to(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        // Walk to the nearest char boundary so a multi-byte UTF-8 codepoint
+        // (Suricata warnings can carry non-ASCII rule metadata) doesn't panic
+        // `String::truncate`. The walk is bounded at 4 bytes per codepoint.
+        let mut boundary = max;
+        while boundary > 0 && !s.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        s.truncate(boundary);
+        s.push_str("…[truncated]");
+    }
+    s
+}
+```
+
+[`services/mcp/src/tools/suricata_eve.rs:252-265`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L252-L265)
+
+[30] `format_value`는 4,096바이트를 넘는 이진 값을 자르고 원래 길이를 붙인다.
+
+```rust
+        // REG_BINARY and any unknown type → hex (capped, like before).
+        _ => {
+            const MAX_HEX: usize = 4096;
+            if data.len() <= MAX_HEX {
+                ("REG_BINARY".into(), hex::encode(data))
+            } else {
+                let suffix = format!("…[truncated, full {} bytes]", data.len());
+                let mut out = hex::encode(&data[..MAX_HEX]);
+                out.push_str(&suffix);
+                ("REG_BINARY".into(), out)
+            }
+        }
+```
+
+[`services/mcp/src/tools/registry_query.rs:355-366`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L355-L366)
+
+[31] `vol_malfind`는 표본을 16진 128자로 자른다.
+
+```rust
+const PREVIEW_BYTES: usize = 64;
+```
+
+[`services/mcp/src/tools/vol_malfind.rs:27-27`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_malfind.rs#L27-L27)
+
+```rust
+    let preview_raw = pick_str(&["Hexdump", "Disasm", "Data", "data"]);
+    let sample_hex = if preview_raw.is_empty() {
+        String::new()
+    } else {
+        // Strip whitespace and ASCII noise, keep only hex chars,
+        // truncate to PREVIEW_BYTES * 2 chars.
+        let cleaned: String = preview_raw
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .take(PREVIEW_BYTES * 2)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        cleaned
+    };
+```
+
+[`services/mcp/src/tools/vol_malfind.rs:285-298`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_malfind.rs#L285-L298)
+
+[32] `yara_scan`은 일치한 바이트를 64바이트까지 16진으로 싣고 일치 길이를 따로 싣는다.
+
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YaraPatternMatch {
+    /// Pattern identifier from the rule (e.g. `$a`, `$mz`).
+    pub identifier: String,
+
+    /// Byte offset within the scanned file where the match starts.
+    pub offset: u64,
+
+    /// Length of the matched bytes.
+    pub length: usize,
+
+    /// First 64 bytes of the matched data, lowercase hex. Truncated
+    /// silently if the match is longer; full bytes are not returned
+    /// to keep responses bounded.
+    pub preview_hex: String,
+}
+```
+
+[`services/mcp/src/tools/yara_scan.rs:66-81`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L66-L81)
+
+```rust
+            let preview_len = data.len().min(PREVIEW_BYTES);
+            out.push(YaraPatternMatch {
+                identifier: pattern.identifier().to_string(),
+                offset: u64::try_from(range.start).unwrap_or(u64::MAX),
+                length: range.len(),
+                preview_hex: hex::encode(&data[..preview_len]),
+```
+
+[`services/mcp/src/tools/yara_scan.rs:281-286`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L281-L286)
+
+[33] `pcap_triage`의 `truncate_to`는 뒤쪽 256바이트를 문자 경계 확인 없이 잘라 앞에 `…`를 붙인다.
+
+```rust
+fn truncate_to(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let start = s.len() - max;
+        s = format!("…{}", &s[start..]);
+    }
+    s
+}
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:435-441`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L435-L441)
+
+[34] `_make_preview`는 일치한 곳 앞뒤를 정한 너비로 잘라 공백을 줄인다.
+
+```python
+def _make_preview(text: str, start: int, end: int, preview_chars: int) -> str:
+    """Bounded, whitespace-collapsed snippet centered on a match.
+
+    Newlines/tabs are collapsed to single spaces so a multi-line match renders
+    as one inert line. The snippet is purely informational; the MCP output
+    boundary still neutralizes any chat/role control tokens it contains.
+    """
+    width = max(0, min(preview_chars, MAX_PREVIEW_CHARS))
+    pad = max(0, (width - (end - start)) // 2)
+    lo = max(0, start - pad)
+    hi = min(len(text), end + pad)
+    snippet = text[lo:hi]
+    return re.sub(r"\s+", " ", snippet).strip()
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:261-273`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L261-L273)
+
+[35] `pcap_triage`의 `stderr_tail`은 직렬화하지 않는다.
+
+```rust
+    // Diagnostic only — kept in-process but NEVER serialized. tshark/zeek stderr is
+    // volatile (timing, truncation warnings, version banners), and the server folds
+    // the serialized output into `output_sha256`, which `verify_finding` replays. A
+    // volatile field here makes that hash drift run-to-run and vetoes correct
+    // findings, so it must stay out of the hashed evidence output.
+    #[serde(skip)]
+    pub stderr_tail: String,
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:68-74`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L68-L74)
+
+[36] (실행 확인) 시험용 tshark 실행 파일로 `pcap_triage`를 부르자 ASCII URI는 `…`와 뒤쪽 256자로 실렸고 2바이트 문자 URI는 처리기 중단 메시지가 담긴 JSON-RPC 오류 `-32603`으로 끝났다.
+
+[37] `bulk_extract`와 `disk.rs`의 `tail_utf8_lossy`는 표준 오류의 뒤쪽 4,096바이트를 표시 없이 남긴다.
+
+```rust
+fn tail_utf8_lossy(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(STDERR_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).to_string()
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:805-808`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L805-L808)
+```rust
+fn tail_utf8_lossy(bytes: &[u8]) -> String {
+    let start = bytes.len().saturating_sub(STDERR_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).to_string()
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1793-1796`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1793-L1796)
+
+[38] `thumbcache_parse`는 CMMM 형식에서 검사 상한에 닿으면 `parse_errors`에 문장을 넣고 XP 형식에서는 반복 조건으로만 멈춘다.
+
+```rust
+    let mut scanned = 0_usize;
+    while offset + 4 <= data.len() {
+        if scanned >= MAX_SCANNED_ENTRIES {
+            parse_errors.push(format!(
+                "record scan capped at {MAX_SCANNED_ENTRIES} records"
+            ));
+            break;
+        }
+```
+
+[`services/mcp/src/tools/thumbcache_parse.rs:305-312`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L305-L312)
+```rust
+    let mut pos = header_size;
+    while pos + 16 <= catalog.len() && entries.len() < MAX_SCANNED_ENTRIES {
+```
+
+[`services/mcp/src/tools/thumbcache_parse.rs:459-460`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L459-L460)
+
+[39] (실행 확인) `find_ai_signatures`에 `limit` 1로 일치가 둘 이상인 파일을 주자 `matches` 1개와 `truncated` 참이 실렸다.

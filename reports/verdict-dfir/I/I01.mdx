@@ -1,0 +1,355 @@
+---
+cell: I01
+details:
+- id: I01.01
+- id: I01.02
+- id: I01.04
+- id: I01.05
+- id: I01.06
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.01 명시적 설정으로 활성화
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `manifest_finalize`가 Merkle 루트를 외부 투명성 기록에 올리는 경로와 `expert_miss_capture`가 GitHub 이슈를 만드는 경로에 적용된다 [1][2].
+`manifest_finalize`는 인자 `anchor_transparency`가 참이면 먼저 `require_rekor_enabled`로 환경변수 `FINDEVIL_REKOR_ENABLE`을 확인한다 [1][3].
+이 값이 비었거나 `0`, `false`, `no`, `off`이면 `RekorAnchorDisabledError`를 올려 연결하지 않는다 [3].
+`expert_miss_capture`는 환경변수 `FINDEVIL_MISS_GH_ENABLED`가 `1`이고 `PATH`에서 `gh`를 찾았을 때만 `gh issue create`를 실행한다 [2].
+`FINDEVIL_REKOR_ENABLE` 없이 `anchor_transparency`를 켠 `manifest_finalize`는 `RekorAnchorDisabledError`를 담은 오류 결과를 받았다 [4].
+`FINDEVIL_MISS_GH_ENABLED` 없이 부른 `expert_miss_capture`는 `gh`를 실행하지 않았고 `github_issue_url`이 `null`이었다 [4].
+이 값을 `1`로 두고 기록용 시험 실행 파일 `gh`를 `PATH` 앞에 두자 `gh issue create`가 실행되었다 [5].
+
+`manifest_finalize`의 인자 `signer`를 `sigstore`로 주는 서명 경로에는 이런 환경변수 조건이 없다 [6].
+이 경로는 인자 하나로 Sigstore의 TUF 저장소, Fulcio, Rekor에 연결한다 [6][7].
+`FINDEVIL_REKOR_ENABLE`과 `SIGSTORE_ID_TOKEN` 없이 `signer`를 `sigstore`로 주자 서버가 `tuf-repo-cdn.sigstore.dev`의 이름 해석을 시도했고 실패한 뒤 `ed25519`로 서명했다 [4].
+`findevil-mcp`의 서버 코드는 외부에 연결하지 않는다 [8].
+
+### I01.02 자격증명 존재로 활성화
+
+**구현.** 이 방식은 `manifest_finalize`가 Merkle 루트를 Rekor에 올리는 경로에 적용된다 [9].
+`_submit_to_rekor`는 환경변수 `SIGSTORE_ID_TOKEN`이 비어 있으면 Sigstore 서비스에 연결하기 전에 예외를 올린다 [9].
+`anchor_merkle_root`는 이 예외를 받으면 Rekor 대신 RFC 3161 시각 인증 서버로 바꾼다 [10].
+`FINDEVIL_REKOR_ENABLE=1`과 `anchor_transparency`를 주고 토큰 없이 부르자 manifest의 `transparency_log`에 Rekor에는 토큰이 없어 올리지 않았다는 까닭과 시각 인증 서버의 이름 해석 실패가 함께 남았다 [11].
+
+**한계.** 토큰이 없을 때 바꾸는 시각 인증 서버 연결은 자격증명 없이 이루어진다 [10][12].
+`signer`가 `sigstore`인 서명은 `SigningContext.production`으로 TUF 저장소에서 신뢰 정보를 받은 뒤에 토큰을 확인한다 [13][7].
+그래서 이 서명 경로는 토큰이 없어도 TUF 저장소에 연결한다 [4].
+
+### I01.04 호출별 선택
+
+**구현.** 이 방식은 `manifest_finalize`의 인자 `signer`와 `anchor_transparency`에 적용된다 [14].
+`signer`는 `stub`, `ed25519`, `sigstore` 가운데 하나이고 기본값은 `ed25519`다 [14].
+`sigstore`를 고르면 서버는 Sigstore 서명자를 먼저 쓰고 실패하면 `ed25519`, `stub` 순서로 바꾼다 [6].
+`anchor_transparency`는 기본값이 거짓이고 참으로 준 호출에서만 투명성 기록에 연결한다 [14][1].
+이 인자로 연결을 켜려면 `FINDEVIL_REKOR_ENABLE`도 켜져 있어야 한다 [1][3].
+
+### I01.05 고정 목적지
+
+**구현.** 이 방식은 `manifest_finalize`가 여는 Sigstore 연결과 RFC 3161 시각 인증 서버 연결에 적용된다 [6][9][10].
+서명 경로와 Rekor 경로 모두 sigstore 3.6.7의 `SigningContext.production`을 쓴다 [7][9].
+`SigningContext.production`은 Fulcio `https://fulcio.sigstore.dev`, Rekor `https://rekor.sigstore.dev`, TUF 저장소 `https://tuf-repo-cdn.sigstore.dev`의 운영 서비스 주소를 쓴다 [13].
+시각 인증 서버 주소는 `anchor.py`의 상수 `_DEFAULT_TSA_URL`인 `https://freetsa.org/tsr`다 [10].
+`anchor_merkle_root`의 인자 `rekor_url`은 결과 블록의 `url` 필드에만 쓰이고 실제로 올리는 곳을 바꾸지 않는다 [10][15].
+`manifest_finalize`는 이 인자를 넘기지 않고 도구 입력에도 목적지 인자가 없다 [1][14].
+
+### I01.06 설정으로 목적지 지정
+
+**구현.** 이 방식은 `expert_miss_capture`가 실행하는 `gh issue create`에 적용된다 [16].
+서버는 `gh`에 레이블, 제목, 본문만 넘기고 대상 저장소를 정하는 `--repo`를 넘기지 않는다 [16].
+기록용 시험 실행 파일 `gh`가 받은 인자에도 `--repo`가 없었다 [5].
+GitHub CLI 2.96.0은 저장소를 따로 정하지 않은 명령을 환경변수 `GH_REPO`나 작업 폴더의 로컬 저장소에 적용한다 [17].
+그래서 이슈를 만들 저장소는 `gh` 설정과 서버를 실행한 폴더의 git 원격이 정하고 도구 인자로는 바꿀 수 없다 [16][17].
+
+### 근거
+
+[1] `manifest_finalize`는 `anchor_transparency`가 참일 때만 `require_rekor_enabled`를 거쳐 `anchor_merkle_root`를 부른다.
+
+```python
+    transparency_anchored = False
+    transparency_kind: str | None = None
+    if inp.anchor_transparency:
+        require_rekor_enabled()  # fail-closed when the network action lacks the opt-in
+        block = anchor_merkle_root(manifest.merkle_root_hex)
+        if block is not None:
+            manifest = replace(manifest, transparency_log=block)
+            out_path = write_manifest(manifest, Path(inp.output_path))
+            transparency_kind = str(block.get("kind") or "none")
+            transparency_anchored = bool(block.get("anchored"))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:189-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L189-L198)
+
+[2] `expert_miss_capture`는 `FINDEVIL_MISS_GH_ENABLED`가 `1`이고 `gh`가 있을 때만 이슈를 만든다.
+
+```python
+def _maybe_create_github_issue(args: ExpertMissCaptureInput) -> str | None:
+    if os.environ.get("FINDEVIL_MISS_GH_ENABLED") != "1":
+        return None
+    gh = shutil.which("gh")
+    if gh is None:
+        return None
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:55-60`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L55-L60)
+
+[3] `require_rekor_enabled`는 `FINDEVIL_REKOR_ENABLE`이 꺼져 있으면 예외를 올린다.
+
+```python
+def rekor_enabled() -> bool:
+    """True iff the operator opted into transparency anchoring via the env flag.
+
+    Default (unset/empty/``0``/``false``/``no``/``off``) is OFF: no anchoring,
+    no network.
+    """
+    val = os.environ.get(_REKOR_ENABLE_ENV, "").strip().lower()
+    return val not in ("", "0", "false", "no", "off")
+
+
+def require_rekor_enabled() -> None:
+    """Raise :class:`RekorAnchorDisabledError` unless the env opt-in is set."""
+    if not rekor_enabled():
+        raise RekorAnchorDisabledError(
+            "transparency anchoring requested but disabled; set "
+            f"{_REKOR_ENABLE_ENV}=1 to opt in (publishes the bare SHA-256 Merkle "
+            "root to a public transparency log — no evidence text)"
+        )
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:77-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L77-L94)
+
+[4] (실행 확인) `findevil-agent-mcp`를 `unshare -rn`으로 바깥 네트워크가 없는 상태에서 실행하고 `SIGSTORE_ID_TOKEN`, `FINDEVIL_REKOR_ENABLE`, `FINDEVIL_MISS_GH_ENABLED` 없이 도구를 불렀다.
+`anchor_transparency`를 켠 `manifest_finalize`는 `RekorAnchorDisabledError` 오류 결과를 받았다.
+`expert_miss_capture`는 `github_issue_url`이 `null`이었다.
+`signer`를 `sigstore`로 준 `manifest_finalize`는 표준 오류에 `tuf-repo-cdn.sigstore.dev` 이름 해석 실패와 재시도 줄을 남긴 뒤 `signer_effective`가 `ed25519`이고 `fallback_reason`이 `Failed to refresh TUF metadata`인 결과를 돌려줬다.
+
+[5] (실행 확인) `FINDEVIL_MISS_GH_ENABLED=1`로 실행한 `findevil-agent-mcp`의 `PATH` 앞에 받은 인자를 파일에 적는 시험용 `gh`를 두고 `expert_miss_capture`를 불렀다.
+시험용 `gh`는 `issue create --label miss/rule --title … --body …`를 받았고 `--repo`는 없었다.
+
+[6] `signer`가 `sigstore`이면 Sigstore 서명자를 먼저 쓰고 실패하면 `ed25519`, `stub` 순서로 바꾼다.
+
+```python
+    requested, coerce_reason = _resolve_signer_request(inp.signer)
+    if requested == "stub":
+        signer: Signer = StubSigner(run_id=inp.run_id)
+    elif requested == "ed25519":
+        signer = FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id))
+    else:  # sigstore
+        signer = FallbackSigner(
+            make_signer(kind="sigstore"),
+            FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id)),
+        )
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:161-171`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L161-L171)
+
+[7] `SigstoreSigner`는 `SigningContext.production`을 만든 뒤에 토큰을 확인한다.
+
+```python
+    def _ensure_ctx(self) -> Any:
+        with self._lock:
+            if self._signing_ctx is not None:
+                return self._signing_ctx
+            try:
+                # Lazy import — keeps test env offline-friendly.
+                from sigstore.sign import SigningContext  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise RuntimeError(
+                    "sigstore-python is not installed. Install with `uv add sigstore` "
+                    "or use StubSigner in tests."
+                ) from exc
+            self._signing_ctx = SigningContext.production()
+            return self._signing_ctx
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:95-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L95-L108)
+
+```python
+    def sign(self, payload: bytes) -> SignedBundle:
+        """Sign ``payload`` (canonical JSON bytes). Returns a SignedBundle."""
+        ctx = self._ensure_ctx()
+        # The exact API differs across sigstore-python versions;
+        # this code path is defensive and pinned to sigstore 3.x
+        # per Spec #2 §16.
+        from sigstore.oidc import IdentityToken  # type: ignore[import-not-found]
+
+        if self._identity_token is None:
+            raise RuntimeError(
+                "SigstoreSigner requires identity_token in non-interactive mode. "
+                "Acquire one via Sigstore's OIDC flow before instantiation."
+            )
+        identity = IdentityToken(self._identity_token)
+        with ctx.signer(identity) as signer_session:
+            bundle = signer_session.sign_artifact(payload)
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:110-125`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L110-L125)
+
+[8] `findevil-mcp`의 의존성에는 네트워크 클라이언트가 없고 서버 코드는 연결을 열지 않는다.
+[`services/mcp/Cargo.toml`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/Cargo.toml)
+
+[9] `_submit_to_rekor`는 `SIGSTORE_ID_TOKEN`이 없으면 연결하기 전에 예외를 올리고 있으면 `SigningContext.production`으로 Rekor에 올린다.
+
+```python
+def _submit_to_rekor(merkle_root_hex: str) -> tuple[Any, str]:
+    """Keyless-sign a DSSE Statement over the root and submit it to Rekor.
+
+    Returns ``(log_entry, body_b64)``. Requires ``$SIGSTORE_ID_TOKEN`` and
+    network — raises on any missing prerequisite so the caller can degrade.
+    Isolated as a single function so tests can monkeypatch it without touching
+    the live log.
+    """
+    from sigstore.oidc import IdentityToken  # type: ignore[import-not-found]
+    from sigstore.sign import SigningContext  # type: ignore[import-not-found]
+
+    token = os.environ.get(_ID_TOKEN_ENV)
+    if not token:
+        raise RuntimeError(
+            f"no OIDC identity token in ${_ID_TOKEN_ENV}; keyless Rekor signing "
+            "needs one (acquire via Sigstore's OIDC flow)"
+        )
+
+    statement = _build_statement(merkle_root_hex)
+    ctx = SigningContext.production()
+    identity = IdentityToken(token)
+    with ctx.signer(identity) as signer:
+        bundle = signer.sign_dsse(statement)
+    entry = bundle.log_entry
+    return entry, str(entry.body)
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:171-195`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L171-L195)
+
+[10] `anchor_merkle_root`는 Rekor 실패를 받으면 고정 주소의 시각 인증 서버로 바꾸고 결과 블록에 `rekor_url`을 적는다.
+
+```python
+# Public production Rekor + a public RFC-3161 TSA for the offline-time fallback.
+_DEFAULT_REKOR_URL = "https://rekor.sigstore.dev"
+_DEFAULT_TSA_URL = "https://freetsa.org/tsr"
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:56-58`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L56-L58)
+
+```python
+    if not _is_sha256_hex(merkle_root_hex):
+        return _none_block(
+            merkle_root_hex,
+            "merkle_root_hex is not a 64-char SHA-256 hex string; nothing to anchor",
+        )
+
+    effective_rekor_url = rekor_url or _DEFAULT_REKOR_URL
+    try:
+        entry, body_b64 = _submit_to_rekor(merkle_root_hex)
+        return _rekor_block(merkle_root_hex, entry, body_b64, effective_rekor_url)
+    except Exception as rekor_exc:  # degrade on ANY Rekor failure — never raise into the run
+        rekor_reason = f"rekor anchoring failed: {rekor_exc}"
+        if not allow_tsa_fallback:
+            return _none_block(merkle_root_hex, rekor_reason)
+        try:
+            return _tsa_block(merkle_root_hex, _DEFAULT_TSA_URL, rekor_reason)
+        except Exception as tsa_exc:  # the fallback must also never raise
+            return _none_block(merkle_root_hex, f"{rekor_reason}; tsa fallback failed: {tsa_exc}")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:119-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L119-L136)
+
+[11] (실행 확인) `FINDEVIL_REKOR_ENABLE=1`로 실행한 `findevil-agent-mcp`에 토큰 없이 `anchor_transparency`를 켠 `manifest_finalize`를 보내자 `transparency_kind`가 `none`이었다.
+manifest의 `fallback_reason`은 `rekor anchoring failed: no OIDC identity token in $SIGSTORE_ID_TOKEN …; tsa fallback failed: <urlopen error [Errno -3] Temporary failure in name resolution>`였다.
+
+[12] 시각 인증 요청은 `openssl ts`로 만든 질의를 자격증명 없이 POST로 보낸다.
+[`services/agent/findevil_agent/crypto/anchor.py:310-381`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L310-L381)
+
+[13] sigstore 3.6.7의 `SigningContext.production`은 운영 Fulcio, Rekor, TUF 신뢰 정보를 쓰고 TUF 신뢰 정보는 원격 저장소에서 갱신한다.
+[`sigstore/sign.py:326-335`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/sign.py#L326-L335), [`sigstore/_internal/fulcio/client.py:42`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/_internal/fulcio/client.py#L42), [`sigstore/_internal/rekor/client.py:36`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/_internal/rekor/client.py#L36), [`sigstore/_internal/tuf.py:36`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/_internal/tuf.py#L36), [`sigstore/_internal/trust.py:348-357`](https://github.com/sigstore/sigstore-python/blob/2cb4a174e6f4b270e313aa60704a48223e61c912/sigstore/_internal/trust.py#L348-L357)
+
+[14] `manifest_finalize`의 입력은 `signer`와 `anchor_transparency`를 두고 목적지 인자는 두지 않는다.
+
+```python
+    signer: Literal["stub", "ed25519", "sigstore"] = Field(
+        default="ed25519",
+        description=(
+            "ed25519 = REAL local-keypair signature, verifies offline (default); "
+            "sigstore = keyless Fulcio+Rekor, identity + transparency log "
+            "(Spec #2 §7.1 tier 1; the customer-release tier); "
+            "stub = deterministic test placeholder (explicit opt-in, never proof)."
+        ),
+    )
+    extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Free-form metadata embedded in the manifest (image_path, model, etc.).",
+    )
+    anchor_transparency: bool = Field(
+        default=False,
+        description=(
+            "OPT-IN: publish the audit Merkle root to a public Sigstore Rekor "
+            "transparency log (RFC-3161 TSA fallback) so a third party can prove "
+            "when the sealed root existed. Absent by default — when false the "
+            "manifest is byte-identical and no network is touched. Requires the "
+            "operator to also set FINDEVIL_REKOR_ENABLE=1; requesting it without "
+            "that opt-in fails closed. Only the bare 32-byte SHA-256 root leaves "
+            "the host (no evidence text). The anchor is attached AFTER signing "
+            "and excluded from the signed body, so it never alters the signature."
+        ),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:76-101`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L76-L101)
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:68-101`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L68-L101)
+
+[15] `_rekor_block`은 받은 `rekor_url`을 결과 블록의 `url`에 적는다.
+
+```python
+def _rekor_block(merkle_root_hex: str, entry: Any, body_b64: str, rekor_url: str) -> dict[str, Any]:
+    proof = entry.inclusion_proof
+    return {
+        "kind": "rekor",
+        "anchored": True,
+        "subject": {"merkle_root_sha256": merkle_root_hex},
+        "statement_type": _STATEMENT_TYPE,
+        "predicate_type": _PREDICATE_TYPE,
+        "rekor": {
+            "url": rekor_url,
+            "log_id": entry.log_id,
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:212-222`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L212-L222)
+
+[16] `expert_miss_capture`가 `gh`에 넘기는 인자다.
+
+```python
+    case_label = _github_case_label(args.case_id)
+    title = f"Expert miss: {args.edit_type} for {case_label}"
+    body_lines = [
+        f"Edit type: {args.edit_type}",
+        f"Case: {case_label}",
+        f"Finding: {args.finding_id or 'case-level'}",
+        f"Expert: {args.expert_name or 'unspecified'}",
+        "",
+        args.edit_text,
+    ]
+    try:
+        result = subprocess.run(
+            [
+                gh,
+                "issue",
+                "create",
+                "--label",
+                f"miss/{args.edit_type}",
+                "--title",
+                title,
+                "--body",
+                "\n".join(body_lines),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:62-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L62-L89)
+
+[17] GitHub CLI 2.96.0의 도움말은 `GH_REPO`가 로컬 저장소에 적용되는 명령의 저장소를 정한다고 적는다.
+[`pkg/cmd/root/help_topic.go:57-58`](https://github.com/cli/cli/blob/b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0/pkg/cmd/root/help_topic.go#L57-L58)

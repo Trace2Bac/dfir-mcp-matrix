@@ -1,0 +1,224 @@
+---
+cell: T03
+details:
+- id: T03.01
+---
+
+# T03 실행 조건 확인
+
+### T03.01 선행 결과 대조
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_extract_artifacts`에 적용된다 [1].
+이 도구는 사건 폴더의 자원 기록 `session_resources.json`에서 `mount_id`의 `disk_mount` 자원을 찾는다 [1].
+찾은 자원의 `status`가 `mounted`가 아니면 이미지를 읽지 않고 `mount resource is not mounted`로 거부한다 [1].
+`status`는 `disk_mount`가 `mounted`로 적고 `disk_unmount`가 `unmounted`로 바꾼다 [2].
+`ewfmount`가 없어 파일 시스템을 마운트하지 않고 Sleuth Kit으로 이미지를 직접 읽기로 한 자원도 `mounted`로 적힌다 [3].
+`disk_unmount`로 해제한 `mount_id`로 `disk_extract_artifacts`를 부르자 `mount resource is not mounted`로 거부되었다 [4].
+
+`disk_unmount`는 자원의 `status`를 보지 않으므로 이미 해제한 자원도 다시 해제한다 [2].
+같은 `mount_id`로 `disk_unmount`를 두 번 부르자 두 번 모두 성공했다 [4].
+
+다른 도구는 앞선 호출의 결과나 상태로 호출을 막지 않는다.
+- 도구 설명은 `verify_finding`과 `detect_contradictions`를 `judge_findings`보다 먼저, `manifest_finalize`를 마지막에 부르라고 적지만 서버는 이 차례를 확인하지 않는다 [5].
+- `judge_findings`는 발견사항마다 검증 결과가 하나씩 있어야 받지만 그 검증 결과는 모델이 같은 호출의 인자로 넘기는 값이다 [6].
+- `detect_contradictions`의 `resolution_required`는 응답 항목에 적히기만 하고 `judge_findings`의 입력에는 모순 처리 결과를 받는 인자가 없다 [7].
+
+`manifest_finalize`는 호출 기록에 앞선 `tool_call_output` 항목이 없는 `finding_approved` 항목이 있으면 manifest를 쓰지 않는다 [8].
+이 확인은 발견사항이 인용한 호출이 기록에 있는지 보는 것이고 그 기록 항목은 모델이 `audit_append`로 직접 추가할 수 있다 [8][9].
+
+승인, 호출자 인증, 실행 자원 확인, 동시 실행 수 제한은 두 서버 모두에 없다.
+두 서버는 stdio로만 실행되어 원격 MCP 연결을 받지 않는다 [10].
+`.mcp.json.sift`는 SSH로 SIFT 가상 머신의 두 서버를 실행하지만 이 연결의 인증은 클라이언트의 `ssh`가 하고 서버는 호출자를 확인하지 않는다 [11].
+`findevil-mcp`는 표준 입력에서 한 줄을 읽어 처리하고 응답을 쓴 뒤 다음 줄을 읽으므로 도구 호출은 하나씩 차례로 실행된다 [10].
+이는 서버가 정한 제한이 아니라 처리 반복문의 구조에서 생기는 동작이다.
+
+### 근거
+
+[1] `disk_extract_artifacts`는 자원 기록을 찾고 `status`를 확인한다.
+
+```rust
+    let case_dir = case_dir(&input.case_id)?;
+    let ledger_path = case_dir.join(LEDGER_NAME);
+    let mut ledger = read_ledger(&ledger_path)?;
+    let mount = ledger
+        .resources
+        .iter()
+        .find(|r| r.id == input.mount_id && r.resource_type == "disk_mount")
+        .cloned()
+        .ok_or_else(|| DiskError::MountNotFound(input.mount_id.clone()))?;
+    if mount.status != "mounted" {
+        return Err(DiskError::MountNotMounted(input.mount_id.clone()));
+    }
+```
+
+[`services/mcp/src/tools/disk.rs:309-320`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L309-L320)
+
+[2] `disk_mount`는 `status`를 적고 `disk_unmount`는 `status`를 보지 않고 바꾼다: [`services/mcp/src/tools/disk.rs:255-263`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L255-L263), [`services/mcp/src/tools/disk.rs:274-289`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L274-L289), [`services/mcp/src/tools/disk.rs:431-477`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L431-L477).
+
+[3] 직접 읽기 자원도 `mounted`로 적는다.
+
+```rust
+fn direct_tsk_mount(
+    image_path: &Path,
+    reason: &str,
+) -> (String, PathBuf, Vec<String>, String, String) {
+    (
+        "mounted".to_string(),
+        image_path.to_path_buf(),
+        vec![DIRECT_TSK_COMMAND.to_string()],
+        String::new(),
+        format!("registered direct Sleuth Kit read of the image (no FUSE/loop mount): {reason}"),
+    )
+}
+```
+
+[`services/mcp/src/tools/disk.rs:597-608`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L608)
+
+[4] (실행 확인) `mode: mock`으로 `disk_mount`·`disk_unmount`를 부른 뒤 같은 `mount_id`로 `disk_extract_artifacts`와 `disk_unmount`를 다시 불러 응답을 확인했다(실행 기록 R2).
+
+[5] 차례를 적은 도구 설명이다: [`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:163-179`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L163-L179), [`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:228-235`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L228-L235), [`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:225-243`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L225-L243).
+
+[6] `judge_findings`의 검증 결과 검사는 입력 모델 안에서 인자끼리 대조한다: [`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:27-102`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L27-L102).
+
+[7] `resolution_required`는 입력 값을 응답 항목에 옮겨 적는 값이다.
+
+```python
+    resolution_required: bool = Field(
+        default=True,
+        description=(
+            "True for interactive runs (analyst must Trust A / Trust B / Flag "
+            "before the judge fires); False for --unattended."
+        ),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py:37-43`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py#L37-L43)
+
+```python
+    events = to_events(
+        pairs,
+        case_id=inp.case_id,
+        resolution_required=inp.resolution_required,
+    )
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py:84-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py#L84-L89)
+
+[8] `build_manifest`는 인용 호출이 앞서 기록되지 않은 `finding_approved`가 있으면 거부한다.
+
+```python
+def _uncited_findings(audit_log: AuditLog) -> list[str]:
+    """finding_approved records whose tool_call_id is absent from the chain
+    so far. Chain order matters: a finding cannot cite a future tool call."""
+    seen_tool_calls: set[str] = set()
+    uncited: list[str] = []
+    for record in audit_log.iter_records():
+        if record.kind == "tool_call_output":
+            tcid = str(record.payload.get("tool_call_id") or "")
+            if tcid:
+                seen_tool_calls.add(tcid)
+        elif record.kind == "finding_approved":
+            cited = str(record.payload.get("tool_call_id") or "")
+            if not cited or cited not in seen_tool_calls:
+                uncited.append(str(record.payload.get("finding_id") or f"seq-{record.seq}"))
+    return uncited
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:117-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L117-L131)
+
+```python
+def build_manifest(
+    *,
+    case_id: str,
+    run_id: str,
+    started_at: str,
+    audit_log: AuditLog,
+    signer: Signer,
+    extra: dict[str, Any] | None = None,
+) -> RunManifest:
+    """Assemble + sign a RunManifest from a finalized audit log.
+
+    Caller is responsible for not appending to the audit log after
+    this returns — manifests describe a snapshot.
+
+    Raises :class:`UncitedFindingError` when the log contains a
+    ``finding_approved`` record without a ``tool_call_id`` recorded
+    earlier in the chain — an uncited finding must never be sealed.
+    """
+    uncited = _uncited_findings(audit_log)
+    if uncited:
+        raise UncitedFindingError(
+            "refusing to seal: finding(s) without a tool_call_id recorded "
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:180-201`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L180-L201)
+
+[9] `audit_append`는 받은 `kind`와 `payload`를 그대로 기록에 붙인다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[10] 두 서버의 stdio 처리 반복문이다.
+
+```rust
+pub fn run_stdio_server_with_streams<R, W>(input: R, mut output: W) -> std::io::Result<()>
+where
+    R: Read,
+    W: Write,
+{
+    let registry = build_registry();
+    let mut reader = BufReader::new(input);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            // EOF — peer closed.
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(response) = dispatch(trimmed, &registry) {
+            writeln!(output, "{response}")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
+```
+
+[`services/mcp/src/server.rs:197-223`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L197-L223)
+
+```python
+async def _async_main() -> None:
+    """Production entry point — wires stdio to the Server."""
+    server, _ = build_server()
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:203-211`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L203-L211)
+
+[11] SIFT 설정은 `ssh -i ~/.ssh/sift_key -T`로 원격 서버를 실행한다: [`.mcp.json.sift:1-40`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/.mcp.json.sift#L1-L40).

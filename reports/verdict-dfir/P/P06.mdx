@@ -1,0 +1,386 @@
+---
+cell: P06
+details:
+- id: P06.03
+- id: P06.04
+---
+
+# P06 조사 상태 유지
+
+### P06.03 조사 상태를 파일·DB에 저장
+
+**구현.** 이 방식은 `findevil-mcp`의 사건 폴더와 `findevil-agent-mcp`의 호출 기록 파일, 기억 DB에 적용된다 [1][2][3].
+`case_open`은 사건 ID, 이미지 경로, 해시, 크기, 등록 시각, 표시 이름을 사건 폴더의 `case.json`에 쓴다 [1].
+`disk_mount`·`disk_extract_artifacts`·`disk_unmount`는 마운트와 꺼내기 항목을 사건 폴더의 `session_resources.json`에 적는다 [4][5].
+항목마다 ID, 종류, 상태, 만든 시각과 바꾼 시각, 이미지 경로, 마운트 위치, 상위 항목, 꺼낸 파일 목록, 실행한 명령이 남는다 [5].
+꺼낸 파일은 사건 폴더의 `extracted/` 아래에 남는다 [6].
+`findevil-agent-mcp`의 `audit_append`·`memory_remember` 같은 도구는 모델이 준 경로의 해시 체인 JSONL 파일과 SQLite 기억 DB에 쓴다 [2][3].
+두 서버의 주입 문구 정리 기록은 `FINDEVIL_HOME`의 `injection_alerts.jsonl`에 쌓인다 [7].
+
+두 서버는 조사 상태를 프로세스 메모리에 두지 않는다.
+`findevil-mcp`는 시작할 때 도구 목록만 만들고 호출마다 사건 폴더의 파일을 다시 읽는다 [8][5].
+`findevil-agent-mcp`도 시작할 때 도구 목록만 만들고 호출마다 `AuditLog`와 `MemoryStore`를 새로 연다 [9][2][3].
+
+**한계.** `case_open`의 응답은 사건 DB 경로 `db_path`(`evidence.ddb`)를 돌려주지만 이 파일을 만드는 도구는 없다 [10].
+`case_open`을 실행한 사건 폴더에 `evidence.ddb`는 없었다 [11].
+`vss_mount`는 마운트를 `session_resources.json`에 적지 않고 `mount_id`를 응답으로만 돌려준다 [12].
+기억 DB의 기록은 `memory_recall`이 기록 시각이 오래될수록 신뢰도를 낮춰 정렬할 뿐 지우거나 만료하지 않는다 [13].
+
+### P06.04 재시작 뒤 자동 복구
+
+**구현.** 이 방식은 `findevil-mcp`의 마운트 기록과 `findevil-agent-mcp`의 호출 기록 해시 체인에 적용된다 [5][14].
+`disk_extract_artifacts`·`disk_unmount`는 호출마다 받은 `case_id`의 `session_resources.json`을 읽어 `mount_id`의 항목을 찾는다 [5].
+그래서 서버를 다시 시작해도 모델이 앞서 받은 `case_id`와 `mount_id`로 이어서 부를 수 있다 [5].
+한 서버 프로세스에서 `mode: mock` 마운트를 등록하고 다른 서버 프로세스에서 그 `mount_id`로 꺼내기와 마운트 해제가 이어졌다 [15].
+`AuditLog`는 만들어질 때 파일의 마지막 줄을 읽어 다음 `seq`와 앞 줄 해시를 정한다 [14].
+서버를 다시 시작한 뒤 같은 파일에 덧붙인 줄은 `seq` 2와 앞 프로세스 마지막 줄의 해시를 받았다 [16].
+
+**한계.** 마운트 기록의 상태는 실제 마운트 상태와 대조하지 않는다 [5][17].
+`ewfmount`가 없어 이미지를 바로 읽기로 한 항목도 상태가 `mounted`로 남는다 [18].
+`AuditLog`는 마지막 줄이 JSON으로 읽히지 않거나 줄 수와 `seq`가 맞지 않으면 오류를 내고 이어 쓰지 않는다 [14].
+서버가 시작할 때 사건 폴더나 호출 기록을 스스로 읽는 코드는 없고 모델이 `case_id`나 파일 경로를 다시 넘겨야 상태가 읽힌다 [8][9].
+
+### 근거
+
+[1] `case.json`에 쓰는 필드다.
+
+```rust
+#[derive(Serialize)]
+struct CaseManifest<'a> {
+    id: &'a str,
+    image_path: &'a Path,
+    image_hash: &'a str,
+    image_size_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    image_segments: &'a Vec<PathBuf>,
+    registered_at: &'a str,
+    label: &'a Option<String>,
+}
+
+impl<'a> CaseManifest<'a> {
+    fn from_handle(h: &'a CaseHandle, inp: &'a CaseOpenInput) -> Self {
+        Self {
+            id: &h.id,
+            image_path: &inp.image_path,
+            image_hash: &h.image_hash,
+            image_size_bytes: h.image_size_bytes,
+            image_segments: &h.image_segments,
+            registered_at: &h.registered_at,
+            label: &inp.label,
+        }
+    }
+}
+```
+
+[`services/mcp/src/tools/case_open.rs:221-245`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L221-L245)
+
+[2] `audit_append`는 호출마다 `AuditLog`를 열어 한 줄을 덧붙인다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[3] `memory_remember`는 호출마다 `MemoryStore`를 열어 쓴다.
+
+```python
+async def _handle(inp: BaseModel) -> MemoryRememberOutput:
+    assert isinstance(inp, MemoryRememberInput)
+    with MemoryStore(Path(inp.store_path)) as store:
+        store.remember(
+            case_id=inp.case_id,
+            kind=inp.kind,
+            key=inp.key,
+            value=inp.value,
+            sha256=inp.sha256,
+            ts=inp.ts,
+            case_path=inp.case_path,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:51-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L51-L62)
+
+[4] `disk_mount`는 마운트 항목을 마운트 기록에 넣는다.
+
+```rust
+    let now = now_iso();
+    let resource = SessionResource {
+        id: mount_id.clone(),
+        resource_type: "disk_mount".to_string(),
+        status: status.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(input.image_path.clone()),
+        mount_point: Some(mount_point.clone()),
+        fs_root: Some(fs_root.clone()),
+        parent_id: None,
+        output_dir: None,
+        artifacts: vec![],
+        command: command.clone(),
+        note: note.clone(),
+    };
+```
+
+[`services/mcp/src/tools/disk.rs:273-288`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L273-L288)
+
+[5] 마운트 기록 항목의 필드와 읽고 쓰는 함수다: [`services/mcp/src/tools/disk.rs:189-209`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L189-L209), [`services/mcp/src/tools/disk.rs:306-317`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L306-L317), [`services/mcp/src/tools/disk.rs:1738-1762`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1738-L1762).
+
+[6] 꺼낸 파일은 사건 폴더의 `extracted/disk/<extract_id>`에 놓인다.
+
+```rust
+    let extract_id = format!("disk-extract-{}", Uuid::new_v4());
+    let output_dir = case_dir.join("extracted").join("disk").join(&extract_id);
+    create_dir(&output_dir)?;
+```
+
+[`services/mcp/src/tools/disk.rs:335-337`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L335-L337)
+
+[7] 주입 정리 기록 위치다.
+
+```rust
+fn resolve_ledger_path() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("FINDEVIL_INJECTION_LEDGER") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    if let Ok(home) = std::env::var("FINDEVIL_HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home).join(LEDGER_FILENAME));
+        }
+    }
+    None
+}
+```
+
+[`services/mcp/src/server/injection_ledger.rs:45-57`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server/injection_ledger.rs#L45-L57)
+
+```python
+
+def resolve_ledger_path() -> Path | None:
+    """Resolve the sidecar ledger path, or ``None`` when no contained home exists.
+
+    Order:
+
+      1. ``FINDEVIL_INJECTION_LEDGER`` -- explicit ledger-file override.
+      2. ``FINDEVIL_HOME`` -- a ``injection_alerts.jsonl`` sibling of the case
+         store (where the contained runtime state already lives).
+
+    There is deliberately **no** ``$HOME`` fallback: a stray neutralization must
+    never write outside a contained run (CLAUDE.md containment). ``None`` means
+    "nowhere safe to write" and the caller no-ops.
+    """
+    override = os.environ.get("FINDEVIL_INJECTION_LEDGER")
+    if override:
+        return Path(override)
+    home = os.environ.get("FINDEVIL_HOME")
+    if home:
+```
+
+[`services/agent_mcp/findevil_agent_mcp/injection_ledger.py:45-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/injection_ledger.py#L45-L63)
+
+[8] `findevil-mcp`는 시작할 때 도구 목록만 만들고 줄마다 요청을 처리한다.
+
+```rust
+pub fn run_stdio_server_with_streams<R, W>(input: R, mut output: W) -> std::io::Result<()>
+where
+    R: Read,
+    W: Write,
+{
+    let registry = build_registry();
+    let mut reader = BufReader::new(input);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            // EOF — peer closed.
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(response) = dispatch(trimmed, &registry) {
+            writeln!(output, "{response}")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
+
+```
+
+[`services/mcp/src/server.rs:197-224`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L197-L224)
+
+[9] `findevil-agent-mcp`는 시작할 때 도구 명세 목록을 만든다.
+
+```python
+def build_server() -> tuple[Server, dict[str, ToolSpec]]:
+    """Construct the Server + registered handlers without booting stdio.
+
+    Tests use this entry point to drive the server in-process. The
+    ``run`` coroutine is the production entry point; it calls this
+    function then wires stdio.
+    """
+    server: Server = Server(SERVER_NAME)
+    specs = _build_specs_index()
+    log = _configure_logging()
+    log.info(
+        "agent_mcp_boot",
+        server_name=SERVER_NAME,
+        server_version=SERVER_VERSION,
+        tool_count=len(specs),
+        tools=sorted(specs.keys()),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:141-157`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L141-L157)
+
+[10] `db_path`는 자리만 정하고 만들지 않는다.
+
+```rust
+    // Reserve the DuckDB path; not created yet.
+    let db_path = case_dir.join("evidence.ddb");
+```
+
+[`services/mcp/src/tools/case_open.rs:191-192`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L191-L192)
+
+[11] (실행 확인) `case_open`을 실행한 사건 폴더 다섯 곳에 `case.json`은 있었고 `evidence.ddb`는 없었다.
+
+[12] `vss_mount`는 마운트 결과를 응답으로만 돌려준다.
+
+```rust
+    let spawn = Command::new(&bin)
+        .arg(&input.image_path)
+        .arg(&mount_point)
+        .output();
+    match spawn {
+        Ok(out) if out.status.success() => {
+            let shadow_store_paths = collect_vss_files(&mount_point);
+            Ok(VssMountOutput {
+                vshadowmount_available: true,
+                mount_id,
+                status: "mounted".to_string(),
+                mount_point,
+                shadow_store_paths,
+                command,
+            })
+        }
+```
+
+[`services/mcp/src/tools/vss.rs:226-241`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L226-L241)
+
+[13] `recall`은 기록 시각으로 신뢰도를 낮춰 정렬한다.
+
+```python
+        now = datetime.now(tz=UTC)
+        out: list[RecallHit] = []
+        for row in self._conn.execute(sql, params):
+            row_ts = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+            days_old = max(0.0, (now - row_ts).total_seconds() / 86400.0)
+            decay = math.exp(-days_old / _HALF_LIFE_DAYS)
+            # bm25 returns negative scores in sqlite (lower = better);
+            # invert so confidence rises with relevance.
+            relevance = 1.0 / (1.0 + abs(row["score"]))
+            out.append(
+                RecallHit(
+                    case_id=row["case_id"],
+                    kind=row["kind"],
+                    key=row["key"],
+                    value=row["value"],
+                    sha256=row["sha256"],
+                    ts=row["ts"],
+                    confidence=relevance * decay,
+                )
+            )
+        # Re-rank by combined confidence descending so decay breaks BM25 ties.
+        out.sort(key=lambda h: h.confidence, reverse=True)
+        return out
+```
+
+[`services/agent/findevil_agent/memory/store.py:112-134`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L112-L134)
+
+[14] `AuditLog`는 만들어질 때 파일 끝을 읽어 이어 쓸 값을 정한다.
+
+```python
+    def _load_tail(self) -> None:
+        """Populate ``_next_seq`` + ``_last_hash`` from any existing file."""
+        if not self.path.is_file():
+            return
+        last_line: bytes | None = None
+        count = 0
+        with self.path.open("rb") as f:
+            for raw in f:
+                raw = raw.rstrip(b"\n")
+                if not raw:
+                    continue
+                last_line = raw
+                count += 1
+        if last_line is None:
+            return
+        try:
+            obj = json.loads(last_line)
+        except json.JSONDecodeError as exc:
+            raise AuditLogError(
+                f"audit log {self.path}: last line is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(obj, dict) or "seq" not in obj:
+            raise AuditLogError(f"audit log {self.path}: last line is not an audit record")
+        self._next_seq = int(obj["seq"]) + 1
+        self._last_hash = hash_line(last_line)
+        if count != self._next_seq:
+            raise AuditLogError(
+                f"audit log {self.path}: seq-count mismatch "
+                f"(file has {count} lines but last seq is {obj['seq']})"
+            )
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:137-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L137-L166)
+
+[15] (실행 확인) 한 서버 프로세스에서 `case_open`과 모의 `disk_mount`를 부르고 다른 서버 프로세스에서 같은 `case_id`·`mount_id`로 `disk_extract_artifacts`와 `disk_unmount`를 부르자 둘 다 성공했다.
+
+[16] (실행 확인) 서버 프로세스 두 개에서 같은 `path`로 `audit_append`를 세 번 부르자 세 번째 줄의 `prev_hash`가 두 번째 줄의 해시와 같았고 `audit_verify`가 `ok`와 3을 돌려주었다.
+
+[17] `disk_unmount`는 기록의 상태와 명령만 바꾼다.
+
+```rust
+    ledger.resources[idx].status.clone_from(&status);
+    ledger.resources[idx].updated_at = now_iso();
+    ledger.resources[idx].command.clone_from(&command);
+    write_ledger(&ledger_path, &ledger)?;
+```
+
+[`services/mcp/src/tools/disk.rs:474-477`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L474-L477)
+
+[18] `ewfmount`가 없으면 마운트 없이 이미지를 바로 읽는 항목을 `mounted`로 등록한다.
+
+```rust
+fn direct_tsk_mount(
+    image_path: &Path,
+    reason: &str,
+) -> (String, PathBuf, Vec<String>, String, String) {
+    (
+        "mounted".to_string(),
+        image_path.to_path_buf(),
+        vec![DIRECT_TSK_COMMAND.to_string()],
+        String::new(),
+        format!("registered direct Sleuth Kit read of the image (no FUSE/loop mount): {reason}"),
+    )
+}
+```
+
+[`services/mcp/src/tools/disk.rs:597-608`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L608)

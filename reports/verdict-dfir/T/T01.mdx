@@ -1,0 +1,951 @@
+---
+cell: T01
+details:
+- id: T01.01
+- id: T01.02
+- id: T01.04
+- id: T01.05
+- id: T01.07
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 이 검사는 `findevil-mcp`의 도구 43개와 `findevil-agent-mcp`의 도구 14개의 인자에 적용된다 [1][2].
+`findevil-mcp`는 직접 구현한 JSON-RPC 처리기에서 `tools/call`의 `arguments`를 도구마다 정한 입력 구조체로 `serde_json::from_value`에 넘겨 해석한다 [1].
+해석에 실패하면 도구를 실행하지 않고 JSON-RPC 오류 `-32602`와 `invalid args:`로 시작하는 문구를 돌려준다 [1].
+입력 구조체 44개는 모두 `#[serde(deny_unknown_fields)]`를 달아 모르는 필드를 거부한다 [3].
+자료형이 맞지 않는 값, 빠진 필수 필드, 열거형 밖의 값(`mode`, `artifact_kinds`, `scanners`, `disposition`)도 같은 오류가 된다 [1][4].
+`vol_run`에 모르는 필드와 음수 `pid`를, `bulk_extract`에 목록 밖의 `scanners` 값을 주자 모두 `-32602`로 끝났다 [5].
+
+도구 처리기는 이어서 다음 값을 검사하고 어긋나면 외부 도구를 실행하지 않고 `-32602`를 돌려준다 [1].
+- `hayabusa_scan`은 `min_level`을 `informational`부터 `critical`까지 5개 값과 대조한다 [6].
+- `usnjrnl_query`는 `reasons`의 이름을 USN 이유 목록과 대조하고 `mft_timeline`·`sysmon_network_query`는 시각 필터가 ISO 8601 형식인지 본다 [7].
+- `hashset_lookup`은 해시가 1개 이상 10,000개 이하인지와 각 값이 32·40·64자리 16진수인지 본다 [8].
+- `vel_collect`는 `artifact`가 256자 이하이고 점으로 나눈 영문·숫자·밑줄 이름인지 본다 [9].
+- `thumbcache_parse`는 512MiB를 넘는 입력 파일과 썸네일 캐시 머리글이 없는 파일을, `browser_history`는 알려진 브라우저 기록 표가 없는 SQLite 파일을 거부한다 [10].
+- `bulk_extract`는 `find_regexes` 항목에 줄바꿈이나 NUL 문자가 있으면 거부한다 [11].
+`hayabusa_scan`의 `bogus` 등급, `hashset_lookup`의 3글자 해시, `vel_collect`의 `;`가 들어간 이름을 주자 모두 `-32602`로 끝났다 [5].
+
+`findevil-agent-mcp`의 검사는 두 단계다 [2].
+MCP Python SDK 1.27.0의 저수준 `Server`는 처리기를 부르기 전에 인자를 도구의 입력 schema와 `jsonschema`로 대조하고 어긋나면 `isError`가 참인 결과를 돌려준다 [12].
+입력 schema는 서버가 도구마다 정한 pydantic 모델에서 만든다 [13].
+그래서 모르는 필드(`extra="forbid"`), `Literal` 값 목록, `memory_recall`의 `limit` 범위 1~100, `memory_remember`의 `sha256` 형식은 이 단계에서 검사된다 [14].
+이어 처리기 `call_tool`이 같은 pydantic 모델로 인자를 다시 검사한다 [2].
+schema에 나타나지 않는 검사기는 이 단계에서만 적용되고 실패하면 `isError`가 거짓인 `{"error": {"kind": "validation", ...}}` 글을 돌려준다 [2][15].
+`find_ai_signatures`의 범주 목록 대조와 입력 존재 검사, `judge_findings`의 발견사항마다 검증 결과가 하나씩 있는지 보는 검사가 여기에 해당한다 [15].
+`memory_recall`의 `limit: 1000`은 `isError: true`로, `find_ai_signatures`의 모르는 범주와 `judge_findings`의 검증 결과 없는 발견사항은 `isError: false`인 검사 오류로 끝났다 [16].
+
+**한계.** `evtx_query`의 `xpath`, `journalctl_query`의 `since`·`until`, `vel_collect`의 `args` 값은 자료형만 검사하고 값을 검사하지 않는다 [17].
+`memory_remember`와 `memory_recall`의 `kind`는 설명에 다섯 값을 적지만 그 목록과 대조하지 않는다 [18][19].
+`memory_remember`에 설명 목록에 없는 `kind`를 주자 받아들였다 [16].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 방식은 증거 경로를 받는 `findevil-mcp`의 도구와 `findevil-agent-mcp`의 `accuracy_compare`에 적용된다 [20][21].
+`findevil-mcp`의 도구는 분석이나 외부 도구 실행 전에 경로를 보고 없으면 `-32602`로 거부한다 [20][22].
+- `vol_run`·`vol_pslist`·`vol_psscan`·`vol_psxview`·`vol_malfind`, `pcap_triage`, `journalctl_query`, `login_accounting`, `ausearch`, `nfdump_query`, `suricata_eve`, `indx_parse`, `srum_parse`, `pst_parse`, `bulk_extract`, `sysmon_network_query`, `disk_mount`, `prefetch_parse`, `mft_timeline`, `registry_query`, `usnjrnl_query`, `browser_history`, `thumbcache_parse`는 일반 파일인지까지 본다 [20].
+- `hayabusa_scan`은 `evtx_dir`가 폴더인지 보고 `rule_set`은 있는지만 본다 [6].
+- `yara_scan`, `plaso_parse`, `ez_parse`, `mac_triage`, `cloud_audit`, `oe_dbx_parse`, `email_parse`, `exif_parse`, `bits_parse`, `wmi_persist_parse`, `vss_list`, `vss_mount`, `zeek_summary`는 경로가 있는지만 본다 [20].
+`evtx_query`는 경로가 없으면 `-32602`로 거부하고 일반 파일이 아니면 처리기 오류 `-32603`으로 거부한다 [23].
+`case_open`은 링크를 따라가지 않는 `symlink_metadata`로 경로를 보고 일반 파일이 아니면 거부하므로 심볼릭 링크도 거부한다 [24].
+`case_open`, `disk_extract_artifacts`와 `mode: auto`의 `disk_mount`는 `.E01` 같은 분할 EWF의 첫 조각을 받으면 같은 폴더의 조각을 모으고 중간 번호가 빠져 있으면 거부한다 [25][26].
+`case_open`에 심볼릭 링크, 폴더, `.E02` 없이 `.E01`·`.E03`만 있는 분할 EWF를 주자 모두 `-32602`로 거부되었다 [27].
+`plaso_parse`에 폴더를 주자 이 검사를 통과했다 [27].
+`accuracy_compare`는 `case_dir`에 `verdict.json`이 없거나 기대 결과 파일을 찾지 못하면 채점하지 않고 처리기 오류를 돌려준다 [21].
+
+다른 도구는 입력이 없어도 거부하지 않는다.
+- `hashset_lookup`은 읽지 못한 해시 목록 파일을 `sets_loaded`의 `error`에 적고 나머지 목록으로 조회한다 [28].
+- `find_ai_signatures`는 읽지 못한 경로를 `read_errors`에 적고 건너뛴다 [29].
+- `audit_verify`는 없는 파일을 빈 기록으로 보고 `ok: true`를 돌려준다 [30].
+- `memory_recall`은 `store_path`가 없으면 폴더와 SQLite 파일을 만든 뒤 빈 결과를 돌려준다 [31].
+- `manifest_finalize`는 `audit_log_path`에 파일이 없으면 기록 0건으로 manifest를 만들어 쓴다 [32].
+`audit_verify`에 없는 파일을 주자 `ok: true`, `record_count: 0`이 돌아왔고 `memory_recall`에 없는 `store_path`를 주자 `{"hits":[]}`가 돌아오며 그 경로에 파일이 생겼다 [16].
+`manifest_finalize` 처리 함수에 없는 `audit_log_path`를 주자 `audit_log_record_count`와 `leaf_count`가 0인 manifest 파일이 생겼다 [33].
+
+### T01.04 문자열 경로 검사
+
+**구현.** 이 방식은 사건 폴더 `$FINDEVIL_HOME/cases/<case_id>`를 쓰는 `findevil-mcp` 도구 7개(`disk_mount`, `disk_extract_artifacts`, `disk_unmount`, `vss_mount`, `bulk_extract`, `srum_parse`, `pst_parse`)의 `case_id`에 적용된다 [34][35].
+공통 함수 `is_valid_case_id`는 값이 비어 있지 않고 모든 글자가 영문·숫자·`-`·`_`일 때만 참이므로 `/`, `\`, `.`, NUL 문자가 들어간 값을 거부한다 [34].
+도구는 이 검사를 `case_id`를 경로에 잇기 전에 한다 [35].
+`disk_mount`와 `bulk_extract`에 `../x`를 주자 둘 다 거부되었다 [36].
+거부 응답의 오류 코드는 도구마다 다르다 [37].
+`bulk_extract`와 `vss_mount`는 `-32602`를, `disk_mount`·`disk_extract_artifacts`·`disk_unmount`·`srum_parse`·`pst_parse`는 처리기 오류 `-32603`을 돌려준다 [37].
+`disk_mount`의 거부는 `-32603`, `bulk_extract`의 거부는 `-32602`였다 [36].
+
+**한계.** `bulk_extract`, `srum_parse`, `pst_parse`는 외부 실행 파일을 찾지 못하면 `case_id`를 보기 전에 실행 파일이 없다는 빈 결과를 성공으로 돌려준다 [38].
+`esedbexport`가 없는 환경에서 `srum_parse`에 `../x`를 주자 성공 응답이 돌아왔다 [36].
+
+### T01.05 등록된 ID와 대조
+
+**구현.** 이 방식은 사건 폴더를 쓰는 `findevil-mcp` 도구 7개의 `case_id`와 `disk_extract_artifacts`·`disk_unmount`의 `mount_id`에 적용된다 [35][39].
+`case_id`는 `case_open`이 UUID4로 정하고 `$FINDEVIL_HOME/cases/<case_id>` 폴더를 만들어 등록한 값이다 [40].
+사건 폴더를 쓰는 도구는 그 폴더가 없으면 `case not found`로 거부한다 [35].
+`mount_id`는 `disk_mount`가 사건 폴더의 `session_resources.json`에 적은 자원 ID다 [41].
+두 도구는 이 파일에서 같은 ID의 `disk_mount` 자원을 찾지 못하면 `mount resource not found`로 거부한다 [39].
+`mode: auto`로 등록한 자원이면 `disk_extract_artifacts`는 찾은 자원에 적힌 `image_path`를 읽을 이미지로 쓰므로 이 도구에는 모델이 이미지 경로를 넘기지 않는다 [39].
+없는 사건 `nocase`와 없는 `mount_id`를 주자 각각 `case not found`와 `mount resource not found`로 거부되었다 [36].
+
+사건 폴더를 쓰지 않는 도구는 `case_id`를 대조하지 않는다 [42].
+`vol_run`, `plaso_parse`, `ez_parse` 같은 도구의 입력 구조체는 `case_id`를 호출 기록과 맞추는 용도로만 받는다고 적고 처리기는 이 값을 읽지 않는다 [42].
+`findevil-agent-mcp`의 `verify_finding`은 발견사항의 `tool_call_id`를 모델이 같은 호출에 넘긴 `tool_call_index`에서 찾고 서버가 남긴 호출 기록은 읽지 않는다 [43].
+`findevil-agent-mcp`의 `manifest_finalize`는 `finding_approved` 기록의 `tool_call_id`를 앞선 `tool_call_output` 기록의 `tool_call_id`와 대조하지만 두 값은 모두 `audit_append` 호출자가 `payload`에 넣은 값이다 [44].
+
+**한계.** 사건 폴더 대조는 `cases/<case_id>`가 폴더인지만 보고 `case_open`이 남긴 `case.json`은 보지 않는다 [35].
+
+### T01.07 입력 부재 시 다른 입력으로 대체
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_extract_artifacts`가 `mode: mock`으로 등록한 자원을 읽을 때 적용된다 [45].
+`disk_mount`를 `mode: mock`으로 부르면 서버는 마운트하지 않고 호출 인자 `mount_point`의 폴더(주지 않으면 사건 폴더 아래 새 폴더)를 자원의 `fs_root`로 적는다 [26].
+`disk_extract_artifacts`는 이 자원의 이미지를 Sleuth Kit으로 읽어 파일 목록을 얻지 못하면 `fs_root` 폴더의 파일을 아티팩트로 사건 폴더에 복사한다 [45].
+`mode: mock`으로 등록한 자원으로 `disk_extract_artifacts`를 부르자 `mount_point` 폴더의 파일이 사건 폴더에 복사되었다 [46].
+
+**한계.** 응답에는 파일을 이미지에서 꺼냈는지 `fs_root` 폴더에서 복사했는지 가르는 필드가 없다 [47].
+시험에서도 응답 항목에는 그 파일이 이미지가 아닌 폴더에서 왔다는 표시가 없었다 [46].
+이 경우에도 `session_resources.json`의 추출 항목에는 명령 `fls`·`icat`과 Sleuth Kit으로 이미지에서 꺼냈다는 문구가 적힌다 [48].
+
+### 근거
+
+[1] `findevil-mcp`는 인자를 입력 구조체로 해석하고 실패하면 `-32602`로 돌려준다.
+
+```rust
+fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
+    serde_json::from_value(args).map_err(|e| ToolError::InvalidParams(format!("invalid args: {e}")))
+}
+```
+
+[`services/mcp/src/server.rs:2252-2254`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2252-L2254)
+
+```rust
+    if is_notification {
+        // Method-call-without-id is a notification; even errors get swallowed.
+        return None;
+    }
+
+    let id = id.unwrap_or(Value::Null);
+    Some(match result {
+        Ok(value) => make_success_response(&id, &value),
+        Err(ToolError::InvalidParams(msg)) => make_error_response(&id, ERR_INVALID_PARAMS, &msg),
+        Err(ToolError::Internal(msg)) => make_error_response(&id, ERR_INTERNAL, &msg),
+    })
+}
+```
+
+[`services/mcp/src/server.rs:1465-1476`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1465-L1476)
+
+[2] `findevil-agent-mcp`의 `call_tool`은 pydantic 검사 실패를 `kind: validation` 글로 돌려준다.
+
+```python
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        spec = specs.get(name)
+        if spec is None:
+            log.warning("agent_mcp_unknown_tool", tool=name)
+            return _error_content(f"unknown tool: {name!r}", kind="unknown_tool")
+
+        try:
+            validated = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            log.warning(
+                "agent_mcp_validation_error",
+                tool=name,
+                errors=exc.errors(include_url=False),
+            )
+            return _error_content(f"input validation failed: {exc}", kind="validation")
+
+        try:
+            result = await spec.handler(validated)
+        except Exception as exc:
+            log.error(
+                "agent_mcp_handler_exception",
+                tool=name,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+            )
+            return _error_content(f"{type(exc).__name__}: {exc}", kind="handler")
+
+        return _to_text_content(result, tool=name)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:170-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L170-L198)
+
+[3] 입력 구조체 44개(도구 43개의 입력과 `HashsetRef`)는 모두 바로 위에 `#[serde(deny_unknown_fields)]`를 둔다: [`services/mcp/src/tools/vol_run.rs:105-107`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L105-L107), [`services/mcp/src/tools/disk.rs:77-79`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L77-L79), [`services/mcp/src/tools/hashset_lookup.rs:88-90`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L88-L90).
+
+[4] 열거형 인자는 정해 둔 값만 해석된다: [`services/mcp/src/tools/disk.rs:33-38`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L33-L38), [`services/mcp/src/tools/bulk_extract.rs:79-118`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L79-L118), [`services/mcp/src/tools/hashset_lookup.rs:103-109`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L103-L109).
+
+[5] (실행 확인) `findevil-mcp`에 모르는 필드, 음수 `pid`, 목록 밖 `scanners`, 잘못된 등급·해시·아티팩트 이름을 보내 `-32602`가 돌아오는 것을 확인했다(실행 기록 R1).
+
+[6] `hayabusa_scan`은 등급 목록과 입력 폴더를 검사한다.
+
+```rust
+const VALID_LEVELS: &[&str] = &["informational", "low", "medium", "high", "critical"];
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:31-31`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L31-L31)
+
+```rust
+    if !input.evtx_dir.exists() {
+        return Err(HayabusaError::EvtxDirNotFound(input.evtx_dir.clone()));
+    }
+    if !input.evtx_dir.is_dir() {
+        return Err(HayabusaError::EvtxDirNotDirectory(input.evtx_dir.clone()));
+    }
+    if let Some(ref rules) = input.rule_set {
+        if !rules.exists() {
+            return Err(HayabusaError::RuleSetNotFound(rules.clone()));
+        }
+    }
+    if let Some(ref level) = input.min_level {
+        if !VALID_LEVELS.iter().any(|v| v.eq_ignore_ascii_case(level)) {
+            return Err(HayabusaError::InvalidMinLevel(level.clone()));
+        }
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:220-235`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L220-L235)
+
+[7] USN 이유 이름과 시각 필터를 검사한다: [`services/mcp/src/tools/usnjrnl_query.rs:255-276`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/usnjrnl_query.rs#L255-L276), [`services/mcp/src/tools/mft_timeline.rs:301-310`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mft_timeline.rs#L301-L310), [`services/mcp/src/tools/sysmon_network_query.rs:223-233`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/sysmon_network_query.rs#L223-L233).
+
+[8] `hashset_lookup`은 해시 개수와 형식을 검사한다.
+
+```rust
+    if input.hashes.is_empty() || input.hashes.len() > MAX_HASHES {
+        return Err(HashsetLookupError::BadHashCount(input.hashes.len()));
+    }
+    let mut queries: BTreeSet<String> = BTreeSet::new();
+    for (index, raw) in input.hashes.iter().enumerate() {
+        let normalized = normalize_hash(raw).ok_or_else(|| HashsetLookupError::InvalidHash {
+            index,
+            got_len: raw.chars().count(),
+        })?;
+        queries.insert(normalized);
+    }
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:211-221`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L211-L221)
+
+```rust
+fn normalize_hash(raw: &str) -> Option<String> {
+    if !matches!(raw.len(), 32 | 40 | 64) || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(raw.to_ascii_lowercase())
+}
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:262-267`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L262-L267)
+
+[9] `vel_collect`의 아티팩트 이름 형식 검사다.
+
+```rust
+fn is_valid_artifact_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 256 {
+        return false;
+    }
+    let mut prev_dot = false;
+    for (i, ch) in name.chars().enumerate() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' => prev_dot = false,
+            '.' => {
+                if i == 0 || prev_dot {
+                    return false;
+                }
+                prev_dot = true;
+            }
+            _ => return false,
+        }
+    }
+    !prev_dot
+}
+```
+
+[`services/mcp/src/tools/vel_collect.rs:211-229`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L211-L229)
+
+[10] `thumbcache_parse`는 크기와 머리글을, `browser_history`는 표를 본다.
+
+```rust
+pub fn thumbcache_parse(
+    input: &ThumbcacheParseInput,
+) -> Result<ThumbcacheParseOutput, ThumbcacheParseError> {
+    let path = &input.thumbcache_path;
+    let meta = std::fs::metadata(path).map_err(|_| ThumbcacheParseError::NotFound(path.clone()))?;
+    if !meta.is_file() {
+        return Err(ThumbcacheParseError::NotRegular(path.clone()));
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(ThumbcacheParseError::TooLarge {
+            path: path.clone(),
+            size_bytes: meta.len(),
+            max_bytes: MAX_FILE_BYTES,
+        });
+    }
+    let data = std::fs::read(path).map_err(|source| ThumbcacheParseError::Read {
+        path: path.clone(),
+        source,
+    })?;
+
+    let mut parsed =
+        parse_bytes(&data).ok_or_else(|| ThumbcacheParseError::NotThumbcache(path.clone()))?;
+
+```
+
+[`services/mcp/src/tools/thumbcache_parse.rs:164-186`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L164-L186)
+
+```rust
+fn detect_family(conn: &Connection, path: &Path) -> Result<Family, BrowserHistoryError> {
+    let map_err = |source| BrowserHistoryError::ParseFailed {
+        path: path.to_path_buf(),
+        source,
+    };
+    if has_table(conn, "urls").map_err(map_err)? && has_table(conn, "visits").map_err(map_err)? {
+        return Ok(Family::Chrome);
+    }
+    if has_table(conn, "moz_places").map_err(map_err)? {
+        return Ok(Family::Firefox);
+    }
+    Err(BrowserHistoryError::UnknownSchema(path.to_path_buf()))
+```
+
+[`services/mcp/src/tools/browser_history.rs:187-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L187-L198)
+
+[11] `bulk_extract`는 `find_regexes` 항목의 줄바꿈과 NUL 문자를 거부한다.
+
+```rust
+fn write_find_regexes(
+    regexes: &[String],
+    staging: &Path,
+) -> Result<Option<PathBuf>, BulkExtractError> {
+    if regexes.is_empty() {
+        return Ok(None);
+    }
+    for (index, regex) in regexes.iter().enumerate() {
+        if regex.contains('\n') || regex.contains('\r') || regex.contains('\0') {
+            return Err(BulkExtractError::InvalidRegex { index });
+        }
+    }
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:593-604`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L593-L604)
+
+[12] MCP Python SDK 1.27.0의 `call_tool` 등록 함수는 처리기 앞에서 입력 schema를 `jsonschema.validate`로 대조하고 실패하면 `isError: true` 결과를 만든다: [`src/mcp/server/lowlevel/server.py:467-532`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L467-L532).
+
+[13] 도구의 입력 schema는 pydantic 모델의 `model_json_schema()`다.
+
+```python
+    def input_schema(self) -> dict[str, Any]:
+        """JSON Schema for the input model — emitted to the MCP client."""
+        return self.input_model.model_json_schema()
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/_base.py:46-48`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/_base.py#L46-L48)
+
+[14] `memory_recall`의 `limit`과 `memory_remember`의 `sha256`은 pydantic 제약으로 정해진다.
+
+```python
+class MemoryRecallInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    store_path: str = Field(..., description="Absolute path to memory.sqlite.")
+    query: str = Field(..., min_length=1, description="FTS5 query string.")
+    kind: str | None = Field(
+        default=None,
+        description="Optional filter: 'ioc'|'hash'|'ttp'|'hostname'|'finding_summary'.",
+    )
+    limit: int = Field(default=10, ge=1, le=100)
+    audit_log_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional absolute path to the case audit.jsonl. When set, a "
+            "'memory_recall' record is appended so the run records THAT recall "
+            "happened (process provenance). This is NOT evidence: the record is "
+            "excluded from the Merkle root and carries no tool_call_id."
+        ),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:14-32`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L14-L32)
+
+```python
+    sha256: str = Field(
+        ...,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+        description="Lowercase hex SHA-256 with 'sha256:' prefix, e.g. 'sha256:ab12...'.",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:24-28`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L24-L28)
+
+[15] schema에 나타나지 않는 검사기다: [`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:59-102`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L59-L102).
+
+```python
+    @model_validator(mode="after")
+    def _require_a_source(self) -> FindAiSignaturesInput:
+        if self.text is None and not self.paths:
+            raise ValueError("provide at least one of 'text' or 'paths' to scan")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_categories(self) -> FindAiSignaturesInput:
+        if self.categories is not None:
+            allowed = set(known_categories())
+            unknown = sorted(set(self.categories) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"unknown signature categories {unknown}; " f"known: {sorted(allowed)}"
+                )
+        return self
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/find_ai_signatures.py:81-96`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/find_ai_signatures.py#L81-L96)
+
+[16] (실행 확인) MCP SDK 클라이언트로 `findevil-agent-mcp`에 범위 밖 값, 모르는 범주, 검증 결과 없는 발견사항, 목록에 없는 `kind`, 없는 파일 경로를 보내 두 단계 검사의 응답과 생긴 파일을 확인했다(실행 기록 R6).
+
+[17] 값 검사 없이 쓰는 인자다: [`services/mcp/src/tools/evtx_query.rs:51-53`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L51-L53), [`services/mcp/src/tools/journalctl_query.rs:106-126`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/journalctl_query.rs#L106-L126), [`services/mcp/src/tools/vel_collect.rs:152-156`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L152-L156).
+
+[18] `memory_remember`는 `kind`를 설명에만 적고 그대로 저장한다.
+
+```python
+    kind: str = Field(
+        ..., description="One of: 'ioc', 'hash', 'ttp', 'hostname', 'finding_summary'."
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:19-21`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L19-L21)
+
+```python
+        self._conn.execute(
+            "INSERT INTO memories(case_id, kind, key, value, sha256, ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (case_id, kind, key, value, sha256, now),
+        )
+```
+
+[`services/agent/findevil_agent/memory/store.py:75-78`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L75-L78)
+
+[19] `memory_recall`의 `kind`도 설명에만 값 목록을 적는다.
+
+```python
+    kind: str | None = Field(
+        default=None,
+        description="Optional filter: 'ioc'|'hash'|'ttp'|'hostname'|'finding_summary'.",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:19-22`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L19-L22)
+
+[20] 경로 존재와 일반 파일 검사는 도구마다 처리기 앞부분에 있다: [`services/mcp/src/tools/vol_run.rs:225-230`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L225-L230), [`services/mcp/src/tools/pcap_triage.rs:100-105`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L100-L105), [`services/mcp/src/tools/bulk_extract.rs:288-293`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L288-L293), [`services/mcp/src/tools/yara_scan.rs:154-159`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L154-L159), [`services/mcp/src/tools/plaso_parse.rs:204-208`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L204-L208), [`services/mcp/src/tools/cloud_audit.rs:125-127`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/cloud_audit.rs#L125-L127).
+
+[21] `accuracy_compare`는 `verdict.json`과 기대 결과 파일이 없으면 오류를 낸다.
+
+```python
+async def _handle(inp: BaseModel) -> AccuracyCompareOutput:
+    assert isinstance(inp, AccuracyCompareInput)
+    case_dir = Path(inp.case_dir)
+    if not (case_dir / "verdict.json").is_file():
+        raise FileNotFoundError(f"{case_dir}/verdict.json not found")
+
+    golden_path = _resolve_golden(case_dir, inp.golden_path)
+    if golden_path is None:
+        raise FileNotFoundError(
+            f"no expected-findings.json golden found for {case_dir}; pass golden_path explicitly"
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:178-188`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L178-L188)
+
+[22] 존재 검사 오류는 `-32602`로 돌려준다.
+
+```rust
+fn dispatch_vol_run(args: Value) -> Result<Value, ToolError> {
+    let input: VolRunInput = parse_args(args)?;
+    // PluginNotAllowed / MemoryNotFound / MemoryNotRegular are user-input
+    // errors; surface as -32602 so the agent fixes the call rather than
+    // treating the tool as crashed.
+    match vol_run(&input) {
+        Ok(output) => {
+            serde_json::to_value(output).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(
+            e @ (crate::tools::VolRunError::PluginNotAllowed(_)
+            | crate::tools::VolRunError::MemoryNotFound(_)
+            | crate::tools::VolRunError::MemoryNotRegular(_)),
+        ) => Err(ToolError::InvalidParams(format!("{e}"))),
+        Err(e) => Err(ToolError::Internal(format!("vol_run: {e}"))),
+    }
+}
+```
+
+[`services/mcp/src/server.rs:1890-1906`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1890-L1906)
+
+[23] `evtx_query`는 없는 경로만 `-32602`로 돌려주고 일반 파일이 아닌 경로는 처리기 오류로 돌려준다.
+
+```rust
+    if !input.evtx_path.exists() {
+        return Err(EvtxError::EvtxNotFound(input.evtx_path.clone()));
+    }
+    let meta = std::fs::metadata(&input.evtx_path).map_err(|source| EvtxError::EvtxUnreadable {
+        path: input.evtx_path.clone(),
+        source,
+    })?;
+    if !meta.is_file() {
+        return Err(EvtxError::EvtxUnreadable {
+            path: input.evtx_path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        });
+    }
+```
+
+[`services/mcp/src/tools/evtx_query.rs:110-122`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L110-L122)
+
+```rust
+fn dispatch_evtx_query(args: Value) -> Result<Value, ToolError> {
+    let input: EvtxQueryInput = parse_args(args)?;
+    // EvtxNotFound is user-input territory — surface as -32602 so the
+    // agent can correct the path instead of treating it as a tool crash.
+    match evtx_query(&input) {
+        Ok(output) => {
+            serde_json::to_value(output).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(e @ crate::tools::EvtxError::EvtxNotFound(_)) => {
+            Err(ToolError::InvalidParams(format!("{e}")))
+        }
+        Err(e) => Err(ToolError::Internal(format!("evtx_query: {e}"))),
+    }
+```
+
+[`services/mcp/src/server.rs:1668-1680`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1668-L1680)
+
+[24] `case_open`은 링크를 따라가지 않고 일반 파일인지 본다.
+
+```rust
+    // 1. Resolve + verify the image path. `symlink_metadata` (lstat) does
+    //    NOT follow symlinks, so a link planted in the evidence drop zone
+    //    pointing at an arbitrary host file is refused as not-regular —
+    //    enforcing the "does not follow symlinks" contract documented on
+    //    `CaseOpenInput::image_path`.
+    let image_path = &input.image_path;
+    let meta = fs::symlink_metadata(image_path)
+        .map_err(|_| CaseOpenError::ImageNotFound(image_path.clone()))?;
+    if !meta.is_file() {
+        return Err(CaseOpenError::ImageNotRegular(image_path.clone()));
+    }
+```
+
+[`services/mcp/src/tools/case_open.rs:140-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L140-L150)
+
+[25] 분할 EWF 조각에 빠진 번호가 있으면 거부한다.
+
+```rust
+            continue;
+        }
+        let found_later_segment = segments.range((number + 1)..).next().map_or_else(
+            || expected_segment_path(image_path, &first_ext, max_segment),
+            |(_, path)| path.clone(),
+        );
+        return Err(EwfSegmentError::MissingSegment {
+            missing_segment: expected_segment_path(image_path, &first_ext, number),
+            found_later_segment,
+        });
+```
+
+[`services/mcp/src/tools/ewf_segments.rs:136-145`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ewf_segments.rs#L136-L145)
+
+[26] `disk_mount`는 `mode: mock`이면 분할 EWF 조각을 모으지 않고 마운트 명령 없이 `mount_point`를 `fs_root`로 등록한다.
+
+```rust
+    let mount_point = input
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| case_dir.join("mounts").join(&mount_id));
+    create_dir(&mount_point)?;
+    let image_paths = match input.mode {
+        DiskMode::Mock => vec![input.image_path.clone()],
+        DiskMode::Auto => segment_paths_for_image(&input.image_path)
+            .map_err(|err| DiskError::EwfSegmentSet(err.to_string()))?,
+    };
+
+    let (status, fs_root, command, stderr_tail, note) = match input.mode {
+        DiskMode::Mock => (
+            "mounted".to_string(),
+            mount_point.clone(),
+            vec!["mock".to_string(), "disk_mount".to_string()],
+            String::new(),
+            "mock mount registered; no privileged filesystem operation ran".to_string(),
+        ),
+```
+
+[`services/mcp/src/tools/disk.rs:244-262`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L244-L262)
+
+[27] (실행 확인) `case_open`에 심볼릭 링크, 폴더, 중간 조각이 빠진 분할 EWF를, `yara_scan`에 없는 대상을, `plaso_parse`에 폴더를 주어 결과를 확인했다(실행 기록 R5).
+
+[28] `hashset_lookup`은 읽지 못한 목록을 오류로 적고 호출을 실패시키지 않는다.
+
+```rust
+/// Probe one set against the query hashes and fold matches into `states`.
+/// Never fails the call: any problem lands in the returned entry's `error`.
+fn probe_set(
+    set_ref: &ResolvedRef,
+    queries: &BTreeSet<String>,
+    states: &mut BTreeMap<String, HashState>,
+) -> HashsetLoaded {
+    let (kind, matches, error) = match detect_container(&set_ref.path) {
+        Ok(Container::Sqlite) => probe_sqlite(&set_ref.path, queries),
+        Ok(Container::Text) => {
+            let (matches, error) = probe_text(&set_ref.path, queries);
+            (HashsetKind::Text, matches, error)
+        }
+        Err(msg) => (
+            kind_hint_from_extension(&set_ref.path),
+            BTreeSet::new(),
+            Some(msg),
+        ),
+    };
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:407-425`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L407-L425)
+
+[29] `find_ai_signatures`가 쓰는 파일 읽기 함수는 읽기 실패를 사유로 돌려준다.
+
+```python
+
+
+def _read_text_file(path: str) -> tuple[str | None, str | None]:
+    """Read a file as text, read-only and size-bounded.
+
+    Returns ``(text, None)`` on success or ``(None, reason)`` on a handled
+    failure. Never raises for an ordinary I/O problem (missing file, permission,
+    a directory) — a scan tool degrades gracefully instead of crashing the
+    server, mirroring yara_scan's per-file error tolerance.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_FILE_BYTES + 1)
+    except FileNotFoundError:
+        return None, f"{path}: not found"
+    except IsADirectoryError:
+        return None, f"{path}: is a directory"
+    except PermissionError:
+        return None, f"{path}: permission denied"
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:310-328`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L310-L328)
+
+[30] `audit_verify`의 설명은 없는 파일을 빈 기록으로 본다고 적는다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditVerifyOutput:
+    assert isinstance(inp, AuditVerifyInput)
+    log = AuditLog(Path(inp.path))
+    try:
+        count = log.verify()
+    except AuditLogError as exc:
+        return AuditVerifyOutput(ok=False, record_count=0, error=str(exc))
+    return AuditVerifyOutput(ok=True, record_count=count, error=None)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py:35-42`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py#L35-L42)
+
+[31] `MemoryStore`는 열 때 폴더와 DB를 만든다.
+
+```python
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(path))
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+```
+
+[`services/agent/findevil_agent/memory/store.py:34-39`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L34-L39)
+
+[32] `manifest_finalize`는 호출 기록 파일이 없어도 거부하지 않고 빈 기록으로 manifest를 만든다.
+
+```python
+    manifest = build_manifest(
+        case_id=inp.case_id,
+        run_id=inp.run_id,
+        started_at=inp.started_at,
+        audit_log=log,
+        signer=signer,
+        extra=inp.extra,
+    )
+    out_path = write_manifest(manifest, Path(inp.output_path))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:172-180`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L172-L180)
+
+```python
+    def iter_records(self) -> Iterable[AuditRecord]:
+        """Yield each record in order, without verifying."""
+        if not self.path.is_file():
+            return
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:196-199`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L196-L199)
+
+[33] (실행 확인) `manifest_finalize` 처리 함수에 없는 `audit_log_path`와 시험용 서명으로 manifest를 만들게 해 기록 수와 leaf 수를 확인했다.
+
+[34] `case_id` 형식 검사다.
+
+```rust
+/// Whether a `case_id` is safe to use as a single path component.
+///
+/// True iff non-empty and every character is ASCII alphanumeric, `-`, or
+/// `_`. Excludes `/`, `\`, `.` (so `.`/`..` traversal), and NUL.
+#[must_use]
+pub fn is_valid_case_id(case_id: &str) -> bool {
+    !case_id.is_empty()
+        && case_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+```
+
+[`services/mcp/src/tools/case_id.rs:10-20`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_id.rs#L10-L20)
+
+[35] 사건 폴더 함수는 형식을 본 뒤 폴더가 있는지 본다: [`services/mcp/src/tools/disk.rs:1707-1717`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1707-L1717), [`services/mcp/src/tools/bulk_extract.rs:732-745`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L732-L745), [`services/mcp/src/tools/srum_parse.rs:476-486`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L476-L486), [`services/mcp/src/tools/pst_parse.rs:302-315`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L302-L315), [`services/mcp/src/tools/vss.rs:204-208`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L204-L208).
+
+[36] (실행 확인) `case_id`에 `../x`와 없는 사건을, `mount_id`에 없는 값을 주어 오류 코드와 응답을 확인했다(실행 기록 R2).
+
+[37] 도구별 오류 코드 연결이다: [`services/mcp/src/server.rs:1596-1610`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1596-L1610), [`services/mcp/src/server.rs:1630-1650`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1630-L1650), [`services/mcp/src/server.rs:1992-2005`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1992-L2005), [`services/mcp/src/server.rs:2007-2020`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2007-L2020), [`services/mcp/src/server.rs:2048-2059`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2048-L2059).
+
+[38] 세 도구는 실행 파일을 먼저 찾고 사건 폴더는 그 뒤에 찾는다: [`services/mcp/src/tools/bulk_extract.rs:302-307`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L302-L307), [`services/mcp/src/tools/srum_parse.rs:215-219`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L215-L219), [`services/mcp/src/tools/pst_parse.rs:188-194`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L188-L194).
+
+[39] `disk_extract_artifacts`와 `disk_unmount`는 기록에서 `mount_id`를 찾는다.
+
+```rust
+    let case_dir = case_dir(&input.case_id)?;
+    let ledger_path = case_dir.join(LEDGER_NAME);
+    let mut ledger = read_ledger(&ledger_path)?;
+    let mount = ledger
+        .resources
+        .iter()
+        .find(|r| r.id == input.mount_id && r.resource_type == "disk_mount")
+        .cloned()
+        .ok_or_else(|| DiskError::MountNotFound(input.mount_id.clone()))?;
+    if mount.status != "mounted" {
+        return Err(DiskError::MountNotMounted(input.mount_id.clone()));
+    }
+    // Read artifacts straight from the image with The Sleuth Kit (fls/icat)
+    // instead of walking a live mount: libtsk reads EWF + raw images directly,
+    // so extraction is stateless and survives --sift mode's per-tool SSH
+    // sessions (a FUSE mount's daemon does not). The filesystem mount, if any,
+    // is irrelevant here — only the image path disk_mount recorded matters.
+    let image_path = mount
+        .image_path
+        .ok_or_else(|| DiskError::MountNotMounted(input.mount_id.clone()))?;
+    if !image_path.is_file() {
+        return Err(DiskError::ImageNotFound(image_path));
+    }
+```
+
+[`services/mcp/src/tools/disk.rs:309-331`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L309-L331)
+
+```rust
+    let case_dir = case_dir(&input.case_id)?;
+    let ledger_path = case_dir.join(LEDGER_NAME);
+    let mut ledger = read_ledger(&ledger_path)?;
+    let idx = ledger
+        .resources
+        .iter()
+        .position(|r| r.id == input.mount_id && r.resource_type == "disk_mount")
+        .ok_or_else(|| DiskError::MountNotFound(input.mount_id.clone()))?;
+```
+
+[`services/mcp/src/tools/disk.rs:432-439`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L432-L439)
+
+[40] `case_open`은 UUID4로 사건 ID를 정하고 사건 폴더를 만든다.
+
+```rust
+    // 3. Allocate a case_id.
+    let case_id = Uuid::new_v4().to_string();
+
+    // 4. Resolve FINDEVIL_HOME + create case dir.
+    let home = resolve_findevil_home()?;
+    let case_dir = home.join("cases").join(&case_id);
+    fs::create_dir_all(&case_dir).map_err(|source| CaseOpenError::CaseDirCreate {
+        path: case_dir.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/case_open.rs:180-189`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L180-L189)
+
+[41] `disk_mount`는 새 `mount_id`를 기록 파일에 적는다.
+
+```rust
+    let ledger_path = case_dir.join(LEDGER_NAME);
+    let mount_id = format!("disk-mount-{}", Uuid::new_v4());
+```
+
+[`services/mcp/src/tools/disk.rs:242-243`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L242-L243)
+
+```rust
+    let now = now_iso();
+    let resource = SessionResource {
+        id: mount_id.clone(),
+        resource_type: "disk_mount".to_string(),
+        status: status.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(input.image_path.clone()),
+        mount_point: Some(mount_point.clone()),
+        fs_root: Some(fs_root.clone()),
+        parent_id: None,
+        output_dir: None,
+        artifacts: vec![],
+        command: command.clone(),
+        note: note.clone(),
+    };
+    upsert_resource(&ledger_path, resource)?;
+```
+
+[`services/mcp/src/tools/disk.rs:273-289`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L273-L289)
+
+[42] `case_id`를 호출 기록 대조용으로만 받는 입력 구조체다: [`services/mcp/src/tools/vol_run.rs:108-110`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L108-L110), [`services/mcp/src/tools/plaso_parse.rs:74-75`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L74-L75), [`services/mcp/src/tools/ez_parse.rs:93-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L93-L94).
+
+[43] `reverify_finding`은 모델이 넘긴 `tool_call_index`에서 기록을 찾는다.
+
+```python
+    record = tool_call_index.get(finding.tool_call_id)
+    if record is None:
+        reason = f"tool_call_id {finding.tool_call_id!r} not found in audit log"
+        artifact = missing_replay_artifact(
+            tool_call_id=finding.tool_call_id,
+            drift_class="missing_audit_record",
+            reason=reason,
+        )
+        return (
+            VerifierAction(
+                case_id=finding.case_id,
+                action="rejected",
+                finding_id=finding.finding_id,
+                reason=reason,
+            ),
+            CallReplay(artifact),
+        )
+```
+
+[`services/agent/findevil_agent/verifier.py:132-148`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L132-L148)
+
+[44] `manifest_finalize`가 대조하는 두 `tool_call_id`는 `audit_append`가 받은 `payload`에서 온다.
+
+```python
+def _uncited_findings(audit_log: AuditLog) -> list[str]:
+    """finding_approved records whose tool_call_id is absent from the chain
+    so far. Chain order matters: a finding cannot cite a future tool call."""
+    seen_tool_calls: set[str] = set()
+    uncited: list[str] = []
+    for record in audit_log.iter_records():
+        if record.kind == "tool_call_output":
+            tcid = str(record.payload.get("tool_call_id") or "")
+            if tcid:
+                seen_tool_calls.add(tcid)
+        elif record.kind == "finding_approved":
+            cited = str(record.payload.get("tool_call_id") or "")
+            if not cited or cited not in seen_tool_calls:
+                uncited.append(str(record.payload.get("finding_id") or f"seq-{record.seq}"))
+    return uncited
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:117-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L117-L131)
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[45] `disk_extract_artifacts`는 `mock` 자원에서 Sleuth Kit 목록이 실패하거나 비면 `fs_root` 폴더를 훑어 파일을 복사한다.
+
+```rust
+    let mock_root: Option<PathBuf> = (mount.command.first().map(String::as_str) == Some("mock"))
+        .then(|| mount.fs_root.clone())
+        .flatten();
+    let (listed, via_walk) = match tsk_list(&image_paths, sector_offset) {
+        Ok(files) if !files.is_empty() => (files, false),
+        tsk_result => match &mock_root {
+            Some(root) => (mock_list(root)?, true),
+            None => (tsk_result?, false),
+        },
+    };
+    let (candidates, deleted_entries_seen, deleted_skipped_realloc) =
+        build_candidates(listed, &wanted, input.recover_deleted);
+    let selected = select_artifacts(candidates, input.limit);
+
+    let mut artifacts = Vec::new();
+    let mut stats = ExtractStats::default();
+    for candidate in &selected {
+        match (via_walk, &mock_root) {
+            (true, Some(root)) => mock_extract(
+                root,
+                &candidate.path,
+                candidate.class,
+                &output_dir,
+                input.max_artifact_bytes,
+                &mut artifacts,
+                &mut stats,
+            )?,
+```
+
+[`services/mcp/src/tools/disk.rs:357-383`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L357-L383)
+
+복사 함수는 [`services/mcp/src/tools/disk.rs:1159-1195`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1159-L1195)에 있다.
+
+[46] (실행 확인) `mode: mock`으로 등록한 자원으로 `disk_extract_artifacts`를 불러 사건 폴더에 복사된 파일과 응답 항목을 확인했다.
+
+[47] `disk_extract_artifacts`의 응답 필드다.
+
+```rust
+    Ok(DiskExtractArtifactsOutput {
+        case_id: input.case_id.clone(),
+        mount_id: input.mount_id.clone(),
+        extract_id,
+        output_dir,
+        artifacts_seen: artifacts.len(),
+        artifacts_skipped_oversize: stats.skipped_oversize,
+        max_artifact_bytes: input.max_artifact_bytes,
+        deleted_entries_seen,
+        deleted_recovered: stats.deleted_recovered,
+        deleted_skipped_realloc,
+        deleted_recovery_failed: stats.deleted_recovery_failed,
+        artifacts,
+        ledger_path,
+    })
+```
+
+[`services/mcp/src/tools/disk.rs:414-428`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L414-L428)
+
+[48] 추출 항목의 명령과 문구는 코드에 정해져 있다.
+
+```rust
+    let now = now_iso();
+    ledger.resources.push(SessionResource {
+        id: extract_id.clone(),
+        resource_type: "disk_extract_artifacts".to_string(),
+        status: "extracted".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(image_path),
+        mount_point: mount.mount_point,
+        fs_root: mount.fs_root,
+        parent_id: Some(input.mount_id.clone()),
+        output_dir: Some(output_dir.clone()),
+        artifacts: artifacts.clone(),
+        command: vec!["fls".to_string(), "icat".to_string()],
+        note: "extracted disk artifacts directly from the image via The Sleuth Kit".to_string(),
+    });
+```
+
+[`services/mcp/src/tools/disk.rs:396-411`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L396-L411)

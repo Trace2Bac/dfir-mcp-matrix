@@ -1,0 +1,548 @@
+---
+cell: T04
+details:
+- id: T04.01
+- id: T04.02
+- id: T04.04
+- id: T04.05
+---
+
+# T04 실행 방식
+
+### T04.01 서버 프로세스 안 분석
+
+**구현.** 이 방식은 `findevil-mcp`의 파일 해석 도구와 `findevil-agent-mcp`의 도구 12개에 적용된다 [1][2].
+`findevil-mcp`의 `evtx_query`, `prefetch_parse`, `mft_timeline`, `usnjrnl_query`, `yara_scan`, `browser_history`, `thumbcache_parse`, `exif_parse`, `email_parse`는 저장소가 정확한 버전으로 고정한 Rust 크레이트(`evtx`, `frnsc-prefetch`, `mft`, `usnjrnl-forensic`, `yara-x`, `rusqlite`, `cfb`, `kamadak-exif`, `mail-parser`)를 서버 프로세스 안에서 불러 증거 파일을 해석한다 [1][3].
+`registry_query`는 저장소 안의 하이브 해석 코드 `regf.rs`를 쓴다 [4].
+`sysmon_network_query`, `zeek_summary`, `cloud_audit`, `oe_dbx_parse`, `bits_parse`, `wmi_persist_parse`, `hashset_lookup`과 `case_open`의 해시 계산도 서버 프로세스 안에서 처리한다 [1].
+`plaso_parse`의 `recycle_bin_info2` 파서와 Eric Zimmerman 도구가 없을 때의 `ez_parse` `lecmd`도 외부 도구를 실행하지 않고 서버 코드로 경로 문자열만 뽑는다 [5].
+`findevil-agent-mcp`는 `verify_finding`과 `expert_miss_capture`를 뺀 도구 12개의 판정, 모순 탐지, 상관 분석, 기억 검색, 서명을 서버 프로세스 안의 `findevil_agent` 패키지 코드로 처리한다 [2].
+`findevil-mcp`는 도구 처리기의 panic을 `catch_unwind`로 받아 그 호출만 오류로 돌려주고 서버는 계속 실행한다 [6].
+
+### T04.02 같은 권한의 별도 프로세스
+
+**구현.** 이 방식은 외부 도구를 실행하는 `findevil-mcp` 도구 25개와 `findevil-agent-mcp`의 `verify_finding`에 적용된다 [7][8].
+`findevil-mcp`는 Rust 표준 라이브러리의 `std::process::Command`로 실행 파일 경로와 인자 배열을 따로 넘겨 자식 프로세스를 만든다 [7].
+자식 프로세스는 서버의 환경변수와 계정을 그대로 물려받는다 [7].
+`vol_run`과 `plaso_parse`는 공통 실행기 `proc_runner::run_with_timeout`을 거친다 [9].
+이 실행기는 자식 프로세스를 새 프로세스 그룹으로 만들고 표준 입력을 닫은 채 실행한다 [9].
+다른 도구는 `Command::output()`이나 `status()`로 바로 실행한다 [7].
+`findevil-agent-mcp`의 `verify_finding`은 `subprocess.Popen`으로 인자 배열을 넘겨 실행한다 [8].
+두 서버의 코드에는 셸 명령 문자열로 외부 도구를 실행하는 곳이 없다 [7][8][10].
+`expert_miss_capture`는 GitHub 이슈를 만들려고 `subprocess.run`으로 `gh`를 실행한다 [10].
+`manifest_finalize`와 `manifest_verify`는 RFC 3161 시각 인증 값을 만들거나 확인하려고 `subprocess.run`으로 `openssl`을 실행한다 [11].
+두 실행은 증거 파일을 읽지 않는다 [10][11].
+시험용 실행 파일은 서버를 실행한 계정으로 실행되었고 작업 위치는 서버의 작업 위치(`~/vdrun/src`, `findevil-agent-mcp`는 `services/agent_mcp`)였다 [12].
+
+저장소의 실행 구성도 도구를 서버와 다른 곳에서 실행하지 않는다.
+`.mcp.json.docker`는 두 서버를 `docker exec`로 컨테이너 `findevil-dfir` 안에서 실행하고 외부 도구도 같은 컨테이너에서 서버와 같은 계정 `analyst`로 실행된다 [13].
+`.mcp.json.sift`는 SSH로 SIFT 가상 머신에서 두 서버를 실행하고 외부 도구는 그 가상 머신에서 서버와 같은 계정으로 실행된다 [14].
+
+### T04.04 권한을 나눈 실행
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_mount`와 `disk_unmount`가 `mode: auto`로 실행하는 마운트·해제 명령에 적용된다 [15].
+두 도구는 공통 함수 `run_sudo_fixed`로 `sudo -n <실행 파일> <인자>`를 실행해 서버 계정과 달리 root 권한으로 실행한다 [15].
+- `.E01` 같은 EWF 이미지는 처음부터 `sudo -n ewfmount`로 마운트하고 그 안의 NTFS 볼륨도 `sudo -n mount -t ntfs3 -o ro,loop`로 마운트한다 [16].
+- raw 이미지는 `mount -o ro,loop`를 서버 권한으로 먼저 실행하고 실패하면 `sudo -n mount`로 다시 실행한다 [17].
+- 파티션 오프셋을 찾는 `mmls`는 EWF 장치에서는 `sudo -n mmls`로, 파티션 목록을 만들 때는 먼저 서버 권한으로 실행한 뒤 실패하면 `sudo -n`으로 실행한다 [18].
+- `disk_unmount`는 `umount`를 서버 권한으로 먼저 실행하고 실패하면 `sudo -n umount`로 다시 실행한다 [19].
+권한을 높이는 방향이고 다른 도구와 이미지 추출(`fls`, `icat`)은 서버 권한으로 실행한다 [7].
+`-n`을 주므로 비밀번호를 묻지 않고 실행할 수 있는 sudo 권한이 없으면 명령은 실패한다 [15].
+`docker/dfir.Dockerfile`은 컨테이너 계정 `analyst`에 비밀번호 없는 sudo 권한을 주고 주석에 이 함수를 그 이유로 적는다 [20].
+기록만 하고 실패하는 시험용 `mount`·`sudo`·`ewfmount`를 두고 `disk_mount`를 부르자 서버는 raw 파일에 `mount -o ro,loop`, 이어 `sudo -n mount -o ro,loop`를, `.E01` 파일에 `sudo -n ewfmount`를 실행했다 [21].
+
+**한계.** raw 이미지를 `sudo`로 다시 마운트하는 단계는 마운트 실행 파일 이름이 기본값 `mount`일 때만 실행된다 [17].
+환경변수 `FINDEVIL_MOUNT_BIN`을 정하면 raw 이미지는 서버 권한의 마운트만 시도한다 [17].
+`docker/dfir.Dockerfile`은 이 값을 `/bin/mount`로 정한다 [22].
+`FINDEVIL_MOUNT_BIN`을 시험용 `mount` 경로로 정하자 raw 파일은 `sudo` 없이 한 번만 마운트를 시도했고 `.E01` 파일은 그대로 `sudo -n ewfmount`를 실행했다 [21].
+
+### T04.05 실행별 작업 폴더
+
+**구현.** 이 방식은 `pcap_triage`가 `analyzer: zeek`으로 Zeek을 실행하는 경로에 적용된다 [23].
+이 경로는 호출마다 임시 폴더 아래 `findevil-zeek-<프로세스 번호>-<나노초>` 폴더를 새로 만들고 그 폴더를 작업 위치(`cwd`)로 두어 `zeek -r <pcap>`를 실행한다 [23].
+Zeek이 작업 위치에 쓴 로그를 `zeek_summary`로 읽은 뒤 그 폴더를 지운다 [23].
+같은 pcap으로 두 번 부르자 시험용 `zeek`의 작업 위치는 호출마다 다른 폴더였고 호출이 끝난 뒤 두 폴더는 남지 않았다 [24].
+
+다른 외부 도구는 서버의 작업 위치에서 실행된다 [7].
+`hayabusa_scan`은 작업 위치를 규칙 폴더 `HAYABUSA_RULES_BASE`로 바꾸지만 이 폴더는 호출마다 새로 만드는 폴더가 아니다 [25].
+`ez_parse`, `mac_triage`, `suricata_eve`, `plaso_parse`는 호출마다 임시 출력 폴더나 파일을 만들지만 작업 위치는 바꾸지 않는다 [26].
+
+### 근거
+
+[1] 서버 프로세스 안 해석 코드의 시작 부분이다: [`services/mcp/src/tools/evtx_query.rs:129-133`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/evtx_query.rs#L129-L133), [`services/mcp/src/tools/yara_scan.rs:160-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L160-L166), [`services/mcp/src/tools/cloud_audit.rs:121-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/cloud_audit.rs#L121-L131), [`services/mcp/src/tools/case_open.rs:247-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L247-L271).
+
+[2] `findevil-agent-mcp`의 도구 처리기는 `findevil_agent` 함수를 바로 부른다: [`services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py:78-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py#L78-L106), [`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:76-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L76-L94), [`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:72-92`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L72-L92).
+
+[3] 해석 크레이트는 `=` 버전으로 고정되어 있다: [`services/mcp/Cargo.toml:36-103`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/Cargo.toml#L36-L103).
+
+[4] `Cargo.toml`은 레지스트리 해석을 저장소 안의 `regf.rs`가 맡는다고 적는다.
+
+```toml
+# Windows Registry hive parsing for `registry_query` is handled in-tree by
+# `src/tools/regf.rs` (no external crate). frnsc-hive only implemented the
+# modern `lh` subkey-list cell and panicked `unimplemented!()` on the
+# `lf`/`li`/`ri` cells used by Windows XP-era hives; notatin (the Apache-2.0
+# alternative) doesn't build under the pinned rustc 1.88. The in-tree reader
+# handles all four subkey-list types + resident/non-resident/`db` values.
+```
+
+[`services/mcp/Cargo.toml:56-61`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/Cargo.toml#L56-L61)
+
+```rust
+//! Self-contained, read-only Windows Registry hive (`regf`) reader.
+//!
+//! Why this exists: `frnsc-hive` only implements the modern `lh` (hash-leaf)
+//! subkey-list cell and panics `unimplemented!()` on the `lf`/`li`/`ri` cells
+//! that Windows XP-era hives use; `notatin` won't build on the repo's pinned
+//! rustc. This module parses the `regf` format directly — header, `nk`/`vk`
+//! cells, all four subkey-list types (`lf`/`lh`/`li`/`ri`), resident and
+//! non-resident value data, and `db` big-data values — with full bounds
+//! checking and no panics, so a malformed or unusual hive yields a clean
+//! error/skip rather than taking the process down.
+//!
+//! Read-only: the hive bytes are loaded once and never mutated. Cell offsets
+//! in the format are relative to the start of the first hive bin at 0x1000.
+
+use std::path::Path;
+
+/// Base of the first hive bin; all cell offsets are relative to it.
+const HBIN_BASE: usize = 0x1000;
+/// Offset of the key name within an `nk` cell body.
+const NK_NAME_OFFSET: usize = 0x4c;
+```
+
+[`services/mcp/src/tools/regf.rs:1-20`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/regf.rs#L1-L20)
+
+[5] 외부 도구 없이 처리하는 두 경로다.
+
+```rust
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+    if input.parser == "recycle_bin_info2" {
+        return native_recycle_bin_info2_parse(&input.artifact_path, limit);
+    }
+```
+
+[`services/mcp/src/tools/plaso_parse.rs:209-212`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L209-L212)
+
+```rust
+    let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+    let binary = match resolve_binary(spec.binary) {
+        Ok(binary) => binary,
+        Err(EzParseError::BinaryNotFound { .. }) if spec.key == "lecmd" => {
+            return Ok(native_lecmd_path_fallback(
+                &input.artifact_path,
+                limit,
+                spec.binary,
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+```
+
+[`services/mcp/src/tools/ez_parse.rs:192-203`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L192-L203)
+
+[6] 처리기 panic을 호출 오류로 바꾼다.
+
+```rust
+    // Guard against a panicking tool handler (e.g. a third-party hive/image
+    // parser hitting an unimplemented code path on an unusual artifact) taking
+    // down the whole stdio server mid-investigation. Convert the panic into a
+    // clean per-call ToolError so the run continues with the remaining tools.
+    let payload =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (entry.handler)(arguments)))
+            .map_err(|panic| {
+                let detail = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "tool handler panicked".to_string());
+                ToolError::Internal(format!("tool '{name}' panicked: {detail}"))
+            })??;
+    finalize_tool_output(name, &payload)
+```
+
+[`services/mcp/src/server.rs:1518-1532`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1518-L1532)
+
+[7] 외부 도구를 실행하는 곳은 `std::process::Command`에 실행 파일과 인자를 따로 넘긴다: [`services/mcp/src/tools/vol_pslist.rs:139-158`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L139-L158), [`services/mcp/src/tools/vel_collect.rs:145-167`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L145-L167), [`services/mcp/src/tools/disk.rs:1035-1048`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1035-L1048), [`services/mcp/src/tools/disk.rs:1088-1102`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1088-L1102), [`services/mcp/src/tools/disk.rs:1431-1448`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1431-L1448).
+
+[8] `verify_finding`이 쓰는 클라이언트는 `subprocess.Popen`에 배열을 넘긴다.
+
+```python
+    def _ensure_started(self) -> None:
+        if self._proc is not None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                self._command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self._cwd) if self._cwd else None,
+                env=self._env,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,  # line-buffered
+            )
+        except FileNotFoundError as exc:
+            raise McpClientError(f"could not spawn MCP server {self._command!r}: {exc}") from exc
+```
+
+[`services/agent/findevil_agent/mcp_client.py:143-159`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/mcp_client.py#L143-L159)
+
+[9] `run_with_timeout`은 새 프로세스 그룹과 닫힌 표준 입력으로 실행한다.
+
+```rust
+pub fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<RunOutput, RunError> {
+    #[cfg(unix)]
+    {
+        // Own process group: isolates the child's subtree from the server's group
+        // so the timeout teardown (and any operator `kill -- -<pgid>`) acts on the
+        // child tree alone. `process_group` is a safe std builder method.
+        command.process_group(0);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+```
+
+[`services/mcp/src/tools/proc_runner.rs:120-133`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/proc_runner.rs#L120-L133)
+
+[10] `expert_miss_capture`는 `subprocess.run`에 배열을 넘긴다.
+
+```python
+    try:
+        result = subprocess.run(
+            [
+                gh,
+                "issue",
+                "create",
+                "--label",
+                f"miss/{args.edit_type}",
+                "--title",
+                title,
+                "--body",
+                "\n".join(body_lines),
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:72-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L72-L89)
+
+[11] `anchor.py`는 고정 인자 배열로 `openssl`을 실행한다.
+
+```python
+def _openssl_available() -> bool:
+    try:
+        # Fixed argv (no shell); `openssl` is a trusted local binary.
+        subprocess.run(
+            ["openssl", "version"],
+            capture_output=True,
+            check=True,
+            timeout=_OPENSSL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def _run_openssl(args: list[str]) -> str:
+    # Fixed argv (no shell); `openssl` is a trusted local binary.
+    proc = subprocess.run(
+        ["openssl", *args],
+        capture_output=True,
+        check=True,
+        timeout=_OPENSSL_TIMEOUT_S,
+    )
+    return proc.stdout.decode("utf-8", errors="replace")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:384-406`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L384-L406)
+
+[12] (실행 확인) 시험용 실행 파일이 기록한 작업 위치와 실행 계정을 확인했다(실행 기록 R1, R6).
+
+[13] 컨테이너 구성은 두 서버를 같은 컨테이너에서 실행하고 계정을 `analyst`로 둔다: [`.mcp.json.docker:1-32`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/.mcp.json.docker#L1-L32).
+
+```dockerfile
+RUN groupadd --gid "${DEV_GID}" analyst \
+ && useradd --uid "${DEV_UID}" --gid "${DEV_GID}" --create-home --shell /bin/bash analyst \
+ && mkdir -p /evidence /workspace \
+ && chown -R analyst:analyst /workspace \
+ && DEBIAN_FRONTEND=noninteractive apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf 'analyst ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/analyst-dfir \
+ && chmod 0440 /etc/sudoers.d/analyst-dfir \
+ && visudo -cf /etc/sudoers.d/analyst-dfir
+
+# Prove the toolchain is invocable — the failure mode this image exists to kill.
+HEALTHCHECK --interval=30s --timeout=15s --retries=3 \
+  CMD tshark --version >/dev/null 2>&1 \
+   && fls -V >/dev/null 2>&1 \
+   && ewfexport -V >/dev/null 2>&1 \
+   && command -v hayabusa >/dev/null \
+   && (vol --version >/dev/null 2>&1 || python3 -c "import volatility3") \
+   || exit 1
+
+USER analyst
+WORKDIR /workspace
+```
+
+[`docker/dfir.Dockerfile:250-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/docker/dfir.Dockerfile#L250-L271)
+
+[14] SIFT 구성은 SSH로 원격 가상 머신의 서버를 실행한다: [`.mcp.json.sift:1-40`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/.mcp.json.sift#L1-L40).
+
+[15] `run_sudo_fixed`는 `sudo -n`에 실행 파일과 인자를 넘긴다.
+
+```rust
+fn run_sudo_fixed(bin: &str, args: &[String]) -> Result<(bool, String, String), DiskError> {
+    let mut sudo_args = vec!["-n".to_string(), bin.to_string()];
+    sudo_args.extend(args.iter().cloned());
+    run_fixed("sudo", &sudo_args)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1029-1033`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1029-L1033)
+
+[16] EWF 마운트와 그 안의 NTFS 마운트는 `run_sudo_fixed`를 쓴다.
+
+```rust
+    let mut args: Vec<String> = image_paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    args.push(ewf_dir.to_string_lossy().to_string());
+    // ewfmount must run as root: /etc/fuse.conf has no `user_allow_other`, so a
+    // user-owned FUSE device is unreadable by the (root) loop/mount syscalls.
+    let result = run_sudo_fixed(&bin, &args)?;
+    if !result.0 {
+        // A PATH-present ewfmount can still be unreachable under sudo's
+        // secure_path ("sudo: ewfmount: command not found"); fall through to the
+        // direct-TSK read rather than failing the Case.
+        if is_missing_binary(&result.2) {
+            let _ = fs::remove_dir(&ewf_dir);
+            return Ok(direct_tsk_mount(image_path, &result.2));
+        }
+        return Err(DiskError::SubprocessFailed {
+            status: result.1,
+            stderr_tail: result.2,
+        });
+    }
+    let ewf_cmd: Vec<String> = vec!["sudo".to_string(), "-n".to_string(), bin]
+        .into_iter()
+        .chain(args)
+        .collect();
+```
+
+[`services/mcp/src/tools/disk.rs:528-552`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L528-L552)
+
+```rust
+fn mount_ntfs_ro(device: &Path, mount_point: &Path) -> Result<(Vec<String>, String), DiskError> {
+    let mount_bin = std::env::var("FINDEVIL_MOUNT_BIN").unwrap_or_else(|_| "mount".to_string());
+    let mut offsets = vec![0u64];
+    if let Some(offset) = primary_partition_byte_offset_sudo(device) {
+        offsets.push(offset);
+    }
+    let mut last_status = String::new();
+    let mut last_stderr = String::new();
+    for offset in offsets {
+        let opts = if offset == 0 {
+            "ro,loop".to_string()
+        } else {
+            format!("ro,loop,offset={offset}")
+        };
+        let args = vec![
+            "-t".to_string(),
+            "ntfs3".to_string(),
+            "-o".to_string(),
+            opts,
+            device.to_string_lossy().to_string(),
+            mount_point.to_string_lossy().to_string(),
+        ];
+        let result = run_sudo_fixed(&mount_bin, &args)?;
+        if result.0 {
+            let command: Vec<String> = vec!["sudo".to_string(), "-n".to_string(), mount_bin]
+                .into_iter()
+                .chain(args)
+                .collect();
+            return Ok((command, result.2));
+        }
+```
+
+[`services/mcp/src/tools/disk.rs:634-663`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L634-L663)
+
+[17] raw 이미지는 서버 권한으로 먼저 마운트하고 실행 파일 이름이 `mount`일 때만 `sudo`로 다시 시도한다.
+
+```rust
+    let bin = std::env::var("FINDEVIL_MOUNT_BIN").unwrap_or_else(|_| "mount".to_string());
+    let args = vec![
+        "-o".to_string(),
+        "ro,loop".to_string(),
+        image_path.to_string_lossy().to_string(),
+        mount_point.to_string_lossy().to_string(),
+    ];
+    let result = run_fixed(&bin, &args)?;
+```
+
+[`services/mcp/src/tools/disk.rs:714-721`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L714-L721)
+
+```rust
+    if bin == "mount" {
+        let sudo_result = run_sudo_fixed(&bin, &args)?;
+        if sudo_result.0 {
+            return Ok((
+                "mounted".to_string(),
+                mount_point.to_path_buf(),
+                std::iter::once("sudo".to_string())
+                    .chain(std::iter::once("-n".to_string()))
+                    .chain(std::iter::once(bin))
+                    .chain(args)
+                    .collect(),
+                sudo_result.2,
+                "mounted raw image read-only with sudo loop device".to_string(),
+            ));
+        }
+```
+
+[`services/mcp/src/tools/disk.rs:780-794`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L780-L794)
+
+[18] `mmls`의 두 실행 경로다.
+
+```rust
+fn primary_partition_byte_offset_sudo(image_path: &Path) -> Option<u64> {
+    let output = Command::new("sudo")
+        .args(["-n", "mmls"])
+        .arg(image_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_mmls_primary_partition_offset(&String::from_utf8_lossy(&output.stdout))
+}
+```
+
+[`services/mcp/src/tools/disk.rs:676-686`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L676-L686)
+
+```rust
+fn enumerate_partitions(image_paths: &[PathBuf]) -> Vec<MmlsPartition> {
+    let run = |cmd: &mut Command| -> Option<String> {
+        let output = cmd.output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let mut direct = Command::new("mmls");
+    append_image_args(&mut direct, image_paths);
+    let mut sudo = Command::new("sudo");
+    sudo.args(["-n", "mmls"]);
+    append_image_args(&mut sudo, image_paths);
+    let text = run(&mut direct).or_else(|| run(&mut sudo));
+    text.map(|t| parse_mmls_partitions(&t)).unwrap_or_default()
+}
+```
+
+[`services/mcp/src/tools/disk.rs:693-708`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L693-L708)
+
+[19] `disk_unmount`는 실패하면 `sudo -n`으로 다시 해제한다.
+
+```rust
+        let result = run_fixed(bin, args)?;
+        if result.0 {
+            commands.push(bin.clone());
+            commands.extend(args.iter().cloned());
+            stderr_tail = result.2;
+            continue;
+        }
+        // Privileged mounts need sudo -n; harmless for fusermount on own mounts.
+        let sudo_result = run_sudo_fixed(bin, args)?;
+        if sudo_result.0 {
+            commands.push("sudo".to_string());
+            commands.push("-n".to_string());
+            commands.push(bin.clone());
+            commands.extend(args.iter().cloned());
+            stderr_tail = sudo_result.2;
+            continue;
+        }
+```
+
+[`services/mcp/src/tools/disk.rs:1001-1017`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1001-L1017)
+
+[20] 컨테이너 이미지의 sudo 설정과 그 설명이다.
+
+```dockerfile
+# disk_mount loop-mounts the image read-only, which needs root: the DFIR tools
+# invoke ewfmount / mount / umount / mmls via `sudo -n` (services/mcp/src/tools/
+# disk.rs::run_sudo_fixed), exactly as the SIFT VM does. Grant the non-root
+# analyst passwordless sudo so disk_mount -> disk_extract_artifacts works in the
+# container; without it every raw disk stays custody-only. This is scoped to a
+# single-purpose, ephemeral forensic container that already runs with SYS_ADMIN
+# + unconfined apparmor for disk mounting and read-only evidence, mirroring the
+# SIFT sansforensics passwordless-sudo setup.
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+RUN groupadd --gid "${DEV_GID}" analyst \
+ && useradd --uid "${DEV_UID}" --gid "${DEV_GID}" --create-home --shell /bin/bash analyst \
+ && mkdir -p /evidence /workspace \
+ && chown -R analyst:analyst /workspace \
+ && DEBIAN_FRONTEND=noninteractive apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo \
+ && rm -rf /var/lib/apt/lists/* \
+ && printf 'analyst ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/analyst-dfir \
+ && chmod 0440 /etc/sudoers.d/analyst-dfir \
+ && visudo -cf /etc/sudoers.d/analyst-dfir
+```
+
+[`docker/dfir.Dockerfile:240-259`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/docker/dfir.Dockerfile#L240-L259)
+
+[21] (실행 확인) 기록만 하고 실패하는 시험용 `mount`·`sudo`·`ewfmount`를 `PATH` 앞에 두고 `FINDEVIL_MOUNT_BIN`을 정하지 않았을 때와 정했을 때 `disk_mount`가 실행한 명령을 기록했다(실행 기록 R4).
+
+[22] 컨테이너 이미지는 마운트 실행 파일을 경로로 정한다.
+
+```dockerfile
+ENV HAYABUSA_BIN=/usr/local/bin/hayabusa \
+    HAYABUSA_RULES_BASE=/opt/hayabusa-mcp \
+    CHAINSAW_BIN=/usr/local/bin/chainsaw \
+    VELOCIRAPTOR_BIN=/usr/local/bin/velociraptor \
+    TSHARK_BIN=/usr/bin/tshark \
+    SURICATA_BIN=/usr/bin/suricata \
+    NFDUMP_BIN=/usr/bin/nfdump \
+    AUSEARCH_BIN=/sbin/ausearch \
+    VOLATILITY_BIN=/usr/local/bin/vol \
+    EZTOOLS_DIR=/opt/eztools \
+    FINDEVIL_FLS_BIN=/usr/bin/fls \
+    FINDEVIL_ICAT_BIN=/usr/bin/icat \
+    EWF_MOUNT_BIN=/usr/bin/ewfmount \
+    FINDEVIL_MOUNT_BIN=/bin/mount \
+    FINDEVIL_UMOUNT_BIN=/bin/umount
+
+```
+
+[`docker/dfir.Dockerfile:223-238`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/docker/dfir.Dockerfile#L223-L238)
+
+[23] Zeek은 호출마다 만든 임시 폴더를 작업 위치로 실행된다: [`services/mcp/src/tools/pcap_triage.rs:264-305`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L264-L305).
+
+[24] (실행 확인) `pcap_triage`를 `analyzer: zeek`으로 두 번 불러 시험용 `zeek`의 작업 위치와 남은 폴더를 확인했다(실행 기록 R1).
+
+[25] `hayabusa_scan`은 규칙 폴더를 작업 위치로 둔다.
+
+```rust
+    // Point hayabusa at a CWD that has `rules/` (with config). Without this it
+    // reads `./rules/config` from wherever the MCP launched (no rules there) and
+    // fails. If no rules base is installed, run as-is and let the lane degrade
+    // to an honest tool-error limitation.
+    if let Some(base) = resolve_rules_base() {
+        cmd.current_dir(base);
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:261-267`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L261-L267)
+
+[26] 임시 출력 위치만 만드는 도구다: [`services/mcp/src/tools/ez_parse.rs:205-216`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L205-L216), [`services/mcp/src/tools/mac_triage.rs:155-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mac_triage.rs#L155-L166), [`services/mcp/src/tools/suricata_eve.rs:130-143`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L130-L143), [`services/mcp/src/tools/plaso_parse.rs:217-224`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L217-L224).

@@ -1,0 +1,385 @@
+---
+cell: T06
+details:
+- id: T06.01
+---
+
+# T06 실행 환경정보 표시
+
+### T06.01 응답 메타데이터에 버전 표시
+
+**구현.** 이 방식은 `findevil-mcp`의 `bulk_extract`에 적용된다 [1].
+`bulk_extract`는 디스크 이미지를 검사하기 전에 `capture_version`으로 같은 실행 파일을 `--version` 인자로 한 번 실행한다 [1].
+그 표준 출력의 첫 줄을 응답 필드 `engine_version`에 싣는다 [1][2].
+`bulk_extractor`를 찾지 못해 검사를 하지 않은 응답에서는 `engine_version`이 빈 문자열이다 [2].
+`findevil-mcp`는 응답 본문의 SHA-256을 `_meta.output_sha256`에 싣고 이 해시는 `engine_version`이 들어간 본문 전체에 대해 계산한다 [3].
+실행 확인에서 `--version`에 `bulk_extractor 2.1.1-fake`를 출력하는 시험용 실행 파일을 두자 응답의 `engine_version`이 그 문자열이었다 [4].
+실행 파일을 두지 않은 호출의 응답은 `bulk_extractor_available`이 거짓이고 `engine_version`이 빈 문자열이었다 [4].
+
+다른 도구의 응답에는 도구와 참조 자료의 버전이 실리지 않는다.
+`findevil-mcp`의 `_meta`에는 도구 이름 `tool`과 `output_sha256`만 있다 [3].
+Volatility 3, Hayabusa, Velociraptor를 실행하는 도구는 표준 오류의 끝부분을 `stderr_tail`에 담아 넘기고 서버는 이 글을 해석하지 않는다 [5].
+`pcap_triage`는 `tshark`와 `zeek`의 표준 오류를 응답에서 빼고 코드 주석은 실행마다 달라지는 버전 문구를 그 이유로 적는다 [6].
+`hashset_lookup`의 응답은 해시 집합마다 이름, 종류, 판정, 경로와 읽기 오류만 싣고 `yara_scan`의 응답은 컴파일한 룰 파일 수만 싣는다 [7].
+`findevil-agent-mcp`는 처리기가 돌려준 출력 모델을 JSON 글 하나로 바꿔 돌려주고 응답에 `_meta`를 붙이지 않는다 [8].
+이 서버의 도구 14개의 출력 모델에는 버전 필드가 없다 [8].
+
+호출 기록과 파생물에도 도구 버전은 실리지 않는다.
+`audit_append`는 호출자가 준 `kind`와 `payload`를 그대로 호출 기록에 더한다 [9].
+`find_evil_auto.py`가 남기는 `bulk_extract` 호출 기록에는 `bulk_extractor_available`과 `features_seen`만 있고 `engine_version`은 없다 [10].
+`manifest_finalize`가 쓰는 `run.manifest.json`의 `version`은 manifest 형식 번호 `1`이다 [11].
+manifest의 `extra`에는 호출자가 준 값이 그대로 들어가고 `find_evil_auto.py`는 이미지 경로, 고정 문자열 `find-evil-auto`를 담은 `model`, 증거 유형, 서명 방식을 넘긴다 [11][12].
+
+서버 자신의 버전도 응답과 기록에 실리지 않는다.
+`findevil-mcp`는 크레이트 버전 `CRATE_VERSION`을 초기화 응답의 `serverInfo.version`, `--version` 출력, 시작 로그에만 쓴다 [13].
+`lib.rs`의 주석은 이 값이 호출 기록에도 실린다고 적지만 그렇게 쓰는 코드는 없다 [13].
+`findevil-agent-mcp`는 `SERVER_VERSION` 값 `0.1.0`을 시작 로그에만 쓰고 SDK의 저수준 `Server`에는 이름만 준다 [14].
+MCP Python SDK 1.27.0의 저수준 `Server`는 버전이 없으면 초기화 응답의 `serverInfo.version`에 `mcp` 패키지 버전을 넣는다 [15].
+실행 확인에서 `serverInfo.version`은 `findevil-mcp`가 `0.1.0`, `findevil-agent-mcp`가 `1.27.0`이었다 [16].
+두 서버는 서버 안에서 모델을 부르지 않는다.
+
+**한계.** `engine_version`은 검사를 실행한 프로세스가 아니라 검사 전에 따로 실행한 버전 확인의 출력이다 [1].
+버전 확인 실행이 실패하거나 종료 코드가 0이 아니어도 검사는 그대로 진행되고 `engine_version`만 `unknown`이 된다 [1].
+
+### 근거
+
+[1] `bulk_extract`는 검사 실행 전에 `capture_version`을 부르고 `capture_version`은 `--version` 출력의 첫 줄을 돌려준다.
+
+```rust
+    let engine_version = capture_version(&binary);
+
+    let proc = match Command::new(&binary).args(&args).output() {
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:354-356`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L354-L356)
+
+```rust
+/// Capture `bulk_extractor --version` (first stdout line, trimmed).
+/// `unknown` when the probe fails — this string is part of the hashed
+/// body so a silent engine change is visible to replay.
+fn capture_version(binary: &Path) -> String {
+    match Command::new(binary).arg("--version").output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:683-696`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L683-L696)
+
+[2] 응답 구조에 `engine_version` 필드가 있고 실행 파일이 없을 때의 응답은 이 필드를 비운다.
+
+```rust
+#[derive(Clone, Debug, Serialize)]
+pub struct BulkExtractOutput {
+    /// False when `bulk_extractor` is not installed — the degrade
+    /// signal. Everything below is empty in that case.
+    pub bulk_extractor_available: bool,
+    /// `bulk_extractor --version` string (or `unknown`). Part of the
+    /// hashed body so a version change is visible to custody replay.
+    pub engine_version: String,
+    /// Scanner names requested (sorted, deduped). Empty when defaults
+    /// were used.
+    pub scanners_requested: Vec<String>,
+    /// Recovered feature rows, sorted by the stable key and capped at
+    /// `limit`.
+    pub features: Vec<BulkFeature>,
+    /// Total data rows parsed before the `limit` cap.
+    pub features_seen: usize,
+    /// Every staged output file with its SHA-256 (sorted by name).
+    pub staged_files: Vec<StagedFeatureFile>,
+    /// Stderr tail (capped). Empty on the degrade path.
+    pub stderr_tail: String,
+    /// Human-readable provenance note. Carries NO wall-clock value.
+    pub note: String,
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:210-232`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L210-L232)
+
+```rust
+/// The typed result when `bulk_extractor` is not installed.
+fn unavailable_output() -> BulkExtractOutput {
+    BulkExtractOutput {
+        bulk_extractor_available: false,
+        engine_version: String::new(),
+        scanners_requested: Vec::new(),
+        features: Vec::new(),
+        features_seen: 0,
+        staged_files: Vec::new(),
+        stderr_tail: String::new(),
+        note: "bulk_extractor not installed (set $FINDEVIL_BULK_EXTRACTOR_BIN or \
+               install bulk-extractor); no features produced by this run"
+            .to_string(),
+    }
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:411-425`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L411-L425)
+
+[3] 모든 도구 응답은 본문을 직렬화한 글의 SHA-256과 도구 이름만 `_meta`에 싣는다.
+
+```rust
+fn finalize_tool_output(name: &str, payload: &Value) -> Result<Value, ToolError> {
+    let (payload, sanitized) = crate::sanitize::sanitize_value(payload);
+    let payload_text = serde_json::to_string(&payload)
+        .map_err(|e| ToolError::Internal(format!("serialize tool output: {e}")))?;
+    let sha = sha256_hex(payload_text.as_bytes());
+
+    let mut meta = json!({
+        "tool": name,
+        "output_sha256": sha,
+    });
+    if !sanitized.is_empty() {
+        meta["sanitized"] = sanitized.to_json();
+        // Mirror the `_meta.sanitized` counts into the best-effort, counts-only
+        // injection-alert SIDECAR ledger. This runs AFTER hashing and never
+        // touches `payload`, `sha`, or `meta`, so the sealed output and a
+        // verify_finding replay are unaffected — the ledger is not the audit
+        // chain. `sha` is recorded as the correlation key (the same sanitized
+        // -output digest the audit chain stores), never the payload.
+        injection_ledger::record_neutralization(name, &sha, &sanitized);
+    }
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": payload_text,
+            }
+        ],
+        "_meta": meta,
+    }))
+}
+```
+
+[`services/mcp/src/server.rs:1544-1573`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1544-L1573)
+
+[4] (실행 확인) 시험용 `bulk_extractor`를 `PATH`에 두고 부른 `bulk_extract`의 응답은 `engine_version`이 `bulk_extractor 2.1.1-fake`였고 실행 파일이 없을 때는 `bulk_extractor_available`이 거짓, `engine_version`이 빈 문자열이었다.
+
+[5] 외부 실행 파일을 부르는 도구의 응답 구조는 결과와 `stderr_tail`만 둔다: [`services/mcp/src/tools/vol_pslist.rs:84-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L84-L94), [`services/mcp/src/tools/hayabusa_scan.rs:89-100`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L89-L100), [`services/mcp/src/tools/vel_collect.rs:81-91`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L81-L91).
+
+[6] `pcap_triage`는 `stderr_tail`을 직렬화하지 않는다.
+
+```rust
+    // Diagnostic only — kept in-process but NEVER serialized. tshark/zeek stderr is
+    // volatile (timing, truncation warnings, version banners), and the server folds
+    // the serialized output into `output_sha256`, which `verify_finding` replays. A
+    // volatile field here makes that hash drift run-to-run and vetoes correct
+    // findings, so it must stay out of the hashed evidence output.
+    #[serde(skip)]
+    pub stderr_tail: String,
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:68-74`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L68-L74)
+
+[7] `hashset_lookup`이 해시 집합마다 싣는 필드와 `yara_scan`의 응답 구조다.
+
+```rust
+/// One entry per hash set the call attempted to load.
+#[derive(Clone, Debug, Serialize)]
+pub struct HashsetLoaded {
+    /// Set display name (explicit `name`, else the file stem).
+    pub name: String,
+
+    /// Detected kind. Best-effort (extension-based) when the file could
+    /// not be read at all.
+    pub kind: HashsetKind,
+
+    /// The operator-assigned disposition of this set.
+    pub disposition: SetDisposition,
+
+    /// The set file path.
+    pub path: PathBuf,
+
+    /// Why this set could not be (fully) used: unreadable file,
+    /// unsupported `SQLite` schema, or a mid-scan read failure. Matches
+    /// found before the failure are still reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:145-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L145-L166)
+
+```rust
+#[derive(Clone, Debug, Serialize)]
+pub struct YaraOutput {
+    pub matches: Vec<YaraMatch>,
+    pub files_scanned: usize,
+    pub rules_compiled: usize,
+    pub scan_errors: usize,
+}
+```
+
+[`services/mcp/src/tools/yara_scan.rs:103-109`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L103-L109)
+
+[8] `findevil-agent-mcp`는 출력 모델을 정렬한 JSON 글 하나로 바꿔 돌려준다.
+
+```python
+    if hasattr(payload, "model_dump"):
+        body = payload.model_dump()
+    elif isinstance(payload, dict):
+        body = payload
+    else:
+        body = {"value": payload}
+    # Neutralize attacker-controlled evidence text (chat/role tokens, invisible
+    # Unicode) before it crosses the boundary to the model -- the Python half of
+    # the MCP-output->LLM sanitizer (mirrors services/mcp/src/sanitize.rs). Log
+    # what was neutralized as counts only, never the payload.
+    body, sanitized = sanitize_value(body)
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    if sanitized:
+        structlog.get_logger(SERVER_NAME).warning(
+            "agent_mcp_sanitized_tool_output",
+            patterns=sanitized,
+            total=sum(sanitized.values()),
+        )
+        # Mirror the warning into the counts-only injection-alert ledger (a
+        # best-effort SIDECAR, never the audit chain). output_text is the already
+        # -sanitized canonical JSON, so its digest matches what the model saw and
+        # is the correlation key the judge escalation maps back to a tool_call_id.
+        injection_ledger.record_neutralization(sanitized, tool=tool, output_text=text)
+    return [TextContent(type="text", text=text)]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:85-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L85-L108)
+
+[9] `audit_append`는 받은 `kind`와 `payload`를 호출 기록에 더한다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[10] `find_evil_auto.py`가 `bulk_extract` 호출을 기록할 때 싣는 값이다.
+
+```python
+        be_available = bool(be_out.get("bulk_extractor_available"))
+        features_seen = int(be_out.get("features_seen") or 0)
+        self._record_tool(
+            py,
+            "bulk_extract",
+            self._output_hash(be_out),
+            {
+                "bulk_extractor_available": be_available,
+                "features_seen": features_seen,
+                **({"error": be_error} if be_error else {}),
+            },
+            arguments=be_args,
+```
+
+[`scripts/find_evil_auto.py:12641-12652`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L12641-L12652)
+
+[11] manifest의 `version`은 형식 번호이고 `extra`는 호출자가 준 값이다.
+
+```python
+MANIFEST_VERSION = "1"
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:40-40`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L40-L40)
+
+```python
+    body = RunManifest(
+        version=MANIFEST_VERSION,
+        case_id=case_id,
+        run_id=run_id,
+        started_at=started_at,
+        finalized_at=finalized_at,
+        audit_log_path=audit_log.path.name,
+        audit_log_final_hash=final_hash,
+        audit_log_record_count=record_count,
+        merkle_root_hex=root_hex,
+        leaf_count=len(leaves),
+        leaves=leaves,
+        signature={},
+        extra=extra or {},
+    )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:213-227`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L213-L227)
+
+[12] `find_evil_auto.py`가 `manifest_finalize`에 넘기는 `extra`다.
+
+```python
+        extra = {
+            "image_path": self.evidence,
+            "model": "find-evil-auto",
+            "evidence_type": detect_evidence_type(self.evidence),
+            "signer": self.signer,
+        }
+```
+
+[`scripts/find_evil_auto.py:15944-15949`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L15944-L15949)
+
+[13] `CRATE_VERSION`의 주석과 그 값을 쓰는 초기화 응답이다.
+그 밖에는 [`services/mcp/src/main.rs:31-34`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/main.rs#L31-L34)의 `--version` 출력과 [`services/mcp/src/main.rs:53-56`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/main.rs#L53-L56)의 시작 로그에서만 쓴다.
+
+```rust
+/// Crate version baked in at compile time — surfaced in the MCP
+/// server's capability handshake and in audit logs.
+pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+```
+
+[`services/mcp/src/lib.rs:28-30`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/lib.rs#L28-L30)
+
+```rust
+fn handle_initialize(_params: &Value) -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {}
+        },
+        "serverInfo": {
+            "name": SERVER_NAME,
+            "version": CRATE_VERSION,
+        },
+    })
+}
+```
+
+[`services/mcp/src/server.rs:1478-1489`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1478-L1489)
+
+[14] `findevil-agent-mcp`는 `SERVER_VERSION`을 시작 로그에만 쓰고 `Server`에 이름만 준다.
+
+```python
+SERVER_NAME = "findevil-agent-mcp"
+SERVER_VERSION = "0.1.0"
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:40-41`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L40-L41)
+
+```python
+    server: Server = Server(SERVER_NAME)
+    specs = _build_specs_index()
+    log = _configure_logging()
+    log.info(
+        "agent_mcp_boot",
+        server_name=SERVER_NAME,
+        server_version=SERVER_VERSION,
+        tool_count=len(specs),
+        tools=sorted(specs.keys()),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:148-157`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L148-L157)
+
+[15] MCP Python SDK 1.27.0의 `create_initialization_options`는 서버 버전이 없으면 `mcp` 패키지 버전을 쓴다: [`src/mcp/server/lowlevel/server.py:164-190`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L164-L190).
+
+[16] (실행 확인) 두 서버의 초기화 응답에서 `serverInfo`는 `findevil-mcp` `0.1.0`과 `findevil-agent-mcp` `1.27.0`이었다.

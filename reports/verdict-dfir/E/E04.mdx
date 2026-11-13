@@ -1,0 +1,646 @@
+---
+cell: E04
+details:
+- id: E04.01
+- id: E04.02
+- id: E04.03
+- id: E04.04
+- id: E04.05
+- id: E04.06
+---
+
+# E04 분석 입력 준비
+
+### E04.01 작업 사본 생성
+
+**구현.** 이 방식은 `findevil-mcp`의 `pst_parse`·`srum_parse`에 적용된다 [1][2].
+`pst_parse`는 `pffexport -m all`로 PST 메일 보관 파일의 항목 전체를 사건 폴더의 `extracted/pst/pst-export-<UUID>/` 아래에 꺼내고 그 폴더를 읽어 메시지 요약을 돌려준다 [1].
+`srum_parse`는 `esedbexport`로 `SRUDB.dat`의 표 전체를 사건 폴더의 `_xartifact/` 아래 작업 폴더에 내보내고 그 가운데 네트워크 사용량 표 파일을 해석한다 [2].
+시험용 `pffexport`로 `pst_parse`를 부르자 내보낸 파일이 사건 폴더에 남았다 [3].
+
+**한계.** `pst_parse`의 응답에는 꺼낸 폴더의 경로가 없다 [4].
+`srum_parse`는 해석을 마치면 성공과 실패 모두 내보낸 작업 폴더를 지운다 [2].
+
+### E04.02 선택 추출
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_extract_artifacts`에 적용된다 [5].
+`disk_extract_artifacts`는 `fls -r -p`로 이미지의 파일 목록을 읽고 경로와 이름으로 아티팩트 종류를 정한다 [6][7].
+모델이 `artifact_kinds`로 고른 종류, 주지 않으면 정해 둔 26종 가운데 해당하는 파일만 후보로 삼는다 [8][7].
+후보는 종류 우선순위 차례로 돌아가며 하나씩 골라 `limit`(기본 500)개까지 뽑고 이벤트 로그는 `Security.evtx` 같은 주요 로그를 먼저 고른다 [9][10].
+고른 파일은 `icat`으로 inode 내용을 꺼내 사건 폴더의 `extracted/disk/<extract_id>/<종류>/` 아래에 이미지 안 경로대로 쓴다 [11].
+`recover_deleted`가 참(기본값)이면 삭제됐지만 inode가 남은 항목도 꺼내 `__deleted__/<inode>/` 아래에 둔다 [12][11].
+꺼낸 파일의 경로는 응답에 실리고 도구 설명은 이 경로를 `registry_query`·`evtx_query` 같은 파서에 주라고 적는다 [13][14].
+시험용 `fls`·`icat`으로 실행하자 레지스트리 하이브가 꺼내져 응답에 실렸고 inode가 다시 쓰인 삭제 항목은 꺼내지 않았다 [15].
+
+**한계.** `disk_mount`를 `mode: mock`으로 부르면 서버는 마운트하지 않고 호출 인자 `mount_point`의 폴더를 자원의 `fs_root`로 적는다 [16].
+`disk_extract_artifacts`는 이 자원의 이미지를 Sleuth Kit으로 읽지 못하면 `fs_root` 폴더의 파일을 아티팩트로 복사한다 [17].
+이때 항목의 `source_path`는 이미지 안 경로가 아니라 그 폴더 안 경로이고 응답은 이를 따로 표시하지 않는다 [18][19].
+크기 상한 `max_artifact_bytes`(기본 512 MiB)는 `icat`이 파일을 다 쓴 뒤 크기를 보고 지우는 방식이라 상한을 넘는 파일도 한 번은 사건 폴더에 쓰인다 [11].
+도구 설명은 상한을 넘는 파일을 복사하기 전에 건너뛴다고 적는다 [13].
+
+### E04.03 전체·부분 마운트
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_mount`와 `disk_extract_artifacts`에 적용된다 [20][5].
+`disk_mount`는 raw 이미지를 `ro,loop`로 마운트하고 실패하면 `mmls`로 고른 가장 긴 파일 시스템 파티션의 시작 위치를 `offset`으로 붙여 다시 마운트한다 [20][21].
+EWF 이미지는 `ewfmount`로 연 뒤 그 안의 NTFS 볼륨을 시작 위치 0이나 같은 파티션 위치로 `ntfs3` loop 마운트한다 [22][23].
+`disk_extract_artifacts`는 마운트를 쓰지 않고 서버가 고른 파티션의 섹터 위치를 `fls`·`icat`의 `-o` 인자로 넘겨 그 파티션만 읽는다 [24][21].
+마운트 위치는 사건 폴더의 `mounts/<mount_id>`이고 `mount_point`를 주면 그 위치를 쓴다 [25].
+시험용 `mmls`가 파티션 3개를 내자 `disk_mount`는 가장 긴 파티션의 위치로 마운트했고 `fls`·`icat`은 `-o 1026048`을 받았다 [15].
+
+`vss_mount`는 `vshadowmount`로 볼륨 섀도 복사본마다 `vssN` 볼륨 파일을 드러내고 그 경로 목록을 돌려준다 [26].
+이 파일은 파일 시스템이 아닌 볼륨 이미지이고 서버는 그 안의 파일 시스템을 마운트하지 않는다 [26].
+
+**한계.** 다른 파일 시스템 파티션은 `partitions`에 실리기만 하고 마운트나 꺼내기 대상이 되지 않는다 [21][24].
+`ewfmount`는 있는데 NTFS 볼륨을 마운트하지 못하면 EWF 컨테이너만 마운트한 채 `mounted`로 등록한다 [22].
+`ewfmount`가 없으면 마운트 없이 `mounted` 항목을 등록한다 [27].
+`mmls`가 실패하거나 파티션 표가 없으면 시작 위치 0으로 읽는다 [21][24].
+
+### E04.04 추출·생략 범위 기록
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_mount`·`disk_extract_artifacts` 응답과 사건 폴더의 `session_resources.json`에 적용된다 [28][29][30].
+`disk_extract_artifacts`의 응답에는 꺼낸 파일마다 종류, 이미지 안 경로, 꺼낸 경로, 크기, 삭제 항목 여부가 실린다 [28].
+크기 상한으로 건너뛴 수, 본 삭제 항목 수, 꺼낸 삭제 항목 수, inode가 다시 쓰여 건너뛴 수, 내용을 읽지 못한 삭제 항목 수도 함께 실린다 [28].
+같은 꺼낸 파일 목록은 부모 마운트 ID, 출력 폴더, 실행 명령과 함께 `session_resources.json`의 `disk_extract_artifacts` 항목에 남는다 [30].
+`disk_mount`는 파티션 표의 파일 시스템 파티션을 `partitions`에 싣고 마운트한 위치와 명령을 `note`·`command`에 싣는다 [29].
+
+**한계.** `limit`에 닿아 고르지 않은 후보 수는 응답과 기록에 남지 않는다 [9][28].
+`limit` 4로 실행하자 고르지 않은 후보 5개는 응답 어디에도 나타나지 않았다 [31].
+삭제되지 않은 파일의 `icat`이 실패하면 그 파일을 빼고 따로 세지 않는다 [11].
+`artifacts_seen`은 이름과 달리 꺼낸 파일 수와 같다 [28].
+`mode: mock` 자원의 폴더에서 복사한 경우에도 `session_resources.json`의 꺼내기 항목은 `command`를 `fls`·`icat`으로 적고 `note`에 이미지에서 Sleuth Kit으로 꺼냈다고 적는다 [32].
+
+### E04.05 부속 자료 탐색
+
+**구현.** 이 방식은 `findevil-mcp`의 분할 EWF 조각 탐색 `segment_paths_for_image`에 적용된다 [33].
+이 함수는 첫 조각과 같은 폴더에서 이름 줄기가 같고 확장자가 `E`·`Ex`와 번호로 된 파일을 모아 번호 차례로 늘어놓는다 [33].
+`case_open`은 모은 조각 전체를 이어 해시하고 `disk_mount`·`disk_extract_artifacts`는 모은 조각을 `ewfmount`, `mmls`, `fls`, `icat`의 인자로 함께 넘긴다 [34][35][11].
+`E01`·`E02` 두 조각을 둔 폴더에서 첫 조각으로 `case_open`을 부르자 두 조각이 `image_segments`에 실렸다 [36].
+
+**한계.** `bulk_extract`, `vss_list`, `vss_mount`는 받은 경로 하나만 외부 도구에 넘긴다 [37].
+`disk_extract_artifacts`는 레지스트리 트랜잭션 로그 `.LOG1`·`.LOG2`를 `reg_txlog` 종류로 꺼내지만 하이브와 묶지 않는다 [7].
+`registry_query`는 트랜잭션 로그를 읽지 않고 하이브 파일만 해석한다 [38].
+`browser_history`는 SQLite 기록 파일을 `immutable=1`로 열어 옆의 `-wal` 파일을 반영하지 않는다 [39].
+
+### E04.06 부속 자료 누락·로그 미반영 표시
+
+**구현.** 이 방식은 분할 EWF 조각 탐색에 적용된다 [33].
+`segment_paths_for_image`는 보이는 가장 큰 번호보다 작은 번호의 조각이 빠져 있으면 오류로 끝난다 [33].
+`case_open`·`disk_mount`·`disk_extract_artifacts`는 이 오류를 `EwfSegmentSet` 오류로 바꾸고 서버는 JSON-RPC 오류 코드 `-32602`로 돌려준다 [34][40].
+`E01`과 `E03`만 둔 폴더에서 `case_open`을 부르자 `missing split EWF segment before visible later segment` 오류가 돌아왔다 [36].
+
+**한계.** 마지막 번호 뒤의 조각이 빠지면 알아채지 못한다 [33].
+레지스트리 트랜잭션 로그와 SQLite `-wal`을 반영하지 않는다는 사실은 응답에 실리지 않는다 [38][39].
+
+### 근거
+
+[1] `pst_parse`는 `pffexport -m all`로 사건 폴더 아래 작업 폴더에 항목 전체를 꺼낸다.
+
+```rust
+    // Stage the export UNDER THE CASE DIR — never beside the evidence.
+    let case_dir = case_dir(&input.case_id)?;
+    let staging = case_dir
+        .join("extracted")
+        .join("pst")
+        .join(format!("pst-export-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&staging).map_err(|source| PstError::StagingCreate {
+        path: staging.clone(),
+        source,
+    })?;
+
+    let prefix = staging.join("store");
+    let args = build_pffexport_args(&prefix, &input.artifact_path);
+```
+
+[`services/mcp/src/tools/pst_parse.rs:193-205`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L193-L205)
+
+```rust
+/// Build the fixed argv: `-m all -t <prefix> <artifact>`. Pure + tested.
+fn build_pffexport_args(prefix: &Path, artifact: &Path) -> Vec<OsString> {
+    vec![
+        "-m".into(),
+        "all".into(),
+        "-t".into(),
+        prefix.as_os_str().to_os_string(),
+        artifact.as_os_str().to_os_string(),
+    ]
+```
+
+[`services/mcp/src/tools/pst_parse.rs:260-268`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L260-L268)
+
+[2] `srum_parse`는 `SRUDB.dat`의 표 전체를 사건 폴더 아래 작업 폴더에 내보내고 해석한 뒤 지운다.
+
+```rust
+    let staging = prepare_staging_dir(&input.case_id)?;
+    let target_prefix = staging.join("srum");
+    let export_dir = export_dir_for(&target_prefix);
+
+    let args = build_esedbexport_args(&target_prefix, &input.artifact_path);
+```
+
+[`services/mcp/src/tools/srum_parse.rs:219-223`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L219-L223)
+
+```rust
+    let result = decode_export(&export_dir);
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+```
+
+[`services/mcp/src/tools/srum_parse.rs:263-265`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L263-L265)
+
+[`services/mcp/src/tools/srum_parse.rs:462-471`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L462-L471)
+
+[3] (실행 확인) 시험용 `pffexport`로 `pst_parse`를 부르자 내보낸 파일이 사건 폴더의 `extracted/pst/pst-export-<UUID>/` 아래에 남았다.
+
+[4] `pst_parse`의 응답 필드다.
+
+```rust
+#[derive(Clone, Debug, Serialize)]
+pub struct PstParseOutput {
+    /// False when `pffexport` was not installed. All other fields are then
+    /// empty/zero — this is a graceful degrade, not an error.
+    pub pffexport_available: bool,
+
+    /// Total messages found in the export (before the `MAX_MESSAGES` cap on
+    /// the `messages` vector).
+    pub message_count: usize,
+
+    /// Per-message metadata, sorted by (folder, `delivery_time`, subject,
+    /// from) and capped at `MAX_MESSAGES`.
+    pub messages: Vec<PstMessage>,
+
+    /// How many messages were flagged `recovered` (deleted/orphaned items
+    /// reconstructed from unallocated space).
+    pub recovered_deleted_count: usize,
+
+    /// Sorted, de-duplicated sender values across all messages (capped).
+    pub unique_senders: Vec<String>,
+
+    /// Sorted, de-duplicated subjects across all messages (capped).
+    pub subjects: Vec<String>,
+}
+```
+
+[`services/mcp/src/tools/pst_parse.rs:116-139`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L116-L139)
+
+[5] `disk_extract_artifacts`의 처리 흐름이다: [`services/mcp/src/tools/disk.rs:306-429`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L306-L429).
+
+[6] `fls -r -p`로 이미지의 파일 목록을 읽는다.
+
+```rust
+fn tsk_list(
+    image_paths: &[PathBuf],
+    sector_offset: Option<u64>,
+) -> Result<Vec<FlsEntry>, DiskError> {
+    let bin = std::env::var("FINDEVIL_FLS_BIN").unwrap_or_else(|_| "fls".to_string());
+    let mut command = Command::new(&bin);
+    command.args(["-r", "-p"]);
+    if let Some(offset) = sector_offset {
+        command.arg("-o").arg(offset.to_string());
+    }
+    append_image_args(&mut command, image_paths);
+    let output = command.output().map_err(|source| DiskError::Io {
+        path: PathBuf::from(&bin),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(DiskError::SubprocessFailed {
+            status: output.status.to_string(),
+            stderr_tail: tail_utf8_lossy(&output.stderr),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_fls_line)
+        .collect())
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1088-1113`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1088-L1113)
+
+[7] 경로와 이름으로 아티팩트 종류를 정한다: [`services/mcp/src/tools/disk.rs:1503-1635`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1503-L1635).
+
+[8] `artifact_kinds`를 주지 않으면 모든 종류를 고른다: [`services/mcp/src/tools/disk.rs:1637-1705`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1637-L1705).
+
+[9] 종류별로 돌아가며 `limit`까지 고른다.
+
+```rust
+    let mut selected = Vec::new();
+    while selected.len() < limit && queues.iter().any(|queue| !queue.is_empty()) {
+        for queue in &mut queues {
+            if selected.len() >= limit {
+                break;
+            }
+            if let Some(item) = queue.pop_front() {
+                selected.push(item);
+            }
+        }
+    }
+    selected
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1382-1394`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1382-L1394)
+
+[10] 이벤트 로그는 주요 로그를 먼저 고른다.
+
+```rust
+fn artifact_subrank(class: &str, rel_path: &str) -> u8 {
+    if class != "evtx" {
+        return 0;
+    }
+    let lower = rel_path.replace('\\', "/").to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or("");
+    if name == "security.evtx"
+        || name == "system.evtx"
+        || name.contains("sysmon")
+        || name.contains("powershell")
+    {
+        0
+    } else if name == "application.evtx"
+        || name == "forwardedevents.evtx"
+        || name.starts_with("archive-security")
+        || name.contains("taskscheduler")
+        || name.contains("windows defender")
+        || name.contains("winrm")
+        || name.contains("wmi-activity")
+        || name.contains("terminalservices")
+        || name.contains("applocker")
+        || !name.starts_with("microsoft-windows-")
+    {
+        1
+    } else {
+        2
+    }
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1289-1316`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1289-L1316)
+
+[11] `tsk_extract`는 `icat`으로 inode를 꺼내 쓰고 실패와 크기 초과를 처리한다: [`services/mcp/src/tools/disk.rs:1412-1484`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1412-L1484).
+
+[12] `recover_deleted`의 기본값과 설명이다.
+
+```rust
+    /// Also recover deleted-but-metadata-intact files (unallocated dirents
+    /// whose inode still resolves). Entries whose inode was reallocated to a
+    /// live file are always skipped — extracting them would return the reusing
+    /// file's bytes. Recovered files stage under `<class>/__deleted__/<inode>/`
+    /// and never crowd allocated files out of the class budget.
+    #[serde(default = "default_true")]
+    pub recover_deleted: bool,
+```
+
+[`services/mcp/src/tools/disk.rs:99-105`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L99-L105)
+
+[13] `disk_extract_artifacts`의 도구 설명이다.
+
+```rust
+            name: "disk_extract_artifacts",
+            description:
+                "Copy selected artifacts from a disk_mount fs_root into the case extraction area \
+                 for existing typed parsers: $MFT, $UsnJrnl:$J exports, Prefetch, Registry hives, \
+                 EVTX, and YARA target files. Updates the SessionResource ledger and returns \
+                 extracted artifact paths for downstream mft_timeline/usnjrnl_query/\
+                 prefetch_parse/registry_query/evtx_query/yara_scan calls. The optional \
+                 max_artifact_bytes guard skips oversized files before copying them into the case \
+                 workspace and reports artifacts_skipped_oversize.",
+```
+
+[`services/mcp/src/server.rs:268-276`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L268-L276)
+
+[14] `registry_query`의 설명은 이미지 안 하이브 파일 경로를 주라고 적는다.
+
+```rust
+            name: "registry_query",
+            description: "Read keys + values from an offline Windows Registry hive (NTUSER.DAT, \
+                 SOFTWARE, SYSTEM, SECURITY, SAM, USRCLASS.DAT). PRIMARY POOL A persistence \
+                 surface — Run / RunOnce / IFEO / Services / WMI subscription consumers / \
+                 ScheduledTasks all live here. Use AFTER case_open with the hive_path \
+                 pointing at the file inside the mounted image. \
+```
+
+[`services/mcp/src/server.rs:415-420`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L415-L420)
+
+[15] (실행 확인) 시험용 `mmls`·`mount`·`fls`·`icat`으로 `disk_mount` 자동 모드와 `disk_extract_artifacts`를 실행해 마운트 인자, 파티션 위치, 꺼낸 파일, 삭제 항목 수를 확인했다.
+
+[16] `mode: mock`의 `disk_mount`는 마운트 명령을 실행하지 않고 `mount_point`를 `fs_root`로 적는다.
+
+```rust
+    let (status, fs_root, command, stderr_tail, note) = match input.mode {
+        DiskMode::Mock => (
+            "mounted".to_string(),
+            mount_point.clone(),
+            vec!["mock".to_string(), "disk_mount".to_string()],
+            String::new(),
+            "mock mount registered; no privileged filesystem operation ran".to_string(),
+        ),
+```
+
+[`services/mcp/src/tools/disk.rs:255-262`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L255-L262)
+
+[17] `mock` 자원은 Sleuth Kit 목록이 실패하거나 비면 `fs_root` 폴더를 훑어 복사한다.
+
+```rust
+    let mock_root: Option<PathBuf> = (mount.command.first().map(String::as_str) == Some("mock"))
+        .then(|| mount.fs_root.clone())
+        .flatten();
+    let (listed, via_walk) = match tsk_list(&image_paths, sector_offset) {
+        Ok(files) if !files.is_empty() => (files, false),
+        tsk_result => match &mock_root {
+            Some(root) => (mock_list(root)?, true),
+            None => (tsk_result?, false),
+        },
+    };
+```
+
+[`services/mcp/src/tools/disk.rs:357-366`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L357-L366)
+
+[18] 폴더에서 복사한 항목은 폴더 기준 경로를 `source_path`로 둔다.
+
+```rust
+    out.push(ExtractedDiskArtifact {
+        artifact_class: class.to_string(),
+        source_path: PathBuf::from(rel_path),
+        extracted_path: dest,
+        size_bytes: size,
+        recovered_deleted: false,
+    });
+```
+
+[`services/mcp/src/tools/disk.rs:1187-1193`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1187-L1193)
+
+[19] (실행 확인) `mode: mock`으로 등록한 자원에서 `disk_extract_artifacts`를 부르자 `mount_point` 폴더의 파일이 꺼내졌고 항목의 `source_path`는 그 폴더 기준 경로였으며 출처를 가르는 필드는 없었다.
+
+[20] `disk_mount`는 마운트 방식을 고른다.
+
+```rust
+fn auto_mount(
+    image_paths: &[PathBuf],
+    mount_point: &Path,
+) -> Result<(String, PathBuf, Vec<String>, String, String), DiskError> {
+    if cfg!(windows) {
+        return Err(DiskError::UnsupportedPlatform);
+    }
+    let image_path = image_paths
+        .first()
+        .ok_or_else(|| DiskError::ImageNotFound(PathBuf::from("<empty image set>")))?;
+    if is_first_ewf_segment(image_path) {
+        return auto_mount_ewf(image_paths, mount_point);
+    }
+    auto_mount_raw(image_path, mount_point)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:489-503`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L489-L503)
+
+[21] 파일 시스템 파티션을 모으고 가장 긴 파티션의 위치를 고른다: [`services/mcp/src/tools/disk.rs:811-943`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L811-L943), [`services/mcp/src/tools/disk.rs:710-809`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L710-L809).
+
+[22] EWF 이미지의 마운트 처리다: [`services/mcp/src/tools/disk.rs:504-587`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L504-L587).
+
+[23] NTFS 볼륨은 시작 위치 0과 고른 파티션 위치로 시도한다.
+
+```rust
+fn mount_ntfs_ro(device: &Path, mount_point: &Path) -> Result<(Vec<String>, String), DiskError> {
+    let mount_bin = std::env::var("FINDEVIL_MOUNT_BIN").unwrap_or_else(|_| "mount".to_string());
+    let mut offsets = vec![0u64];
+    if let Some(offset) = primary_partition_byte_offset_sudo(device) {
+        offsets.push(offset);
+    }
+    let mut last_status = String::new();
+    let mut last_stderr = String::new();
+    for offset in offsets {
+        let opts = if offset == 0 {
+            "ro,loop".to_string()
+        } else {
+            format!("ro,loop,offset={offset}")
+        };
+        let args = vec![
+            "-t".to_string(),
+            "ntfs3".to_string(),
+            "-o".to_string(),
+            opts,
+            device.to_string_lossy().to_string(),
+            mount_point.to_string_lossy().to_string(),
+        ];
+```
+
+[`services/mcp/src/tools/disk.rs:634-655`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L634-L655)
+
+[24] `fls`·`icat`에 넘길 섹터 위치를 정한다.
+
+```rust
+/// Sector offset of the primary (largest) filesystem partition for
+/// `fls`/`icat -o`, or None for a bare volume image (TSK reads it at offset 0).
+/// mmls reports the start
+/// sector; the byte helper multiplies by 512, so divide it back to sectors.
+fn primary_partition_sector_offset(image_paths: &[PathBuf]) -> Option<u64> {
+    primary_partition_byte_offset(image_paths).map(|bytes| bytes / 512)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1056-1062`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1056-L1062)
+
+[25] 마운트 위치를 정한다.
+
+```rust
+    let ledger_path = case_dir.join(LEDGER_NAME);
+    let mount_id = format!("disk-mount-{}", Uuid::new_v4());
+    let mount_point = input
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| case_dir.join("mounts").join(&mount_id));
+    create_dir(&mount_point)?;
+```
+
+[`services/mcp/src/tools/disk.rs:242-248`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L242-L248)
+
+[26] `vss_mount`는 `vssN` 파일 목록을 돌려준다: [`services/mcp/src/tools/vss.rs:204-280`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L204-L280).
+
+[27] `ewfmount`가 없으면 마운트 없이 항목을 등록한다.
+
+```rust
+fn direct_tsk_mount(
+    image_path: &Path,
+    reason: &str,
+) -> (String, PathBuf, Vec<String>, String, String) {
+    (
+        "mounted".to_string(),
+        image_path.to_path_buf(),
+        vec![DIRECT_TSK_COMMAND.to_string()],
+        String::new(),
+        format!("registered direct Sleuth Kit read of the image (no FUSE/loop mount): {reason}"),
+    )
+}
+```
+
+[`services/mcp/src/tools/disk.rs:597-608`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L608)
+
+[28] `disk_extract_artifacts`의 응답이다.
+
+```rust
+    Ok(DiskExtractArtifactsOutput {
+        case_id: input.case_id.clone(),
+        mount_id: input.mount_id.clone(),
+        extract_id,
+        output_dir,
+        artifacts_seen: artifacts.len(),
+        artifacts_skipped_oversize: stats.skipped_oversize,
+        max_artifact_bytes: input.max_artifact_bytes,
+        deleted_entries_seen,
+        deleted_recovered: stats.deleted_recovered,
+        deleted_skipped_realloc,
+        deleted_recovery_failed: stats.deleted_recovery_failed,
+        artifacts,
+        ledger_path,
+    })
+```
+
+[`services/mcp/src/tools/disk.rs:414-428`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L414-L428)
+
+[29] `disk_mount`의 응답 필드다.
+
+```rust
+pub struct DiskMountOutput {
+    pub case_id: String,
+    pub mount_id: String,
+    pub status: String,
+    pub image_path: PathBuf,
+    pub mount_point: PathBuf,
+    pub fs_root: PathBuf,
+    pub ledger_path: PathBuf,
+    pub command: Vec<String>,
+    pub stderr_tail: String,
+    pub note: String,
+    /// Every filesystem partition enumerated from the image's `mmls` table (empty
+    /// for a bare volume image with no table, in mock mode, or when mmls is
+    /// unavailable). The tool mounts/extracts the primary (largest) volume; this
+    /// list makes any additional volumes visible so multi-volume disks are not
+    /// silently reduced to one. Defaults keep older ledgers deserializing.
+    #[serde(default)]
+    pub partitions: Vec<MmlsPartition>,
+}
+```
+
+[`services/mcp/src/tools/disk.rs:118-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L118-L136)
+
+[30] 꺼내기 항목을 마운트 기록에 남긴다.
+
+```rust
+    let now = now_iso();
+    ledger.resources.push(SessionResource {
+        id: extract_id.clone(),
+        resource_type: "disk_extract_artifacts".to_string(),
+        status: "extracted".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(image_path),
+        mount_point: mount.mount_point,
+        fs_root: mount.fs_root,
+        parent_id: Some(input.mount_id.clone()),
+        output_dir: Some(output_dir.clone()),
+        artifacts: artifacts.clone(),
+        command: vec!["fls".to_string(), "icat".to_string()],
+        note: "extracted disk artifacts directly from the image via The Sleuth Kit".to_string(),
+    });
+    write_ledger(&ledger_path, &ledger)?;
+```
+
+[`services/mcp/src/tools/disk.rs:396-412`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L396-L412)
+
+[31] (실행 확인) `mode: mock` 마운트의 폴더에 파일 10개를 두고 `limit` 4로 실행하자 꺼낸 3개와 크기 상한으로 건너뛴 1개만 응답에 실렸다.
+
+[32] 꺼내기 항목은 목록을 얻은 경로와 관계없이 `command`와 `note`를 같은 값으로 적는다.
+
+```rust
+    let now = now_iso();
+    ledger.resources.push(SessionResource {
+        id: extract_id.clone(),
+        resource_type: "disk_extract_artifacts".to_string(),
+        status: "extracted".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(image_path),
+        mount_point: mount.mount_point,
+        fs_root: mount.fs_root,
+        parent_id: Some(input.mount_id.clone()),
+        output_dir: Some(output_dir.clone()),
+        artifacts: artifacts.clone(),
+        command: vec!["fls".to_string(), "icat".to_string()],
+        note: "extracted disk artifacts directly from the image via The Sleuth Kit".to_string(),
+    });
+```
+
+[`services/mcp/src/tools/disk.rs:396-411`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L396-L411)
+
+[33] 분할 EWF 조각을 모으고 빈 번호를 찾는다: [`services/mcp/src/tools/ewf_segments.rs:83-184`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ewf_segments.rs#L83-L184).
+
+[34] `case_open`은 모은 조각으로 크기와 해시를 계산한다.
+
+```rust
+    let image_segments = segment_paths_for_image(image_path)
+        .map_err(|err| CaseOpenError::EwfSegmentSet(err.to_string()))?;
+    let image_size_bytes =
+        image_segments
+            .iter()
+            .skip(1)
+            .try_fold(meta.len(), |total, segment| {
+                let segment_meta = fs::symlink_metadata(segment)
+                    .map_err(|_| CaseOpenError::ImageNotFound(segment.clone()))?;
+                if !segment_meta.is_file() {
+                    return Err(CaseOpenError::ImageNotRegular(segment.clone()));
+                }
+                Ok(total.saturating_add(segment_meta.len()))
+            })?;
+
+    // 2. Stream-hash the full evidence input.
+    let actual_hash = sha256_files(&image_segments)?;
+```
+
+[`services/mcp/src/tools/case_open.rs:152-168`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L152-L168)
+
+[35] `disk_mount`는 자동 모드에서 조각을 모아 마운트에 넘긴다.
+
+```rust
+    let image_paths = match input.mode {
+        DiskMode::Mock => vec![input.image_path.clone()],
+        DiskMode::Auto => segment_paths_for_image(&input.image_path)
+            .map_err(|err| DiskError::EwfSegmentSet(err.to_string()))?,
+    };
+```
+
+[`services/mcp/src/tools/disk.rs:249-253`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L249-L253)
+
+[36] (실행 확인) `E01`·`E02` 조각과 `E01`·`E03` 조각을 둔 폴더에서 각각 `case_open`을 부르고 응답과 오류를 확인했다.
+
+[37] 받은 경로 하나만 넘기는 도구다: [`services/mcp/src/tools/bulk_extract.rs:338-343`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L338-L343), [`services/mcp/src/tools/vss.rs:129-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L129-L131), [`services/mcp/src/tools/vss.rs:219-229`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L219-L229).
+
+[38] `registry_query`는 트랜잭션 로그를 불러오지 않는다.
+
+```rust
+    /// Absolute or relative path to the hive primary file (e.g. the
+    /// `SOFTWARE` hive at `Windows/System32/config/SOFTWARE`, or a
+    /// per-user `NTUSER.DAT`). Transaction logs (`.LOG1`, `.LOG2`) are
+    /// not loaded by this tool — agents that need transaction-replay
+    /// can pass a pre-merged hive.
+    pub hive_path: PathBuf,
+```
+
+[`services/mcp/src/tools/registry_query.rs:40-45`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L40-L45)
+
+[39] `browser_history`는 `immutable=1`로 연다.
+
+```rust
+    // Read-only + immutable so we never write a -wal/-journal next to the
+    // evidence file, and a stale WAL header can't block the open.
+    let uri = format!("file:{}?immutable=1", path.to_string_lossy());
+    let conn = Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|source| BrowserHistoryError::Unreadable {
+        path: path.clone(),
+```
+
+[`services/mcp/src/tools/browser_history.rs:139-147`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/browser_history.rs#L139-L147)
+
+[40] `EwfSegmentSet`은 세 도구에서 `InvalidParams`로 바뀐다: [`services/mcp/src/server.rs:1580-1628`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1580-L1628).

@@ -1,0 +1,674 @@
+---
+cell: R03
+details:
+- id: R03.01
+- id: R03.02
+- id: R03.03
+- id: R03.04
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 두 서버의 모든 도구 호출에 적용되고 서버마다 실패를 담는 자리가 다르다 [1][2].
+`findevil-mcp`는 도구 처리기가 오류를 돌려주면 `result` 대신 JSON-RPC `error` 객체로 답한다 [1].
+없는 파일이나 허용 목록 밖의 값처럼 입력에서 온 오류는 `-32602`로, 외부 도구 실패와 그 밖의 오류는 `-32603`으로 보낸다 [3].
+처리기가 중단되면 `catch_unwind`가 받아 `-32603`과 중단 문구로 보낸다 [4].
+인자가 입력 구조체에 맞지 않으면 `parse_args`가 `-32602`를 보낸다 [5].
+`findevil-mcp`는 도구 결과에 MCP 오류 결과 `isError`를 쓰지 않는다 [6].
+시험에서 없는 pcap 경로는 `-32602`, 실패하는 외부 도구는 `-32603`, 모르는 인자는 `-32602`로 돌아왔고 성공 응답에는 `isError`가 없었다 [6].
+
+`findevil-agent-mcp`는 서버 코드가 다루는 실패를 `isError`가 거짓인 응답의 `error` 객체로 보낸다 [2].
+이 객체의 `kind`는 없는 도구 `unknown_tool`, pydantic 입력 검사 실패 `validation`, 처리기 예외 `handler` 가운데 하나다 [2].
+MCP Python SDK 1.27.0은 입력 schema 검사에 실패한 호출과 서버 코드 밖으로 나온 예외를 `isError`가 참인 결과로 돌려준다 [7].
+시험에서 필수 인자가 빠진 호출만 `isError`가 참이었고 없는 도구, pydantic 검사 실패, 처리기 예외는 `isError`가 거짓인 `error` 객체였다 [8].
+
+`findevil-agent-mcp`의 일부 도구는 결과 안에 상태 필드를 둔다 [9][10][11].
+`audit_verify`는 `ok`와 `error`를, `manifest_verify`는 `overall`과 검사마다의 참거짓 값을 싣는다 [9][10].
+`verify_finding`은 `action`에 `approved`, `rejected`, `downgraded`를 싣고 재실행 오류를 `replay_error`에 싣는다 [11].
+두 서버 모두 실행 중에 MCP 진행 알림을 보내지 않는다 [1][2].
+
+**한계.** `findevil-mcp`는 오류 종류를 JSON-RPC 코드 두 개로만 나눈다 [1].
+외부 도구의 시간 초과, 실행 파일 없음, 출력 해석 실패가 모두 `-32603`이고 문구로만 갈린다 [3][12].
+`findevil-mcp`는 모르는 메서드와 해석할 수 없는 JSON에도 `-32602`를 쓴다 [13].
+시험에서 해석할 수 없는 줄은 `id`가 `null`인 `-32602`로, `resources/list`는 모르는 메서드 `-32602`로 돌아왔다 [6].
+
+`findevil-agent-mcp`의 서버 코드가 다룬 실패는 `isError`가 거짓이므로 `isError`만 보는 클라이언트는 성공 응답과 구별하지 못한다 [2][8].
+같은 도구의 입력 오류라도 SDK의 schema 검사에서 실패하면 `isError` 참의 문장으로, pydantic 검사에서 실패하면 `error` 객체로 나간다 [7][8].
+
+`disk_mount`는 파일 시스템을 마운트하지 못하고 EWF 컨테이너만 연결한 경우와 마운트 없이 Sleuth Kit 직접 읽기로 등록한 경우에도 `status`를 `mounted`로 싣는다 [14].
+`disk_mount`를 `mode: mock`으로 부르면 서버는 마운트하지 않고 `status`를 `mounted`로 싣는다 [14].
+이 차이는 `note` 문장으로만 알린다 [14].
+`manifest_verify`는 서명 종류가 `stub`이나 `sigstore`이면 서명이 검증되지 않아도 다른 대조가 통과할 때 `overall`을 참으로 둔다 [15].
+`manifest_verify`의 `overall`은 `entailment_ok`와 `transparency_ok`를 반영하지 않는다 [15].
+
+### R03.02 찾지 못함과 실패 구분
+
+**구현.** 이 방식은 `findevil-mcp`의 `registry_query`, `ausearch`, `hashset_lookup`과 외부 도구가 없을 때의 상태를 따로 싣는 도구, `findevil-agent-mcp`의 `audit_verify`, `memory_recall`에 적용된다 [16][17][18][19][9][20].
+`registry_query`는 키가 없으면 오류 대신 빈 `entries`와 `key_present` 거짓을 싣는다 [16].
+하이브 파일이 없으면 `-32602` 오류를 보낸다 [3].
+`ausearch`는 `ausearch`가 종료 코드 1과 `<no matches>`를 내면 빈 `rows`로 답하고 다른 0이 아닌 종료는 오류로 보낸다 [17].
+`hashset_lookup`은 읽은 해시 집합에 없는 해시를 `unknown`으로 싣고 집합을 읽지 못한 사실은 `sets_loaded`의 `error`에 싣는다 [18].
+`pst_parse`, `srum_parse`, `bulk_extract`, `vss_list`, `vss_mount`는 외부 도구가 없으면 오류 대신 `*_available` 거짓으로 답한다 [19].
+`srum_parse`는 내보낸 자료에 네트워크 사용 표가 없으면 `table_found` 거짓을 따로 싣는다 [19].
+`audit_verify`는 호출 기록 파일이 없으면 `ok` 참과 0건으로 답하고 체인이 끊기면 `ok` 거짓과 `error`를 싣는다 [9].
+`memory_recall`은 일치가 없으면 빈 `hits`를 싣고 도구 설명에 그 뜻을 적는다 [20].
+시험에서 없는 호출 기록 파일에 `audit_verify`는 `ok` 참과 `record_count` 0을, 빈 기억 저장소에 `memory_recall`은 빈 `hits`를 돌려주었다 [8].
+
+**한계.** 다음 도구는 실패를 결과 없음과 같은 값으로 돌려준다.
+`vss_list`는 `vshadowinfo`가 0이 아닌 종료 코드로 끝나면 종료 코드와 표준 오류를 버리고 저장소가 없다는 결과를 싣는다 [21].
+`vss_list`는 실행 파일이 없는 경우와 다른 실행 오류를 같은 `vshadowinfo_available` 거짓으로 싣는다 [21].
+`exif_parse`는 EXIF를 읽다 난 모든 오류를 `has_exif` 거짓으로 싣는다 [22].
+`disk_mount`는 `mmls` 실패를 빈 `partitions`로 싣는다 [23].
+Volatility 도구, `indx_parse`, `hayabusa_scan`, `nfdump_query`, `journalctl_query`, `vel_collect`는 외부 도구가 표준 출력에 아무것도 쓰지 않고 0으로 끝나면 빈 목록을 싣는다 [24].
+`hashset_lookup`은 `FINDEVIL_HASHSET_DIR`이 없으면 `sets_loaded`를 비우고 모든 해시를 `unknown`으로 싣는다 [18].
+`yara_scan`은 검사하지 못한 파일을 `scan_errors` 수로만 싣는다 [25].
+`disk_extract_artifacts`는 삭제되지 않은 파일을 꺼내지 못하면 그 파일을 응답에서 빼고 실패 수를 싣지 않는다 [26].
+`vss_mount`는 `vshadowmount`가 0이 아닌 종료로 끝나면 저장소가 없을 때와 같은 `unavailable` 상태를 싣는다 [27].
+`registry_query`의 `parse_errors`는 늘 0으로 실린다 [28].
+
+### R03.03 입력별 성공·실패·생략 목록
+
+**구현.** 이 방식은 `findevil-mcp`의 `hashset_lookup`과 `findevil-agent-mcp`의 `manifest_verify`, `find_ai_signatures`에 적용된다 [18][10][29].
+`hashset_lookup`은 읽으려 한 해시 집합마다 이름, 형식, 판정, 경로, 실패 사유를 `sets_loaded`에 싣는다 [18].
+`manifest_verify`는 호출 기록 체인, Merkle 루트, 리프 수, 서명, 함의 검사, 투명성 기록마다 참거짓 값과 설명을 싣는다 [10].
+`find_ai_signatures`는 읽지 못한 경로마다 경로와 사유를 `read_errors`에 싣는다 [29].
+시험에서 없는 파일을 함께 준 `find_ai_signatures` 호출은 그 경로를 `read_errors`에 싣고 다른 파일의 일치를 돌려주었다 [8].
+
+**한계.** `find_ai_signatures`는 실패한 경로만 싣고 검사한 경로는 `sources_scanned` 수로만 싣는다 [29].
+`truncated`가 참일 때 검사하지 않은 경로도 목록에 싣지 않는다 [29].
+`hashset_lookup`은 집합 하나를 읽다 중간에 실패하면 실패 사유만 싣고 어느 해시까지 대조했는지 싣지 않는다 [18].
+
+### R03.04 시간 초과·부분 완료 표시
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `judge_findings`와 `findevil-mcp`의 `thumbcache_parse`, `hashset_lookup`에 적용된다 [30][31][18].
+`judge_findings`는 병합이 `budget_seconds`를 넘으면 빈 `merged`와 함께 `budget_exceeded` 참과 `budget_detail`을 싣는다 [30].
+`thumbcache_parse`는 레코드가 파일 끝을 넘거나 검사 상한에 닿아 일부만 읽은 사실을 `parse_errors`에 싣는다 [31].
+`hashset_lookup`은 집합을 읽다 실패해도 그 전까지 찾은 일치를 싣고 그 집합의 `error`에 실패를 적는다 [18].
+
+**한계.** 외부 도구의 시간 초과는 결과 필드가 아니라 JSON-RPC 오류 문구로만 알린다.
+`vol_run`과 `plaso_parse`는 시간 제한(기본 1,800초와 3,600초)이 지나면 하위 프로세스를 끝내고 `-32603` 오류와 시간 제한을 넘었다는 문구를 보낸다 [12].
+이때 그 전까지 나온 행은 응답에 실리지 않는다 [12].
+나머지 외부 도구 실행 경로에는 시간 제한이 없다 [32].
+`pst_parse`는 내보낸 폴더 항목 500,000개에서 읽기를 멈추고 그때까지 읽은 메시지를 표시 없이 싣는다 [33].
+
+### 근거
+
+[1] `findevil-mcp`의 `dispatch`는 처리 결과를 `result`나 JSON-RPC `error`로 보내고 진행 알림 메서드를 두지 않는다: [`services/mcp/src/server.rs:1430-1476`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1430-L1476).
+
+[2] `findevil-agent-mcp`의 `call_tool`은 없는 도구, 입력 검사 실패, 처리기 예외를 `kind`가 다른 `error` 객체로 돌려준다.
+
+```python
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        spec = specs.get(name)
+        if spec is None:
+            log.warning("agent_mcp_unknown_tool", tool=name)
+            return _error_content(f"unknown tool: {name!r}", kind="unknown_tool")
+
+        try:
+            validated = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            log.warning(
+                "agent_mcp_validation_error",
+                tool=name,
+                errors=exc.errors(include_url=False),
+            )
+            return _error_content(f"input validation failed: {exc}", kind="validation")
+
+        try:
+            result = await spec.handler(validated)
+        except Exception as exc:
+            log.error(
+                "agent_mcp_handler_exception",
+                tool=name,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+            )
+            return _error_content(f"{type(exc).__name__}: {exc}", kind="handler")
+
+        return _to_text_content(result, tool=name)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:170-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L170-L198)
+```python
+    counts: dict[str, int] = {}
+    safe_message = sanitize_str(message, counts)
+    payload = {"error": {"kind": kind, "message": safe_message}}
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+    ]
+```
+
+[`services/agent_mcp/findevil_agent_mcp/server.py:130-138`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L130-L138)
+
+[3] 도구마다 입력에서 온 오류는 `InvalidParams`로, 그 밖의 오류는 `Internal`로 나눈다: [`services/mcp/src/server.rs:1580-1594`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1580-L1594), [`services/mcp/src/server.rs:1716-1732`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1716-L1732), [`services/mcp/src/server.rs:2173-2186`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2173-L2186).
+
+[4] `handle_tools_call`은 처리기 중단을 `Internal` 오류로 바꾼다.
+
+```rust
+    // Guard against a panicking tool handler (e.g. a third-party hive/image
+    // parser hitting an unimplemented code path on an unusual artifact) taking
+    // down the whole stdio server mid-investigation. Convert the panic into a
+    // clean per-call ToolError so the run continues with the remaining tools.
+    let payload =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (entry.handler)(arguments)))
+            .map_err(|panic| {
+                let detail = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "tool handler panicked".to_string());
+                ToolError::Internal(format!("tool '{name}' panicked: {detail}"))
+            })??;
+    finalize_tool_output(name, &payload)
+```
+
+[`services/mcp/src/server.rs:1518-1532`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1518-L1532)
+
+[5] `parse_args`는 인자를 입력 구조체로 읽지 못하면 `InvalidParams`를 돌려준다.
+
+```rust
+fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ToolError> {
+    serde_json::from_value(args).map_err(|e| ToolError::InvalidParams(format!("invalid args: {e}")))
+}
+```
+
+[`services/mcp/src/server.rs:2252-2254`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2252-L2254)
+
+[6] (실행 확인) `findevil-mcp`에 JSON-RPC 줄을 직접 보내자 없는 pcap 경로, 모르는 인자, 모르는 도구, `resources/list`는 `-32602`, 실패하는 시험용 `suricata`는 `-32603`, 해석할 수 없는 줄은 `id`가 `null`인 `-32602`로 돌아왔고 성공 응답의 `result`에는 `content`와 `_meta`만 있었다.
+
+[7] MCP Python SDK 1.27.0의 저수준 `call_tool`은 입력 schema 검사 실패와 처리기 밖으로 나온 예외를 `isError`가 참인 결과로 만든다: [`src/mcp/server/lowlevel/server.py:467-473`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L467-L473), [`src/mcp/server/lowlevel/server.py:527-533`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L527-L533), [`src/mcp/server/lowlevel/server.py:582-585`](https://github.com/modelcontextprotocol/python-sdk/blob/652478266702ac71a1d03692337bd5207ddbedf4/src/mcp/server/lowlevel/server.py#L582-L585).
+
+[8] (실행 확인) MCP Python SDK 1.27.0 `ClientSession`으로 `findevil-agent-mcp`를 부르자 필수 인자가 빠진 호출만 `isError` 참의 `Input validation error` 문장이었고 없는 도구, pydantic 검사 실패, 처리기 예외는 `isError` 거짓의 `error` 객체였으며 `audit_verify`, `memory_recall`, `find_ai_signatures`는 본문에 적은 값을 돌려주었다.
+
+[9] `audit_verify`는 체인 검증 결과를 `ok`, `record_count`, `error`로 싣는다.
+
+```python
+class AuditVerifyOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ok: bool
+    record_count: int
+    error: str | None = Field(
+        default=None,
+        description="Chain-break reason on failure; null on success.",
+    )
+
+
+async def _handle(inp: BaseModel) -> AuditVerifyOutput:
+    assert isinstance(inp, AuditVerifyInput)
+    log = AuditLog(Path(inp.path))
+    try:
+        count = log.verify()
+    except AuditLogError as exc:
+        return AuditVerifyOutput(ok=False, record_count=0, error=str(exc))
+    return AuditVerifyOutput(ok=True, record_count=count, error=None)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py:24-42`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py#L24-L42)
+
+[10] `manifest_verify`의 출력은 전체 결과와 검사마다의 참거짓 값과 설명을 담는다.
+
+```python
+class ManifestVerifyOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    overall: bool
+    audit_chain_ok: bool
+    audit_chain_detail: str | None
+    merkle_root_ok: bool
+    merkle_root_detail: str | None
+    leaf_count_ok: bool
+    leaf_count_detail: str | None
+    signature_present: bool
+    signature_kind: str
+    signature_verified: bool
+    signature_verified_detail: str | None
+    entailment_ok: bool
+    entailment_ok_detail: str | None
+    transparency_ok: bool
+    transparency_ok_detail: str | None
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py:52-69`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py#L52-L69)
+
+[11] `verify_finding`의 출력은 판정 `action`과 재실행 오류 `replay_error`를 담는다.
+
+```python
+class VerifyFindingOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: str = Field(..., description="'approved', 'rejected', or 'downgraded'.")
+    finding_id: str
+    reason: str
+    replay_tool_name: str | None
+    replay_expected_sha256: str | None
+    replay_actual_sha256: str | None
+    replay_matched: bool | None
+    replay_error: str | None
+    replay_artifact: ReplayArtifact | None = Field(
+        default=None,
+        description="Structured replay artifact. Legacy top-level replay_* fields are preserved.",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:81-95`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L81-L95)
+
+[12] `vol_run`과 `plaso_parse`는 시간 제한을 넘으면 오류 변형 `Timeout`을 돌려준다.
+
+```rust
+    #[error(
+        "volatility exceeded its {seconds} s time budget and was killed \
+         (raise $FINDEVIL_VOL_TIMEOUT_SECS for legitimately long plugins)"
+    )]
+    Timeout { seconds: u64 },
+```
+
+[`services/mcp/src/tools/vol_run.rs:174-178`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L174-L178)
+```rust
+    #[error(
+        "{stage} exceeded its {seconds} s time budget and was killed \
+         (raise $FINDEVIL_PLASO_TIMEOUT_SECS for legitimately long parses)"
+    )]
+    Timeout { stage: String, seconds: u64 },
+```
+
+[`services/mcp/src/tools/plaso_parse.rs:130-134`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L130-L134)
+
+[13] `dispatch`는 해석할 수 없는 JSON과 모르는 메서드에 `ERR_INVALID_PARAMS`를 쓴다.
+
+```rust
+    let msg: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(err) => {
+            return Some(make_error_response(
+                &Value::Null,
+                ERR_INVALID_PARAMS,
+                &format!("malformed JSON: {err}"),
+            ));
+        }
+    };
+
+    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    let id = msg.get("id").cloned();
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+
+    // Notifications have no id and expect no response.
+    let is_notification = id.is_none();
+
+    let result = match method {
+        "initialize" => Ok(handle_initialize(&params)),
+        "notifications/initialized" | "initialized" => {
+            // Spec: notifications/initialized is fire-and-forget.
+            return None;
+        }
+        "tools/list" => Ok(handle_tools_list(registry)),
+        "tools/call" => handle_tools_call(&params, registry),
+        "ping" => Ok(json!({})),
+        other => Err(ToolError::InvalidParams(format!(
+            "unknown method: {other:?}"
+        ))),
+```
+
+[`services/mcp/src/server.rs:1433-1462`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1433-L1462)
+
+[14] `disk_mount`는 `mock` 등록, 컨테이너만 연결한 경우, Sleuth Kit 직접 읽기 등록에서 모두 `status`를 `mounted`로 두고 `note`만 다르게 적는다: [`services/mcp/src/tools/disk.rs:255-262`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L255-L262), [`services/mcp/src/tools/disk.rs:576-586`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L576-L586), [`services/mcp/src/tools/disk.rs:597-607`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L607).
+
+[15] `verify_manifest`의 `overall`은 체인, Merkle 루트, 리프 수, 서명 묶음 존재만 요구하고 `stub`과 `sigstore` 서명의 검증 결과를 반영하지 않는다.
+
+```python
+    # `overall` requires the chain, Merkle root, and leaf count to verify and a
+    # signature bundle to be present. A `stub` (dev/offline placeholder) or a
+    # recorded `sigstore` bundle is advisory — it does not gate `overall`, so
+    # dev/offline stub runs still verify end-to-end. But a signature that is
+    # present and was cryptographically checked yet did NOT verify (a forged or
+    # corrupted `ed25519` bundle, or an unknown signer kind) is a hard failure:
+    # `overall` must not stay true for a signature that fails verification.
+    # `signature_verified` remains the separate, field-level crypto signal.
+    advisory_sig_kinds = ("stub", "sigstore")
+    sig_failed = sig_present and sig_kind not in advisory_sig_kinds and sig_verified is not True
+    overall = (
+        audit_status is True
+        and rebuild_status is True
+        and count_status is True
+        and sig_present
+        and not sig_failed
+    )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:468-484`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L468-L484)
+
+[16] `registry_query`는 키가 없으면 `key_present` 거짓의 빈 결과를 돌려준다.
+
+```rust
+    let Some(key) = hive.find(&normalized) else {
+        // An absent key is a valid finding ("no such persistence here"), not an
+        // error. Return an empty result so the agent records "0 entries" rather
+        // than treating it as a tool failure that needs a course-correction.
+        return Ok(RegistryOutput {
+            entries: Vec::new(),
+            keys_visited: 0,
+            parse_errors: 0,
+            key_present: false,
+        });
+    };
+```
+
+[`services/mcp/src/tools/registry_query.rs:193-203`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L193-L203)
+
+[17] `ausearch`는 종료 코드 1과 `<no matches>`를 결과 없음으로 다룬다.
+
+```rust
+/// `ausearch` exits 1 with no error when a search yields zero matches.
+/// Distinguish that benign "no results" case from a real failure so an
+/// empty audit log reads as an empty row set, not a [`AusearchError::SubprocessFailed`].
+const NO_MATCHES_EXIT_CODE: i32 = 1;
+
+fn stderr_signals_no_matches(stderr: &str) -> bool {
+    stderr.contains("<no matches>")
+}
+```
+
+[`services/mcp/src/tools/ausearch.rs:109-116`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ausearch.rs#L109-L116)
+```rust
+    // A zero-match search exits 1 with "<no matches>" on stderr — benign.
+    let is_no_matches =
+        exit_code == NO_MATCHES_EXIT_CODE && stderr_signals_no_matches(&stderr_tail);
+    if !proc.status.success() && !is_no_matches {
+        return Err(AusearchError::SubprocessFailed {
+            exit_code,
+            stderr: stderr_tail,
+        });
+    }
+```
+
+[`services/mcp/src/tools/ausearch.rs:156-164`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ausearch.rs#L156-L164)
+
+[18] `HashsetLoaded`는 집합마다의 실패 사유를 담고 환경변수가 없으면 집합 목록이 빈다.
+
+```rust
+/// One entry per hash set the call attempted to load.
+#[derive(Clone, Debug, Serialize)]
+pub struct HashsetLoaded {
+    /// Set display name (explicit `name`, else the file stem).
+    pub name: String,
+
+    /// Detected kind. Best-effort (extension-based) when the file could
+    /// not be read at all.
+    pub kind: HashsetKind,
+
+    /// The operator-assigned disposition of this set.
+    pub disposition: SetDisposition,
+
+    /// The set file path.
+    pub path: PathBuf,
+
+    /// Why this set could not be (fully) used: unreadable file,
+    /// unsupported `SQLite` schema, or a mid-scan read failure. Matches
+    /// found before the failure are still reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:145-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L145-L166)
+```rust
+fn enumerate_env_sets() -> Vec<ResolvedRef> {
+    let Ok(root) = std::env::var(HASHSET_DIR_ENV) else {
+        return Vec::new();
+    };
+    if root.trim().is_empty() {
+        return Vec::new();
+    }
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:317-323`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L317-L323)
+
+[19] 외부 도구가 없을 때 `pst_parse`, `srum_parse`, `bulk_extract`는 오류 대신 사용할 수 없다는 결과를 만든다: [`services/mcp/src/tools/pst_parse.rs:188-191`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L188-L191), [`services/mcp/src/tools/srum_parse.rs:127-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L127-L136), [`services/mcp/src/tools/srum_parse.rs:288-290`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L288-L290), [`services/mcp/src/tools/bulk_extract.rs:411-425`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L411-L425), [`services/mcp/src/tools/vss.rs:242-259`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L242-L259).
+
+[20] `memory_recall`의 설명은 빈 `hits`가 이전 사건에 일치가 없다는 뜻이라고 적는다.
+
+```python
+SPEC = ToolSpec(
+    name="memory_recall",
+    description=(
+        "Query the cross-case FTS5 memory store for prior-case observations matching a search. "
+        "Use this BEFORE proposing a finding to check whether you've seen this IOC/hash/TTP "
+        "in a previous investigation — reduces re-investigation hallucination on patterns you "
+        "already know. Hermes-pattern (A3 §2.2). "
+        "**Query semantics: exact phrase match.** The query string is phrase-quoted before "
+        "being passed to FTS5 MATCH (so 'evil.com' or 'T1059.001' match safely without "
+        "tripping on the dot). Multi-word queries become exact-phrase searches: pass "
+        "'powershell' alone, NOT 'powershell encoded' (which would only hit rows containing "
+        "that literal two-word phrase). Hits are returned ordered by BM25 relevance * "
+        "90-day exponential decay. The kind argument optionally filters to one of: 'ioc', "
+        "'hash', 'ttp', 'hostname', 'finding_summary'. Empty hits list means no prior cases "
+        "matched — that's a useful signal too."
+    ),
+    input_model=MemoryRecallInput,
+    output_model=MemoryRecallOutput,
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py:95-112`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_recall.py#L95-L112)
+
+[21] `vss_list`는 실행 오류를 모두 `vshadowinfo_available` 거짓으로 싣고 0이 아닌 종료를 저장소 없음으로 다룬다.
+
+```rust
+    let output = match Command::new(vshadowinfo_bin())
+        .arg(&input.image_path)
+        .output()
+    {
+        Ok(out) => out,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(VssListOutput {
+                vshadowinfo_available: false,
+                has_shadow_store: false,
+                store_count: 0,
+                stores: Vec::new(),
+            });
+        }
+        Err(_) => {
+            return Ok(VssListOutput {
+                vshadowinfo_available: false,
+                has_shadow_store: false,
+                store_count: 0,
+                stores: Vec::new(),
+            });
+        }
+    };
+    // vshadowinfo exits non-zero on a volume with no shadow store; that is a
+    // valid "no snapshots" answer, not a tool failure.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let stores = parse_vshadowinfo(&text);
+```
+
+[`services/mcp/src/tools/vss.rs:129-154`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L129-L154)
+
+[22] `exif_parse`는 EXIF 읽기 오류에 빈 결과를 돌려준다.
+
+```rust
+fn parse_bytes(data: &[u8]) -> ExifParseOutput {
+    let reader = exif::Reader::new();
+    let mut cursor = std::io::Cursor::new(data);
+    let Ok(exif) = reader.read_from_container(&mut cursor) else {
+        return ExifParseOutput::empty();
+    };
+```
+
+[`services/mcp/src/tools/exif_parse.rs:155-160`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/exif_parse.rs#L155-L160)
+
+[23] `disk_mount`는 `mmls` 오류를 빈 분할 목록으로 바꾼다.
+
+```rust
+/// Enumerate every filesystem partition in the image for the mount output. Tries
+/// a plain `mmls` first, then `sudo -n mmls` (the EWF device is root-owned),
+/// mirroring the offset helpers. Returns an empty vec for a bare volume image,
+/// when mmls is unavailable, or on any error — enumeration is best-effort and
+/// never fails the mount.
+fn enumerate_partitions(image_paths: &[PathBuf]) -> Vec<MmlsPartition> {
+    let run = |cmd: &mut Command| -> Option<String> {
+        let output = cmd.output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let mut direct = Command::new("mmls");
+    append_image_args(&mut direct, image_paths);
+    let mut sudo = Command::new("sudo");
+    sudo.args(["-n", "mmls"]);
+    append_image_args(&mut sudo, image_paths);
+    let text = run(&mut direct).or_else(|| run(&mut sudo));
+    text.map(|t| parse_mmls_partitions(&t)).unwrap_or_default()
+}
+```
+
+[`services/mcp/src/tools/disk.rs:688-708`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L688-L708)
+
+[24] 외부 도구의 표준 출력이 비면 빈 목록을 돌려준다: [`services/mcp/src/tools/vol_pslist.rs:209-216`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L209-L216), [`services/mcp/src/tools/indx_parse.rs:201-209`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/indx_parse.rs#L201-L209), [`services/mcp/src/tools/hayabusa_scan.rs:353-359`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L353-L359), [`services/mcp/src/tools/nfdump_query.rs:179-185`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/nfdump_query.rs#L179-L185), [`services/mcp/src/tools/journalctl_query.rs:213-219`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/journalctl_query.rs#L213-L219), [`services/mcp/src/tools/vel_collect.rs:258-264`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vel_collect.rs#L258-L264).
+
+[25] `yara_scan`은 파일 검사 실패를 `scan_errors` 수만 늘리고 건너뛴다.
+
+```rust
+        output.files_scanned += 1;
+
+        let Ok(scan_result) = scanner.scan_file(&file) else {
+            output.scan_errors += 1;
+            continue;
+        };
+```
+
+[`services/mcp/src/tools/yara_scan.rs:183-188`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L183-L188)
+
+[26] `disk_extract_artifacts`는 `icat`이 실패하면 꺼낸 파일을 지우고 삭제 항목일 때만 실패 수를 늘린다.
+
+```rust
+    if !icat_status.success() {
+        let _ = fs::remove_file(&dest);
+        if candidate.deleted {
+            stats.deleted_recovery_failed += 1;
+        }
+        return Ok(());
+    }
+```
+
+[`services/mcp/src/tools/disk.rs:1449-1455`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1449-L1455)
+
+[27] `vss_mount`는 `vshadowmount`가 0이 아닌 종료로 끝나면 종료 코드 없이 `unavailable`과 빈 경로 목록을 싣는다.
+
+```rust
+        Ok(_) => Ok(VssMountOutput {
+            // vshadowmount ran but could not mount (e.g. no shadow store): report
+            // unavailable data rather than a hard error so the pipeline pivots.
+            vshadowmount_available: true,
+            mount_id,
+            status: "unavailable".to_string(),
+            mount_point,
+            shadow_store_paths: Vec::new(),
+            command,
+        }),
+```
+
+[`services/mcp/src/tools/vss.rs:242-251`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L242-L251)
+
+[28] `registry_query`는 `parse_errors`를 0으로만 채운다.
+
+```rust
+        return Ok(RegistryOutput {
+            entries: Vec::new(),
+            keys_visited: 0,
+            parse_errors: 0,
+            key_present: false,
+        });
+    };
+
+    let mut output = RegistryOutput {
+        entries: Vec::new(),
+        keys_visited: 0,
+        parse_errors: 0,
+        key_present: true,
+    };
+```
+
+[`services/mcp/src/tools/registry_query.rs:197-210`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/registry_query.rs#L197-L210)
+
+[29] `scan_sources`는 읽지 못한 경로를 `read_errors`에 넣고 상한에 닿으면 남은 경로를 건너뛴다.
+
+```python
+    if text is not None:
+        _absorb(text, "<inline>")
+
+    for path in paths:
+        if truncated:
+            break
+        blob, err = _read_text_file(path)
+        if err is not None:
+            read_errors.append(err)
+        if blob is None:
+            continue
+        _absorb(blob, path)
+```
+
+[`services/agent/findevil_agent/ai_signatures.py:374-385`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/ai_signatures.py#L374-L385)
+
+[30] `judge_findings`는 시간 예산을 넘으면 빈 결과와 `budget_exceeded`를 돌려준다.
+
+```python
+    try:
+        merged = judge_findings(pool_a, pool_b, budget_seconds=inp.budget_seconds)
+    except JudgeBudgetExceeded as exc:
+        return JudgeFindingsOutput(
+            merged=[],
+            budget_exceeded=True,
+            budget_detail=str(exc),
+        )
+
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:174-182`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L174-L182)
+
+[31] `thumbcache_parse`의 `parse_errors`는 일부만 읽은 사실 같은 해석 메모를 담는다.
+
+```rust
+    pub thumbcache_path: PathBuf,
+    /// Detected on-disk format: `olecfb_xp` (XP `Thumbs.db`) or `cmmm`
+    /// (Vista+ `thumbcache_*.db` / `iconcache_*.db`).
+    pub format: String,
+    /// Parsed entries, sorted by (index, cache entry hash) and capped at
+    /// `limit`. Raw image bytes are never included.
+    pub entries: Vec<ThumbcacheEntry>,
+    /// Entries parsed before the `limit` cap (empty/deallocated CMMM slots
+    /// are not counted).
+    pub entries_seen: usize,
+    /// Non-fatal parse notes: truncated tails, bad record magic, missing
+    /// thumbnail streams. Never carries evidence content.
+    pub parse_errors: Vec<String>,
+}
+```
+
+[`services/mcp/src/tools/thumbcache_parse.rs:80-93`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/thumbcache_parse.rs#L80-L93)
+
+[32] `proc_runner`의 `run_with_timeout`을 쓰는 도구는 `vol_run`과 `plaso_parse`이고 다른 외부 도구 실행은 시간 제한 없는 `Command::output()`이다: [`services/mcp/src/tools/vol_run.rs:250-272`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_run.rs#L250-L272), [`services/mcp/src/tools/vol_pslist.rs:139-156`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L139-L156), [`services/mcp/src/tools/suricata_eve.rs:143-153`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/suricata_eve.rs#L143-L153).
+
+[33] `pst_parse`는 폴더 항목 수가 상한에 닿으면 표시 없이 탐색을 멈춘다.
+
+```rust
+            // A single unreadable subdir must not abort the whole walk; the
+            // root itself failing is the only hard error.
+            Err(e) if dir == root => return Err(format!("read_dir {}: {e}", root.display())),
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > MAX_WALK_ENTRIES {
+                return Ok(messages);
+            }
+            let path = entry.path();
+```
+
+[`services/mcp/src/tools/pst_parse.rs:350-360`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L350-L360)

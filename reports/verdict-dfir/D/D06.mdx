@@ -1,0 +1,360 @@
+---
+cell: D06
+details:
+- id: D06.01
+- id: D06.02
+- id: D06.03
+---
+
+# D06 산출물 식별·재생성 처리
+
+### D06.01 실행 ID별 위치
+
+**구현.** 이 방식은 `findevil-mcp`의 `case_open`, `disk_mount`, `disk_extract_artifacts`, `pst_parse`에 적용된다 [1][2][3][4].
+`case_open`은 호출마다 UUIDv4 `case_id`를 새로 짓고 그 이름의 사건 폴더를 만든다 [1].
+같은 증거로 다시 부르면 다른 사건 폴더가 생기고 앞 사건 폴더는 그대로 남는다 [1].
+`disk_mount`는 `disk-mount-<UUID>`, `disk_extract_artifacts`는 `disk-extract-<UUID>`를 호출마다 매기고 그 ID로 `mounts/`와 `extracted/disk/` 아래 폴더를 나눈다 [2][3].
+`pst_parse`는 호출마다 `pst-export-<UUID>` 폴더를 새로 만든다 [4].
+한 추출 안에서 삭제 항목은 `__deleted__/<inode>/` 아래에 두어 이미지 안 경로가 같은 삭제되지 않은 파일과 겹치지 않는다 [3].
+같은 증거로 `case_open`을 두 번, 같은 마운트로 추출을 두 번, 같은 파일로 `pst_parse`를 두 번 부르자 각각 다른 ID의 폴더가 따로 남았다 [5].
+
+**한계.** `disk_mount`와 `vss_mount`에 `mount_point`를 주면 마운트 지점은 ID로 나뉘지 않고 받은 경로를 쓴다 [2][6].
+
+### D06.02 입력·작업별 고유 이름
+
+**구현.** 이 방식은 `findevil-mcp`의 `bulk_extract`에 적용된다 [7].
+출력 폴더 이름은 입력 이미지의 파일 이름을 폴더 이름 한 조각으로 바꾼 값이고 UUID나 시각이 들어가지 않는다 [7][8].
+그래서 파일 이름이 다른 이미지의 결과와는 구별되지만 같은 이미지를 다시 실행한 결과는 구별하지 않는다 [7].
+같은 이름의 출력 폴더가 있으면 알리지 않고 지운 뒤 새로 만든다 [7].
+코드 주석은 같은 이미지의 기록 경로가 실행마다 같도록 UUID를 넣지 않는다고 적는다 [7].
+
+**한계.** 이름에는 이미지의 경로가 아니라 파일 이름만 들어가므로 다른 폴더의 같은 이름 이미지는 같은 출력 폴더를 쓴다 [8].
+다른 폴더의 같은 이름 이미지로 `bulk_extract`를 이어 부르자 첫 호출의 `find_regexes.txt`가 사라졌고 두 응답의 `staged_files`는 같은 경로를 실었다 [9].
+
+### D06.03 버전·이력 보존
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `memory_remember`와 해시 체인 파일에 덧붙이는 `audit_append`·`expert_miss_capture`·`pool_handoff`에 적용된다 [10][11].
+`memory_remember`는 같은 사건·종류·키로 다시 불러도 앞 행을 바꾸지 않고 새 행을 시각과 함께 넣는다 [10].
+`memory_recall`은 같은 키의 행을 모두 각 행의 시각과 함께 돌려준다 [12].
+같은 키로 두 번 부르자 두 값이 모두 남았고 조회 결과에 각 행의 시각이 실렸다 [13].
+해시 체인 파일에 덧붙이는 도구는 파일 끝에 순번 `seq`와 시각 `ts`를 붙인 줄을 더하고 앞 줄을 바꾸지 않는다 [11].
+그래서 같은 `finding_id`의 `finding_approved` 기록을 다시 쓰면 앞 기록 뒤에 새 기록이 붙는다 [11].
+
+`manifest_finalize`는 같은 `output_path`로 다시 부르면 앞 manifest를 알리지 않고 덮어쓴다 [14].
+같은 경로로 두 번 부르자 파일은 하나였고 둘째 호출의 `run_id`가 들어 있었다 [13].
+`anchor_transparency`를 켜면 서명한 manifest를 같은 경로에 한 번 더 쓴다 [14].
+`findevil-mcp`의 `session_resources.json`은 새 마운트와 추출 항목을 더해 다시 쓰고 앞 항목을 남긴다 [15].
+
+**한계.** `memory_remember`와 `audit_append`는 호출 인자 `ts`가 있으면 그 값을 행이나 기록 줄의 시각으로 쓰고 없을 때만 서버가 시각을 정한다 [10][11][16].
+서버는 받은 `ts`의 형식과 앞 행보다 늦은 시각인지를 검사하지 않는다 [10][11][16].
+
+### 근거
+
+[1] `case_open`은 호출마다 새 UUID로 사건 폴더를 만든다.
+
+```rust
+    // 3. Allocate a case_id.
+    let case_id = Uuid::new_v4().to_string();
+
+    // 4. Resolve FINDEVIL_HOME + create case dir.
+    let home = resolve_findevil_home()?;
+    let case_dir = home.join("cases").join(&case_id);
+    fs::create_dir_all(&case_dir).map_err(|source| CaseOpenError::CaseDirCreate {
+        path: case_dir.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/case_open.rs:180-189`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L180-L189)
+
+[2] `disk_mount`는 호출마다 마운트 ID를 짓고 `mount_point`가 없으면 그 ID로 폴더를 정한다.
+
+```rust
+    let mount_id = format!("disk-mount-{}", Uuid::new_v4());
+    let mount_point = input
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| case_dir.join("mounts").join(&mount_id));
+    create_dir(&mount_point)?;
+```
+
+[`services/mcp/src/tools/disk.rs:243-248`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L243-L248)
+
+[3] 추출은 호출마다 추출 ID 폴더를 만들고 삭제 항목은 inode 폴더 아래에 둔다.
+
+```rust
+    let extract_id = format!("disk-extract-{}", Uuid::new_v4());
+    let output_dir = case_dir.join("extracted").join("disk").join(&extract_id);
+    create_dir(&output_dir)?;
+```
+
+[`services/mcp/src/tools/disk.rs:335-337`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L335-L337)
+
+```rust
+    let class_dir = output_dir.join(candidate.class);
+    let base = if candidate.deleted {
+        safe_join(&class_dir.join("__deleted__"), &candidate.inode)
+    } else {
+        class_dir
+    };
+    let dest = safe_join(&base, &candidate.path);
+```
+
+[`services/mcp/src/tools/disk.rs:1421-1427`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1421-L1427)
+
+[4] `pst_parse`는 호출마다 UUID 폴더를 만든다.
+
+```rust
+    // Stage the export UNDER THE CASE DIR — never beside the evidence.
+    let case_dir = case_dir(&input.case_id)?;
+    let staging = case_dir
+        .join("extracted")
+        .join("pst")
+        .join(format!("pst-export-{}", uuid::Uuid::new_v4()));
+```
+
+[`services/mcp/src/tools/pst_parse.rs:193-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L193-L198)
+
+[5] (실행 확인) 시험용 `fls`·`icat`·`pffexport` 실행 파일을 두고 `findevil-mcp`를 MCP 클라이언트로 실행해 같은 입력으로 `case_open`, `disk_extract_artifacts`, `pst_parse`를 두 번씩 부르고 사건 폴더를 나열했다.
+
+[6] `vss_mount`도 `mount_point`가 있으면 그 경로를 쓴다.
+
+```rust
+    let mount_id = format!("vss-mount-{}", Uuid::new_v4());
+    let mount_point = input
+        .mount_point
+        .clone()
+        .unwrap_or_else(|| case.join("mounts").join(&mount_id));
+    std::fs::create_dir_all(&mount_point).map_err(|source| VssError::MountPoint {
+        path: mount_point.clone(),
+        source,
+    })?;
+```
+
+[`services/mcp/src/tools/vss.rs:209-217`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L209-L217)
+
+[7] 이미지 파일 이름으로 정한 출력 폴더가 있으면 지우고 새로 만든다.
+
+```rust
+    // Deterministic, uuid-free staging path so the recorded
+    // (case-relative) path is stable across runs of the same image.
+    let stem = sanitize_stem(&input.image_path);
+    let staging = case_dir.join("extracted").join("bulk_extract").join(&stem);
+    // bulk_extractor refuses a non-empty output dir; re-runs re-derive.
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|source| BulkExtractError::Io {
+            path: staging.clone(),
+            source,
+        })?;
+    }
+    create_dir(&staging)?;
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:309-320`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L309-L320)
+
+[8] 폴더 이름은 이미지 경로의 마지막 조각인 파일 이름에서 만든다.
+
+```rust
+/// A filesystem-safe, deterministic stem for the staging directory.
+///
+/// Derived from the image file name at runtime (never a baked-in
+/// literal). Keeps ASCII alphanumerics, `.`, `-`, `_`; folds everything
+/// else to `_`. Empty input yields `image`.
+#[must_use]
+pub fn sanitize_stem(image: &Path) -> String {
+    let raw = image
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image");
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "image".to_string()
+    } else {
+        cleaned
+    }
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:537-563`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L537-L563)
+
+[9] (실행 확인) 시험용 `bulk_extractor`를 두고 `findevil-mcp`를 MCP 클라이언트로 실행해 서로 다른 폴더에 있는 같은 이름의 이미지 둘로 `bulk_extract`를 이어 부르고 출력 폴더와 응답을 확인했다.
+
+[10] `MemoryStore.remember`는 매번 새 행을 넣고 `meta`만 갱신한다.
+
+```python
+    def remember(
+        self,
+        *,
+        case_id: str,
+        kind: str,
+        key: str,
+        value: str,
+        sha256: str,
+        ts: str | None = None,
+        case_path: str | None = None,
+    ) -> None:
+        now = ts or datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+        self._conn.execute(
+            "INSERT INTO memories(case_id, kind, key, value, sha256, ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (case_id, kind, key, value, sha256, now),
+        )
+        self._conn.execute(
+            "INSERT INTO meta(case_id, case_path, first_seen_ts, last_updated_ts) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(case_id) DO UPDATE SET last_updated_ts=excluded.last_updated_ts, "
+            "case_path=COALESCE(excluded.case_path, meta.case_path)",
+            (case_id, case_path, now, now),
+        )
+        self._conn.commit()
+```
+
+[`services/agent/findevil_agent/memory/store.py:63-86`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L63-L86)
+
+[11] `AuditLog.append`는 다음 순번과 시각을 붙여 파일 끝에 덧붙인다.
+
+```python
+    def append(self, kind: str, payload: dict[str, Any], *, ts: str | None = None) -> AuditRecord:
+        """Append one record. Thread-safe. fsyncs before returning."""
+        with self._lock:
+            record = AuditRecord(
+                seq=self._next_seq,
+                ts=ts or _utc_iso(),
+                kind=kind,
+                prev_hash=self._last_hash,
+                payload=payload,
+            )
+            line = canonicalize_json(record.to_canonical_dict())
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("ab") as f:
+                f.write(line + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            self._last_hash = hash_line(line)
+            self._next_seq += 1
+            return record
+```
+
+[`services/agent/findevil_agent/crypto/audit_log.py:172-190`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/audit_log.py#L172-L190)
+
+[12] `memory_recall`은 일치한 행을 각 행의 `ts`와 함께 돌려준다: [`services/agent/findevil_agent/memory/store.py:88-134`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/memory/store.py#L88-L134).
+
+[13] (실행 확인) `findevil-agent-mcp`를 MCP 클라이언트로 실행해 같은 키로 `memory_remember`를 두 번 부른 뒤 `memory_recall`을 불렀고 같은 `output_path`로 `manifest_finalize`를 두 번 불렀다.
+
+[14] `manifest_finalize`는 받은 경로에 바로 쓰고 투명성 기록을 붙이면 같은 경로에 다시 쓴다.
+
+```python
+    out_path = write_manifest(manifest, Path(inp.output_path))
+
+    # Optional, opt-in transparency anchoring. Absent by default: with
+    # anchor_transparency=False (the default) NOTHING below runs, so the manifest
+    # stays byte-identical and no network is touched. When requested, the env
+    # opt-in must also be set (fail-closed), then the anchor is attached AFTER
+    # signing and the manifest is RE-WRITTEN — the anchor is excluded from the
+    # already-computed signed body, so the re-write does NOT invalidate the
+    # signature.
+    transparency_anchored = False
+    transparency_kind: str | None = None
+    if inp.anchor_transparency:
+        require_rekor_enabled()  # fail-closed when the network action lacks the opt-in
+        block = anchor_merkle_root(manifest.merkle_root_hex)
+        if block is not None:
+            manifest = replace(manifest, transparency_log=block)
+            out_path = write_manifest(manifest, Path(inp.output_path))
+            transparency_kind = str(block.get("kind") or "none")
+            transparency_anchored = bool(block.get("anchored"))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:180-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L180-L198)
+
+```python
+def write_manifest(manifest: RunManifest, path: Path) -> Path:
+    """Write the manifest to ``path`` as canonical pretty JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_to_json_safe(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:264-271`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L264-L271)
+
+[15] 기록 파일은 읽은 목록에 항목을 더해 다시 쓴다.
+
+```rust
+    let now = now_iso();
+    ledger.resources.push(SessionResource {
+        id: extract_id.clone(),
+        resource_type: "disk_extract_artifacts".to_string(),
+        status: "extracted".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+        image_path: Some(image_path),
+        mount_point: mount.mount_point,
+        fs_root: mount.fs_root,
+        parent_id: Some(input.mount_id.clone()),
+        output_dir: Some(output_dir.clone()),
+        artifacts: artifacts.clone(),
+        command: vec!["fls".to_string(), "icat".to_string()],
+        note: "extracted disk artifacts directly from the image via The Sleuth Kit".to_string(),
+    });
+    write_ledger(&ledger_path, &ledger)?;
+```
+
+[`services/mcp/src/tools/disk.rs:396-412`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L396-L412)
+
+```rust
+fn read_ledger(path: &Path) -> Result<SessionLedger, DiskError> {
+    if !path.exists() {
+        return Ok(SessionLedger::default());
+    }
+    let text = fs::read_to_string(path).map_err(|source| DiskError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str(&text).map_err(DiskError::Serialize)
+}
+
+fn write_ledger(path: &Path, ledger: &SessionLedger) -> Result<(), DiskError> {
+    let text = serde_json::to_string_pretty(ledger)?;
+    fs::write(path, text).map_err(|source| DiskError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn upsert_resource(path: &Path, resource: SessionResource) -> Result<(), DiskError> {
+    let mut ledger = read_ledger(path)?;
+    ledger.resources.retain(|r| r.id != resource.id);
+    ledger.resources.push(resource);
+    write_ledger(path, &ledger)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:1738-1762`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1738-L1762)
+
+[16] 두 도구는 `ts`를 형식 검사 없는 선택 인자로 받는다.
+
+```python
+    ts: str | None = Field(default=None, description="UTC ISO-8601Z; defaults to now().")
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:29-29`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L29-L29)
+
+```python
+    ts: str | None = Field(
+        default=None,
+        description="Optional UTC ISO-8601Z timestamp; defaults to now().",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:36-39`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L36-L39)

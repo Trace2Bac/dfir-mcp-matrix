@@ -1,0 +1,257 @@
+---
+cell: P02
+details:
+- id: P02.02
+- id: P02.04
+---
+
+# P02 다음 작업 결정
+
+### P02.02 규칙·조사 상태로 추천
+
+**구현.** 이 방식은 `findevil-mcp`의 `srum_parse`·`pst_parse`가 사건 폴더를 찾지 못했을 때의 오류 응답과 `findevil-agent-mcp`의 `correlate_findings` 응답에 적용된다 [1][2][3].
+두 도구는 받은 `case_id`의 사건 폴더가 `FINDEVIL_HOME/cases` 아래에 없으면 `case_open`을 먼저 부르라는 문구를 오류에 싣는다 [1][2].
+서버는 이 오류를 JSON-RPC 오류 코드 `-32602`로 돌려준다 [4].
+등록하지 않은 사건 ID로 `srum_parse`를 부르자 `(run case_open first)`가 붙은 오류가 돌아왔다 [5].
+이 안내는 오류 문자열이고 서버가 다음 호출을 대신 고르거나 안내를 따르지 않은 호출을 막지는 않는다.
+`correlate_findings`는 검사 규칙을 채우지 못해 등급을 낮춘 발견사항마다 가장 가까운 조합을 채우려면 더할 아티팩트 분류를 `missing_classes`에 싣는다 [3][6].
+이 값은 더할 자료의 분류이고 부를 도구는 정하지 않는다 [3].
+
+같은 사건 폴더 확인을 하는 `disk_mount`·`disk_extract_artifacts`·`disk_unmount`·`bulk_extract`·`vss_mount`는 사건을 찾지 못했다는 사실만 알리고 다음 작업을 적지 않는다 [7][8].
+두 서버 모두 MCP 리소스, 프롬프트, 초기화 지침을 두지 않는다.
+도구 설명의 "Use AFTER case_open", "FIRST tool to call" 같은 순서 문구는 도구 하나의 설명에 적힌 안내다 [9].
+`findevil-mcp`의 분석 도구는 결과에 따라 다음에 부를 도구를 응답에 싣지 않는다 [10].
+`findevil-agent-mcp`의 `detect_contradictions`는 다른 흔적이 뒷받침하지 않는 발견사항을 빠진 대상(`missing`) 문구와 함께 단서로 싣지만 부를 도구나 작업은 정하지 않는다 [11].
+
+조사 절차와 도구 차례는 사용자 CLI `scripts/find_evil_auto.py`가 정한다 [12].
+이 CLI는 LLM 없이 증거 유형을 판별하고 `investigate_inventory`에 정한 증거 종류 차례대로 두 서버의 도구를 MCP 클라이언트로 부른다 [13].
+CLI의 머리 설명은 유형별 playbook 도구 차례를 실행한다고 적는다 [12].
+`findevil_agent/playbook.py`의 유형별 도구 차례 `TOOL_SEQUENCES`는 이 CLI도 두 서버도 불러 쓰지 않는다 [14][15][16].
+`investigate_inventory`의 차례는 사용자 CLI 코드에 있으므로 다른 MCP 클라이언트로 붙으면 적용되지 않는다 [13].
+
+### P02.04 서버 코드에 고정한 분석 절차
+
+**구현.** 이 방식은 `findevil-mcp`의 `disk_mount` 자동 모드와 `disk_extract_artifacts`에 적용된다 [17][18][19].
+`disk_mount`는 EWF 이미지이면 `ewfmount`로 연 뒤 시작 위치 0과 `mmls`로 고른 파티션 위치 차례로 `ntfs3` 읽기 전용 loop 마운트를 시도한다 [17].
+`disk_mount`는 raw 이미지이면 `ro,loop` 마운트가 실패할 때 `mmls`로 고른 파티션 위치를 붙여 다시 마운트한다 [18].
+`disk_extract_artifacts`는 `mmls`로 파티션 위치를 정하고 `fls`로 파일 목록을 읽어 종류를 나눈 뒤 종류마다 돌아가며 고른 파일을 `icat`으로 꺼내고 건너뛴 수와 함께 돌려준다 [19].
+모델은 이미지 경로, 마운트 위치, 꺼낼 종류, 개수 상한, 크기 상한, 삭제 항목 복구 여부만 고르고 단계와 그 차례는 서버 코드가 정한다 [17][19].
+
+### 근거
+
+[1] `srum_parse`의 사건 폴더 오류 문구다.
+
+```rust
+    #[error("case {0} not found under FINDEVIL_HOME/cases (run case_open first)")]
+    CaseNotFound(String),
+```
+
+[`services/mcp/src/tools/srum_parse.rs:165-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L165-L166)
+
+[2] `pst_parse`의 사건 폴더 오류 문구다.
+
+```rust
+    #[error("case dir not found for case_id {0:?} (call case_open first)")]
+    CaseNotFound(String),
+```
+
+[`services/mcp/src/tools/pst_parse.rs:149-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L149-L150)
+
+[3] `correlate_findings`는 발견사항마다 더하면 검사를 채우는 아티팩트 분류를 `missing_classes`에 싣는다.
+
+```python
+    missing_classes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Artifact classes that, if added, would satisfy the closest pair. "
+            "Empty when the gate held (or no gate fired)."
+        ),
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:54-60`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L54-L60)
+
+[`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:76-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L76-L94)
+
+[4] 두 오류는 `InvalidParams`로 바뀌어 `-32602`로 돌아간다.
+
+```rust
+fn dispatch_srum_parse(args: Value) -> Result<Value, ToolError> {
+    let input: SrumParseInput = parse_args(args)?;
+    match srum_parse(&input) {
+        Ok(output) => {
+            serde_json::to_value(output).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(
+            e @ (crate::tools::SrumError::NotFound(_)
+            | crate::tools::SrumError::NotRegular(_)
+            | crate::tools::SrumError::CaseNotFound(_)),
+        ) => Err(ToolError::InvalidParams(format!("{e}"))),
+        Err(e) => Err(ToolError::Internal(format!("srum_parse: {e}"))),
+    }
+}
+```
+
+[`services/mcp/src/server.rs:1992-2005`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1992-L2005)
+
+```rust
+fn dispatch_pst_parse(args: Value) -> Result<Value, ToolError> {
+    let input: PstParseInput = parse_args(args)?;
+    match pst_parse(&input) {
+        Ok(output) => {
+            serde_json::to_value(output).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(
+            e @ (crate::tools::PstError::NotFound(_)
+            | crate::tools::PstError::NotRegular(_)
+            | crate::tools::PstError::CaseNotFound(_)),
+        ) => Err(ToolError::InvalidParams(format!("{e}"))),
+        Err(e) => Err(ToolError::Internal(format!("pst_parse: {e}"))),
+    }
+}
+```
+
+[`services/mcp/src/server.rs:2007-2020`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L2007-L2020)
+
+[5] (실행 확인) 등록하지 않은 사건 ID `no-such-case`로 `srum_parse`를 부르자 `case no-such-case not found under FINDEVIL_HOME/cases (run case_open first)` 오류가 돌아왔다.
+
+[6] 검사를 채우는 조합이 없으면 빠진 분류가 가장 적은 조합의 빠진 분류를 돌려준다.
+
+```python
+def _evaluate(
+    present: frozenset[str], alternatives: tuple[_Alternative, ...]
+) -> tuple[bool, tuple[str, ...]]:
+    """Return (satisfied, missing_classes).
+
+    A gate holds when ANY alternative has every slot satisfied. When none holds,
+    ``missing_classes`` describes the unsatisfied slots of the CLOSEST (fewest
+    missing) alternative — deterministic: ties break toward the earlier-listed
+    alternative.
+    """
+    best_missing: list[_Slot] | None = None
+    for alt in alternatives:
+        missing = [slot for slot in alt if not any(c in present for c in slot)]
+        if not missing:
+            return True, ()
+        if best_missing is None or len(missing) < len(best_missing):
+            best_missing = missing
+    return False, tuple("|".join(slot) for slot in (best_missing or ()))
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:444-461`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L444-L461)
+
+[7] 디스크 도구의 사건 폴더 오류는 사건을 찾지 못했다는 문구만 싣는다.
+
+```rust
+pub enum DiskError {
+    #[error("case not found: {0}")]
+    CaseNotFound(String),
+```
+
+[`services/mcp/src/tools/disk.rs:212-214`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L212-L214)
+
+[8] (실행 확인) 등록하지 않은 사건 ID로 `disk_mount`를 부르자 `case not found: no-such-case` 오류가 돌아왔다.
+
+[9] `case_open`의 도구 설명은 조사의 첫 도구라고 적는다.
+
+```rust
+        ToolEntry {
+            name: "case_open",
+            description:
+                "FIRST tool to call when starting an investigation. Registers an evidence image \
+                 (.e01, .raw, .dd, .mem) by computing its SHA-256, issuing a UUID4 case_id, and \
+                 creating the case directory at $FINDEVIL_HOME/cases/<id>/. Idempotent per image \
+                 hash — calling twice on the same file yields a new case_id but does not mutate \
+                 evidence. Use the returned case_id in every subsequent tool call. \
+                 ERRORS: ImageNotFound (check the path), ImageNotRegular (path is a directory; \
+                 pass the file directly), ImageHashMismatch (only if expected_sha256 supplied — \
+                 implies tampering or wrong file).",
+```
+
+[`services/mcp/src/server.rs:228-238`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L228-L238)
+
+[10] `findevil-mcp`의 도구 등록 목록이다: [`services/mcp/src/server.rs:226-1420`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L226-L1420).
+
+[11] `detect_antiforensics`는 단서마다 빠진 대상을 문구로 적는다.
+
+```python
+    def _add(pattern: AntiForensicsPattern, anchor: Finding, reason: str, missing: str) -> None:
+        key = (pattern.value, anchor.finding_id)
+        if key in seen:
+            return
+        seen.add(key)
+        leads.append(
+            AntiForensicsLead(
+                pattern=pattern, anchor_finding=anchor, reason=reason, missing=missing
+            )
+        )
+
+```
+
+[`services/agent/findevil_agent/contradiction.py:451-461`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/contradiction.py#L451-L461)
+
+[12] 사용자 CLI의 머리 설명은 증거 유형 판별, 유형별 도구 차례, 발견사항 합성을 CLI가 한다고 적는다.
+
+```python
+"""find-evil-auto — single-command automated investigation orchestrator.
+
+Usage:
+    python scripts/find_evil_auto.py <evidence_path> [--unattended] [--no-report] [--run-summary <path>]
+
+What it does:
+    1. Detects evidence type (memory image, EVTX, disk image,
+       Velociraptor zip, or mixed evidence directory)
+    2. Spawns findevil-mcp + findevil-agent-mcp inside the SIFT VM via SSH stdio
+    3. case_open against the evidence (real SHA-256, audit log starts here)
+    4. Runs the per-type playbook tool sequence
+    5. Synthesizes Pool A vs Pool B Findings deterministically from tool outputs
+       (Pool A = persistence-biased framing; Pool B = exfil/general-malware framing)
+    6. detect_contradictions surfaces disagreements
+    7. judge_findings + correlate_findings (SOUL.md ≥2 rule)
+    8. manifest_finalize: Merkle tree + signed manifest
+    9. Writes verdict.json + (optional) PDF report (the report
+       surfaces the findings, ATT&CK coverage, and audit chain).
+
+This is the headless investigation engine behind `scripts/verdict` — point
+```
+
+[`scripts/find_evil_auto.py:2-21`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L2-L21)
+
+[13] 사용자 CLI는 `investigate_inventory`에서 증거 종류마다 조사 함수를 정한 차례로 부른다: [`scripts/find_evil_auto.py:14526-14628`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L14526-L14628).
+
+[14] `TOOL_SEQUENCES`는 증거 유형마다 도구 차례를 둔다.
+
+```python
+# TOOL_SEQUENCES — canonical per-evidence-type investigation order
+# ---------------------------------------------------------------------------
+
+TOOL_SEQUENCES: dict[str, list[PlaybookStep]] = {
+    "disk": [
+        PlaybookStep("disk_mount", "Mount the disk image via libewf", pool="both"),
+        PlaybookStep("disk_extract_artifacts", "Extract filesystem artifacts", pool="both"),
+```
+
+[`services/agent/findevil_agent/playbook.py:74-80`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/playbook.py#L74-L80)
+
+[15] 사용자 CLI는 `findevil_agent.playbook`에서 확장자 목록과 판별 함수만 불러온다.
+
+```python
+try:
+    from findevil_agent.playbook import (
+        MEMORY_EXTS as _PLAYBOOK_MEMORY_EXTS,
+        RAW_DISK_EXTS as _PLAYBOOK_RAW_DISK_EXTS,
+        REGISTRY_HIVE_NAMES as _PLAYBOOK_REGISTRY_HIVE_NAMES,
+        classify_artifact_path as _playbook_classify,
+        detect_evidence_type as _playbook_detect,
+    )
+```
+
+[`scripts/find_evil_auto.py:55-62`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/find_evil_auto.py#L55-L62)
+
+[16] (실행 확인) `findevil-agent-mcp`의 `build_server`를 부른 프로세스에서 불러온 `findevil_agent` 모듈 목록에 `findevil_agent.playbook`이 없었다.
+
+[17] `disk_mount` 자동 모드는 EWF 이미지를 `ewfmount`로 연 뒤 NTFS 볼륨을 시작 위치 0과 고른 파티션 위치 차례로 마운트한다: [`services/mcp/src/tools/disk.rs:489-587`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L489-L587), [`services/mcp/src/tools/disk.rs:634-671`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L634-L671).
+
+[18] raw 이미지의 loop 마운트가 실패하면 고른 파티션의 시작 위치로 다시 마운트한다: [`services/mcp/src/tools/disk.rs:710-809`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L710-L809).
+
+[19] `disk_extract_artifacts`는 파티션 위치, 파일 목록, 종류 분류, 선택, 꺼내기, 수 합산을 차례로 한다: [`services/mcp/src/tools/disk.rs:306-429`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L306-L429).

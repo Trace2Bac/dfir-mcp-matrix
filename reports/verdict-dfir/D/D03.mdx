@@ -1,0 +1,581 @@
+---
+cell: D03
+details:
+- id: D03.01
+- id: D03.03
+---
+
+# D03 파생물 무결성 검증
+
+### D03.01 기준값 자동 계산
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `manifest_finalize`가 쓰는 manifest와 그 leaf인 발견사항 기록, `expert_miss_capture`의 수정 기록, `findevil-mcp`의 `bulk_extract`가 남기는 특징 파일에 적용된다 [1][2][3][4].
+`manifest_finalize`는 서명 블록과 `transparency_log`를 뺀 manifest 본문을 정규화한 바이트에 서명하고 서명 묶음과 그 바이트의 SHA-256 `payload_sha256`을 manifest의 `signature`에 넣는다 [1].
+`signer`의 기본값 `ed25519`는 `FINDEVIL_SIGNING_KEY`나 `~/.findevil/signing.key`의 로컬 키로 서명하고 키 파일이 없으면 새로 만든다 [5].
+`signer`에 `sigstore`를 주면 Fulcio·Rekor 서명을 먼저 시도한다 [6].
+`finding_approved` 기록마다 그 기록 줄의 SHA-256을 leaf로 계산해 leaf 목록과 Merkle root를 manifest에 넣는다 [2].
+`tool_call_output` leaf는 호출한 쪽이 기록에 넣은 응답 해시 `output_hash`다 [2].
+`expert_miss_capture`는 줄마다 앞 줄의 SHA-256을 `prev_hash`로 넣어 쓰고 쓴 줄의 해시를 응답의 `line_hash`로 돌려준다 [3].
+모델이 해시 도구를 부르지 않아도 서버가 계산한다.
+manifest의 기준값은 manifest 파일 안과 `manifest_finalize` 응답에 남는다 [1][7].
+`bulk_extract`는 특징 파일(`.txt`)마다 내용 전체의 SHA-256을 계산해 응답의 `staged_files`에 싣는다 [4].
+이 해시는 응답에만 있고 서버가 파일로 남기지 않으며 `report.xml`과 `find_regexes.txt`는 해시하지 않는다 [4].
+에이전트 서버로 manifest를 만들자 `signer_effective`가 `ed25519`였고 시험용 `bulk_extractor`로 `bulk_extract`를 부르자 응답에 특징 파일 둘의 SHA-256이 실렸다 [8].
+
+`disk_extract_artifacts`가 꺼낸 파일과 `pst_parse`의 내보내기 폴더, `case.json`, `session_resources.json`에는 기준값이 없다 [9].
+`memory_remember`의 `sha256`은 호출 인자로 받은 값이고 서버가 계산하지 않는다 [10].
+
+**한계.** 서명 키를 읽거나 만들지 못하면 `stub` 서명으로 바꾸고 이유를 `fallback_reason`에 적은 뒤 manifest를 쓴다 [6].
+`stub` 서명은 본문 SHA-256과 `run_id`로 만든 값이고 키를 쓰지 않는다 [11].
+키 경로를 쓸 수 없는 곳으로 두고 `manifest_finalize`를 부르자 `signer_effective`가 `stub`이고 `fallback_reason`에 실패 이유가 실린 manifest가 생겼다 [8].
+`signer`에 `stub`을 주면 `FINDEVIL_ALLOW_STUB_SIGNER`가 켜져 있을 때만 그대로 쓰고 아니면 `ed25519`로 바꾼다 [12].
+`anchor_transparency`로 붙이는 `transparency_log`는 서명 뒤에 manifest를 다시 써서 넣으므로 서명 대상이 아니다 [7][1].
+
+### D03.03 도구를 요청해 검증
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `manifest_verify`가 manifest를 검증할 때 적용된다 [13].
+`manifest_verify`는 manifest의 `leaves`로 Merkle root를 다시 계산해 `merkle_root_hex`와 대조한다 [14].
+호출 기록 파일을 다시 읽어 체인을 확인하고 기록 수, 마지막 줄 해시, leaf 목록을 다시 만들어 manifest에 적힌 값과 대조한다 [15].
+대조할 호출 기록 파일은 인자 `audit_log_path`, manifest와 같은 폴더의 같은 이름 파일, manifest에 적힌 경로 순서로 고른다 [15].
+`ed25519` 서명이면 manifest에서 서명 블록과 `transparency_log`를 뺀 본문을 정규화해 서명 묶음 안의 공개 키로 서명을 검증한다 [16].
+결과는 항목마다 참·거짓과 이유를 담고 체인, Merkle root, leaf 수, 서명 유무를 묶은 `overall`을 함께 돌려준다 [17][13].
+`ed25519` manifest의 `extra`를 고친 뒤 부르자 `signature_verified`와 `overall`이 거짓이었다 [8].
+봉인 뒤 호출 기록에 한 줄을 더하고 부르자 기록 수가 다르다는 이유로 `audit_chain_ok`가 거짓이었다 [8].
+`audit_verify`는 받은 경로의 해시 체인을 다시 계산하므로 `expert_misses.jsonl`의 체인도 이 도구로 검증한다 [18].
+검증 결과는 그 도구의 응답에만 실리고 서버는 다른 도구 호출에서 이 결과를 쓰지 않는다.
+
+`bulk_extract` 특징 파일의 해시를 대조하는 도구는 없다 [4].
+`verify_finding`은 인용한 호출을 다시 실행해 새 응답의 해시를 호출한 쪽이 준 `output_sha256`과 대조하고 보관한 파생물의 기준값은 쓰지 않는다 [19].
+
+**한계.** `ed25519` 서명은 manifest의 서명 묶음에 들어간 공개 키로만 검증하고 정해 둔 키와 대조하지 않는다 [16].
+다시 쓴 호출 기록을 다른 키로 봉인한 manifest는 `manifest_verify`에서 `signature_verified`와 `overall`이 참이었다 [20].
+`stub`과 `sigstore` 서명은 검증하지 않고 `signature_verified`에 이유만 적으며 `overall`은 이 두 서명이 있는지만 본다 [17][21].
+서명 종류는 manifest에 적힌 `signature.kind` 값으로 정하고 이 값은 서명 대상 밖이다 [22][16].
+`ed25519`로 봉인한 manifest의 본문과 서명 종류 값을 함께 고치자 `overall`이 참이었다 [23].
+`stub` manifest의 `case_id`를 고친 뒤 부르자 체인과 Merkle root는 맞아 `overall`이 참이었다 [8].
+키를 쓰지 못해 `stub`으로 서명된 manifest도 `overall`이 참이었다 [8].
+README는 `manifest_verify`가 전체 체인을 오프라인으로 확인한다고 적는다 [24].
+
+### 근거
+
+[1] 서명 블록과 `transparency_log`를 뺀 본문을 정규화해 서명하고 서명 블록에 해시를 넣는다.
+
+```python
+    # Sign the canonicalized body sans signature.
+    body_bytes = canonicalize_json(_to_json_safe(body, exclude_signature=True))
+    bundle: SignedBundle = signer.sign(body_bytes)
+
+    # Re-construct with signature populated.
+    signed_body = RunManifest(
+        version=body.version,
+        case_id=body.case_id,
+        run_id=body.run_id,
+        started_at=body.started_at,
+        finalized_at=body.finalized_at,
+        audit_log_path=body.audit_log_path,
+        audit_log_final_hash=body.audit_log_final_hash,
+        audit_log_record_count=body.audit_log_record_count,
+        merkle_root_hex=body.merkle_root_hex,
+        leaf_count=body.leaf_count,
+        leaves=body.leaves,
+        signature={
+            "payload_sha256": bundle.payload_sha256,
+            "bundle_b64": bundle.bundle_b64,
+            "cert_fingerprint": bundle.cert_fingerprint,
+            "signed_at": bundle.signed_at,
+            "kind": bundle.kind,
+            # Only present when a sigstore attempt honestly degraded to stub.
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:229-252`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L229-L252)
+
+```python
+def _to_json_safe(manifest: RunManifest, *, exclude_signature: bool = False) -> dict[str, Any]:
+    """Convert the dataclass to a JSON-safe dict.
+
+    Used both for canonicalizing-then-signing (with
+    ``exclude_signature=True``) and for the on-disk write (with
+    the signature included).
+    """
+    out: dict[str, Any] = asdict(manifest)
+    if exclude_signature:
+        out.pop("signature", None)
+        # The transparency anchor is attached AFTER signing, so it must never be
+        # part of the signed bytes — strip it on the sign/verify path exactly
+        # like ``signature``. The on-disk write (exclude_signature=False) keeps
+        # both, so a re-write that adds the anchor does not invalidate the
+        # already-computed signature.
+        out.pop("transparency_log", None)
+    return out
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:584-600`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L584-L600)
+
+[2] `finding_approved` 기록은 기록 줄의 해시를, `tool_call_output` 기록은 `output_hash`를 leaf로 쓴다.
+
+```python
+        # Identify Merkle-eligible records.
+        if record.kind == "tool_call_output":
+            digest = _payload_digest(record.payload, "output_hash") or _record_digest(
+                canonical_line
+            )
+            leaves.append(
+                ManifestLeaf(
+                    seq=record.seq,
+                    kind="tool_call_output",
+                    digest_hex=digest,
+                    record_id=str(record.payload.get("tool_call_id", "")),
+                )
+            )
+        elif record.kind == "finding_approved":
+            digest = _record_digest(canonical_line)
+            leaves.append(
+                ManifestLeaf(
+                    seq=record.seq,
+                    kind="finding",
+                    digest_hex=digest,
+                    record_id=str(record.payload.get("finding_id", "")),
+                )
+            )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:151-173`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L151-L173)
+
+[3] `expert_miss_capture`는 `AuditLog`로 한 줄을 덧붙이고 줄 해시를 돌려준다.
+
+```python
+async def _handle(inp: BaseModel) -> ExpertMissCaptureOutput:
+    assert isinstance(inp, ExpertMissCaptureInput)
+    payload = {
+        "case_id": inp.case_id,
+        "finding_id": inp.finding_id,
+        "edit_type": inp.edit_type,
+        "edit_text": inp.edit_text,
+        "expert_name": inp.expert_name,
+    }
+    log = AuditLog(Path(inp.ledger_path))
+    record = log.append("expert_miss", payload)
+    github_issue_url = _maybe_create_github_issue(inp)
+    return ExpertMissCaptureOutput(
+        seq=record.seq,
+        ts=record.ts,
+        line_hash=log.last_hash,
+        prev_hash=record.prev_hash,
+        github_issue_url=github_issue_url,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:98-116`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L98-L116)
+
+[4] `bulk_extract`는 `.txt` 출력 파일마다 SHA-256을 계산해 `staged_files`에 넣는다.
+
+```rust
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            entries.insert(name.to_string(), path);
+        }
+    }
+
+    for (name, path) in entries {
+        let bytes = std::fs::read(&path).map_err(|source| BulkExtractError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let sha256 = sha256_hex(&bytes);
+        let text = String::from_utf8_lossy(&bytes);
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:637-652`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L637-L652)
+
+```rust
+        let rel = path.strip_prefix(case_dir).unwrap_or(&path).to_path_buf();
+        staged.push(StagedFeatureFile {
+            feature_type,
+            path: rel,
+            sha256,
+            line_count,
+        });
+    }
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:671-678`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L671-L678)
+
+[5] Ed25519 서명기는 지정한 경로나 `~/.findevil/signing.key`의 키를 읽고 없으면 만든다.
+
+```python
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            from cryptography.hazmat.primitives.serialization import (
+                Encoding,
+                NoEncryption,
+                PrivateFormat,
+                load_pem_private_key,
+            )
+
+            if self._key_path.exists():
+                self._private_key = load_pem_private_key(self._key_path.read_bytes(), password=None)
+            else:
+                key = Ed25519PrivateKey.generate()
+                self._key_path.parent.mkdir(parents=True, exist_ok=True)
+                os.chmod(self._key_path.parent, 0o700)
+                pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+                # Write owner-only: create with 0o600 before the bytes land.
+                fd = os.open(self._key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(pem)
+                self._private_key = key
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:207-226`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L207-L226)
+
+```python
+
+def _default_key_path() -> Any:
+    from pathlib import Path
+
+    env = os.environ.get("FINDEVIL_SIGNING_KEY")
+    if env:
+        return Path(env)
+    return Path.home() / ".findevil" / "signing.key"
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:256-263`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L256-L263)
+
+[6] 서명기는 앞 서명기가 실패하면 다음 서명기로 바꾸고 이유를 남긴다.
+
+```python
+    requested, coerce_reason = _resolve_signer_request(inp.signer)
+    if requested == "stub":
+        signer: Signer = StubSigner(run_id=inp.run_id)
+    elif requested == "ed25519":
+        signer = FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id))
+    else:  # sigstore
+        signer = FallbackSigner(
+            make_signer(kind="sigstore"),
+            FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id)),
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:161-170`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L161-L170)
+
+```python
+    def sign(self, payload: bytes) -> SignedBundle:
+        try:
+            return self._primary.sign(payload)
+        except Exception as exc:  # degrade on ANY primary-signer failure
+            bundle = self._fallback.sign(payload)
+            reason = f"primary signer failed, degraded to {bundle.kind}: {exc}"
+            if bundle.fallback_reason:  # nested fallback — keep the inner story
+                reason = f"{reason} (after: {bundle.fallback_reason})"
+            return replace(bundle, fallback_reason=reason)
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:279-287`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L279-L287)
+
+[7] `manifest_finalize`는 manifest를 쓰고 `anchor_transparency`가 참이면 투명성 기록을 붙여 다시 쓴다.
+
+```python
+    out_path = write_manifest(manifest, Path(inp.output_path))
+
+    # Optional, opt-in transparency anchoring. Absent by default: with
+    # anchor_transparency=False (the default) NOTHING below runs, so the manifest
+    # stays byte-identical and no network is touched. When requested, the env
+    # opt-in must also be set (fail-closed), then the anchor is attached AFTER
+    # signing and the manifest is RE-WRITTEN — the anchor is excluded from the
+    # already-computed signed body, so the re-write does NOT invalidate the
+    # signature.
+    transparency_anchored = False
+    transparency_kind: str | None = None
+    if inp.anchor_transparency:
+        require_rekor_enabled()  # fail-closed when the network action lacks the opt-in
+        block = anchor_merkle_root(manifest.merkle_root_hex)
+        if block is not None:
+            manifest = replace(manifest, transparency_log=block)
+            out_path = write_manifest(manifest, Path(inp.output_path))
+            transparency_kind = str(block.get("kind") or "none")
+            transparency_anchored = bool(block.get("anchored"))
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:180-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L180-L198)
+
+[8] (실행 확인) `findevil-agent-mcp`를 MCP 클라이언트로 실행해 `ed25519`·`stub` manifest와 키 경로를 쓸 수 없게 둔 manifest를 만들고 manifest나 호출 기록을 고친 뒤 `manifest_verify`를 불렀다.
+`findevil-mcp`에서는 시험용 `bulk_extractor`로 `bulk_extract`를 부르고 응답의 `staged_files`를 읽었다.
+
+[9] 추출 항목과 `case.json`에는 크기와 경로만 있고 파생물 자체의 해시 필드가 없다: [`services/mcp/src/tools/disk.rs:138-149`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L138-L149), [`services/mcp/src/tools/disk.rs:189-204`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L189-L204), [`services/mcp/src/tools/case_open.rs:221-231`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/case_open.rs#L221-L231), [`services/mcp/src/tools/pst_parse.rs:244-245`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L244-L245).
+
+[10] `memory_remember`는 `sha256` 인자의 형식만 검사한다.
+
+```python
+    sha256: str = Field(
+        ...,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+        description="Lowercase hex SHA-256 with 'sha256:' prefix, e.g. 'sha256:ab12...'.",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py:24-28`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/memory_remember.py#L24-L28)
+
+[11] `stub` 서명은 본문 해시와 `run_id`로 만든다.
+
+```python
+    def sign(self, payload: bytes) -> SignedBundle:
+        with self._lock:
+            self._counter += 1
+            seq = self._counter
+        digest = hashlib.sha256(payload).hexdigest()
+        # Deterministic stub: cert_fingerprint derived from run_id +
+        # seq so two stub runs produce distinguishable but
+        # reproducible "fingerprints".
+        cert_fp = hashlib.sha256(f"stub:{self._run_id}:{seq}".encode("ascii")).hexdigest()
+        bundle_obj: dict[str, Any] = {
+            "kind": "stub",
+            "run_id": self._run_id,
+            "seq": seq,
+            "payload_sha256": digest,
+            "cert_fingerprint": cert_fp,
+            "note": "StubSigner output — NOT a real Sigstore signature.",
+        }
+        bundle_json = json.dumps(bundle_obj, sort_keys=True, separators=(",", ":"))
+        return SignedBundle(
+            payload_sha256=digest,
+            bundle_b64=base64.b64encode(bundle_json.encode("utf-8")).decode("ascii"),
+            cert_fingerprint=cert_fp,
+            signed_at=_utc_iso(),
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:151-173`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L151-L173)
+
+[12] `stub` 요청은 환경변수가 켜져 있을 때만 그대로 쓴다.
+
+```python
+_STUB_ALLOW_ENV = "FINDEVIL_ALLOW_STUB_SIGNER"
+
+
+def _stub_signer_allowed() -> bool:
+    return os.environ.get(_STUB_ALLOW_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _resolve_signer_request(requested: str) -> tuple[str, str | None]:
+    """Return (effective_request, coerce_reason).
+
+    Coerces ``stub`` → ``ed25519`` unless :envvar:`FINDEVIL_ALLOW_STUB_SIGNER`
+    is set. Does not alter sigstore/ed25519 requests.
+    """
+    if requested != "stub":
+        return requested, None
+    if _stub_signer_allowed():
+        return "stub", None
+    return (
+        "ed25519",
+        "stub coerced to ed25519 "
+        f"(set {_STUB_ALLOW_ENV}=1 for the test-only stub placeholder)",
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:39-65`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L39-L65)
+
+[13] `manifest_verify`는 `verify_manifest` 결과를 항목별로 돌려준다.
+
+```python
+async def _handle(inp: BaseModel) -> ManifestVerifyOutput:
+    assert isinstance(inp, ManifestVerifyInput)
+    audit_path = Path(inp.audit_log_path) if inp.audit_log_path else None
+    result = verify_manifest(Path(inp.manifest_path), audit_log_path=audit_path)
+
+    def _split(value: bool | str) -> tuple[bool, str | None]:
+        if value is True:
+            return True, None
+        if value is False:
+            return False, None
+        return False, str(value)
+
+    audit_ok, audit_detail = _split(result.audit_chain_ok)
+    merkle_ok, merkle_detail = _split(result.merkle_root_ok)
+    count_ok, count_detail = _split(result.leaf_count_ok)
+    sig_verified, sig_verified_detail = _split(result.signature_verified)
+    entail_ok, entail_detail = _split(result.entailment_ok)
+    transparency_ok, transparency_detail = _split(result.transparency_ok)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py:72-89`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py#L72-L89)
+
+[14] leaf로 Merkle root를 다시 계산해 대조한다.
+
+```python
+    # 2. Merkle root.
+    declared_root = obj.get("merkle_root_hex", "")
+    leaves = obj.get("leaves", [])
+    tree = MerkleTree()
+    rebuild_status: bool | str = True
+    try:
+        for leaf in leaves:
+            digest_hex = leaf.get("digest_hex", "")
+            tree.append(bytes.fromhex(digest_hex))
+        rebuilt = tree.root_hex()
+        if rebuilt != declared_root:
+            rebuild_status = f"declared root {declared_root} != rebuilt {rebuilt}"
+    except (MerkleError, ValueError) as exc:
+        rebuild_status = f"merkle rebuild failed: {exc}"
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:418-431`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L418-L431)
+
+[15] 호출 기록 파일을 골라 체인을 확인하고 다시 만든 값과 manifest 값을 대조한다.
+
+```python
+    # 1. Audit chain. Precedence: explicit override → the audit log sitting
+    # next to the manifest (a copied case dir verifies on any machine; the
+    # chain itself proves it is the right file) → the embedded absolute path.
+    embedded = Path(obj.get("audit_log_path") or "")
+    sibling = manifest_path.parent / (embedded.name or "audit.jsonl")
+    log_path = audit_log_path or (sibling if sibling.is_file() else embedded)
+    audit_status: bool | str = "audit_log_path missing"
+    if log_path and log_path.is_file():
+        try:
+            AuditLog(log_path).verify()
+            audit_status = True
+        except AuditLogError as exc:
+            audit_status = f"audit chain break: {exc}"
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:372-384`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L372-L384)
+
+```python
+    if audit_status is True:
+        derived, replayed_count, replayed_final = _walk_audit_log(AuditLog(log_path))
+        declared_count = obj.get("audit_log_record_count")
+        declared_final = str(obj.get("audit_log_final_hash") or "")
+        declared_leaves = [
+            (
+                int(leaf.get("seq", -1)),
+                str(leaf.get("kind", "")),
+                str(leaf.get("digest_hex", "")),
+                str(leaf.get("record_id", "")),
+            )
+            for leaf in obj.get("leaves", [])
+        ]
+        derived_leaves = [
+            (leaf.seq, leaf.kind, leaf.digest_hex, leaf.record_id) for leaf in derived
+        ]
+        if replayed_count != declared_count:
+            audit_status = (
+                f"audit log has {replayed_count} record(s) but the manifest "
+                f"declares {declared_count} (tail truncation or post-seal append)"
+            )
+        elif replayed_final != declared_final:
+            audit_status = "audit log final hash does not match the manifest's audit_log_final_hash"
+        elif derived_leaves != declared_leaves:
+            audit_status = (
+                "leaves re-derived from the audit log do not match the manifest's declared leaves"
+            )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:390-416`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L390-L416)
+
+[16] Ed25519 서명은 본문을 다시 만들어 공개 키로 검증한다.
+
+```python
+    import base64
+
+    try:
+        bundle = json.loads(base64.b64decode(str(sig.get("bundle_b64") or "")))
+        public_key_b64 = bundle["public_key_b64"]
+        signature_b64 = bundle["signature_b64"]
+    except (KeyError, ValueError, TypeError) as exc:
+        return f"ed25519 bundle malformed: {exc}"
+    # Mirror the sign path: the signed body excludes BOTH ``signature`` and the
+    # after-signing ``transparency_log`` anchor, so exclude both when rebuilding
+    # the bytes to verify. (See ``_to_json_safe(exclude_signature=True)``.)
+    body = {k: v for k, v in manifest_obj.items() if k not in ("signature", "transparency_log")}
+    body_bytes = canonicalize_json(body)
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
+        pub.verify(base64.b64decode(signature_b64), body_bytes)
+    except InvalidSignature:
+        return "ed25519 signature verification FAILED: manifest body does not match the signature"
+    except Exception as exc:  # key decode / import errors — honest reason, never a crash
+        return f"ed25519 signature verification failed: {exc}"
+    return True
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:538-561`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L538-L561)
+
+[17] `overall`은 체인, Merkle root, leaf 수, 서명 유무와 검증된 서명의 실패 여부로 정한다.
+
+```python
+    advisory_sig_kinds = ("stub", "sigstore")
+    sig_failed = sig_present and sig_kind not in advisory_sig_kinds and sig_verified is not True
+    overall = (
+        audit_status is True
+        and rebuild_status is True
+        and count_status is True
+        and sig_present
+        and not sig_failed
+    )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:476-484`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L476-L484)
+
+[18] `audit_verify`는 받은 경로의 체인을 다시 계산한다.
+
+```python
+async def _handle(inp: BaseModel) -> AuditVerifyOutput:
+    assert isinstance(inp, AuditVerifyInput)
+    log = AuditLog(Path(inp.path))
+    try:
+        count = log.verify()
+    except AuditLogError as exc:
+        return AuditVerifyOutput(ok=False, record_count=0, error=str(exc))
+    return AuditVerifyOutput(ok=True, record_count=count, error=None)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py:35-42`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_verify.py#L35-L42)
+
+[19] 재실행 결과의 해시를 호출 기록 색인의 `output_sha256`과 대조한다: [`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:49-56`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L49-L56), [`services/agent/findevil_agent/replay.py:184-192`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L184-L192), [`services/agent/findevil_agent/replay.py:70-96`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L70-L96).
+
+[20] (실행 확인) 호출 기록을 고쳐 체인을 다시 쓴 사본을 다른 서명 키로 `manifest_finalize`하고 `manifest_verify`를 불렀다.
+
+[21] `stub`과 `sigstore` 서명은 이유 문자열만 돌려준다.
+
+```python
+    if not present:
+        return "no signature bundle present"
+    if kind == "stub":
+        return "stub signature: deterministic dev/offline placeholder, not cryptographic proof"
+    if kind == "ed25519":
+        return _verify_ed25519_signature(sig or {}, manifest_obj or {})
+    if kind == "sigstore":
+        return (
+            "sigstore bundle present and recorded; offline cryptographic verification "
+            "requires the verifier to supply the expected signer identity (deployment policy)"
+        )
+    return f"unknown signer kind {kind!r}"
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:515-526`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L515-L526)
+
+[22] `manifest_verify`는 서명 종류를 manifest의 `signature` 블록에서 읽는다.
+
+```python
+    # 4. Signature presence + honest verification status.
+    sig = obj.get("signature") or {}
+    sig_present = bool(sig.get("bundle_b64") and sig.get("payload_sha256"))
+    sig_kind = str(sig.get("kind") or "stub")
+    sig_verified = _signature_verified(sig_present, sig_kind, sig, obj)
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:440-444`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L440-L444)
+
+[23] (실행 확인) `ed25519`로 봉인한 manifest의 본문과 서명 종류 값을 고치고 `manifest_verify`를 불렀다.
+
+[24] README의 오프라인 검증 설명이다: [`README.md:74`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/README.md#L74).

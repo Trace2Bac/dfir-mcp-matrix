@@ -1,0 +1,742 @@
+---
+cell: F05
+details:
+- id: F05.01
+- id: F05.02
+- id: F05.03
+- id: F05.04
+---
+
+# F05 발견사항·결론 근거 검증
+
+### F05.01 근거 참조 존재 확인
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `manifest_finalize`와 `verify_finding`에 적용된다 [1][2].
+`manifest_finalize`는 서명하기 전에 `audit.jsonl`을 처음부터 읽어 `finding_approved` 기록마다 `tool_call_id`가 그보다 앞선 `tool_call_output` 기록에 있는지 대조한다 [3].
+`tool_call_id`가 비었거나 앞선 출력 기록에 없는 발견사항이 하나라도 있으면 `UncitedFindingError`로 manifest를 만들지 않는다 [4][1].
+`verify_finding`은 발견사항의 `tool_call_id`가 비었거나 호출자가 넘긴 `tool_call_index`에 없으면 다시 실행하지 않고 `rejected`를 돌려준다 [5][6].
+CONFIRMED·INFERRED 발견사항은 `Finding` schema가 빈 `tool_call_id`를 거부하고 `verify_finding`은 이 거부를 `rejected`로 바꿔 돌려준다 [7][2].
+인용한 호출이 없는 `finding_approved` 기록과 출력 기록보다 앞에 놓인 `finding_approved` 기록은 manifest 봉인이 거부되었다 [8].
+인용한 출력 기록이 앞에 있는 기록은 봉인되었다 [8].
+목록에 없는 `tool_call_id`를 인용한 발견사항은 `verify_finding`이 `rejected`로 돌려줬다 [8].
+
+**한계.** `tool_call_output` 기록도 호출자가 `audit_append`로 아무 `tool_call_id`와 해시로 남길 수 있다 [9].
+`manifest_finalize`는 그 호출이 `findevil-mcp`에서 실제로 있었는지 대조하지 않는다 [3].
+지어낸 `tool_call_id`로 출력 기록을 먼저 남기고 그 ID를 인용한 `finding_approved` 기록은 봉인되었다 [8].
+`verify_finding`의 `tool_call_index`는 호출자가 넘긴 값이고 서버는 이 목록을 `audit.jsonl`과 대조하지 않는다 [2][6].
+INFERRED 발견사항이 기대는 사실의 ID `derived_from`은 어느 경로에서도 대조하지 않는다 [3][6].
+기록에 없는 ID를 `derived_from`에 적은 INFERRED 발견사항도 `verify_finding`에서 `approved`로 나왔다 [8].
+`FIND_EVIL_REQUIRE_TOOL_CALL_ID`를 `0`으로 두면 `Finding` schema의 빈 `tool_call_id` 검사가 꺼진다 [7].
+
+### F05.02 근거 내용 대조
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `verify_finding`에 적용된다 [2].
+`verify_finding`은 호출마다 호출자가 준 명령 `findevil_mcp_command`로 `findevil-mcp`를 새로 실행하고 `tool_call_index`에서 찾은 도구와 인자로 인용한 호출을 다시 실행한다 [2][10].
+다시 실행한 도구는 증거를 다시 읽는다 [10].
+서버 안의 MCP 클라이언트는 받은 응답 글의 SHA-256을 계산해 기록된 `output_sha256`과 대조한다 [11][12].
+해시가 같으면 발견사항의 `asserted_values`마다 경로로 출력 JSON의 값을 찾아 `exact`, `contains`, `iso_ts`, `int`, `record` 방식으로 기대값과 대조한다 [13][14].
+
+- 해시나 IP 주소처럼 식별값인 기대값이 출력에 없으면 등급과 관계없이 `rejected`다 [13][15].
+- 그 밖의 기대값이 없으면 CONFIRMED는 `rejected`, `downgrade_on_drift`를 참으로 주거나 아래 등급이면 `downgraded`다 [13].
+- `count`로 주장한 수보다 맞는 값이 적으면 `downgraded`다 [13].
+- 해시가 다르면 CONFIRMED는 `rejected`, `downgrade_on_drift`를 참으로 주거나 아래 등급이면 `downgraded`다 [16].
+- 다시 실행하다 오류가 나면 `rejected`다 [17].
+
+`approved`의 사유에는 출력에서 다시 읽은 값을 적고 `replay_artifact`에 그 값을 싣는다 [13].
+`FIND_EVIL_REQUIRE_EXPECTATION`을 `1`로 두면 발견사항이 적은 예측 `expectation`이 출력의 값과 어긋날 때도 같은 처분을 한다 [18].
+`FIND_EVIL_REQUIRE_ARTIFACT_REBIND`를 `1`로 두면 발견사항의 `artifact_path`가 인용한 호출의 `*_path` 인자와 다를 때 다시 실행하기 전에 `rejected`를 돌려준다 [19].
+`judge_findings`는 받은 검증 결과가 `rejected`인 발견사항을 빼고 `downgraded`인 발견사항의 등급을 한 단계 낮춘다 [20].
+`hashset_lookup` 호출을 인용한 시험 발견사항에서 맞는 해시와 판정 값은 `approved`, 틀린 해시는 `rejected`, 틀린 판정 값은 CONFIRMED에서 `rejected`와 INFERRED에서 `downgraded`가 나왔다 [8].
+기록 해시를 다르게 준 CONFIRMED 발견사항은 `rejected`, `downgrade_on_drift`를 함께 주자 `downgraded`가 나왔다 [8].
+
+**한계.** `tool_call_index`의 도구, 인자, 기대 해시와 실행할 명령 `findevil_mcp_command`는 모두 호출자가 넘긴다 [2].
+서버는 이 값을 `audit.jsonl`에서 읽지 않으므로 기대 해시가 호출 기록과 같은지는 호출자에 달려 있다 [2][6].
+서버는 `findevil_mcp_command`가 가리키는 프로그램을 검사하지 않고 그 프로그램의 응답 글을 다시 실행한 출력으로 대조한다 [2][21].
+HYPOTHESIS 발견사항은 `asserted_values` 없이 해시만 대조한다 [7][13].
+INFERRED 발견사항도 `derived_from`만 있으면 `asserted_values` 없이 해시만 대조한다 [7][13].
+`FIND_EVIL_REQUIRE_ASSERTED_VALUES`를 `0`으로 두면 CONFIRMED도 `asserted_values` 없이 받는다 [7].
+`asserted_values`는 발견사항을 낸 쪽이 고르고 설명 글 `description`은 대조하지 않는다 [13][14].
+`contains` 방식에 빈 기대값을 주면 경로에 값이 하나만 있어도 맞는 것으로 본다 [22].
+빈 기대값을 `contains`로 적은 CONFIRMED 발견사항은 `approved`로 나왔다 [8].
+`verify_finding`은 처분을 응답으로만 돌려주고 `judge_findings`는 호출자가 넘긴 검증 결과를 다시 확인하지 않는다 [2][20].
+
+### F05.03 출처 수·범주로 등급 산정
+
+**구현.** 이 방식은 `findevil-agent-mcp`의 `correlate_findings`에 적용된다 [23].
+`correlate_findings`는 발견사항의 설명 글에서 Prefetch, Amcache, ShimCache, UserAssist, EDR, 네트워크, 프로세스, 로그온, 레지스트리 같은 아티팩트 분류를 정규식으로 찾는다 [24].
+실행 주장은 Prefetch와 Amcache·ShimCache·UserAssist 가운데 하나, 또는 EDR 기록이 있어야 등급을 유지한다 [25].
+전술 검사는 기법마다 정한 분류 조합 가운데 하나를 채워야 등급을 유지한다 [26].
+채우지 못하면 등급을 한 단계 낮추고 빠진 분류를 `missing_classes`에 싣는다 [27].
+그다음 등급 상한 표를 적용해 Logon Type 3·10 기록이 없는 횡적 이동 주장과 덤프 흔적 없이 LSASS 접근만 적은 주장을 INFERRED를 넘지 않게 낮춘다 [28].
+`FIND_EVIL_REQUIRE_TEMPORAL_COUPLING`을 `1`로 두면 실행 시각을 등록 시각류 출처로만 적었거나 실행 시각 출처끼리 300초 넘게 어긋나는 주장도 한 단계 낮춘다 [29][30].
+시험 입력에서 Amcache만 적은 CONFIRMED 실행 주장과 Logon Type 없는 횡적 이동 주장은 INFERRED로, Prefetch와 Amcache를 함께 적은 실행 주장은 CONFIRMED로 나왔다 [31].
+등록 시각만 적은 주장과 실행 시각 출처가 두 시간 어긋난 주장은 이 환경변수를 켜자 INFERRED로 나왔다 [32].
+
+**한계.** 분류는 설명 글의 낱말로 정하고 인용한 호출의 도구나 출력은 보지 않는다 [24][25].
+그래서 Prefetch와 Amcache라는 낱말을 적은 주장은 그 두 아티팩트를 조회한 호출이 없어도 등급을 유지한다 [25].
+따옴표 안 낱말은 `FIND_EVIL_NEUTRALIZE_QUOTED_CLASSES`를 `1`로 두어야 분류에서 빠진다 [33].
+기본값에서는 증거에서 옮겨 적은 따옴표 안 글도 분류를 찾는 데 쓴다 [33].
+따옴표 안에만 Prefetch와 Amcache를 적은 실행 주장은 기본값에서 CONFIRMED를 유지했고 이 환경변수를 켜자 INFERRED로 나왔다 [32].
+실행 주장도 전술 검사 대상도 아닌 발견사항은 분류를 보지 않고 그대로 둔다 [23][31].
+`correlate_findings`는 낮춘 등급을 응답으로만 돌려주고 그 등급을 쓸지는 호출자가 정한다 [23].
+
+### F05.04 교차 확인·반론 검토
+
+**구현.** 이 방식은 환경변수를 켰을 때 `findevil-agent-mcp`의 `verify_finding`, `correlate_findings`를 포함해 `Finding` schema로 발견사항을 받는 도구에 적용된다 [7][2][34].
+`FIND_EVIL_REQUIRE_COUNTER_HYPOTHESIS_FINDING`을 `1`로 두면 배제한 다른 설명 `counter_hypothesis`가 빈 CONFIRMED 발견사항을 `Finding` schema가 거부한다 [7].
+같은 상태에서 `verify_finding`은 이 필드가 빈 CONFIRMED 발견사항을 schema 검사에서 거부하고 다시 실행하지 않은 채 `rejected`로 돌려준다 [2][7].
+`correlate_findings`는 이 필드가 빈 INFERRED·HYPOTHESIS 실행 주장을 다른 분류 검사보다 먼저 한 단계 낮춘다 [34].
+이 필드가 빈 CONFIRMED 발견사항이 하나라도 들어가면 `correlate_findings`, `judge_findings`, `detect_contradictions`는 schema 검사에서 처리를 멈추고 `error` 응답 글을 돌려준다 [7][35].
+환경변수를 켜자 `counter_hypothesis`가 빈 CONFIRMED 발견사항은 `verify_finding`에서 schema 거부 사유와 함께 `rejected`로 나왔고 같은 조건의 INFERRED 실행 주장은 `correlate_findings`에서 한 단계 낮춰졌다 [36].
+
+**한계.** 이 환경변수는 기본값에서 꺼져 있다 [7].
+서버는 `counter_hypothesis`가 비었는지만 보고 그 내용이 근거와 맞는지는 대조하지 않는다 [7][34].
+
+### 근거
+
+[1] `manifest_finalize`의 도구 설명은 인용 없는 발견사항이 있으면 봉인을 거부한다고 적는다.
+```python
+SPEC = ToolSpec(
+    name="manifest_finalize",
+    description=(
+        "TERMINAL crypto-custody step (M2). Call this AFTER every finding is verified, "
+        "every contradiction is resolved, and the audit chain is settled — once the "
+        "manifest is written, no further tool calls should append to the audit log for "
+        "this run. Builds run.manifest.json by: (1) iterating the audit log, (2) "
+        "extracting tool_call_output digests + finding digests as Merkle leaves, (3) "
+        "computing the SHA-256 root, (4) signing the canonicalized body. "
+        "signer='ed25519' (default) is a REAL local-keypair signature that verifies "
+        "offline; signer='sigstore' for production identity + transparency log "
+        "(keyless Fulcio/Rekor — requires $SIGSTORE_ID_TOKEN); signer='stub' is an "
+        "explicit dev placeholder. This is the terminal step — once the manifest is signed "
+        "the run is closed. REFUSES to seal a run containing any finding_approved "
+        "record without a tool_call_id recorded earlier in the audit chain — the "
+        "'every Finding cites a tool_call_id' invariant is enforced here in code, "
+        "not just by prompts. "
+        "On error: most common cause is the audit_log_path doesn't exist or has been "
+        "tampered with — run audit_verify first to confirm the chain is clean."
+    ),
+    input_model=ManifestFinalizeInput,
+    output_model=ManifestFinalizeOutput,
+    handler=_handle,
+)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:225-248`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L225-L248)
+
+[2] `verify_finding`의 입력과 처리다.
+```python
+    tool_call_index: dict[str, dict[str, Any]] = Field(
+        ...,
+        description=(
+            "Map tool_call_id -> {tool_name, arguments, output_sha256} "
+            "from the audit log. The verifier looks up the cited "
+            "tool_call_id here, then re-runs that exact call."
+        ),
+    )
+    findevil_mcp_command: list[str] = Field(
+        ...,
+        description=(
+            "Argv to launch findevil-mcp (the Rust DFIR tool server). "
+            "Example: ['cargo', 'run', '--release', '-p', 'findevil-mcp', "
+            "'--quiet']."
+        ),
+        min_length=1,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:49-65`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L49-L65)
+```python
+    try:
+        finding = Finding.model_validate(inp.finding)
+    except ValidationError as exc:
+        finding_id = ""
+        if isinstance(inp.finding, dict):
+            finding_id = str(inp.finding.get("finding_id") or "")
+        return VerifyFindingOutput(
+            action="rejected",
+            finding_id=finding_id,
+            reason=f"schema rejected before replay: {exc.errors()[0].get('msg', str(exc))}",
+            replay_tool_name=None,
+            replay_expected_sha256=None,
+            replay_actual_sha256=None,
+            replay_matched=None,
+            replay_error=None,
+        )
+    client = _make_mcp_client(list(inp.findevil_mcp_command))
+    try:
+        action, replay = reverify_finding(
+            finding,
+            mcp=client,
+            tool_call_index=inp.tool_call_index,
+            force_fresh=inp.force_fresh_replay,
+            downgrade_on_drift=inp.downgrade_on_drift,
+        )
+    finally:
+        client.close()
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py:122-148`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/verify_finding.py#L122-L148)
+
+[3] 앞선 출력 기록에 없는 인용을 찾는 함수다.
+```python
+def _uncited_findings(audit_log: AuditLog) -> list[str]:
+    """finding_approved records whose tool_call_id is absent from the chain
+    so far. Chain order matters: a finding cannot cite a future tool call."""
+    seen_tool_calls: set[str] = set()
+    uncited: list[str] = []
+    for record in audit_log.iter_records():
+        if record.kind == "tool_call_output":
+            tcid = str(record.payload.get("tool_call_id") or "")
+            if tcid:
+                seen_tool_calls.add(tcid)
+        elif record.kind == "finding_approved":
+            cited = str(record.payload.get("tool_call_id") or "")
+            if not cited or cited not in seen_tool_calls:
+                uncited.append(str(record.payload.get("finding_id") or f"seq-{record.seq}"))
+    return uncited
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:117-131`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L117-L131)
+
+[4] 인용 없는 발견사항이 있으면 manifest를 만들지 않는다.
+```python
+    uncited = _uncited_findings(audit_log)
+    if uncited:
+        raise UncitedFindingError(
+            "refusing to seal: finding(s) without a tool_call_id recorded "
+            f"earlier in the audit chain: {', '.join(uncited[:5])}"
+        )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:198-203`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L198-L203)
+
+[5] `tool_call_id`가 비었을 때의 처분이다.
+```python
+    if not finding.tool_call_id:
+        reason = "missing tool_call_id (Spec #2 invariant)"
+        artifact = missing_replay_artifact(
+            tool_call_id=None, drift_class="missing_citation", reason=reason
+        )
+        return (
+            VerifierAction(
+                case_id=finding.case_id,
+                action="rejected",
+                finding_id=finding.finding_id,
+                reason=reason,
+            ),
+            CallReplay(artifact),
+        )
+```
+
+[`services/agent/findevil_agent/verifier.py:117-130`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L117-L130)
+
+[6] `tool_call_index`에 없을 때의 처분이다.
+```python
+    record = tool_call_index.get(finding.tool_call_id)
+    if record is None:
+        reason = f"tool_call_id {finding.tool_call_id!r} not found in audit log"
+        artifact = missing_replay_artifact(
+            tool_call_id=finding.tool_call_id,
+            drift_class="missing_audit_record",
+            reason=reason,
+        )
+        return (
+            VerifierAction(
+                case_id=finding.case_id,
+                action="rejected",
+                finding_id=finding.finding_id,
+                reason=reason,
+            ),
+            CallReplay(artifact),
+        )
+```
+
+[`services/agent/findevil_agent/verifier.py:132-148`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L132-L148)
+
+[7] `Finding` schema의 검사 세 가지다: [`services/agent/findevil_agent/events.py:207-297`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/events.py#L207-L297).
+
+[8] (실행 확인) `findevil-mcp`의 `hashset_lookup`을 실행하고 그 출력 해시를 `audit_append`로 남긴 뒤, 이 호출을 인용한 시험 발견사항으로 `verify_finding`과 `manifest_finalize`를 불렀다.
+
+[9] `audit_append`는 받은 종류와 내용을 그대로 기록에 더한다.
+```python
+async def _handle(inp: BaseModel) -> AuditAppendOutput:
+    args = inp  # already validated AuditAppendInput
+    assert isinstance(args, AuditAppendInput)
+    log = AuditLog(Path(args.path))
+    record = log.append(args.kind, args.payload, ts=args.ts)
+    return AuditAppendOutput(
+        seq=record.seq,
+        ts=record.ts,
+        kind=record.kind,
+        prev_hash=record.prev_hash,
+        line_hash=log.last_hash,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/audit_append.py:52-63`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/audit_append.py#L52-L63)
+
+[10] 기록된 도구와 인자로 다시 실행한다.
+```python
+    tool_name = str(record.get("tool_name", ""))
+    arguments = rewrite_arguments_for_replay(dict(record.get("arguments") or {}), env=env)
+    expected = str(record.get("output_sha256", ""))
+    try:
+        result = (
+            replay_pool.replay(tool_name, arguments, force_fresh=force_fresh)
+            if replay_pool is not None
+            else mcp.call_tool(tool_name, arguments)
+        )
+```
+
+[`services/agent/findevil_agent/replay.py:184-192`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L184-L192)
+
+[11] 클라이언트는 응답 글의 SHA-256을 직접 계산한다.
+```python
+        result = response.get("result") or {}
+        content = result.get("content") or []
+        text = ""
+        if content and isinstance(content[0], dict):
+            text = str(content[0].get("text", ""))
+        meta = result.get("_meta") or {}
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+```
+
+[`services/agent/findevil_agent/mcp_client.py:277-283`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/mcp_client.py#L277-L283)
+
+[12] 기대 해시와 다시 실행한 해시를 대조해 결과를 나눈다.
+```python
+def classify_drift(
+    *, expected_sha256: str | None, actual_sha256: str | None, error: str | None = None
+) -> tuple[DriftClass, str]:
+    """Classify replay outcome without severity escalation.
+
+    Track 3b's policy changes intentionally do not live here; this only labels
+    determinism state for the existing approve/downgrade/reject behavior.
+    """
+
+    if error:
+        return "replay_error", error
+    if expected_sha256 and actual_sha256 and expected_sha256 == actual_sha256:
+        return "exact_match", "replay output_sha256 matches audit log"
+    return "material_drift", "replay output_sha256 differs from audit log"
+```
+
+[`services/agent/findevil_agent/replay.py:70-83`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L70-L83)
+
+[13] 해시가 같을 때 `asserted_values`를 대조하고 처분을 정한다: [`services/agent/findevil_agent/verifier.py:235-342`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L235-L342).
+
+[14] 경로로 값을 찾아 대조하는 함수다: [`services/agent/findevil_agent/entailment.py:150-206`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/entailment.py#L150-L206), [`services/agent/findevil_agent/entailment.py:332-381`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/entailment.py#L332-L381).
+
+[15] 해시와 IP 주소를 식별값으로 본다.
+```python
+def is_identity_anchor(av: AssertedValue) -> bool:
+    """True if the asserted value is a forgery-resistant IDENTITY anchor — a
+    cryptographic hash or an IP address. These are the hard anchors with no
+    legitimate near-miss reading, so a non-entailment must reject the finding
+    outright (the verifier's cross-tier gate), unlike a filename/byte-size miss
+    which stays on the existing per-tier downgrade contract."""
+    if av.match in ("iso_ts", "record", "int"):
+        return False
+    token = av.expected.strip()
+    return bool(_HASH.match(token) or _IPV4.match(token) or _is_ipv6(token))
+```
+
+[`services/agent/findevil_agent/entailment.py:125-134`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/entailment.py#L125-L134)
+
+[16] 해시가 다를 때의 처분이다.
+```python
+    if finding.confidence == "CONFIRMED" and not downgrade_on_drift:
+        return (
+            VerifierAction(
+                case_id=finding.case_id,
+                action="rejected",
+                finding_id=finding.finding_id,
+                reason=(
+                    f"tool re-run output_sha256 drift on a CONFIRMED finding "
+                    f"(expected={expected[:12]}…, got={(artifact.actual_sha256 or '')[:12]}…) "
+                    "— fresh replay required"
+                ),
+            ),
+            replay,
+        )
+    return (
+        VerifierAction(
+            case_id=finding.case_id,
+            action="downgraded",
+            finding_id=finding.finding_id,
+            reason=(
+                f"tool re-run output_sha256 drift "
+                f"(expected={expected[:12]}…, got={(artifact.actual_sha256 or '')[:12]}…)"
+            ),
+        ),
+        replay,
+    )
+```
+
+[`services/agent/findevil_agent/verifier.py:348-373`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L348-L373)
+
+[17] 다시 실행 중 오류가 나면 거부한다.
+```python
+    if artifact.drift_class == "replay_error":
+        return (
+            VerifierAction(
+                case_id=finding.case_id,
+                action="rejected",
+                finding_id=finding.finding_id,
+                reason=replay.error or "tool re-run failed",
+            ),
+            replay,
+        )
+```
+
+[`services/agent/findevil_agent/verifier.py:224-233`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L224-L233)
+
+[18] 예측 `expectation` 대조는 환경변수로 켠다.
+```python
+        # Falsifiable expectation (opt-in, FIND_EVIL_REQUIRE_EXPECTATION=1,
+        # default-off so default verdicts never change). The finding committed to
+        # a refutable PREDICTION; if the cited output reaches that path and holds
+        # a CONTRADICTING value, the prediction is refuted and the finding is
+        # demoted like a misread — CONFIRMED rejected (re-dispatchable once),
+        # lower tiers downgraded. Path-absent / consistent = not refuted.
+        if (
+            finding.expectation is not None
+            and os.environ.get("FIND_EVIL_REQUIRE_EXPECTATION") == "1"
+        ):
+            prediction = check_expectation(finding.expectation, artifact.parsed_output or {})
+            if not prediction.passed:
+                refuted_action = (
+                    "rejected"
+                    if finding.confidence == "CONFIRMED" and not downgrade_on_drift
+                    else "downgraded"
+                )
+                return (
+                    VerifierAction(
+                        case_id=finding.case_id,
+                        action=refuted_action,
+                        finding_id=finding.finding_id,
+                        reason=f"expectation refuted: {prediction.reason}",
+                    ),
+                    replay,
+                )
+```
+
+[`services/agent/findevil_agent/verifier.py:308-333`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L308-L333)
+
+[19] `artifact_path` 대조는 환경변수로 켠다.
+```python
+    # Preflight gate 1 — EVIDENCE RE-BINDING (opt-in,
+    # FIND_EVIL_REQUIRE_ARTIFACT_REBIND=1). The model PROPOSES
+    # ``finding.artifact_path``; the server RE-DERIVES the artifact from the
+    # cited call's recorded ``*_path`` argument(s) and rejects a finding that
+    # glues a real ``tool_call_id`` to an artifact the cited call never read.
+    # Runs BEFORE replay so a fabricated artifact is caught without spending a
+    # re-run. No ``*_path`` argument => nothing to bind against => not gated.
+    if os.environ.get("FIND_EVIL_REQUIRE_ARTIFACT_REBIND") == "1":
+        call_paths = _path_arguments(arguments)
+        if call_paths and not _artifact_matches_call(finding.artifact_path, call_paths):
+            reason = (
+                f"artifact re-bind mismatch: finding claims artifact "
+                f"{finding.artifact_path!r} but cited tool_call_id "
+                f"{finding.tool_call_id!r} read {call_paths!r}"
+            )
+            return (
+                VerifierAction(
+                    case_id=finding.case_id,
+                    action="rejected",
+                    finding_id=finding.finding_id,
+                    reason=reason,
+                ),
+                CallReplay(
+                    missing_replay_artifact(
+                        tool_call_id=finding.tool_call_id,
+                        drift_class="artifact_rebind_mismatch",
+                        reason=reason,
+                    )
+                ),
+            )
+```
+
+[`services/agent/findevil_agent/verifier.py:153-182`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L153-L182)
+
+[20] `judge_findings`는 받은 검증 결과로 발견사항을 빼거나 낮춘다.
+```python
+def _apply_verifier_actions(
+    findings: list[dict[str, Any]], actions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    action_by_finding = {str(action.get("finding_id")): action for action in actions}
+    verified: list[dict[str, Any]] = []
+    for finding in findings:
+        finding_id = str(finding.get("finding_id") or "")
+        action = action_by_finding[finding_id]
+        if action.get("action") == "rejected":
+            continue
+        next_finding = dict(finding)
+        if action.get("action") == "downgraded":
+            next_finding["confidence"] = DOWNGRADED_CONFIDENCE.get(
+                str(next_finding.get("confidence")),
+                next_finding.get("confidence"),
+            )
+        verified.append(next_finding)
+    return verified
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:105-122`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L105-L122)
+
+[21] 서버 안의 MCP 클라이언트는 받은 명령을 그대로 하위 프로세스로 실행한다.
+
+```python
+    def _ensure_started(self) -> None:
+        if self._proc is not None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                self._command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self._cwd) if self._cwd else None,
+                env=self._env,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,  # line-buffered
+            )
+```
+
+[`services/agent/findevil_agent/mcp_client.py:143-157`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/mcp_client.py#L143-L157)
+
+[22] 빈 기대값은 어느 값에나 맞는다.
+```python
+    needle = needle.strip().lower()
+    if not needle:
+        return True
+```
+
+[`services/agent/findevil_agent/entailment.py:401-403`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/entailment.py#L401-L403)
+
+[23] `correlate_findings`의 처리와 도구 설명이다.
+```python
+async def _handle(inp: BaseModel) -> CorrelateFindingsOutput:
+    assert isinstance(inp, CorrelateFindingsInput)
+    findings = [Finding.model_validate(f) for f in inp.findings]
+    refined, outcomes = correlate(findings)
+    return CorrelateFindingsOutput(
+        refined=[f.model_dump() for f in refined],
+        outcomes=[
+            CorrelationRecord(
+                finding_id=o.finding_id,
+                action=o.action,
+                reason=o.reason,
+                gate=o.gate,
+                severity=o.severity,
+                required_pairs=list(o.required_pairs),
+                missing_classes=list(o.missing_classes),
+            )
+            for o in outcomes
+        ],
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:76-94`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L76-L94)
+```python
+SPEC = ToolSpec(
+    name="correlate_findings",
+    description=(
+        "FINAL ACH gate before manifest_finalize. Applies the agent-config/SOUL.md "
+        "cross-artifact rule: an execution claim must be supported by ≥2 distinct "
+        "artifact classes (disk + log + memory). Findings that cite execution "
+        "(description tokens like 'executed', 'ran', 'launched', or MITRE prefixes "
+        "T1059/T1106/T1129/T1203/T1543/T1547/T1053) are checked against the rule and "
+        "DOWNGRADED one tier when corroboration is missing. The hard-coded special "
+        "case from agent-config/MEMORY.md: Amcache-ONLY execution claims always "
+        "downgrade because Amcache LastModified is catalog-registration time, NOT "
+        "execution time. Strong corroboration (Prefetch + Amcache/Shimcache pair, OR "
+        "Sysmon/Carbon Black/CrowdStrike telemetry mentioned in the description) keeps "
+        "the original confidence. Pass the judge's merged output here (ideally; the "
+        "tool also handles raw pool findings). Returns refined[] (same length as "
+        "input; confidence may be lower) plus outcomes[] (one CorrelationOutcome per "
+        "finding describing the action taken and why, including the structured "
+        "gate/severity/required_pairs/missing_classes record when a per-technique "
+        "corroboration gate fired)."
+    ),
+    input_model=CorrelateFindingsInput,
+    output_model=CorrelateFindingsOutput,
+    handler=_handle,
+)
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:97-120`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L97-L120)
+
+[24] 설명 글에서 분류를 찾는 정규식이다: [`services/agent/findevil_agent/correlator_gates.py:193-245`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L193-L245), [`services/agent/findevil_agent/correlator_gates.py:427-436`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L427-L436).
+
+[25] 실행 주장 검사다: [`services/agent/findevil_agent/correlator_gates.py:269-278`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L269-L278), [`services/agent/findevil_agent/correlator_gates.py:483-519`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L483-L519).
+
+```python
+_EXECUTION_GATE = CorroborationGate(
+    name="EXECUTION",
+    severity="high",
+    mitre_prefixes=(),  # detection via is_execution_claim, not a prefix list
+    text_re=re.compile(r"(?!)"),  # never matches — execution detection is special-cased
+    alternatives=(
+        (("prefetch",), ("amcache", "shimcache", "userassist")),
+        (("edr",),),
+    ),
+)
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:269-278`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L269-L278)
+
+[26] 전술 검사의 분류 조합이다: [`services/agent/findevil_agent/correlator_gates.py:283-378`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L283-L378).
+
+[27] 조합을 채우지 못하면 한 단계 낮추고 빠진 분류를 싣는다.
+```python
+def _apply_tactic_gate(f: Finding, gate: CorroborationGate) -> tuple[Finding, CorrelationOutcome]:
+    present = _present_classes(f.description.lower())
+    required = _describe_alternatives(gate.alternatives)
+    satisfied, missing = _evaluate(present, gate.alternatives)
+
+    if satisfied:
+        return f, CorrelationOutcome(
+            finding_id=f.finding_id,
+            action="kept",
+            reason=f"{gate.name} corroborated in-finding by an independent class pair",
+            gate=gate.name,
+            severity=gate.severity,
+            required_pairs=required,
+        )
+    return _downgrade(f), CorrelationOutcome(
+        finding_id=f.finding_id,
+        action="downgraded",
+        reason=(
+            f"{gate.name} claim from a single artifact class; "
+            f"missing independent class(es): {', '.join(missing)}"
+        ),
+        gate=gate.name,
+        severity=gate.severity,
+        required_pairs=required,
+        missing_classes=missing,
+    )
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:535-560`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L535-L560)
+
+[28] 등급 상한 표다.
+```python
+_CEILING_TABLE: tuple[_Ceiling, ...] = (
+    _Ceiling(
+        claim_type="lateral-movement",
+        max_tier="INFERRED",
+        reason=(
+            "lateral-movement claim without destination Logon Type 3/10 evidence "
+            "cannot exceed INFERRED (source-side process-create is not remote-auth proof)"
+        ),
+        applies=lambda text, mitre: (
+            _is_lateral_claim(text, mitre) and not _LATERAL_LOGON_RE.search(text)
+        ),
+    ),
+    _Ceiling(
+        claim_type="credential-access",
+        max_tier="INFERRED",
+        reason=(
+            "ceiling lsass-memory-access-only: a process holding a handle into LSASS "
+            "is access, not a completed credential dump — cannot exceed INFERRED "
+            "without a dump artifact or 4624/4688 corroboration"
+        ),
+        applies=lambda text, mitre: _is_lsass_access_only(text),
+    ),
+)
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:153-175`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L153-L175)
+
+[29] 시각 대조 검사는 환경변수로 켠다.
+```python
+        if temporal_on:
+            temporal_decision = evaluate_temporal_coupling(f)
+            if temporal_decision.demote:
+                f = _downgrade(f)
+                outcome = replace(
+                    outcome,
+                    action="downgraded",
+                    reason=temporal_decision.reason,
+                    temporal_state=temporal_decision.state,
+                )
+```
+
+[`services/agent/findevil_agent/correlator.py:313-322`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator.py#L313-L322)
+
+[30] 실행 시각 출처끼리 허용하는 차이다.
+```python
+_EXECUTION_TIME_TOLERANCE_SECONDS = 300
+```
+
+[`services/agent/findevil_agent/correlator_temporal.py:43-43`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_temporal.py#L43-L43)
+
+[31] (실행 확인) `correlate_findings`에 실행 주장, 횡적 이동 주장, 실행이 아닌 주장을 넣고 `refined`와 `outcomes`를 확인했다.
+
+[32] (실행 확인) 같은 가상 환경에서 `correlate`, `reverify_finding`, `judge_findings`, `Finding` schema를 환경변수를 켜고 끈 상태로 불러 결과를 비교했다.
+
+[33] 따옴표 안 낱말을 빼는 처리는 환경변수로 켠다.
+```python
+_QUOTED_SPAN_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
+
+
+def _neutralize_quoted_classes_active() -> bool:
+    # Opt-in, default-OFF (custody-neutral, downgrade-only). Mirrors the other
+    # correlator gate flags.
+    return os.environ.get("FIND_EVIL_NEUTRALIZE_QUOTED_CLASSES") == "1"
+
+
+def strip_quoted_spans(text: str) -> str:
+    """Remove double/single-quoted excerpts (attacker-controllable evidence echoes).
+
+    Deterministic and idempotent: quoted spans are replaced with a single space so
+    surrounding tokens stay word-separated. Used before artifact-class detection so
+    a class named only inside a quoted excerpt cannot spoof corroboration.
+    """
+    return _QUOTED_SPAN_RE.sub(" ", text)
+
+
+def _present_classes(text: str) -> frozenset[str]:
+    """Artifact classes whose regex matches the (already-lowercased) text.
+
+    When ``FIND_EVIL_NEUTRALIZE_QUOTED_CLASSES`` is on, quoted excerpts are
+    stripped first so an attacker-echoed class name inside a quote cannot
+    manufacture a corroboration signal (downgrade-only).
+    """
+    if _neutralize_quoted_classes_active():
+        text = strip_quoted_spans(text)
+    return frozenset(name for name, rx in _GATE_CLASS_PATTERNS.items() if rx.search(text))
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:408-436`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L408-L436)
+
+[34] `correlate_findings`의 `counter_hypothesis` 검사다.
+```python
+def _apply_execution_gate_with_benign(f: Finding) -> tuple[Finding, CorrelationOutcome]:
+    # P0-5 benign-explanation gate (opt-in via
+    # FIND_EVIL_REQUIRE_COUNTER_HYPOTHESIS_FINDING; default-OFF) runs before the
+    # corroboration rule: an execution/intent claim that recorded NO benign
+    # alternative it ruled out (counter_hypothesis) is the "too clean" tell and is
+    # downgraded one tier regardless of corroboration. The schema validator rejects
+    # such a finding at construction when the same flag is on; this covers findings
+    # that reached the correlator via the MCP wire (raw dict) and bypassed Pydantic.
+    if _benign_gate_active() and not (f.counter_hypothesis or "").strip():
+        return _downgrade(f), CorrelationOutcome(
+            finding_id=f.finding_id,
+            action="downgraded",
+            reason="execution/intent claim missing benign-explanation (counter_hypothesis)",
+            gate=_EXECUTION_GATE.name,
+            severity=_EXECUTION_GATE.severity,
+        )
+    return _apply_execution_gate(f)
+```
+
+[`services/agent/findevil_agent/correlator_gates.py:464-480`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/correlator_gates.py#L464-L480)
+
+[35] 세 도구는 받은 발견사항을 처리 전에 `Finding` schema로 검사하고 처리 중 난 예외는 `error` 응답 글이 된다: [`services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py:76-79`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/correlate_findings.py#L76-L79), [`services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py:156-173`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/judge_findings.py#L156-L173), [`services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py:78-81`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/detect_contradictions.py#L78-L81), [`services/agent_mcp/findevil_agent_mcp/server.py:187-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/server.py#L187-L198).
+
+[36] (실행 확인) 환경변수를 켜고 `correlate_findings`와 `verify_finding`의 처리 함수에 `counter_hypothesis`가 빈 CONFIRMED·INFERRED 실행 주장을 넣었다.
+CONFIRMED 실행 주장은 `correlate_findings`에서 schema 검사 예외로 끝났고 `verify_finding`에서는 `schema rejected before replay` 사유의 `rejected`로 나왔다.
+INFERRED 실행 주장은 `correlate_findings`에서 `downgraded`로 나왔다.

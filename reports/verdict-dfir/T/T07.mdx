@@ -1,0 +1,967 @@
+---
+cell: T07
+details:
+- id: T07.01
+- id: T07.02
+- id: T07.03
+- id: T07.04
+- id: T07.05
+- id: T07.06
+- id: T07.08
+---
+
+# T07 도구 부재 처리
+
+### T07.01 실행 전 도구·참조 자료 가용성 검사
+
+**구현.** 이 방식은 `findevil-mcp`가 외부 실행 파일을 부르는 도구 20개와 `disk_mount`, 참조 자료를 받는 `hayabusa_scan`·`yara_scan`·`bulk_extract`, `findevil-agent-mcp`의 `accuracy_compare`와 시간 기록 경로에 적용된다 [1][2][3][4][5][6][7].
+외부 실행 파일을 부르는 도구는 실행하기 전에 도구마다 정한 함수 `resolve_binary`(`pst_parse`는 `resolve_pffexport`)로 실행 파일을 찾는다 [1].
+이 함수는 환경변수가 가리키는 경로와 `PATH`의 폴더마다 정해 둔 이름의 파일이 있는지 `is_file`로 확인하고 찾지 못하면 실행하지 않고 오류를 돌려준다 [1].
+이 확인을 거치는 도구는 `vol_pslist`, `vol_psscan`, `vol_psxview`, `vol_malfind`, `vol_run`, `hayabusa_scan`, `vel_collect`, `ausearch`, `journalctl_query`, `login_accounting`, `nfdump_query`, `suricata_eve`, `indx_parse`, `mac_triage`, `ez_parse`, `plaso_parse`, `pcap_triage`, `bulk_extract`, `pst_parse`, `srum_parse`다 [1][2].
+`plaso_parse`는 `log2timeline.py`와 `psort.py`를 둘 다 찾은 뒤에 첫 단계를 실행한다 [2].
+`disk_mount`는 E01 이미지를 마운트하기 전에 `ewfmount -h`를 실행해 보고 실행 파일이 없다는 오류가 나면 없는 것으로 본다 [3].
+`hayabusa_scan`은 호출자가 준 룰 폴더 `rule_set`이 없으면 실행하지 않고 `yara_scan`은 `rules_path`가 없거나 룰 파일이 하나도 없으면 실행하지 않는다 [4].
+`bulk_extract`는 호출 인자 `keyword_file`이나 환경변수 `FINDEVIL_BULK_KEYWORD_FILE`이 가리키는 키워드 목록 파일이 일반 파일이 아니면 `KeywordFileNotFound`로 거부하고 bulk_extractor를 실행하지 않는다 [5].
+`accuracy_compare`는 채점 전에 정답 파일 `expected-findings.json`을 찾고 없으면 `FileNotFoundError`를 낸다 [6].
+`manifest_finalize`의 시간 기록 경로는 RFC 3161 시간 기록을 요청하기 전에 `openssl version`을 실행해 `openssl`이 있는지 확인한다 [7].
+
+`vss_list`, `vss_mount`, `disk_extract_artifacts`, `disk_unmount`는 실행 파일을 미리 찾지 않고 바로 실행한다 [8].
+`findevil-agent-mcp`의 `verify_finding`도 호출자가 준 명령 `findevil_mcp_command`가 있는지 미리 확인하지 않는다 [9].
+
+**한계.** `resolve_binary`는 파일이 있는지만 보고 실행 권한은 보지 않는다 [1].
+실행 권한이 없는 파일이 먼저 찾아지면 실행 단계에서 `spawn failed` 문구를 담은 `SubprocessFailed`가 된다 [1].
+`hayabusa_scan`은 Hayabusa가 읽는 `rules/config` 폴더를 `HAYABUSA_RULES_BASE`, `XDG_DATA_HOME`, `HOME` 아래에서 찾고 찾지 못해도 작업 폴더를 바꾸지 않은 채 Hayabusa를 실행한다 [10].
+
+### T07.02 대체 없는 실패 처리·도구 부재 알림
+
+**구현.** 이 방식은 `findevil-mcp`가 외부 실행 파일을 부르는 도구와 `vss_list`·`vss_mount`, `findevil-agent-mcp`의 `accuracy_compare`, `manifest_finalize`의 시간 기록 경로, `manifest_verify`의 RFC 3161 확인에 적용된다 [11][12][13][6][14][15].
+실행 파일을 찾지 못한 도구는 오류 종류 `BinaryNotFound`를 내고 그 문구에는 경로를 바꾸는 환경변수가 들어 있다 [11].
+`pcap_triage`를 뺀 도구의 문구에는 설치 안내도 들어 있다 [11][16].
+`findevil-mcp`는 이 오류를 JSON-RPC 오류 코드 -32603과 `<도구 이름>: <문구>` 형식의 글로 돌려준다 [11].
+실행 확인에서 `PATH`에 Volatility가 없을 때 `vol_pslist`는 -32603과 `volatility binary not on PATH (set $VOLATILITY_BIN to override)`로 시작하는 문구를 돌려주었다 [17].
+`ez_parse`의 `jlecmd`도 같은 조건에서 `JLECmd`를 찾지 못했다는 문구와 설치 안내를 돌려주었다 [17].
+
+`bulk_extract`, `pst_parse`, `srum_parse`, `vss_list`, `vss_mount`는 실행 파일이 없으면 오류 대신 성공 응답을 돌려주고 `*_available` 필드를 거짓으로 둔다 [12][13].
+`bulk_extract`의 응답은 `note`에 설치되지 않았다는 사실과 환경변수를 적고 나머지 네 도구는 문구 없이 필드 값으로만 알린다 [12][13].
+실행 확인에서 실행 파일이 없을 때 `bulk_extract`, `pst_parse`, `srum_parse`의 응답은 각각 `bulk_extractor_available`, `pffexport_available`, `esedbexport_available`이 거짓이었다 [17].
+`accuracy_compare`는 정답 파일이 없으면 `no expected-findings.json golden found`와 `golden_path`를 직접 주라는 안내를 담은 오류 글을 돌려준다 [6].
+실행 확인에서 이 오류 글은 `{"error":{"kind":"handler",...}}` 형태였고 MCP 응답의 `isError`는 거짓이었다 [18].
+
+`verify_finding`은 `findevil-mcp`를 실행하지 못한 경우를 따로 구분하지 않는다 [9].
+실행 오류는 다시 실행한 결과의 분류 `replay_error`가 되고 `verify_finding`은 발견사항을 `rejected`로 정한다 [9].
+실행 확인에서 없는 경로를 `findevil_mcp_command`로 주자 응답의 `action`은 `rejected`, `reason`은 `mcp replay error: could not spawn MCP server`로 시작했다 [18].
+
+`manifest_finalize`의 시간 기록 경로는 `openssl`이 없으면 RFC 3161 시간 기록을 요청하지 않고 manifest의 `transparency_log`에 종류 `none`과 `openssl not found on PATH`가 들어간 `fallback_reason`을 남긴다 [14].
+`manifest_verify`는 RFC 3161 시간 기록을 확인할 때 `openssl`이 없으면 `transparency_ok`를 거짓으로 두고 `transparency_ok_detail`에 확인하지 못했다는 문구를 싣는다 [15][19].
+
+**한계.** `findevil-mcp`에서 도구 부재와 다른 실행 실패는 같은 오류 코드 -32603으로 나가고 오류 글로만 구별된다 [11].
+`vss_list`와 `vss_mount`는 실행 파일이 없는 경우 말고 다른 이유로 실행하지 못한 경우에도 `*_available`을 거짓으로 둔다 [13].
+
+### T07.03 알림 없는 대체 실행
+
+**구현.** 이 대체는 `findevil-mcp`가 환경변수로 실행 파일 경로를 받는 도구 17개와 `disk_mount`의 raw 이미지 마운트와 E01 안 NTFS 볼륨 마운트, 파티션 조회에 적용된다 [1][20][21][22].
+`VOLATILITY_BIN`, `HAYABUSA_BIN`, `VELOCIRAPTOR_BIN` 같은 환경변수가 없는 파일을 가리키면 `resolve_binary`는 그 값을 쓰지 않고 `PATH`에서 같은 도구를 찾는다 [1].
+응답에는 실행한 파일의 경로나 환경변수 값을 쓰지 못했다는 사실이 실리지 않는다 [1].
+실행 확인에서 `VOLATILITY_BIN`에 없는 경로를 주고 `PATH`에 시험용 `vol`을 두자 `vol_pslist`는 `PATH`의 `vol`로 실행되었고 응답은 프로세스 목록과 빈 `stderr_tail`뿐이었다 [17].
+`bulk_extract`와 `pst_parse`는 환경변수 값이 폴더 구분자를 담은 경로이면 그 파일만 보고 `PATH`로 넘기지 않는다 [23].
+
+`disk_mount`는 raw 이미지를 `mount -o ro,loop`로 마운트하다 실패하면 `mmls`로 찾은 주 파티션 위치를 붙여 다시 마운트하고 마운트 실행 파일 이름이 기본값 `mount`이면 그것도 실패할 때 `sudo -n`을 붙여 다시 실행한다 [20].
+응답의 `command`와 `note`에는 성공한 시도만 적히고 앞의 시도가 실패했다는 사실은 적히지 않는다 [20].
+E01 컨테이너 안의 NTFS 볼륨도 위치 0으로 마운트하지 못하면 `sudo -n mmls`로 찾은 위치로 다시 마운트하고 응답의 `command`에는 성공한 명령만 남긴다 [21].
+파티션 목록을 만드는 `mmls`도 실패하면 `sudo -n mmls`로 다시 실행한다 [22].
+실행 확인에서 시험용 `mmls`와 `sudo`가 모두 실패하자 두 실행이 차례로 기록되었고 `disk_mount` 응답의 `partitions`는 빈 목록이었다 [24].
+
+### T07.04 실행 환경별 경로 분기
+
+**구현.** 이 분기는 `findevil-mcp`의 실행 파일 탐색, `pcap_triage`의 분석기 선택, `hayabusa_scan`의 룰 폴더 탐색, `disk_mount`의 마운트 방식 선택에 적용된다 [1][25][10][26].
+`resolve_binary`는 환경변수의 경로를 먼저 보고 그다음 `PATH`의 폴더마다 정해 둔 이름을 차례로 찾는다 [1].
+Volatility는 `vol`, `volatility3`, `volatility`, `vol.py` 차례이고 Windows에서는 `vol.exe`, `volatility3.exe`, `volatility.exe`, `vol.py` 차례로 찾는다 [1].
+`ez_parse`는 `EZTOOLS_DIR`, `plaso_parse`는 `PLASO_DIR`, `mac_triage`는 `MAC_APT`를 먼저 본다 [2].
+`pcap_triage`는 `analyzer`가 `auto`이면 `tshark`가 있을 때 `tshark`를, 없고 `zeek`가 있을 때 `zeek`를 실행하고 응답의 `analyzer`에 실행한 분석기를 적는다 [25].
+`zeek`로 실행한 응답은 요청별 출발지와 쿠키를 담는 `http_requests`를 비워 둔다 [25].
+`hayabusa_scan`은 `HAYABUSA_RULES_BASE`, `$XDG_DATA_HOME/hayabusa-mcp`, `~/.local/share/hayabusa-mcp` 차례로 `rules/config`가 있는 폴더를 찾아 Hayabusa의 작업 폴더로 쓴다 [10].
+시작 스크립트가 읽는 `project-env.sh`는 `HAYABUSA_RULES_BASE`를 실행 상태 폴더 아래로 정해 둔다 [10].
+`disk_mount`의 `auto` 방식은 Windows에서 실행을 거부하고 그 밖에서는 이미지가 E01 첫 조각이면 `ewfmount`로, 아니면 `mount`로 마운트한다 [26].
+
+### T07.05 대체 사실을 응답·기록에 표시
+
+**구현.** 이 표시는 `findevil-mcp`의 `ez_parse`와 `disk_mount`, `findevil-agent-mcp`의 `manifest_finalize`에 적용된다 [27][28][29][30].
+`ez_parse`는 인자 `tool`이 `lecmd`이고 `LECmd`가 없으면 서버 안의 경로 이름 검사로 대신한다 [27].
+이 대체는 LNK 파일 경로에 `/recent/`나 `/nethood/`와 정해 둔 낱말이 함께 있을 때만 행을 하나 내고 그 행의 `Fallback Basis`에 `path_name`을 적는다 [27].
+응답의 `stderr_tail`에는 `LECmd`가 없어 경로 이름 대체를 썼다는 문구가 들어간다 [27].
+실행 확인에서 `Recent` 폴더 아래 `staging`이 들어간 이름의 시험 파일로 부르자 응답의 `stderr_tail`과 행의 `Fallback Basis`, `Fallback Warning`이 위 내용대로였다 [17].
+
+`disk_mount`는 E01 이미지에서 `ewfmount`가 없거나 `sudo` 아래에서 찾지 못하면 마운트하지 않고 Sleuth Kit으로 이미지를 직접 읽는 자원으로 등록한다 [28].
+이때 응답과 사건 폴더의 `session_resources.json`에는 `command`가 `direct-tsk`로, `note`가 마운트하지 않은 사실과 그 이유로 남는다 [28].
+실행 확인에서 `ewfmount`가 없는 환경으로 `disk_mount`를 부르자 응답과 `session_resources.json`의 `note`가 모두 `ewfmount not found`를 담았다 [24].
+
+`manifest_finalize`는 `sigstore` 서명이 실패하면 Ed25519 서명으로, Ed25519 서명이 실패하면 시험용 `stub` 서명으로 바꾼다 [29].
+`FallbackSigner`는 바꾼 이유를 `fallback_reason`에 남기고 manifest의 `signature`에는 실제 서명 종류 `kind`와 `fallback_reason`이 들어간다 [29].
+응답은 실제 서명 종류를 `signer_effective`에, 이유를 `fallback_reason`에 싣는다 [29].
+호출자가 `stub`을 요청하면 `FINDEVIL_ALLOW_STUB_SIGNER`가 켜져 있지 않은 한 Ed25519로 바꾸고 그 사실도 `fallback_reason`에 적는다 [29].
+실행 확인에서 네트워크가 없는 상태로 `sigstore`를 요청하자 응답의 `signer_effective`는 `ed25519`, `fallback_reason`은 `primary signer failed, degraded to ed25519: Failed to refresh TUF metadata`였고 manifest의 `signature`에도 같은 값이 있었다 [18].
+`anchor_transparency`를 켠 호출은 Rekor 기록이 실패하면 RFC 3161 시간 기록으로 바꾸고 manifest의 `transparency_log`에 실제 종류 `kind`와 `fallback_reason`을 남긴다 [30].
+
+**한계.** `ez_parse`의 대체에서 경로 조건이 맞지 않으면 행이 없고 대체 사실은 `stderr_tail`에만 남는다 [27].
+`disk_mount`가 `direct-tsk`로 등록한 응답의 `status`는 실제 마운트와 같은 `mounted`이고 `fs_root`는 이미지 파일 경로다 [28][24].
+
+### T07.06 대체에 따른 검증·입력 범위 변화 표시
+
+**구현.** 이 표시는 `findevil-mcp`의 `ez_parse` 대체와 `disk_mount`의 E01 마운트, `findevil-agent-mcp`의 `stub` 서명에 적용된다 [27][31][32].
+`ez_parse` 대체 행의 `Fallback Warning`은 경로만 낸 것이고 대상 정보와 볼륨 일련번호를 디코딩하지 않았다고 적는다 [27].
+`disk_mount`는 E01 컨테이너를 마운트한 뒤 NTFS 볼륨을 마운트하지 못하면 컨테이너만 등록하고 `note`에 NTFS 볼륨을 마운트하지 못했다는 문구와 `custody-only`를 적는다 [31].
+`manifest_verify`는 서명 종류가 `stub`이면 응답의 `signature_verified`를 거짓으로 두고 `signature_verified_detail`에 암호 증명이 아닌 시험용 값이라는 문구를 싣는다 [32][19].
+
+**한계.** `sigstore`에서 Ed25519로 바뀐 경우 응답과 manifest는 서명 종류와 실패 이유만 적고 서명자 신원과 투명성 기록이 빠졌다는 사실은 따로 적지 않는다 [29].
+`manifest_verify`는 서명 종류가 `stub`이나 `sigstore`이면 서명이 검증되지 않아도 다른 대조가 통과할 때 `overall`을 참으로 두므로 `stub`으로 대체된 서명의 manifest도 `overall`이 참이 된다 [33].
+NTFS 볼륨을 마운트하지 못한 경로는 실제 마운트가 필요해 실행으로 확인하지 않았다.
+
+### T07.08 일부 제외 후 계속 실행
+
+**구현.** 이 방식은 `findevil-mcp`의 `hashset_lookup`과 `disk_mount`의 파티션 목록, `findevil-agent-mcp`의 `expert_miss_capture`에 적용된다 [34][22][35].
+`hashset_lookup`은 해시 집합 파일마다 읽기를 시도하고 읽지 못한 집합은 그 항목의 `error`에 이유를 적은 뒤 나머지 집합으로 조회를 계속한다 [34].
+실행 확인에서 없는 파일을 집합으로 주자 응답의 `sets_loaded` 항목에 `open failed`로 시작하는 `error`가 있었고 조회한 해시는 `unknown`이었다 [17].
+`disk_mount`는 `mmls`로 파티션 목록을 얻지 못해도 마운트를 계속하고 `partitions`를 빈 목록으로 둔다 [22][24].
+`expert_miss_capture`는 `FINDEVIL_MISS_GH_ENABLED`가 켜져 있으면 `gh`로 GitHub 이슈를 만들려 하고 `gh`가 없거나 실패하면 이슈 없이 기록만 남긴다 [35].
+실행 확인에서 `gh`가 없는 환경으로 부르자 기록은 남았고 응답의 `github_issue_url`은 `null`이었다 [18].
+
+**한계.** `FINDEVIL_HASHSET_DIR`이 없으면 `hashset_lookup`은 집합 없이 조회하고 모든 해시를 `unknown`으로 돌려준다 [34].
+실행 확인에서 이 경우 응답의 `sets_loaded`는 빈 목록이었고 집합이 없다는 문구는 없었다 [17].
+`disk_mount`와 `expert_miss_capture`의 응답은 빠진 부분이 있다는 사실이나 그 이유를 적지 않는다 [22][35].
+
+### 근거
+
+[1] Volatility 도구의 실행 파일 탐색이다.
+다른 도구의 `resolve_binary`도 환경변수 이름과 찾는 이름만 다르다.
+
+```rust
+fn resolve_binary() -> Result<PathBuf, VolError> {
+    if let Ok(env_path) = std::env::var("VOLATILITY_BIN") {
+        let p = PathBuf::from(env_path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        // Try the most-common command names in order. The SIFT VM ships
+        // `vol.py`; pip installs put `vol` and/or `volatility3` on PATH.
+        let candidates: &[&str] = if cfg!(windows) {
+            &["vol.exe", "volatility3.exe", "volatility.exe", "vol.py"]
+        } else {
+            &["vol", "volatility3", "volatility", "vol.py"]
+        };
+        for dir in std::env::split_paths(&path_var) {
+            for name in candidates {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Err(VolError::BinaryNotFound)
+}
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:176-201`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L176-L201)
+
+```rust
+    let proc = cmd.output().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            VolError::BinaryNotFound
+        } else {
+            VolError::SubprocessFailed {
+                exit_code: -1,
+                stderr: format!("spawn failed: {err}"),
+            }
+        }
+    })?;
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:147-156`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L147-L156)
+
+[2] `plaso_parse`는 두 실행 파일을 먼저 찾고 `PLASO_DIR`을 먼저 본다.
+`ez_parse`는 [`services/mcp/src/tools/ez_parse.rs:410-435`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L410-L435), `mac_triage`는 [`services/mcp/src/tools/mac_triage.rs:273-291`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/mac_triage.rs#L273-L291)에서 찾는다.
+
+```rust
+    let l2t = resolve_binary("log2timeline.py")?;
+    let psort = resolve_binary("psort.py")?;
+```
+
+[`services/mcp/src/tools/plaso_parse.rs:214-215`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L214-L215)
+
+```rust
+fn resolve_binary(binary: &str) -> Result<PathBuf, PlasoParseError> {
+    if let Ok(dir) = std::env::var("PLASO_DIR") {
+        if !dir.is_empty() {
+            let candidate = PathBuf::from(dir).join(binary);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(binary);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(PlasoParseError::BinaryNotFound {
+        binary: binary.to_string(),
+    })
+}
+```
+
+[`services/mcp/src/tools/plaso_parse.rs:470-490`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/plaso_parse.rs#L470-L490)
+
+[3] `disk_mount`는 `ewfmount -h`를 실행해 보고 실행 파일이 없으면 없는 것으로 본다.
+
+```rust
+fn ewfmount_available(bin: &str) -> bool {
+    match Command::new(bin).arg("-h").output() {
+        Ok(_) => true,
+        Err(err) => err.kind() != io::ErrorKind::NotFound,
+    }
+}
+```
+
+[`services/mcp/src/tools/disk.rs:614-619`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L614-L619)
+
+[4] `hayabusa_scan`과 `yara_scan`의 룰 경로 확인이다.
+
+```rust
+    if let Some(ref rules) = input.rule_set {
+        if !rules.exists() {
+            return Err(HayabusaError::RuleSetNotFound(rules.clone()));
+        }
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:226-230`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L226-L230)
+
+```rust
+    if !input.rules_path.exists() {
+        return Err(YaraError::RulesNotFound(input.rules_path.clone()));
+    }
+
+    let rule_files = collect_rule_files(&input.rules_path);
+    if rule_files.is_empty() {
+        return Err(YaraError::NoRulesFiles(input.rules_path.clone()));
+    }
+```
+
+[`services/mcp/src/tools/yara_scan.rs:157-164`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/yara_scan.rs#L157-L164)
+
+[5] `bulk_extract`는 키워드 목록 파일을 실행 전에 찾고 일반 파일이 아니면 거부한다.
+
+```rust
+    // Resolve the operator keyword sources (args first, then env). A
+    // supplied keyword file MUST exist; find_regexes are written to a
+    // generated -F file so no regex ever reaches the argv directly.
+    let keyword_file = resolve_keyword_file(input)?;
+    let generated_find_file = write_find_regexes(&input.find_regexes, &staging)?;
+
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:322-327`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L322-L327)
+
+```rust
+fn resolve_keyword_file(input: &BulkExtractInput) -> Result<Option<PathBuf>, BulkExtractError> {
+    let candidate = input.keyword_file.clone().or_else(|| {
+        std::env::var(KEYWORD_FILE_ENV)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
+    match candidate {
+        Some(path) if path.is_file() => Ok(Some(path)),
+        Some(path) => Err(BulkExtractError::KeywordFileNotFound(path)),
+        None => Ok(None),
+    }
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:575-587`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L575-L587)
+
+[6] `accuracy_compare`는 채점 전에 `verdict.json`과 정답 파일을 찾는다.
+
+```python
+async def _handle(inp: BaseModel) -> AccuracyCompareOutput:
+    assert isinstance(inp, AccuracyCompareInput)
+    case_dir = Path(inp.case_dir)
+    if not (case_dir / "verdict.json").is_file():
+        raise FileNotFoundError(f"{case_dir}/verdict.json not found")
+
+    golden_path = _resolve_golden(case_dir, inp.golden_path)
+    if golden_path is None:
+        raise FileNotFoundError(
+            f"no expected-findings.json golden found for {case_dir}; pass golden_path explicitly"
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py:178-188`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/accuracy_compare.py#L178-L188)
+
+[7] 시간 기록 경로는 `openssl`을 먼저 확인한다.
+
+```python
+def _openssl_available() -> bool:
+    try:
+        # Fixed argv (no shell); `openssl` is a trusted local binary.
+        subprocess.run(
+            ["openssl", "version"],
+            capture_output=True,
+            check=True,
+            timeout=_OPENSSL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:384-395`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L384-L395)
+
+```python
+def _rfc3161_timestamp(merkle_root_hex: str, tsa_url: str) -> str:
+    """Return a base64 RFC-3161 timestamp token over the root digest.
+
+    Builds an ``openssl ts`` query over the SHA-256 imprint (the Merkle root is
+    already a SHA-256 digest) and POSTs it to the TSA. Requires ``openssl`` +
+    network; raises otherwise so the caller degrades to a ``none`` block.
+    """
+    if not _openssl_available():
+        raise RuntimeError("openssl not found on PATH; cannot build an RFC-3161 token")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:310-318`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L310-L318)
+
+[8] `vss_list`, `vss_mount`, `disk_extract_artifacts`의 `fls`·`icat`, `disk_unmount`의 `umount`는 정해 둔 이름이나 환경변수 값으로 바로 실행한다: [`services/mcp/src/tools/vss.rs:129-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L129-L150), [`services/mcp/src/tools/disk.rs:1092-1105`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1092-L1105), [`services/mcp/src/tools/disk.rs:1431-1449`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L1431-L1449), [`services/mcp/src/tools/disk.rs:985-1042`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L985-L1042).
+
+[9] `verify_finding`의 클라이언트는 명령을 바로 실행하고 실행 오류는 `replay_error`가 되어 `rejected`로 이어진다: [`services/agent/findevil_agent/mcp_client.py:143-159`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/mcp_client.py#L143-L159), [`services/agent/findevil_agent/replay.py:202-210`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/replay.py#L202-L210), [`services/agent/findevil_agent/verifier.py:224-233`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/verifier.py#L224-L233).
+
+[10] `hayabusa_scan`의 룰 폴더 탐색과 사용이다.
+`project-env.sh`는 [`scripts/lib/project-env.sh:56`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/scripts/lib/project-env.sh#L56)에서 `HAYABUSA_RULES_BASE`를 정한다.
+
+```rust
+fn resolve_rules_base() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("HAYABUSA_RULES_BASE") {
+        if !p.is_empty() {
+            candidates.push(PathBuf::from(p));
+        }
+    }
+    if let Ok(x) = std::env::var("XDG_DATA_HOME") {
+        if !x.is_empty() {
+            candidates.push(PathBuf::from(x).join("hayabusa-mcp"));
+        }
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            candidates.push(PathBuf::from(h).join(".local/share/hayabusa-mcp"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|base| base.join("rules").join("config").is_dir())
+}
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:146-166`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L146-L166)
+
+```rust
+    // Point hayabusa at a CWD that has `rules/` (with config). Without this it
+    // reads `./rules/config` from wherever the MCP launched (no rules there) and
+    // fails. If no rules base is installed, run as-is and let the lane degrade
+    // to an honest tool-error limitation.
+    if let Some(base) = resolve_rules_base() {
+        cmd.current_dir(base);
+    }
+```
+
+[`services/mcp/src/tools/hayabusa_scan.rs:261-267`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hayabusa_scan.rs#L261-L267)
+
+[11] `BinaryNotFound` 문구와 이 오류를 -32603으로 돌려주는 처리다.
+
+```rust
+    #[error(
+        "volatility binary not on PATH (set $VOLATILITY_BIN to override). \
+         Install: `pip install volatility3` or use the SIFT VM bundle."
+    )]
+    BinaryNotFound,
+```
+
+[`services/mcp/src/tools/vol_pslist.rs:104-108`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vol_pslist.rs#L104-L108)
+
+```rust
+fn dispatch_vol_pslist(args: Value) -> Result<Value, ToolError> {
+    let input: VolPslistInput = parse_args(args)?;
+    // MemoryNotFound / MemoryNotRegular are user-input errors; surface
+    // as -32602 so the agent corrects the path rather than treating
+    // the tool as crashed.
+    match vol_pslist(&input) {
+        Ok(output) => {
+            serde_json::to_value(output).map_err(|e| ToolError::Internal(format!("serialize: {e}")))
+        }
+        Err(
+            e @ (crate::tools::VolError::MemoryNotFound(_)
+            | crate::tools::VolError::MemoryNotRegular(_)),
+        ) => Err(ToolError::InvalidParams(format!("{e}"))),
+        Err(e) => Err(ToolError::Internal(format!("vol_pslist: {e}"))),
+    }
+}
+```
+
+[`services/mcp/src/server.rs:1830-1845`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/server.rs#L1830-L1845)
+
+[12] `bulk_extract`, `pst_parse`, `srum_parse`는 실행 파일이 없으면 `*_available`을 거짓으로 둔 응답을 돌려준다: [`services/mcp/src/tools/bulk_extract.rs:411-425`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L411-L425), [`services/mcp/src/tools/pst_parse.rs:188-191`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L188-L191), [`services/mcp/src/tools/srum_parse.rs:211-217`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/srum_parse.rs#L211-L217).
+
+[13] `vss_list`와 `vss_mount`는 실행하지 못한 모든 경우를 `*_available` 거짓으로 둔다.
+
+```rust
+    let output = match Command::new(vshadowinfo_bin())
+        .arg(&input.image_path)
+        .output()
+    {
+        Ok(out) => out,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(VssListOutput {
+                vshadowinfo_available: false,
+                has_shadow_store: false,
+                store_count: 0,
+                stores: Vec::new(),
+            });
+        }
+        Err(_) => {
+            return Ok(VssListOutput {
+                vshadowinfo_available: false,
+                has_shadow_store: false,
+                store_count: 0,
+                stores: Vec::new(),
+            });
+        }
+    };
+```
+
+[`services/mcp/src/tools/vss.rs:129-150`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L129-L150)
+
+```rust
+        Err(_) => Ok(VssMountOutput {
+            vshadowmount_available: false,
+            mount_id,
+            status: "unavailable".to_string(),
+            mount_point,
+            shadow_store_paths: Vec::new(),
+            command,
+        }),
+```
+
+[`services/mcp/src/tools/vss.rs:252-259`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/vss.rs#L252-L259)
+
+[14] 시간 기록 함수는 `openssl`이 없으면 예외를 내고 호출부는 이를 종류 `none`과 이유를 담은 블록으로 바꾼다.
+
+```python
+    try:
+        entry, body_b64 = _submit_to_rekor(merkle_root_hex)
+        return _rekor_block(merkle_root_hex, entry, body_b64, effective_rekor_url)
+    except Exception as rekor_exc:  # degrade on ANY Rekor failure — never raise into the run
+        rekor_reason = f"rekor anchoring failed: {rekor_exc}"
+        if not allow_tsa_fallback:
+            return _none_block(merkle_root_hex, rekor_reason)
+        try:
+            return _tsa_block(merkle_root_hex, _DEFAULT_TSA_URL, rekor_reason)
+        except Exception as tsa_exc:  # the fallback must also never raise
+            return _none_block(merkle_root_hex, f"{rekor_reason}; tsa fallback failed: {tsa_exc}")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:126-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L126-L136)
+
+```python
+    if not _openssl_available():
+        raise RuntimeError("openssl not found on PATH; cannot build an RFC-3161 token")
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:317-318`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L317-L318)
+
+[15] `manifest_verify`의 RFC 3161 확인은 `openssl`이 없으면 이유 문구를 돌려준다.
+
+```python
+    tsa = block.get("tsa") or {}
+    tsr_b64 = tsa.get("tsr_b64")
+    if not tsr_b64:
+        return "rfc3161 block missing tsr_b64; nothing to verify"
+    if not _openssl_available():
+        return "rfc3161 timestamp present but openssl is unavailable to verify it offline"
+```
+
+[`services/agent/findevil_agent/crypto/anchor.py:345-350`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L345-L350)
+
+[16] `pcap_triage`의 부재 문구는 환경변수만 알린다.
+
+```rust
+    #[error(
+        "neither tshark nor zeek binary is on PATH (set $TSHARK_BIN or $ZEEK_BIN to override)"
+    )]
+    BinaryNotFound,
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:85-88`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L85-L88)
+
+[17] (실행 확인) 시험용 실행 파일로 `findevil-mcp` 도구를 불렀다.
+`vol_pslist`(Volatility 없음, `VOLATILITY_BIN` 없는 경로와 `PATH`의 시험용 `vol`), `ez_parse`(`lecmd`·`jlecmd`), `bulk_extract`·`pst_parse`·`srum_parse`(실행 파일 없음), `hashset_lookup`(집합 없음, 없는 집합 파일)의 응답을 확인했다.
+
+[18] (실행 확인) `findevil-agent-mcp`의 `accuracy_compare`, `verify_finding`, `manifest_finalize`, `expert_miss_capture`를 네트워크 namespace를 새로 만든 상태에서 불렀다.
+
+[19] `manifest_verify` 처리기는 문구로 온 확인 결과를 거짓인 값과 `_detail` 필드로 나눈다.
+
+```python
+    def _split(value: bool | str) -> tuple[bool, str | None]:
+        if value is True:
+            return True, None
+        if value is False:
+            return False, None
+        return False, str(value)
+
+    audit_ok, audit_detail = _split(result.audit_chain_ok)
+    merkle_ok, merkle_detail = _split(result.merkle_root_ok)
+    count_ok, count_detail = _split(result.leaf_count_ok)
+    sig_verified, sig_verified_detail = _split(result.signature_verified)
+    entail_ok, entail_detail = _split(result.entailment_ok)
+    transparency_ok, transparency_detail = _split(result.transparency_ok)
+    return ManifestVerifyOutput(
+        overall=result.overall,
+        audit_chain_ok=audit_ok,
+        audit_chain_detail=audit_detail,
+        merkle_root_ok=merkle_ok,
+        merkle_root_detail=merkle_detail,
+        leaf_count_ok=count_ok,
+        leaf_count_detail=count_detail,
+        signature_present=result.signature_present,
+        signature_kind=result.signature_kind,
+        signature_verified=sig_verified,
+        signature_verified_detail=sig_verified_detail,
+        entailment_ok=entail_ok,
+        entailment_ok_detail=entail_detail,
+        transparency_ok=transparency_ok,
+        transparency_ok_detail=transparency_detail,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py:77-106`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_verify.py#L77-L106)
+
+[20] `disk_mount`의 raw 이미지 마운트는 실패하면 위치를 붙여, 다시 실패하면 `sudo -n`을 붙여 다시 실행한다: [`services/mcp/src/tools/disk.rs:710-809`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L710-L809).
+
+[21] EWF 안 NTFS 볼륨은 위치 0으로 실패하면 `mmls`로 찾은 위치로 다시 마운트하고 성공한 명령만 돌려준다.
+
+```rust
+    let mut offsets = vec![0u64];
+    if let Some(offset) = primary_partition_byte_offset_sudo(device) {
+        offsets.push(offset);
+    }
+    let mut last_status = String::new();
+    let mut last_stderr = String::new();
+    for offset in offsets {
+        let opts = if offset == 0 {
+            "ro,loop".to_string()
+        } else {
+            format!("ro,loop,offset={offset}")
+        };
+        let args = vec![
+            "-t".to_string(),
+            "ntfs3".to_string(),
+            "-o".to_string(),
+            opts,
+            device.to_string_lossy().to_string(),
+            mount_point.to_string_lossy().to_string(),
+        ];
+        let result = run_sudo_fixed(&mount_bin, &args)?;
+        if result.0 {
+            let command: Vec<String> = vec!["sudo".to_string(), "-n".to_string(), mount_bin]
+                .into_iter()
+                .chain(args)
+                .collect();
+            return Ok((command, result.2));
+        }
+```
+
+[`services/mcp/src/tools/disk.rs:636-663`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L636-L663)
+
+[22] 파티션 목록은 `mmls`가 실패하면 `sudo -n mmls`로 다시 시도하고 둘 다 실패하면 빈 목록이다.
+
+```rust
+fn enumerate_partitions(image_paths: &[PathBuf]) -> Vec<MmlsPartition> {
+    let run = |cmd: &mut Command| -> Option<String> {
+        let output = cmd.output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let mut direct = Command::new("mmls");
+    append_image_args(&mut direct, image_paths);
+    let mut sudo = Command::new("sudo");
+    sudo.args(["-n", "mmls"]);
+    append_image_args(&mut sudo, image_paths);
+    let text = run(&mut direct).or_else(|| run(&mut sudo));
+    text.map(|t| parse_mmls_partitions(&t)).unwrap_or_default()
+}
+```
+
+[`services/mcp/src/tools/disk.rs:693-708`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L693-L708)
+
+[23] `bulk_extract`는 폴더 구분자가 있는 값을 그 경로로만 본다.
+`pst_parse`도 [`services/mcp/src/tools/pst_parse.rs:274-290`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pst_parse.rs#L274-L290)에서 같다.
+
+```rust
+fn resolve_binary() -> Option<PathBuf> {
+    let name = std::env::var(BIN_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_BINARY.to_string());
+
+    let candidate = PathBuf::from(&name);
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then_some(candidate);
+    }
+
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name
+    };
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path_var) {
+        let cand = dir.join(&exe);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+```
+
+[`services/mcp/src/tools/bulk_extract.rs:700-724`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/bulk_extract.rs#L700-L724)
+
+[24] (실행 확인) `ewfmount`가 없고 시험용 `mmls`와 `sudo`가 실패하는 환경에서 `disk_mount`를 E01 이름의 시험 파일로 불렀다.
+응답의 `status`는 `mounted`, `command`는 `direct-tsk`, `fs_root`는 이미지 파일 경로, `partitions`는 빈 목록이었고 `session_resources.json`에도 같은 `command`와 `note`가 남았다.
+
+[25] `pcap_triage`의 분석기 선택과 `zeek` 경로의 `http_requests`다.
+
+```rust
+    let analyzer = input.analyzer.as_deref().unwrap_or("auto").to_lowercase();
+    match analyzer.as_str() {
+        "tshark" => run_tshark(input),
+        "zeek" => run_zeek(input),
+        "auto" => {
+            if resolve_binary("TSHARK_BIN", &["tshark", "tshark.exe"]).is_some() {
+                run_tshark(input)
+            } else if resolve_binary("ZEEK_BIN", &["zeek", "zeek.exe"]).is_some() {
+                run_zeek(input)
+            } else {
+                Err(PcapTriageError::BinaryNotFound)
+            }
+        }
+        other => Err(PcapTriageError::InvalidAnalyzer(other.to_string())),
+    }
+}
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:106-121`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L106-L121)
+
+```rust
+    Ok(PcapTriageOutput {
+        analyzer: "zeek".to_string(),
+        packets_seen: summary.rows_seen,
+        conversations: summary
+            .notable_connections
+            .iter()
+            .map(|c| PcapConversation {
+                src: c.src.clone(),
+                dst: c.dst.clone(),
+                dst_port: c.dst_port.clone(),
+                proto: c.proto.clone(),
+                count: 1,
+            })
+            .collect(),
+        dns_queries: summary.top_dns_queries.clone(),
+        http_hosts: summary.top_http_hosts.clone(),
+        // Per-request src/cookie linkage requires raw packet fields; the zeek
+        // summary path doesn't carry them, so leave this empty here.
+        http_requests: Vec::new(),
+        zeek: Some(summary),
+        stderr_tail,
+    })
+```
+
+[`services/mcp/src/tools/pcap_triage.rs:306-327`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/pcap_triage.rs#L306-L327)
+
+[26] `disk_mount`의 `auto` 방식 선택이다.
+
+```rust
+    image_paths: &[PathBuf],
+    mount_point: &Path,
+) -> Result<(String, PathBuf, Vec<String>, String, String), DiskError> {
+    if cfg!(windows) {
+        return Err(DiskError::UnsupportedPlatform);
+    }
+    let image_path = image_paths
+        .first()
+        .ok_or_else(|| DiskError::ImageNotFound(PathBuf::from("<empty image set>")))?;
+    if is_first_ewf_segment(image_path) {
+        return auto_mount_ewf(image_paths, mount_point);
+    }
+    auto_mount_raw(image_path, mount_point)
+}
+```
+
+[`services/mcp/src/tools/disk.rs:490-503`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L490-L503)
+
+[27] `ez_parse`는 `LECmd`가 없을 때 경로 이름 대체를 쓰고 그 사실을 행과 `stderr_tail`에 적는다.
+경로 조건은 [`services/mcp/src/tools/ez_parse.rs:263-278`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L263-L278)에 있다.
+
+```rust
+    let binary = match resolve_binary(spec.binary) {
+        Ok(binary) => binary,
+        Err(EzParseError::BinaryNotFound { .. }) if spec.key == "lecmd" => {
+            return Ok(native_lecmd_path_fallback(
+                &input.artifact_path,
+                limit,
+                spec.binary,
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+```
+
+[`services/mcp/src/tools/ez_parse.rs:193-203`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L193-L203)
+
+```rust
+    if path_context && limit > 0 {
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("Source File".to_string(), display);
+        row.insert("Fallback Basis".to_string(), "path_name".to_string());
+        row.insert(
+            "Fallback Warning".to_string(),
+            format!(
+                "{binary} not found; emitted path-only LNK context. Target metadata and volume serial were not decoded."
+            ),
+        );
+        rows.push(row);
+    }
+    EzParseOutput {
+        tool: "lecmd".to_string(),
+        rows,
+        rows_seen,
+        csv_files: Vec::new(),
+        stderr_tail: format!(
+            "{binary} not found; native path-only LNK fallback used for suspicious Recent/NetHood context."
+        ),
+    }
+}
+```
+
+[`services/mcp/src/tools/ez_parse.rs:279-300`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/ez_parse.rs#L279-L300)
+
+[28] `ewfmount`가 없거나 `sudo` 아래에서 찾지 못하면 `direct_tsk_mount`로 등록한다: [`services/mcp/src/tools/disk.rs:517-548`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L517-L548).
+
+```rust
+fn direct_tsk_mount(
+    image_path: &Path,
+    reason: &str,
+) -> (String, PathBuf, Vec<String>, String, String) {
+    (
+        "mounted".to_string(),
+        image_path.to_path_buf(),
+        vec![DIRECT_TSK_COMMAND.to_string()],
+        String::new(),
+        format!("registered direct Sleuth Kit read of the image (no FUSE/loop mount): {reason}"),
+    )
+}
+```
+
+[`services/mcp/src/tools/disk.rs:597-608`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L597-L608)
+
+[29] `manifest_finalize`의 서명 요청 처리, `FallbackSigner`, 응답 값이다.
+manifest의 `signature`는 [`services/agent/findevil_agent/crypto/manifest.py:246-258`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L246-L258)에서 만든다.
+
+```python
+    requested, coerce_reason = _resolve_signer_request(inp.signer)
+    if requested == "stub":
+        signer: Signer = StubSigner(run_id=inp.run_id)
+    elif requested == "ed25519":
+        signer = FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id))
+    else:  # sigstore
+        signer = FallbackSigner(
+            make_signer(kind="sigstore"),
+            FallbackSigner(make_signer(kind="ed25519"), StubSigner(run_id=inp.run_id)),
+        )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:161-170`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L161-L170)
+
+```python
+class FallbackSigner:
+    """Tries a primary signer (real sigstore) and honestly degrades to a
+    fallback (stub) when the primary fails — the typical offline / no-token
+    case. The returned bundle carries ``kind="stub"`` and a non-empty
+    ``fallback_reason`` so the release gate reads the *effective* signer, not
+    the *requested* one, and never crashes a run just because Fulcio/Rekor
+    (or an OIDC token) was unavailable.
+    """
+
+    def __init__(self, primary: Signer, fallback: Signer) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def sign(self, payload: bytes) -> SignedBundle:
+        try:
+            return self._primary.sign(payload)
+        except Exception as exc:  # degrade on ANY primary-signer failure
+            bundle = self._fallback.sign(payload)
+            reason = f"primary signer failed, degraded to {bundle.kind}: {exc}"
+            if bundle.fallback_reason:  # nested fallback — keep the inner story
+                reason = f"{reason} (after: {bundle.fallback_reason})"
+            return replace(bundle, fallback_reason=reason)
+```
+
+[`services/agent/findevil_agent/crypto/signer.py:266-287`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/signer.py#L266-L287)
+
+[30] Rekor 기록이 실패하면 시간 기록으로 바꾸고 그 결과를 manifest에 다시 쓴다: [`services/agent/findevil_agent/crypto/anchor.py:125-136`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L125-L136), [`services/agent/findevil_agent/crypto/anchor.py:282-307`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/anchor.py#L282-L307), [`services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py:189-198`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/manifest_finalize.py#L189-L198).
+
+[31] NTFS 볼륨을 마운트하지 못하면 컨테이너만 등록하고 `custody-only`를 적는다.
+
+```rust
+    if let Ok((fs_cmd, fs_stderr)) = mount_ntfs_ro(&ewf_raw, &fs_dir) {
+        let mut command = ewf_cmd;
+        command.push("&&".to_string());
+        command.extend(fs_cmd);
+        Ok((
+            "mounted".to_string(),
+            fs_dir,
+            command,
+            fs_stderr,
+            "mounted EWF container + NTFS filesystem read-only".to_string(),
+        ))
+    } else {
+        let _ = fs::remove_dir(&fs_dir);
+        Ok((
+            "mounted".to_string(),
+            ewf_dir,
+            ewf_cmd,
+            ewf_stderr,
+            "mounted EWF container read-only; NTFS volume could not be mounted (custody-only)"
+                .to_string(),
+        ))
+    }
+```
+
+[`services/mcp/src/tools/disk.rs:565-586`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/disk.rs#L565-L586)
+
+[32] `manifest_verify`가 쓰는 서명 확인 결과 문구다.
+
+```python
+    if kind == "stub":
+        return "stub signature: deterministic dev/offline placeholder, not cryptographic proof"
+    if kind == "ed25519":
+        return _verify_ed25519_signature(sig or {}, manifest_obj or {})
+    if kind == "sigstore":
+        return (
+            "sigstore bundle present and recorded; offline cryptographic verification "
+            "requires the verifier to supply the expected signer identity (deployment policy)"
+        )
+    return f"unknown signer kind {kind!r}"
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:517-526`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L517-L526)
+
+[33] `stub`과 `sigstore` 서명은 검증 결과가 `overall`에 반영되지 않는다.
+
+```python
+    advisory_sig_kinds = ("stub", "sigstore")
+    sig_failed = sig_present and sig_kind not in advisory_sig_kinds and sig_verified is not True
+    overall = (
+        audit_status is True
+        and rebuild_status is True
+        and count_status is True
+        and sig_present
+        and not sig_failed
+    )
+```
+
+[`services/agent/findevil_agent/crypto/manifest.py:476-484`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent/findevil_agent/crypto/manifest.py#L476-L484)
+
+[34] `hashset_lookup`은 집합 목록을 정한 뒤 집합마다 읽기를 시도하고 환경변수가 없으면 집합 목록이 비어 있다.
+
+```rust
+    let refs = if input.hashset_paths.is_empty() {
+        enumerate_env_sets()
+    } else {
+        input.hashset_paths.iter().map(ResolvedRef::from).collect()
+    };
+
+    // BTreeMap keyed by the normalized hash: iteration order IS the
+    // sorted-by-hash output order.
+    let mut states: BTreeMap<String, HashState> = queries
+        .iter()
+        .map(|h| (h.clone(), HashState::default()))
+        .collect();
+
+    let mut sets_loaded: Vec<HashsetLoaded> = refs
+        .iter()
+        .map(|set_ref| probe_set(set_ref, &queries, &mut states))
+        .collect();
+    sets_loaded.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:223-240`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L223-L240)
+
+```rust
+/// Enumerate `$FINDEVIL_HASHSET_DIR/known_good/**` + `.../known_bad/**`.
+/// Missing env var / directories yield an empty list (degrade honestly).
+fn enumerate_env_sets() -> Vec<ResolvedRef> {
+    let Ok(root) = std::env::var(HASHSET_DIR_ENV) else {
+        return Vec::new();
+    };
+    if root.trim().is_empty() {
+        return Vec::new();
+    }
+```
+
+[`services/mcp/src/tools/hashset_lookup.rs:315-323`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/mcp/src/tools/hashset_lookup.rs#L315-L323)
+
+[35] `expert_miss_capture`는 `gh`가 없거나 실패하면 `None`을 돌려주고 기록은 그대로 남긴다.
+
+```python
+def _maybe_create_github_issue(args: ExpertMissCaptureInput) -> str | None:
+    if os.environ.get("FINDEVIL_MISS_GH_ENABLED") != "1":
+        return None
+    gh = shutil.which("gh")
+    if gh is None:
+        return None
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:55-60`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L55-L60)
+
+```python
+async def _handle(inp: BaseModel) -> ExpertMissCaptureOutput:
+    assert isinstance(inp, ExpertMissCaptureInput)
+    payload = {
+        "case_id": inp.case_id,
+        "finding_id": inp.finding_id,
+        "edit_type": inp.edit_type,
+        "edit_text": inp.edit_text,
+        "expert_name": inp.expert_name,
+    }
+    log = AuditLog(Path(inp.ledger_path))
+    record = log.append("expert_miss", payload)
+    github_issue_url = _maybe_create_github_issue(inp)
+    return ExpertMissCaptureOutput(
+        seq=record.seq,
+        ts=record.ts,
+        line_hash=log.last_hash,
+        prev_hash=record.prev_hash,
+        github_issue_url=github_issue_url,
+    )
+```
+
+[`services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py:98-116`](https://github.com/TimothyVang/verdict-dfir/blob/acada5c6b91545639d5a470ba0d92c0e29e73063/services/agent_mcp/findevil_agent_mcp/tools/expert_miss_capture.py#L98-L116)
