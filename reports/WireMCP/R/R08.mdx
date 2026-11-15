@@ -1,0 +1,119 @@
+---
+cell: R08
+details:
+- id: R08.01
+- id: R08.03
+---
+
+# R08 시간값 처리
+
+### R08.01 시간 변환 전 값 유지
+
+**구현.** 이 방식은 `capture_packets`의 `frame.time`과 `get_conversations`의 시간 열에 적용된다 [1][2].
+`capture_packets`는 `tshark`에 `-e frame.time`을 주고 그 값을 바꾸지 않고 패킷 JSON에 싣는다 [1].
+서버는 `tshark`에 시각 형식 옵션 `-t`를 넘기지 않는다 [1].
+`get_conversations`는 `tshark -qz conv,tcp`의 표를 그대로 싣는다 [2].
+`tshark` 4.0.17은 기본 시각 형식에서 이 표의 `Relative Start` 열에 대화가 시작된 상대 시각을, `Duration` 열에 대화의 길이를 초 단위 소수로 적는다 [3].
+루프백 캡처의 `get_conversations` 응답에서 두 열은 `0.000435678`과 `2.1317`이었다 [4].
+
+`analyze_pcap`, `extract_credentials`, `check_threats`, `check_ip_threats`, `get_summary_stats`는 시각 값을 싣지 않는다 [5][6][7].
+
+### R08.03 시간대·단위·정밀도 표시
+
+**구현.** 이 방식은 `capture_packets`의 `frame.time`에 적용된다 [1].
+`tshark` 4.0.17은 절대 시각 필드를 표시용 문자열로 낼 때 시간대 이름을 붙인다 [8].
+컨테이너에서 이 값은 `Nov 14, 2026 14:21:33.253827256 UTC`였다 [4].
+서버는 이 값을 바꾸지 않는다 [1].
+`get_conversations`의 `Relative Start`와 `Duration` 값과 열 이름에는 초라는 단위가 없다 [3][4].
+
+**한계.** `frame.time`의 시간대는 `tshark`를 실행한 프로세스의 현지 시간대이고 서버는 시간대를 정하지 않는다 [1][8].
+
+### 근거
+
+[1] `capture_packets`는 `frame.time`을 고르고 시각 옵션 없이 `tshark`를 실행한다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:67-70`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L67-L70)
+
+[2] `get_conversations`는 `tshark` 출력을 그대로 싣는다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz conv,tcp`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `TCP/UDP conversation statistics for LLM analysis:\n${stdout}`,
+        }],
+      };
+```
+
+[`index.js:160-173`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L160-L173)
+
+[3] Wireshark 4.0.17의 대화 통계 출력은 기본 시각 형식에서 시작 시각과 길이를 `nstime_to_sec`로 바꾼 초 값으로 적는다: [`ui/cli/tap-iousers.c:67-74`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/cli/tap-iousers.c#L67-L74), [`ui/cli/tap-iousers.c:219-227`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/ui/cli/tap-iousers.c#L219-L227).
+
+[4] (실행 확인) 컨테이너(UTC)의 루프백 인터페이스에서 `capture_packets`와 `get_conversations`를 불렀다.
+`capture_packets`의 `frame.time`은 `Nov 14, 2026 14:21:33.253827256 UTC` 꼴이었다.
+`get_conversations`의 표 머리는 `Relative`와 `Start`, `Duration`을 두 줄로 나눠 적었고 값에는 단위가 없었다.
+
+[5] `analyze_pcap`이 고르는 필드에 시각이 없다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:317-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L317-L320)
+
+[6] `extract_credentials`와 `check_threats`가 고르는 필드에 시각이 없다.
+
+```javascript
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:380-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L380-L389)
+
+```javascript
+      const { stdout } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T fields -e ip.src -e ip.dst`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:201-204`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L201-L204)
+
+[7] `get_summary_stats`는 프로토콜 계층 통계만 읽는다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz io,phs`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:119-122`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L119-L122)
+
+[8] Wireshark 4.0.17은 절대 시각 필드의 표시용 문자열에 시간대를 붙인다: [`epan/ftypes/ftype-time.c:378-402`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/ftypes/ftype-time.c#L378-L402).

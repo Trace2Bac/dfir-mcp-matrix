@@ -1,0 +1,245 @@
+---
+cell: R03
+details:
+- id: R03.01
+---
+
+# R03 분석 상태 알림
+
+### R03.01 구조화 status·error
+
+**구현.** 이 방식은 도구 7개의 오류 응답에 적용된다 [1][2].
+처리기마다 예외가 나면 `Error: <예외 문구>`를 담은 글 블록과 `isError: true`를 돌려준다 [1].
+성공 응답에는 `isError` 필드가 없다 [2][3].
+`tshark`가 0이 아닌 코드로 끝난 오류 문구에는 Node.js가 만든 `Command failed: <명령 문자열>` 줄과 `tshark`의 표준 오류가 들어간다 [4][3].
+없는 pcap 파일, 끝이 잘린 pcap 파일, 없는 인터페이스, 1 MiB를 넘는 출력으로 도구를 부르자 모두 `isError`가 참인 응답이 왔다 [3].
+
+입력 schema 검사에서 거부된 호출은 MCP TypeScript SDK 1.15.0이 도구 결과 대신 JSON-RPC 오류 `-32602`로 돌려준다 [5].
+`check_ip_threats`에 숫자 꼴이 없는 `ip`를 주자 이 오류가 왔다 [3].
+
+빈 결과는 상태 값 없이 글로만 나타난다.
+`capture_packets`는 패킷이 없으면 `[]`을, `analyze_pcap`의 URL 목록과 `extract_credentials`의 각 절은 `None`을 싣는다 [6][7][2].
+`check_threats`와 `check_ip_threats`는 일치가 없으면 `No threats detected in URLhaus blacklist.`나 `No threat detected in URLhaus blacklist.`를 싣는다 [8][9].
+실시간 캡처는 `duration`초 동안 끝나지 않지만 서버는 그동안 진행 알림을 보내지 않는다 [10].
+
+**한계.** URLhaus 목록을 받지 못한 `check_threats`와 `check_ip_threats`는 `isError` 없이 일치가 없을 때와 같은 문구를 돌려준다 [8][9].
+네트워크를 끈 컨테이너에서 두 도구를 부르자 이 응답이 왔다 [3].
+`analyze_pcap`과 `capture_packets`는 패킷 JSON을 잘라도 응답에 그 사실을 싣지 않고 성공으로 돌려준다 [6][11].
+`capture_packets`, `get_summary_stats`, `get_conversations`, `analyze_pcap`은 `tshark`가 표준 오류에 경고를 쓰고 0으로 끝나면 그 글을 서버의 표준 오류에만 남기고 성공 응답을 돌려준다 [6][11][12].
+`check_threats`와 `extract_credentials`는 `tshark`의 표준 오류를 읽지 않는다 [13].
+
+### 근거
+
+[1] `analyze_pcap`의 `catch`는 `isError` 참인 응답을 돌려준다.
+
+```javascript
+    } catch (error) {
+      console.error(`Error in analyze_pcap: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:357-360`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L357-L360)
+
+[2] `extract_credentials`의 성공 응답에는 `isError`가 없고 빈 절은 `None`으로 채운다.
+
+```javascript
+        const outputText = `Analyzed PCAP: ${pcapPath}\n\n` +
+          `Plaintext Credentials:\n${credentials.plaintext.length > 0 ? 
+            credentials.plaintext.map(c => 
+              c.type === 'Telnet Prompt' ? 
+                `${c.type}: ${c.data} (Frame ${c.frame})` : 
+                `${c.type}: ${c.username}:${c.password} (Frame ${c.frame})`
+            ).join('\n') : 
+            'None'}\n\n` +
+          `Encrypted/Hashed Credentials:\n${credentials.encrypted.length > 0 ?
+            credentials.encrypted.map(c =>
+              `${c.type}: User=${c.username} Realm=${c.realm} (Frame ${c.frame})\n` +
+              `Hash=${c.hash}\n` +
+              `Cracking Command: ${c.crackingMode}\n`
+            ).join('\n') :
+            'None'}\n\n` +
+          `Note: Encrypted credentials can be cracked using tools like John the Ripper or hashcat.\n` +
+          `For Kerberos hashes:\n` +
+          `- AS-REQ/TGS-REQ: hashcat -m 7500 or john --format=krb5pa-md5\n` +
+          `- AS-REP: hashcat -m 18200 or john --format=krb5asrep`;
+  
+        return {
+          content: [{ type: 'text', text: outputText }],
+        };
+```
+
+[`index.js:481-503`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L481-L503)
+
+[3] (실행 확인) 컨테이너에서 MCP TypeScript SDK 클라이언트로 도구를 불러 응답의 `isError` 필드를 확인했다.
+성공 응답은 이 필드가 없었고 오류 응답은 참이었다.
+`ip` 검사 실패는 `MCP error -32602`로 왔다.
+
+[4] Node.js 22.17.0의 `exec`는 실패한 명령의 오류 문구를 `Command failed: <명령>`과 표준 오류로 만든다: [`lib/child_process.js:407-422`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L407-L422).
+
+[5] MCP TypeScript SDK 1.15.0은 인자 검사가 실패하면 `InvalidParams` 오류를 던지고 처리기 예외만 `isError` 결과로 바꾼다: [`src/server/mcp.ts:157-200`](https://github.com/modelcontextprotocol/typescript-sdk/blob/1ac2e5926c93a7f1122e50bbbd6be60de1ae2c87/src/server/mcp.ts#L157-L200).
+
+[6] `analyze_pcap`은 표준 오류를 서버 로그에만 쓰고 자른 사실을 응답에 넣지 않는다: [`index.js:317-356`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L317-L356).
+
+[7] `capture_packets`의 성공 응답이다.
+
+```javascript
+      return {
+        content: [{
+          type: 'text',
+          text: `Captured packet data (JSON for LLM analysis):\n${jsonString}`,
+        }],
+      };
+```
+
+[`index.js:86-91`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L86-L91)
+
+[8] `check_threats`는 내려받기 실패에도 같은 문구를 싣는다.
+
+```javascript
+      try {
+        const response = await axios.get(urlhausUrl);
+        console.error(`URLhaus response status: ${response.status}, length: ${response.data.length} chars`);
+        console.error(`URLhaus raw data (first 200 chars): ${response.data.slice(0, 200)}`);
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        urlhausThreats = ips.filter(ip => urlhausData.includes(ip));
+        console.error(`Checked IPs against URLhaus: ${urlhausThreats.length} threats found - ${urlhausThreats.join(', ') || 'None'}`);
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+
+      const outputText = `Captured IPs:\n${ips.join('\n')}\n\n` +
+        `Threat check against URLhaus blacklist:\n${
+          urlhausThreats.length > 0 ? `Potential threats: ${urlhausThreats.join(', ')}` : 'No threats detected in URLhaus blacklist.'
+        }`;
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{ type: 'text', text: outputText }],
+      };
+```
+
+[`index.js:212-241`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L212-L241)
+
+[9] `check_ip_threats`의 응답 문구다.
+
+```javascript
+      const outputText = `IP checked: ${ip}\n\n` +
+        `Threat check against URLhaus blacklist:\n${
+          isThreat ? 'Potential threat detected in URLhaus blacklist.' : 'No threat detected in URLhaus blacklist.'
+        }`;
+
+      return {
+        content: [{ type: 'text', text: outputText }],
+      };
+```
+
+[`index.js:285-292`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L285-L292)
+
+[10] 캡처 명령은 `duration`초 뒤에 끝나고 처리기는 그 사이에 알림을 보내지 않는다.
+
+```javascript
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing packets on ${interface} for ${duration}s`);
+
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:55-65`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L55-L65)
+
+[11] `capture_packets`는 `tshark`의 표준 오류를 서버 로그에만 쓰고 자른 사실을 응답에 넣지 않는다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+      let packets = JSON.parse(stdout);
+
+      const maxChars = 720000;
+      let jsonString = JSON.stringify(packets);
+      if (jsonString.length > maxChars) {
+        const trimFactor = maxChars / jsonString.length;
+        const trimCount = Math.floor(packets.length * trimFactor);
+        packets = packets.slice(0, trimCount);
+        jsonString = JSON.stringify(packets);
+        console.error(`Trimmed packets from ${packets.length} to ${trimCount} to fit ${maxChars} chars`);
+      }
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Captured packet data (JSON for LLM analysis):\n${jsonString}`,
+        }],
+      };
+```
+
+[`index.js:67-91`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L67-L91)
+
+[12] `get_summary_stats`와 `get_conversations`도 `tshark`의 표준 오류를 서버의 표준 오류에만 쓴다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz io,phs`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+```
+
+[`index.js:119-123`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L119-L123)
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz conv,tcp`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+```
+
+[`index.js:160-164`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L160-L164)
+
+[13] `check_threats`와 `extract_credentials`는 `execAsync` 결과에서 표준 출력만 꺼낸다.
+
+```javascript
+      const { stdout } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T fields -e ip.src -e ip.dst`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:201-204`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L201-L204)
+
+```javascript
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:380-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L380-L389)

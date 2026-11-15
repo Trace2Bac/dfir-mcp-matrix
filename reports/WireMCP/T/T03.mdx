@@ -1,0 +1,81 @@
+---
+cell: T03
+details:
+- id: not_implemented
+---
+
+# T03 실행 조건 확인
+
+### 미구현
+
+**판단.** 서버에는 도구 인자 밖의 조건으로 호출을 막거나 미루는 코드가 없다.
+도구 처리기 7개는 받은 인자로 바로 `tshark`를 찾아 실행하거나 URLhaus 목록을 내려받는다 [1].
+서버는 앞선 호출의 결과나 작업 상태를 남기지 않고 승인이나 호출자를 확인하는 코드도 없다 [1].
+서버는 `StdioServerTransport` 하나로만 연결을 받는다 [2].
+실행 전에 메모리나 디스크 같은 자원 상태를 확인하는 코드도 없다 [1].
+캡처 시간 `duration`에는 상한이 없고 `tshark` 실행에는 시간 제한이 없다 [3][4].
+프롬프트 7개는 분석할 내용을 적지만 호출 순서나 승인을 적지 않는다 [5].
+
+동시 실행 수를 정하는 장치도 없다.
+MCP TypeScript SDK 1.15.0은 요청마다 처리기를 Promise로 시작하고 앞 요청이 끝나기를 기다리지 않는다 [6].
+도구 처리기는 `exec`의 결과를 `await`하는 비동기 함수라서 여러 호출이 함께 진행된다 [1].
+URLhaus 내려받기에도 요청 사이 간격이나 횟수 제한이 없고 `check_threats`와 `check_ip_threats`는 호출마다 목록 전체를 내려받는다 [7].
+
+실시간 캡처 도구 4개는 모두 서버 작업 폴더의 같은 이름 `temp_capture.pcap`에 캡처를 쓰고 읽은 뒤 지운다 [3].
+캡처 시간 3초와 1초인 `capture_packets` 두 호출을 겹쳐 보내자 두 호출 모두 `tshark`가 파일이 중간에 끊겼다는 오류를 내 오류 응답으로 끝났다 [8].
+
+### 근거
+
+[1] 서버 코드 전체다: [`index.js:1-663`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L1-L663).
+도구 처리기 7개에는 인자 밖의 상태, 승인, 호출자, 자원을 확인하는 분기가 없고 모듈 수준의 상태는 `server` 객체와 `console.log` 바꿔치기뿐이다.
+
+[2] 서버는 stdio 전송으로 연결한다.
+
+```javascript
+// Start the server
+server.connect(new StdioServerTransport())
+  .then(() => console.error('WireMCP Server is running...'))
+  .catch(err => {
+    console.error('Failed to start WireMCP:', err);
+    process.exit(1);
+  });
+```
+
+[`index.js:657-663`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L657-L663)
+
+[3] `capture_packets`는 고정 이름의 임시 파일에 캡처하고 `duration`을 그대로 `-a duration:`에 넘긴다.
+
+```javascript
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing packets on ${interface} for ${duration}s`);
+
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:58-65`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L58-L65)
+
+[4] Node.js 22.17.0의 `execFile`은 `timeout`을 주지 않으면 0으로 두고 0이면 시간 제한을 두지 않는다: [`lib/child_process.js:324-337`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L324-L337), [`lib/child_process.js:453-458`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L453-L458).
+
+[5] 프롬프트 7개다: [`index.js:511-655`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L511-L655).
+
+[6] MCP TypeScript SDK 1.15.0의 `_onrequest`는 처리기를 Promise로 시작하고 끝나기를 기다리지 않고 함수를 마친다: [`src/shared/protocol.ts:357-430`](https://github.com/modelcontextprotocol/typescript-sdk/blob/1ac2e5926c93a7f1122e50bbbd6be60de1ae2c87/src/shared/protocol.ts#L357-L430).
+
+[7] `check_ip_threats`는 호출마다 URLhaus 목록을 내려받는다.
+
+```javascript
+      const urlhausUrl = 'https://urlhaus.abuse.ch/downloads/text/';
+      console.error(`Fetching URLhaus blacklist from ${urlhausUrl}`);
+      let urlhausData;
+      let isThreat = false;
+      try {
+        const response = await axios.get(urlhausUrl);
+```
+
+[`index.js:261-266`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L261-L266)
+
+[8] (실행 확인) 컨테이너의 루프백 인터페이스 `lo`에 시험 트래픽을 보내며 `capture_packets`를 캡처 시간 3초와 1초로 0.3초 차이를 두고 불렀다.
+두 응답 모두 `isError`가 참이고 `The file "temp_capture.pcap" appears to have been cut short in the middle of a packet.` 문구를 담았다.

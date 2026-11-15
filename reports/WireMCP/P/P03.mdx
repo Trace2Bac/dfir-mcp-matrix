@@ -1,0 +1,107 @@
+---
+cell: P03
+details:
+- id: not_implemented
+---
+
+# P03 조사 진척 판단
+
+### 미구현
+
+**판단.** 서버는 대상별로 수행한 작업과 남은 작업을 표현하지 않고 완료 판단을 모델에 맡긴다.
+서버에는 대상마다 해야 할 작업 목록, 조사 단계, 완료 조건이 없고 모델이 진행을 적는 도구도 없다 [1].
+서버는 호출 기록을 남기지 않으므로 앞선 호출을 다시 읽어 집계할 자료도 없다 [2].
+
+도구 응답은 그 호출 한 번의 결과만 싣고 다루지 못한 범위를 싣지 않는다.
+
+- `capture_packets`와 `analyze_pcap`은 패킷 JSON이 720,000자를 넘으면 앞부분 패킷만 남기고 응답에는 잘랐다는 사실이나 뺀 패킷 수를 싣지 않는다 [3][4].
+- 두 도구가 표준 오류에 남기는 줄은 패킷을 자른 뒤의 수를 두 번 적어 원래 패킷 수도 남지 않는다 [3][4].
+- `check_threats`와 `check_ip_threats`는 URLhaus 목록을 내려받지 못해도 응답에 대조하지 못했다는 사실을 싣지 않고 위협이 없을 때와 같은 문장을 싣는다 [5][6].
+- `extract_credentials`는 정해 둔 메시지 유형에 맞지 않는 Kerberos 줄을 항목으로 만들지 않고 뺀 줄 수를 싣지 않는다 [7].
+
+### 근거
+
+[1] (실행 확인) MCP SDK 클라이언트로 받은 도구는 캡처·분석·대조 도구 7개였고 진척이나 범위를 조회하거나 적는 도구는 없었다.
+
+[2] 서버가 남기는 기록은 `console.error`로 쓰는 표준 오류뿐이다: [`index.js:12-14`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L12-L14), [`index.js:60`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L60-L60), [`index.js:657-663`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L657-L663).
+
+[3] `capture_packets`는 패킷 목록을 자르고 응답에는 남은 JSON만 싣는다.
+
+```javascript
+      const maxChars = 720000;
+      let jsonString = JSON.stringify(packets);
+      if (jsonString.length > maxChars) {
+        const trimFactor = maxChars / jsonString.length;
+        const trimCount = Math.floor(packets.length * trimFactor);
+        packets = packets.slice(0, trimCount);
+        jsonString = JSON.stringify(packets);
+        console.error(`Trimmed packets from ${packets.length} to ${trimCount} to fit ${maxChars} chars`);
+      }
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Captured packet data (JSON for LLM analysis):\n${jsonString}`,
+        }],
+      };
+```
+
+[`index.js:74-91`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L74-L91)
+
+[4] `analyze_pcap`도 같은 상한으로 패킷 목록을 자른다.
+
+```javascript
+      const maxChars = 720000;
+      let jsonString = JSON.stringify(packets);
+      if (jsonString.length > maxChars) {
+        const trimFactor = maxChars / jsonString.length;
+        const trimCount = Math.floor(packets.length * trimFactor);
+        packets.splice(trimCount);
+        jsonString = JSON.stringify(packets);
+        console.error(`Trimmed packets from ${packets.length} to ${trimCount} to fit ${maxChars} chars`);
+      }
+
+      const outputText = `Analyzed PCAP: ${pcapPath}\n\n` +
+        `Unique IPs:\n${ips.join('\n')}\n\n` +
+        `URLs:\n${urls.length > 0 ? urls.join('\n') : 'None'}\n\n` +
+        `Protocols:\n${protocols.join('\n') || 'None'}\n\n` +
+        `Packet Data (JSON for LLM):\n${jsonString}`;
+```
+
+[`index.js:338-352`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L338-L352)
+
+[5] `check_threats`는 내려받기 예외를 처리한 뒤 위협 목록이 비었으면 위협이 없다는 문장을 싣는다.
+
+```javascript
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+
+      const outputText = `Captured IPs:\n${ips.join('\n')}\n\n` +
+        `Threat check against URLhaus blacklist:\n${
+          urlhausThreats.length > 0 ? `Potential threats: ${urlhausThreats.join(', ')}` : 'No threats detected in URLhaus blacklist.'
+        }`;
+```
+
+[`index.js:227-235`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L227-L235)
+
+[6] `check_ip_threats`도 내려받기 예외를 처리한 뒤 같은 문장을 싣는다.
+
+```javascript
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+
+      const outputText = `IP checked: ${ip}\n\n` +
+        `Threat check against URLhaus blacklist:\n${
+          isThreat ? 'Potential threat detected in URLhaus blacklist.' : 'No threat detected in URLhaus blacklist.'
+        }`;
+```
+
+[`index.js:280-288`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L280-L288)
+
+[7] Kerberos 줄은 정해 둔 메시지 유형일 때만 항목이 된다: [`index.js:446-477`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L446-L477).

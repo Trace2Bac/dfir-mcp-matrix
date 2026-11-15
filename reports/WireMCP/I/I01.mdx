@@ -1,0 +1,177 @@
+---
+cell: I01
+details:
+- id: I01.03
+- id: I01.05
+---
+
+# I01 외부 연동 대상 관리
+
+### I01.03 기본 활성화
+
+**구현.** 이 방식은 `check_threats`와 `check_ip_threats`가 URLhaus 목록을 내려받는 연결에 적용된다 [1].
+`index.js`에서 `axios`를 부르는 곳은 이 두 도구의 `axios.get` 두 곳뿐이다 [1][2].
+다른 도구는 tshark를 하위 프로세스로 실행해 패킷을 잡거나 pcap 파일을 읽고 서버 코드가 외부 연결을 열지 않는다 [2].
+두 도구는 조건 없이 등록되어 늘 도구 목록에 있다 [3].
+모델이 두 도구를 부르면 서버는 설정이나 자격증명 없이 목록을 요청한다 [1].
+연결을 켜거나 끄는 설정 파일, 환경변수, 시작 인자는 없다 [2].
+서버 코드는 환경변수를 tshark에 넘길 `env`를 만드는 데만 쓴다 [2].
+`check_ip_threats`는 tshark를 찾거나 실행하지 않고 호출을 받으면 바로 목록을 요청한다 [1].
+`check_threats`는 tshark로 캡처하고 캡처에서 IP를 뽑은 뒤에 목록을 요청한다 [4].
+tshark를 찾지 못하거나 캡처 명령이 실패하면 `check_threats`는 오류 응답으로 끝나고 목록을 요청하지 않는다 [4].
+두 도구는 받은 목록을 처리기 안의 변수 `urlhausData`에만 두고 저장하지 않는다 [1].
+그래서 두 도구는 호출할 때마다 목록 전체를 새로 요청한다 [1][5].
+네트워크를 끈 컨테이너에서 같은 서버에 `check_ip_threats`를 두 번 부르자 두 호출 모두 URLhaus 주소로 요청을 시도했다 [5].
+두 요청은 모두 `urlhaus.abuse.ch`의 이름 해석 오류로 실패했다 [5].
+
+### I01.05 고정 목적지
+
+**구현.** 이 방식은 `check_threats`와 `check_ip_threats`가 URLhaus 목록을 내려받는 연결에 적용된다 [1].
+두 처리기는 요청 주소 `https://urlhaus.abuse.ch/downloads/text/`를 처리기 안의 문자열 상수 `urlhausUrl`로 둔다 [1].
+이 주소를 바꾸는 설정, 환경변수, 도구 인자는 없다 [2][3].
+`check_threats`의 인자는 `interface`와 `duration`이고 `check_ip_threats`의 인자는 `ip`뿐이다 [3].
+이 인자 값은 요청 주소에 들어가지 않는다 [1].
+`check_ip_threats`는 받은 목록의 줄마다 IP 형식의 문자열을 뽑아 서버 프로세스 안에서 `ip`와 대조한다 [6].
+두 처리기는 `axios.get`에 주소만 넘기고 요청 설정을 주지 않는다 [1].
+axios 1.10.0은 기본 어댑터 목록 `xhr`, `http`, `fetch`에서 실행 환경이 지원하는 첫 어댑터를 쓴다 [7].
+Node.js 22.17.0 컨테이너에는 `XMLHttpRequest`가 없었으므로 요청은 `http` 어댑터로 나간다 [7][5].
+axios의 `timeout` 기본값은 0이고 이 값이 0이면 `http` 어댑터는 시간 제한을 두지 않는다 [8].
+`maxRedirects`를 주지 않으면 `http` 어댑터는 follow-redirects 1.15.9로 요청하고 follow-redirects는 리다이렉트를 21번까지 따라간다 [9].
+`proxy`를 주지 않으면 `http` 어댑터는 proxy-from-env 1.1.0으로 환경변수 `https_proxy`, `all_proxy`, `no_proxy` 등을 읽어 프록시를 정한다 [10].
+`httpsAgent`를 주지 않으므로 HTTPS 연결은 Node.js 22.17.0의 기본값대로 서버 인증서를 확인한다 [11].
+
+**한계.** 서버 코드에는 리다이렉트 대상이나 프록시를 확인하는 처리가 없다 [1].
+URLhaus가 다른 호스트로 리다이렉트하면 axios는 그 호스트가 돌려준 응답을 목록으로 넘긴다 [9].
+URLhaus가 리다이렉트 응답을 돌려주는지는 확인하지 않았다.
+환경변수에 프록시가 있으면 axios는 고정 주소 대신 그 프록시에 연결하고 프록시가 돌려준 응답을 받는다 [10].
+네트워크를 끈 컨테이너에서 `HTTPS_PROXY`를 로컬 수신 프로그램의 `http://` 주소로 주고 `check_ip_threats`를 부르자 요청은 그 수신 프로그램으로 갔다 [12].
+수신 프로그램이 받은 요청은 목적지 URL 전체를 요청 줄에 적은 평문 HTTP 요청이었다 [12].
+
+### 근거
+
+[1] 두 처리기는 처리기 안의 고정 주소를 `axios.get`에 넘겨 목록을 받고 `check_ip_threats`는 그 전에 tshark를 부르지 않는다.
+
+```javascript
+      const urlhausUrl = 'https://urlhaus.abuse.ch/downloads/text/';
+      console.error(`Fetching URLhaus blacklist from ${urlhausUrl}`);
+      let urlhausData;
+      let urlhausThreats = [];
+      try {
+        const response = await axios.get(urlhausUrl);
+```
+
+[`index.js:208-213`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L208-L213)
+
+```javascript
+  async (args) => {
+    try {
+      const { ip } = args;
+      console.error(`Checking IP ${ip} against URLhaus blacklist`);
+
+      const urlhausUrl = 'https://urlhaus.abuse.ch/downloads/text/';
+      console.error(`Fetching URLhaus blacklist from ${urlhausUrl}`);
+      let urlhausData;
+      let isThreat = false;
+      try {
+        const response = await axios.get(urlhausUrl);
+```
+
+[`index.js:256-266`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L256-L266)
+
+[2] `index.js`는 `axios`를 두 도구에서만 부르고 `process.env`를 tshark 실행의 `env`에만 쓰며 시작 인자와 설정 파일을 읽지 않는다: [`index.js`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js), [`index.js:62-65`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L62-L65), [`index.js:317-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L317-L320), [`index.js:657-663`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L657-L663).
+
+[3] 두 도구는 조건 없이 등록되고 인자는 `interface`·`duration`과 `ip`뿐이다.
+
+```javascript
+// Tool 4: Capture traffic and check threats against URLhaus
+server.tool(
+  'check_threats',
+  'Capture live traffic and check IPs against URLhaus blacklist',
+  {
+    interface: z.string().optional().default('en0').describe('Network interface to capture from (e.g., eth0, en0)'),
+    duration: z.number().optional().default(5).describe('Capture duration in seconds'),
+  },
+```
+
+[`index.js:181-188`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L181-L188)
+
+```javascript
+// Tool 5: Check a specific IP against URLhaus IOCs
+server.tool(
+  'check_ip_threats',
+  'Check a given IP address against URLhaus blacklist for IOCs',
+  {
+    ip: z.string().regex(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/).describe('IP address to check (e.g., 192.168.1.1)'),
+  },
+```
+
+[`index.js:249-255`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L249-L255)
+
+[4] `check_threats`는 캡처와 IP 추출 뒤에 목록을 요청하고 앞 단계의 예외는 오류 응답으로 끝난다.
+
+```javascript
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing traffic on ${interface} for ${duration}s to check threats`);
+
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+
+      const { stdout } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T fields -e ip.src -e ip.dst`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      const ips = [...new Set(stdout.split('\n').flatMap(line => line.split('\t')).filter(ip => ip && ip !== 'unknown'))];
+      console.error(`Captured ${ips.length} unique IPs: ${ips.join(', ')}`);
+```
+
+[`index.js:189-206`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L189-L206)
+
+```javascript
+    } catch (error) {
+      console.error(`Error in check_threats: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:242-245`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L242-L245)
+
+[5] (실행 확인) `--network none` 컨테이너에서 MCP TypeScript SDK 1.15.0의 stdio 클라이언트로 서버를 실행하고 `check_ip_threats`에 문서용 시험 주소 하나를 주어 두 번 불렀다.
+두 호출 모두 표준 오류에 URLhaus 주소에서 목록을 받는다는 줄과 `getaddrinfo EAI_AGAIN urlhaus.abuse.ch` 실패 줄이 기록되었다.
+같은 컨테이너의 Node.js 22.17.0에서 `typeof XMLHttpRequest`는 `undefined`였다.
+
+[6] `check_ip_threats`는 받은 목록에서 줄마다 IP 형식의 문자열을 뽑아 `ip`와 대조한다.
+
+```javascript
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        isThreat = urlhausData.includes(ip);
+```
+
+[`index.js:269-278`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L269-L278)
+
+[7] axios 1.10.0의 기본 어댑터 목록과 고르는 순서, `xhr`·`http` 어댑터를 쓸 수 있는 조건이다: [`lib/defaults/index.js:40`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/defaults/index.js#L40), [`lib/adapters/adapters.js:29-57`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/adapters.js#L29-L57), [`lib/adapters/xhr.js:12`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/xhr.js#L12), [`lib/adapters/http.js:127`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L127).
+
+[8] axios 1.10.0의 `timeout` 기본값은 0이고 `http` 어댑터는 이 값이 있을 때만 시간 제한을 건다: [`lib/defaults/index.js:128-132`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/defaults/index.js#L128-L132), [`lib/adapters/http.js:630`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L630).
+
+[9] axios 1.10.0의 `http` 어댑터는 `maxRedirects`가 0이 아니면 follow-redirects로 요청하고 follow-redirects 1.15.9의 기본 `maxRedirects`는 21이다: [`lib/adapters/http.js:435-450`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L435-L450), [`index.js:499-503`](https://github.com/follow-redirects/follow-redirects/blob/e4e55c77b2d849280d105943f49f42e0c735d05d/index.js#L499-L503), [`index.js:421-425`](https://github.com/follow-redirects/follow-redirects/blob/e4e55c77b2d849280d105943f49f42e0c735d05d/index.js#L421-L425).
+
+[10] axios 1.10.0의 `setProxy`는 `proxy` 설정이 없으면 proxy-from-env 1.1.0의 `getProxyForUrl`로 환경변수에서 프록시를 찾아 연결 대상을 그 프록시로 바꾼다: [`lib/adapters/http.js:83-125`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L83-L125), [`lib/adapters/http.js:432`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L432), [`index.js:24-52`](https://github.com/Rob--W/proxy-from-env/blob/96d01f8fcfdccfb776735751132930bbf79c4a3a/index.js#L24-L52), [`index.js:104-106`](https://github.com/Rob--W/proxy-from-env/blob/96d01f8fcfdccfb776735751132930bbf79c4a3a/index.js#L104-L106).
+
+[11] axios 1.10.0은 `httpsAgent`가 없으면 에이전트를 정하지 않고 Node.js 22.17.0의 `rejectUnauthorized` 기본값은 `true`다: [`lib/adapters/http.js:436-437`](https://github.com/axios/axios/blob/73a836dae75f06055c24561d83cf4ca1c43e2854/lib/adapters/http.js#L436-L437), [`doc/api/tls.md:1727-1730`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/tls.md#L1727-L1730).
+
+[12] (실행 확인) `--network none` 컨테이너 안에서 `127.0.0.1:18080`에 받은 요청을 기록하고 502로 답하는 TCP 수신 프로그램을 두었다.
+`HTTPS_PROXY`를 `http://127.0.0.1:18080`으로 준 서버에 `check_ip_threats`를 한 번 부르자 수신 프로그램이 요청 하나를 받았다.
+요청 줄은 `GET https://urlhaus.abuse.ch/downloads/text/ HTTP/1.1`이었고 TLS 연결 없이 평문으로 왔다.

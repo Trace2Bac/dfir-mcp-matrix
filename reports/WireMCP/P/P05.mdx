@@ -1,0 +1,132 @@
+---
+cell: P05
+details:
+- id: P05.03
+- id: P05.04
+---
+
+# P05 사건 자료 정리
+
+### P05.03 자동 정리
+
+**구현.** 이 방식은 실시간 캡처 도구 4개(`capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`)의 캡처 파일 `temp_capture.pcap`에 적용된다 [1][2].
+네 도구는 `tshark -i`로 서버 프로세스의 작업 폴더에 `temp_capture.pcap`을 쓰고 `tshark -r`로 그 파일을 읽어 응답을 만든다 [1][2][3].
+응답을 돌려주기 전에 `fs.unlink`로 이 파일을 지운다 [1][2].
+`check_threats`는 URLhaus 목록을 내려받지 못한 경우에도 그 예외를 따로 처리하므로 파일을 지우는 단계까지 실행한다 [4].
+응답은 캡처 파일을 지웠다는 사실을 적지 않는다 [1][2].
+
+사건 자료를 지우거나 초기화하는 MCP 도구와 사용자 명령은 없다 [5].
+`analyze_pcap`과 `extract_credentials`는 받은 pcap 파일을 읽기만 하고 지우지 않는다 [6].
+
+**한계.** 파일을 지우는 단계는 도구가 성공한 경로에만 있다 [1][2].
+캡처 명령이나 읽기 명령이 실패하거나 출력 해석이 예외로 끝나면 `catch`가 오류 응답을 돌려주고 파일을 지우지 않는다 [1][2].
+Node.js 22.17.0의 `exec`는 하위 프로세스의 표준 출력이 `maxBuffer` 기본값 1 MiB를 넘으면 그 프로세스를 끝내고 오류로 처리한다 [7].
+그래서 읽기 명령의 출력이 1 MiB를 넘는 캡처에서도 캡처 파일은 작업 폴더에 남는다 [1][7].
+남은 파일은 다음 실시간 캡처 호출이 같은 이름으로 다시 쓰고 지울 때까지 그대로 있다 [2].
+루프백 인터페이스에 트래픽을 많이 보내는 동안 `capture_packets`를 부르자 `maxBuffer` 오류로 끝났고 캡처 파일이 작업 폴더에 남았다 [8].
+이어서 부른 `get_summary_stats`는 같은 inode에 파일을 다시 쓰고 성공한 뒤 그 파일을 지웠다 [8].
+지우기에 실패하면 서버는 표준 오류에 한 줄을 남기고 응답에는 그 사실을 싣지 않는다 [1].
+
+### P05.04 원본 증거까지 삭제 대상에 포함
+
+**구현.** 이 방식은 실시간 캡처 도구 4개의 자동 정리에 적용된다 [1][2].
+지우는 파일은 서버가 서버 호스트의 인터페이스에서 캡처한 패킷을 담은 파일이다 [1].
+네 도구는 캡처한 패킷을 이 파일에만 쓰고 다른 곳으로 옮기거나 사본을 남기지 않는다 [1][2].
+응답에는 도구마다 정해 둔 필드나 통계만 실린다 [1][2].
+그래서 호출이 성공하면 캡처한 패킷 자체는 남지 않는다 [1].
+서버는 지울 파일이 그 호출에서 쓴 파일인지 확인하지 않고 작업 폴더의 고정 이름으로 지운다 [1][2].
+서버가 만들지 않은 같은 이름의 파일을 작업 폴더에 두고 `get_conversations`를 부르자 응답은 성공이었고 앞 파일이 있었다는 내용이 없었으며 그 파일은 호출 뒤 남지 않았다 [8].
+`capture_packets`를 3초로 부른 동안 `get_summary_stats`를 1초로 부르자 뒤 호출은 성공했고 앞 호출은 tshark가 `temp_capture.pcap`이 없다고 알린 오류로 끝났다 [8].
+
+### 근거
+
+[1] `capture_packets`는 캡처 파일을 쓰고 읽은 뒤 응답 전에 지우고 오류가 나면 지우지 않고 돌려준다: [`index.js:55-96`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L55-L96).
+
+```javascript
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Captured packet data (JSON for LLM analysis):\n${jsonString}`,
+        }],
+      };
+    } catch (error) {
+      console.error(`Error in capture_packets: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:84-95`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L84-L95)
+
+[2] 다른 실시간 캡처 도구 3개도 같은 이름으로 쓰고 지운다: [`index.js:111-136`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L111-L136), [`index.js:152-177`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L152-L177), [`index.js:193-245`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L193-L245).
+
+[3] Node.js 22.17.0의 `exec`는 `cwd`를 주지 않으면 `process.cwd()`에서 하위 프로세스를 실행하고 `fs`는 상대 경로를 `process.cwd()` 기준으로 정한다: [`doc/api/child_process.md:189-190`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/child_process.md#L189-L190), [`doc/api/fs.md:8119-8123`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/fs.md#L8119-L8123).
+
+[4] `check_threats`는 URLhaus 내려받기 예외를 안에서 처리한 뒤 파일을 지운다.
+
+```javascript
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+
+      const outputText = `Captured IPs:\n${ips.join('\n')}\n\n` +
+        `Threat check against URLhaus blacklist:\n${
+          urlhausThreats.length > 0 ? `Potential threats: ${urlhausThreats.join(', ')}` : 'No threats detected in URLhaus blacklist.'
+        }`;
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+```
+
+[`index.js:227-237`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L227-L237)
+
+[5] (실행 확인) MCP SDK 클라이언트로 받은 도구 7개와 프롬프트 7개 가운데 자료를 지우거나 초기화하는 것은 없었고 리소스 목록 요청은 `Method not found`였다.
+
+[6] `analyze_pcap`과 `extract_credentials`는 받은 경로를 `fs.access`로 확인하고 `tshark -r`로 읽는다.
+
+```javascript
+      const { pcapPath } = args;
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:310-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L310-L320)
+
+```javascript
+        const { pcapPath } = args;
+        console.error(`Extracting credentials from PCAP file: ${pcapPath}`);
+  
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:374-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L374-L389)
+
+[7] Node.js 22.17.0의 `exec`는 `maxBuffer` 기본값이 `1024 * 1024`이고 넘으면 하위 프로세스를 끝낸다: [`doc/api/child_process.md:199-202`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/child_process.md#L199-L202), [`lib/child_process.js:478-484`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L478-L484).
+
+[8] (실행 확인) 네트워크를 끈 컨테이너에서 서버의 작업 폴더를 빈 폴더로 정하고 `lo`로 캡처 도구를 불렀다.
+UDP 패킷을 많이 보낸 `capture_packets` 호출은 `maxBuffer` 오류로 끝났고 18,983,592바이트의 `temp_capture.pcap`이 남았다.
+이어서 부른 `get_summary_stats`가 캡처하는 동안 그 파일은 inode가 같고 크기가 284바이트였으며 호출이 성공한 뒤에는 없었다.
+작업 폴더에 직접 쓴 21바이트 글 파일 `temp_capture.pcap`을 두고 `get_conversations`를 부르자 응답은 대화 통계였고 호출 뒤 파일이 없었다.
+`capture_packets`를 3초로 부르고 0.3초 뒤에 `get_summary_stats`를 1초로 부르자 `get_summary_stats`는 성공했고 `capture_packets`는 `isError`가 참인 응답에 `tshark -r` 실패를 실었다.
+그때 서버 표준 오류에는 `temp_capture.pcap`이 없다는 tshark 문장이 남았다.

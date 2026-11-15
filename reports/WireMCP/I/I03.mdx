@@ -1,0 +1,88 @@
+---
+cell: I03
+details:
+- id: not_applicable
+---
+
+# I03 외부 전송 범위 구성
+
+### 비적용
+
+**판단.** 서버 코드가 외부 서비스에 조사 자료를 보내는 요청은 없다 [1].
+서버 코드가 여는 외부 연결은 `check_threats`와 `check_ip_threats`가 URLhaus 목록을 받는 GET 요청뿐이다 [1][2].
+두 처리기는 고정 주소만 `axios.get`에 넘기고 질의 값, 본문, 헤더를 더하지 않는다 [1].
+`check_ip_threats`는 인자 `ip`를 요청에 싣지 않고 받은 목록과 서버 프로세스 안에서 대조한다 [3].
+`check_threats`도 캡처에서 뽑은 IP를 요청에 싣지 않고 받은 목록과 서버 프로세스 안에서 대조한다 [4].
+네트워크를 끈 컨테이너에서 `HTTPS_PROXY`를 로컬 수신 프로그램 주소로 주고 `check_ip_threats`를 불렀다 [5].
+수신 프로그램이 받은 요청에는 고정 주소와 axios가 붙이는 기본 헤더만 있었고 인자로 준 시험 IP는 없었다 [5].
+tshark의 이름 해석이 켜졌을 때 나가는 역방향 DNS 조회에는 캡처한 주소가 들어간다 [6].
+이 조회는 분석 도구가 스스로 하는 통신이고 서버 코드가 보내는 요청이 아니다.
+
+### 근거
+
+[1] 두 처리기는 고정 주소 하나만 `axios.get`에 넘긴다.
+
+```javascript
+      const urlhausUrl = 'https://urlhaus.abuse.ch/downloads/text/';
+      console.error(`Fetching URLhaus blacklist from ${urlhausUrl}`);
+      let urlhausData;
+      let urlhausThreats = [];
+      try {
+        const response = await axios.get(urlhausUrl);
+```
+
+[`index.js:208-213`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L208-L213)
+
+```javascript
+      const urlhausUrl = 'https://urlhaus.abuse.ch/downloads/text/';
+      console.error(`Fetching URLhaus blacklist from ${urlhausUrl}`);
+      let urlhausData;
+      let isThreat = false;
+      try {
+        const response = await axios.get(urlhausUrl);
+```
+
+[`index.js:261-266`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L261-L266)
+
+[2] `index.js`는 `axios`를 이 두 곳에서만 부른다: [`index.js`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js).
+
+[3] `check_ip_threats`는 목록에서 뽑은 IP 집합에 `ip`가 있는지 대조한다.
+
+```javascript
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        isThreat = urlhausData.includes(ip);
+```
+
+[`index.js:269-278`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L269-L278)
+
+[4] `check_threats`는 목록에서 뽑은 IP 집합과 캡처한 IP를 대조한다.
+
+```javascript
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        urlhausThreats = ips.filter(ip => urlhausData.includes(ip));
+        console.error(`Checked IPs against URLhaus: ${urlhausThreats.length} threats found - ${urlhausThreats.join(', ') || 'None'}`);
+```
+
+[`index.js:216-226`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L216-L226)
+
+[5] (실행 확인) `--network none` 컨테이너 안에서 `127.0.0.1:18080`에 받은 요청을 기록하고 502로 답하는 TCP 수신 프로그램을 두었다.
+`HTTPS_PROXY`를 `http://127.0.0.1:18080`으로 준 서버에 `check_ip_threats`를 문서용 시험 주소 하나로 한 번 불렀다.
+수신 프로그램이 받은 요청은 요청 줄 `GET https://urlhaus.abuse.ch/downloads/text/ HTTP/1.1`과 `Accept`, `User-Agent: axios/1.10.0`, `Accept-Encoding`, `host`, `Connection` 헤더였고 본문이 없었다.
+
+[6] tshark는 `network_name`이 켜져 있으면 주소를 외부 resolver로 조회한다: [`epan/addr_resolv.c:1121-1125`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/epan/addr_resolv.c#L1121-L1125).

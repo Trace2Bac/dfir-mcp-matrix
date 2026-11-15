@@ -1,0 +1,138 @@
+---
+cell: E01
+details:
+- id: not_implemented
+---
+
+# E01 증거 등록 관리
+
+### 미구현
+
+**판단.** 서버는 증거를 등록하는 도구를 두지 않고 증거를 식별하는 목록이나 등록 정보를 남기지 않는다.
+`analyze_pcap`과 `extract_credentials`는 pcap 파일 경로 `pcapPath`를 호출마다 인자로 받아 그 호출에서만 읽는다 [1][2].
+두 도구는 `fs.access`로 그 경로가 있는지만 확인하고 경로를 `tshark -r`에 넘긴다 [1][2].
+두 도구의 응답 첫 줄 `Analyzed PCAP: <경로>`는 모델이 준 경로를 그대로 옮긴 것이고 파일의 크기, 시각, 해시는 응답에 없다 [3].
+서버 코드에서 `fs`를 쓰는 곳은 경로 확인 `fs.access`와 임시 파일 삭제 `fs.unlink`뿐이고 받은 경로를 호출 밖의 변수나 파일에 남기는 처리는 없다 [4].
+표준 오류에는 `Analyzing PCAP file: <경로>` 같은 줄이 출력된다 [5].
+이 줄은 서버 운영 로그에 경로 인자가 남는 것이고 증거를 식별하는 목록이 아니다.
+같은 파일을 다시 넘기면 서버는 `tshark`를 다시 실행해 새 응답을 만들고 앞선 호출을 가리키는 값을 싣지 않는다 [1][2].
+
+서버가 시작하는 수집도 서버 쪽 목록에 오르지 않는다.
+`capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`는 서버를 실행한 호스트의 네트워크 인터페이스에서 `duration`초 동안 잡은 트래픽을 서버 작업 폴더의 `temp_capture.pcap`에 쓴다 [6].
+네 도구는 이 파일을 `tshark -r`로 다시 읽은 뒤 `fs.unlink`로 지운다 [6].
+응답에는 캡처 결과만 실리고 캡처한 인터페이스 이름과 캡처 파일 이름은 실리지 않는다 [6].
+`capture_packets`를 루프백 인터페이스 `lo`로 1초 부르자 응답은 `Captured packet data (JSON for LLM analysis):` 아래 빈 목록이었고 호출 뒤 작업 폴더에 `temp_capture.pcap`이 남지 않았다 [7].
+
+### 근거
+
+[1] `analyze_pcap`은 경로가 있는지 확인하고 그 경로를 `tshark -r`에 넘긴다.
+
+```javascript
+  {
+    pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+  },
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { pcapPath } = args;
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:304-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L304-L320)
+
+[2] `extract_credentials`도 경로가 있는지 확인하고 같은 경로로 `tshark -r`을 두 번 실행한다.
+
+```javascript
+    {
+      pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+    },
+    async (args) => {
+      try {
+        const tsharkPath = await findTshark();
+        const { pcapPath } = args;
+        console.error(`Extracting credentials from PCAP file: ${pcapPath}`);
+  
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:368-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L368-L389)
+
+[3] 두 도구의 응답 글은 받은 경로를 첫 줄에 옮기고 분석 결과를 잇는다.
+
+```javascript
+      const outputText = `Analyzed PCAP: ${pcapPath}\n\n` +
+        `Unique IPs:\n${ips.join('\n')}\n\n` +
+        `URLs:\n${urls.length > 0 ? urls.join('\n') : 'None'}\n\n` +
+        `Protocols:\n${protocols.join('\n') || 'None'}\n\n` +
+        `Packet Data (JSON for LLM):\n${jsonString}`;
+```
+
+[`index.js:348-352`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L348-L352)
+
+```javascript
+        const outputText = `Analyzed PCAP: ${pcapPath}\n\n` +
+          `Plaintext Credentials:\n${credentials.plaintext.length > 0 ? 
+            credentials.plaintext.map(c => 
+              c.type === 'Telnet Prompt' ? 
+                `${c.type}: ${c.data} (Frame ${c.frame})` : 
+                `${c.type}: ${c.username}:${c.password} (Frame ${c.frame})`
+            ).join('\n') : 
+            'None'}\n\n` +
+          `Encrypted/Hashed Credentials:\n${credentials.encrypted.length > 0 ?
+            credentials.encrypted.map(c =>
+              `${c.type}: User=${c.username} Realm=${c.realm} (Frame ${c.frame})\n` +
+              `Hash=${c.hash}\n` +
+              `Cracking Command: ${c.crackingMode}\n`
+            ).join('\n') :
+            'None'}\n\n` +
+          `Note: Encrypted credentials can be cracked using tools like John the Ripper or hashcat.\n` +
+          `For Kerberos hashes:\n` +
+          `- AS-REQ/TGS-REQ: hashcat -m 7500 or john --format=krb5pa-md5\n` +
+          `- AS-REP: hashcat -m 18200 or john --format=krb5asrep`;
+```
+
+[`index.js:481-499`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L481-L499)
+
+[4] 서버 코드의 `fs` 사용은 불러오기, 경로 확인 두 곳, 임시 파일 삭제 네 곳이다: [`index.js:6`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L6-L6), [`index.js:314`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L314-L314), [`index.js:377`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L377-L377), [`index.js:84`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L84-L84), [`index.js:125`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L125-L125), [`index.js:166`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L166-L166), [`index.js:237`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L237-L237).
+
+[5] 서버는 `console.log`의 출력을 표준 오류로 보내고 받은 경로를 표준 오류에 출력한다.
+
+```javascript
+// Redirect console.log to stderr
+const originalConsoleLog = console.log;
+console.log = (...args) => console.error(...args);
+```
+
+[`index.js:12-14`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L12-L14)
+
+```javascript
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+```
+
+[`index.js:311-311`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L311-L311)
+
+[6] 실시간 캡처 도구는 정해 둔 임시 파일에 캡처를 쓰고 읽은 뒤 지우며 응답에는 결과만 싣는다: [`index.js:55-91`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L55-L91), [`index.js:107-131`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L107-L131), [`index.js:148-172`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L148-L172), [`index.js:189-241`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L189-L241).
+
+[7] (실행 확인) 네트워크를 끈 컨테이너에서 서버 작업 폴더 `/work/srv`로 서버를 실행하고 `capture_packets`를 `interface` `lo`, `duration` 1로 불렀다.
+응답은 `Captured packet data (JSON for LLM analysis):` 다음 줄에 빈 JSON 목록이었고 호출 뒤 작업 폴더에는 시험 pcap을 둔 `evidence` 폴더만 있었다.

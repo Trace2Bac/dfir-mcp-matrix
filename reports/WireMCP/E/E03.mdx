@@ -1,0 +1,112 @@
+---
+cell: E03
+details:
+- id: E03.03
+---
+
+# E03 원본 변경 방지
+
+### E03.03 외부 도구·플랫폼에 위임
+
+**구현.** 이 방식은 pcap 파일을 읽는 `analyze_pcap`과 `extract_credentials`에 적용된다 [1][2].
+서버 코드는 pcap 파일을 직접 열지 않고 `fs.access`로 있는지만 확인한 뒤 경로를 `tshark -r`의 인자로 넘긴다 [1][2].
+두 도구가 실행하는 `tshark` 명령에는 파일을 쓰는 인자가 없고 패킷 필드를 고르는 `-e`와 출력 형식만 있다 [1][2].
+이 경로에서 원본을 지키는 것은 서버 개요의 버전 기준대로 설치된 `tshark`가 입력 파일을 읽기 모드로 연다는 동작이다 [3].
+Wireshark 4.0.17의 `tshark`는 `-r`로 받은 파일을 파일 읽기 라이브러리 wiretap으로 열고 wiretap은 입력 파일을 `O_RDONLY`로 연다 [3].
+직접 만든 pcap 파일로 두 도구를 부른 뒤 그 파일의 크기, 수정 시각, SHA-256은 부르기 전과 같았고 그 폴더와 서버 작업 폴더에 새 파일이 생기지 않았다 [4].
+
+실시간 캡처 도구 4개는 원본 증거 파일을 받지 않는다 [5].
+이 도구들이 읽는 것은 서버를 실행한 호스트의 네트워크 인터페이스를 지나는 트래픽이다 [5].
+`tshark -i`가 그 트래픽을 서버 작업 폴더의 `temp_capture.pcap`에 쓰고 서버는 이 파일을 `tshark -r`로 다시 읽은 뒤 `fs.unlink`로 지운다 [5].
+서버 코드가 지우는 파일과 서버가 실행한 `tshark`가 쓰는 파일은 이 임시 파일뿐이다 [5][6].
+`check_ip_threats`는 파일을 읽지 않고 URLhaus 목록만 내려받는다 [7].
+
+저장소에는 증거를 읽기 전용으로 연결하거나 서버를 읽기 전용 환경에서 실행하는 실행 구성이 없다 [8].
+README는 `node index.js`로 서버를 직접 실행하게 하고 클라이언트 설정에도 `node`와 `index.js` 경로만 적는다 [8].
+
+**한계.** 실시간 캡처 도구는 캡처를 쓸 파일과 읽은 뒤 지울 파일을 같은 상대 경로 `temp_capture.pcap`으로 정해 두고 그 이름의 파일이 이미 있는지 확인하지 않는다 [5].
+Wireshark 4.0.17의 `tshark`는 캡처를 `dumpcap`에 맡기고 출력 파일을 `-w`로 넘긴다 [9].
+`dumpcap`은 링 버퍼를 쓰지 않는 캡처에서 출력 파일을 `O_TRUNC`로 연다 [9].
+그래서 원본 pcap 파일이 서버 작업 폴더의 `temp_capture.pcap`이면 실시간 캡처 도구를 부를 때 그 파일의 내용이 새 캡처로 바뀌고 서버가 그 파일을 읽은 뒤 지운다 [5][9].
+캡처 뒤의 읽기나 해석에서 오류가 나면 서버는 `fs.unlink`를 부르지 않고 오류 응답을 돌려주므로 새 캡처가 담긴 파일이 남는다 [5].
+서버 작업 폴더에 직접 만든 pcap을 `temp_capture.pcap`으로 두고 `analyze_pcap`으로 읽은 뒤 `capture_packets`를 루프백 인터페이스로 부르자 그 파일은 남지 않았다 [4].
+
+`analyze_pcap`과 `extract_credentials`는 `pcapPath`를 문자열인지만 검사하고 셸 명령 문자열의 큰따옴표 안에 넣어 실행한다 [10].
+실시간 캡처 도구 4개는 `interface`를 문자열인지만 검사하고 따옴표로 감싸지 않은 채 셸 명령 문자열에 넣는다 [10].
+Node.js 22.17.0의 `exec`는 명령 문자열을 Unix에서 `/bin/sh`로 실행하고 문서는 그 문자열의 특수 문자를 셸이 그대로 처리한다고 적는다 [11].
+POSIX 셸은 큰따옴표 안에서도 `$`와 역따옴표로 시작하는 치환을 해석한다 [12].
+그래서 셸이 해석하는 문자를 넣은 인자로 `tshark`가 아닌 명령이 실행될 수 있고 그 명령에는 입력 파일을 읽기 모드로 여는 동작이 적용되지 않는다 [11][12].
+셸 메타 문자를 넣은 이름의 `pcapPath`와 셸 메타 문자를 넣은 `interface`로 도구를 부르자 두 경우 모두 셸이 그 문자를 해석해 `tshark`가 아닌 명령이 서버 작업 폴더에 파일을 만들었다 [13].
+
+### 근거
+
+[1] `analyze_pcap`은 경로가 있는지 확인하고 패킷 필드만 고르는 `tshark -r` 명령을 실행한다.
+
+```javascript
+      const tsharkPath = await findTshark();
+      const { pcapPath } = args;
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:309-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L309-L320)
+
+[2] `extract_credentials`도 경로가 있는지 확인하고 같은 경로로 패킷 필드만 고르는 `tshark -r` 명령을 두 번 실행한다.
+
+```javascript
+        const tsharkPath = await findTshark();
+        const { pcapPath } = args;
+        console.error(`Extracting credentials from PCAP file: ${pcapPath}`);
+  
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:373-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L373-L389)
+
+[3] Wireshark 4.0.17의 `tshark`는 `-r`의 파일을 `wtap_open_offline`으로 열고 wiretap은 입력 파일을 `O_RDONLY`로 연다: [`tshark.c:4469`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L4469-L4469), [`wiretap/file_access.c:896-904`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wiretap/file_access.c#L896-L904), [`wiretap/file_wrappers.c:1240-1258`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wiretap/file_wrappers.c#L1240-L1258).
+
+[4] (실행 확인) 네트워크를 끈 컨테이너에서 Ethernet·IPv4·TCP 패킷 2개(HTTP 요청과 응답)를 담은 250바이트 pcap을 직접 만들어 서버 작업 폴더 아래 `evidence/test.pcap`에 두었다.
+`analyze_pcap`과 `extract_credentials`를 이 파일의 절대 경로로 부른 뒤 파일의 크기, 수정 시각, SHA-256이 부르기 전과 같았고 `evidence` 폴더와 서버 작업 폴더의 파일 목록도 같았다.
+같은 파일을 서버 작업 폴더의 `temp_capture.pcap`으로 복사하고 `analyze_pcap`에 상대 경로 `temp_capture.pcap`을 주자 같은 IP·URL 목록이 돌아왔고 그 파일의 SHA-256은 바뀌지 않았다.
+이어서 `capture_packets`를 `interface` `lo`, `duration` 1로 부르자 빈 JSON 목록을 담은 응답이 돌아왔고 호출 뒤 `temp_capture.pcap`은 없었다.
+`evidence/test.pcap`의 SHA-256은 마지막까지 처음과 같았다.
+
+[5] 실시간 캡처 도구는 정해 둔 상대 경로에 캡처를 쓰고 다시 읽은 뒤 지운다: [`index.js:57-84`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L57-L84), [`index.js:109-125`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L109-L125), [`index.js:150-166`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L150-L166), [`index.js:191-237`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L191-L237).
+
+[6] 서버 코드의 `fs` 사용은 불러오기, 경로 확인 두 곳, 임시 파일 삭제 네 곳이다: [`index.js:6`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L6-L6), [`index.js:314`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L314-L314), [`index.js:377`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L377-L377), [`index.js:84`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L84-L84), [`index.js:125`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L125-L125), [`index.js:166`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L166-L166), [`index.js:237`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L237-L237).
+
+[7] `check_ip_threats`는 받은 IP를 URLhaus 목록과 대조하고 `tshark`를 실행하지 않는다: [`index.js:256-292`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L256-L292).
+
+[8] README의 실행 안내와 클라이언트 설정 예다: [`README.md:34-78`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/README.md#L34-L78).
+
+[9] Wireshark 4.0.17의 `tshark`는 출력 파일을 `-w`로 `dumpcap`에 넘기고 `dumpcap`은 링 버퍼가 아니면 그 파일을 `O_TRUNC`로 연다: [`tshark.c:2619-2620`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L2619-L2620), [`capture/capture_sync.c:586-589`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/capture/capture_sync.c#L586-L589), [`dumpcap.c:3951-3955`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/dumpcap.c#L3951-L3955).
+
+[10] 도구 인자의 검사와 셸 명령 문자열에 넣는 곳이다.
+실시간 캡처 도구는 `capture_packets`의 위치만 적었고 다른 3개도 같은 코드다: [`index.js:52-53`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L52-L53), [`index.js:62-65`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L62-L65), [`index.js:305`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L305-L305), [`index.js:317-318`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L317-L318), [`index.js:369`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L369-L369), [`index.js:380-388`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L380-L388).
+
+[11] Node.js 22.17.0 문서는 `exec`의 `shell` 기본값이 Unix에서 `/bin/sh`이고 명령 문자열을 셸이 그대로 처리한다고 적는다: [`doc/api/child_process.md:188-196`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/child_process.md#L188-L196), [`doc/api/child_process.md:214-228`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/child_process.md#L214-L228).
+
+[12] POSIX 셸 명세의 큰따옴표 규칙이다: [Shell Command Language 2.2.3 Double-Quotes](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_02_03).
+
+[13] (실행 확인) 네트워크를 끈 컨테이너에서 MCP TypeScript SDK 클라이언트로 셸 메타 문자가 들어간 이름의 `pcapPath`로 `analyze_pcap`을 부르고 셸 메타 문자를 넣은 `interface`로 `capture_packets`를 불렀다.
+두 호출 모두 서버 작업 폴더에 셸이 실행한 명령의 표식 파일이 생겼고 응답은 `tshark` 읽기 실패의 오류였다.

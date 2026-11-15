@@ -1,0 +1,135 @@
+---
+cell: D01
+details:
+- id: not_implemented
+---
+
+# D01 파생물 보관
+
+### 미구현
+
+**판단.** 서버는 도구 결과를 응답으로 돌려주기만 하고 성공한 호출이 끝난 뒤에 남기는 파일이나 DB가 없다.
+실시간 캡처 도구 4개 `capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`는 tshark가 잡은 패킷을 서버 프로세스의 현재 폴더에 `temp_capture.pcap`이라는 이름으로 쓰게 한다 [1].
+네 도구는 이 파일을 tshark로 다시 읽어 응답 글을 만들고 응답을 돌려주기 전에 `fs.unlink`로 지운다 [1][2].
+캡처하는 동안 현재 폴더에 이 파일이 생겼고 성공한 호출이 끝난 뒤에는 남지 않았다 [3].
+이 파일은 이름의 확장자와 달리 pcapng 형식이었다 [3].
+서버 코드에는 이 파일을 다른 곳에 복사하거나 지우지 않고 남기는 경로가 없다 [1][2].
+
+오류로 끝난 캡처 호출은 이 파일을 지우지 않는다.
+네 도구의 `catch`는 오류 글을 `isError`와 함께 돌려주고 `fs.unlink`를 부르지 않는다 [4].
+그래서 캡처가 끝난 뒤 파일을 읽는 단계가 실패하면 파일이 현재 폴더에 남는다 [4].
+Node.js 22.17.0의 `exec`는 하위 프로세스의 표준 출력이 `maxBuffer` 기본값 `1024 * 1024`바이트를 넘으면 그 프로세스를 끝내고 오류를 낸다 [5].
+루프백 인터페이스에 트래픽을 많이 보내는 동안 `capture_packets`를 부르자 응답은 `stdout maxBuffer length exceeded` 오류였고 18,983,592바이트의 `temp_capture.pcap`이 현재 폴더에 남았다 [3].
+남은 파일은 다음 캡처 호출이 같은 이름으로 다시 쓴 뒤 그 호출이 성공하면서 지워졌다 [3].
+
+`analyze_pcap`과 `extract_credentials`는 인자로 받은 pcap을 tshark로 읽기만 하고 파일을 쓰지 않는다 [6].
+서버 로그는 `console.log`까지 표준 오류로 보내므로 파일로 남지 않는다 [7].
+`check_ip_threats`를 뺀 도구 6개를 부르기 전과 뒤에 `/tmp`, `/root`, 서버 설치 폴더의 파일 목록이 같았다 [3].
+
+### 근거
+
+[1] 실시간 캡처 도구 4개는 상대 이름 `temp_capture.pcap`을 tshark의 `-w`로 주고 같은 이름을 다시 읽는다.
+
+```javascript
+    try {
+      const tsharkPath = await findTshark();
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing packets on ${interface} for ${duration}s`);
+
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:56-70`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L56-L70)
+
+[`index.js:108-122`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L108-L122), [`index.js:149-163`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L149-L163), [`index.js:190-204`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L190-L204)
+
+[2] 성공 경로는 응답을 돌려주기 전에 파일을 지우고 삭제 실패는 표준 오류에만 적는다.
+
+```javascript
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Captured packet data (JSON for LLM analysis):\n${jsonString}`,
+        }],
+      };
+```
+
+[`index.js:84-91`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L84-L91)
+
+[`index.js:125-125`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L125-L125), [`index.js:166-166`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L166-L166), [`index.js:237-237`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L237-L237)
+
+[3] (실행 확인) 네트워크를 끈 컨테이너에서 서버의 현재 폴더를 빈 폴더로 정하고 루프백 인터페이스 `lo`로 캡처 도구를 부르며 호출 중과 호출 뒤의 파일을 확인했다.
+캡처 중에는 `temp_capture.pcap`이 있었고 첫 4바이트는 pcapng 블록 유형 `0a0d0d0a`였다.
+성공한 호출 뒤에는 현재 폴더가 비어 있었다.
+UDP 패킷을 많이 보낸 `capture_packets` 호출은 `maxBuffer` 오류로 끝났고 파일이 남았다.
+이어서 부른 `get_summary_stats`는 같은 inode의 파일을 284바이트로 다시 썼고 성공한 뒤 파일은 없었다.
+`analyze_pcap`, `extract_credentials`, 없는 경로의 `analyze_pcap`을 부른 전후로 현재 폴더, `/tmp`, `/root`, 서버 설치 폴더의 목록이 같았다.
+
+[4] 네 도구의 `catch`는 오류 글만 돌려준다.
+
+```javascript
+    } catch (error) {
+      console.error(`Error in capture_packets: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:92-95`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L92-L95)
+
+[`index.js:133-136`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L133-L136), [`index.js:174-177`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L174-L177), [`index.js:242-245`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L242-L245)
+
+[5] Node.js 22.17.0 문서는 `exec`의 `maxBuffer` 기본값과 넘었을 때 하위 프로세스를 끝낸다는 것을 적는다: [`doc/api/child_process.md:187-202`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/doc/api/child_process.md#L187-L202).
+
+[6] 두 도구는 받은 경로를 `tshark -r`로 읽는다.
+
+```javascript
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:313-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L313-L320)
+
+```javascript
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:377-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L377-L389)
+
+[7] 서버는 `console.log`를 `console.error`로 바꾼다.
+
+```javascript
+// Redirect console.log to stderr
+const originalConsoleLog = console.log;
+console.log = (...args) => console.error(...args);
+```
+
+[`index.js:12-14`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L12-L14)

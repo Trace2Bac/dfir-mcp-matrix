@@ -1,0 +1,172 @@
+---
+cell: T01
+details:
+- id: T01.01
+- id: T01.02
+---
+
+# T01 입력 검증
+
+### T01.01 인자 구조·값 검사
+
+**구현.** 이 방식은 `check_ip_threats`의 `ip` 인자에 적용된다 [1].
+서버 코드는 `ip`의 입력 schema에 zod `regex`로 점으로 나눈 1~3자리 숫자 넷의 꼴을 적는다 [1].
+MCP TypeScript SDK 1.15.0은 처리기를 부르기 전에 도구의 입력 schema로 인자를 검사하고 맞지 않으면 처리기를 부르지 않고 JSON-RPC 오류 `-32602`를 돌려준다 [2].
+`ip`에 숫자 꼴이 없는 글자를 주자 `Invalid arguments for tool check_ip_threats`와 `regex` 검사 실패를 담은 `-32602` 오류가 왔다 [3].
+
+다른 인자에는 자료형만 적혀 있다 [4][5].
+`capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`의 `interface`는 `z.string()`, `duration`은 `z.number()`이고 값이 빠지면 SDK가 기본값 `en0`과 5를 넣는다 [4].
+`analyze_pcap`과 `extract_credentials`의 `pcapPath`는 `z.string()`이다 [5].
+`duration`에는 범위 검사가 없다 [4].
+`duration`에 -1을 주자 서버는 그 값을 그대로 `tshark`에 넘겼고 `tshark`가 음수라는 오류를 내 오류 응답이 왔다 [3].
+0을 주자 빈 배열 `[]`을 담은 성공 응답이 왔고 1.5는 받아들여졌다 [3].
+`interface`도 값 검사 없이 `tshark` 명령에 들어간다 [4].
+
+SDK는 `server.tool`로 받은 인자 꼴을 zod `object`로 만들고 zod 3.25.76의 `object`는 꼴에 없는 키를 거부하지 않고 버린다 [2][6].
+`analyze_pcap`에 입력 schema에 없는 인자를 더해 부르자 오류 없이 실행되었다 [3].
+
+**한계.** `ip`의 정규식은 앞뒤를 고정하지 않고 zod의 `regex` 검사는 정규식의 `test`로 값의 일부가 맞는지만 본다 [1][7].
+그래서 IPv4 꼴의 앞뒤가 공백이나 기호처럼 단어 경계가 되는 글자이면 다른 글자가 붙은 값도 통과한다 [1][7].
+각 자리의 값이 255를 넘는지도 보지 않는다 [1].
+앞뒤에 공백을 두고 다른 글자를 붙인 값과 `999.999.999.999`를 주자 둘 다 검사를 통과했고 응답의 `IP checked:` 줄에 받은 값이 그대로 실렸다 [3].
+
+### T01.02 입력 존재·읽기 가능 검사
+
+**구현.** 이 방식은 pcap 파일을 읽는 `analyze_pcap`과 `extract_credentials`에 적용된다 [8][9].
+두 도구는 `tshark`를 실행하기 전에 `fs.access(pcapPath)`를 부른다 [8][9].
+파일이 없으면 이 호출이 낸 예외를 처리기의 `catch`가 받아 `tshark`를 실행하지 않고 `Error: ENOENT: …` 문구와 `isError` 참을 돌려준다 [8][10].
+없는 경로로 두 도구를 부르자 `tshark`를 실행하지 않고 이 오류가 왔다 [3].
+
+`pcapPath`에는 허용 폴더 대조나 문자열 검사가 없다 [8][9].
+그래서 서버 프로세스가 열 수 있는 어느 경로든 받는다 [8][9].
+실시간 캡처 도구 4개는 `interface`가 있는지 확인하지 않고 `tshark -i`에 넘긴다 [4][11].
+기본값 `en0`이 없는 컨테이너에서 인자 없이 `capture_packets`를 부르자 `tshark`가 `There is no device named "en0"` 오류로 끝났고 그 문구가 오류 응답에 실렸다 [3].
+
+**한계.** `fs.access`는 모드를 주지 않아 Node.js 22.17.0의 기본값 `F_OK`로 파일이 있는지만 확인하고 읽을 수 있는지는 확인하지 않는다 [8][12].
+`fs.access`는 받은 문자열 그대로의 경로를 확인하지만 `tshark`에는 셸이 해석한 뒤의 경로가 간다 [8][11].
+셸 메타 문자가 들어간 이름의 시험 파일로 `analyze_pcap`을 부르자 `fs.access`는 통과했고 셸이 그 문자를 해석해 `tshark`는 다른 이름의 파일을 열려다 실패했다 [3].
+
+### 근거
+
+[1] `check_ip_threats`의 `ip`는 앞뒤를 고정하지 않은 정규식으로 적혀 있다.
+
+```javascript
+server.tool(
+  'check_ip_threats',
+  'Check a given IP address against URLhaus blacklist for IOCs',
+  {
+    ip: z.string().regex(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/).describe('IP address to check (e.g., 192.168.1.1)'),
+  },
+```
+
+[`index.js:250-255`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L250-L255)
+
+[2] MCP TypeScript SDK 1.15.0은 도구 호출 인자를 `inputSchema`로 검사하고 실패하면 `InvalidParams` 오류를 던지며 인자 꼴을 `z.object`로 만든다: [`src/server/mcp.ts:157-170`](https://github.com/modelcontextprotocol/typescript-sdk/blob/1ac2e5926c93a7f1122e50bbbd6be60de1ae2c87/src/server/mcp.ts#L157-L170), [`src/server/mcp.ts:776-784`](https://github.com/modelcontextprotocol/typescript-sdk/blob/1ac2e5926c93a7f1122e50bbbd6be60de1ae2c87/src/server/mcp.ts#L776-L784).
+
+[3] (실행 확인) 컨테이너에서 MCP TypeScript SDK 클라이언트로 서버를 실행해 `check_ip_threats`, `analyze_pcap`, `extract_credentials`, `capture_packets`를 여러 인자로 불렀다.
+`ip`에 숫자 꼴이 없는 글자를 준 호출만 `-32602` 오류로 거부되었다.
+`duration` -1은 `tshark`의 `The specified autostop duration "-1" is a negative number` 오류로, 0은 `[]`을 담은 성공 응답으로 끝났다.
+
+[4] 실시간 캡처 도구의 인자는 자료형과 기본값만 적혀 있다.
+
+```javascript
+// Tool 1: Capture live packet data
+server.tool(
+  'capture_packets',
+  'Capture live traffic and provide raw packet data as JSON for LLM analysis',
+  {
+    interface: z.string().optional().default('en0').describe('Network interface to capture from (e.g., eth0, en0)'),
+    duration: z.number().optional().default(5).describe('Capture duration in seconds'),
+  },
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing packets on ${interface} for ${duration}s`);
+```
+
+[`index.js:47-60`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L47-L60)
+
+[5] `analyze_pcap`과 `extract_credentials`의 `pcapPath`는 자료형만 적혀 있다.
+
+```javascript
+    pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+```
+
+[`index.js:305-305`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L305-L305)
+
+```javascript
+      pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+```
+
+[`index.js:369-369`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L369-L369)
+
+[6] zod 3.25.76의 `object`는 만들 때 `unknownKeys`를 `strip`으로 두고 `strip`이면 꼴에 없는 키를 결과에 넣지 않는다: [`packages/zod/src/v3/types.ts:2506-2528`](https://github.com/colinhacks/zod/blob/7baee4e17f86f4017e09e12b0acdee36a5b1c087/packages/zod/src/v3/types.ts#L2506-L2528), [`packages/zod/src/v3/types.ts:2878-2894`](https://github.com/colinhacks/zod/blob/7baee4e17f86f4017e09e12b0acdee36a5b1c087/packages/zod/src/v3/types.ts#L2878-L2894).
+
+[7] zod 3.25.76의 `regex` 검사는 정규식의 `test` 결과만 본다: [`packages/zod/src/v3/types.ts:888-899`](https://github.com/colinhacks/zod/blob/7baee4e17f86f4017e09e12b0acdee36a5b1c087/packages/zod/src/v3/types.ts#L888-L899).
+
+[8] `analyze_pcap`은 `fs.access`로 파일을 확인한 뒤 큰따옴표 안에 경로를 넣은 명령을 실행한다.
+
+```javascript
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { pcapPath } = args;
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:307-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L307-L320)
+
+[9] `extract_credentials`도 같은 확인 뒤 `tshark`를 실행한다.
+
+```javascript
+    async (args) => {
+      try {
+        const tsharkPath = await findTshark();
+        const { pcapPath } = args;
+        console.error(`Extracting credentials from PCAP file: ${pcapPath}`);
+  
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:371-383`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L371-L383)
+
+[10] `analyze_pcap`의 `catch`는 예외 문구를 `isError` 참인 응답으로 돌려준다.
+
+```javascript
+    } catch (error) {
+      console.error(`Error in analyze_pcap: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:357-360`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L357-L360)
+
+[11] 캡처 명령은 `interface`와 `duration`을 따옴표 없이 명령 문자열에 넣는다.
+
+```javascript
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:62-65`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L62-L65)
+
+[12] Node.js 22.17.0의 `fs.promises.access`는 모드를 주지 않으면 `F_OK`를 쓴다: [`lib/internal/fs/promises.js:605-611`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/internal/fs/promises.js#L605-L611).

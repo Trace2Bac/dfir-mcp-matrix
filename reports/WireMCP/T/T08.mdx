@@ -1,0 +1,239 @@
+---
+cell: T08
+details:
+- id: T08.01
+- id: T08.03
+- id: T08.06
+---
+
+# T08 실행 종료 판별
+
+### T08.01 종료 코드 확인
+
+**구현.** 이 방식은 서버가 `execAsync`로 실행하는 모든 `tshark` 명령에 적용된다 [1][2].
+Node.js 22.17.0에서 `promisify`로 감싼 `exec`는 명령이 0이 아닌 코드로 끝나거나 신호로 끝나면 Promise를 거부한다 [2].
+거부 사유의 문구는 `Command failed: <명령 문자열>` 다음 줄에 그 명령의 표준 오류를 붙인 것이다 [2].
+도구 처리기는 이 거부를 `catch`로 받아 `Error: <문구>`와 `isError` 참을 돌려준다 [3].
+끝이 잘린 pcap 파일로 `analyze_pcap`과 `extract_credentials`를 부르자 `tshark`가 종료 코드 2로 끝났고 두 응답은 명령 문자열과 `appears to have been cut short in the middle of a packet` 문구를 담은 오류였다 [4].
+없는 인터페이스 `en0`로 `capture_packets`를 부르자 캡처 명령이 실패해 같은 꼴의 오류 응답이 왔다 [4].
+
+`exec`는 표준 출력이 `maxBuffer`를 넘을 때도 프로세스를 끝내고 Promise를 거부한다 [5].
+서버는 `maxBuffer`를 주지 않아 Node.js 기본값 1 MiB가 쓰인다 [1][6].
+출력이 1 MiB를 넘는 pcap 파일로 `analyze_pcap`을 부르자 `Error: stdout maxBuffer length exceeded` 오류 응답이 왔다 [4].
+
+서버는 `tshark` 실행에 시간 제한을 두지 않는다 [1][6].
+캡처 시간은 `tshark`의 `-a duration:` 자동 정지 조건으로 끝난다 [1].
+
+**한계.** 종료 코드가 0이 아니면 그때까지 받은 표준 출력은 버린다 [2][3].
+끝이 잘린 pcap 파일에서도 `tshark`는 마지막 패킷 앞의 42개 패킷을 출력했지만 응답에는 그 결과가 실리지 않았다 [4].
+
+### T08.03 오류·출력 내용 판독
+
+**구현.** 이 방식은 `capture_packets`와 `analyze_pcap`이 `tshark`의 JSON 출력을 읽는 단계에 적용된다 [7][8].
+두 도구는 표준 출력을 `JSON.parse`로 해석하고 해석이 실패하면 그 예외로 호출을 오류로 끝낸다 [7][8][3].
+표준 오류에 글이 있으면 두 도구와 `get_summary_stats`, `get_conversations`는 그 글을 서버의 표준 오류에 `tshark stderr:` 줄로 옮겨 쓴다 [7][9].
+`get_summary_stats`, `get_conversations`, `check_threats`, `extract_credentials`는 출력의 형식을 보지 않는다 [9][10][11][12].
+`extract_credentials`는 맞는 필드가 없는 출력도 `None`을 담은 성공 응답으로 돌려준다 [12].
+
+**한계.** 표준 오류의 글은 옮겨 쓰기만 하고 실패나 부분 결과를 가리는 데 쓰지 않는다 [7][9].
+빈 출력도 실패로 다루지 않는다.
+캡처 시간 0으로 `capture_packets`를 부르자 `[]`만 담은 성공 응답이 왔다 [4].
+
+### T08.06 프로세스 안 분석 예외를 실패로 구별
+
+**구현.** 이 방식은 `capture_packets`, `check_threats`, `analyze_pcap`, `extract_credentials`가 서버 코드로 `tshark` 출력을 해석하는 단계에 적용된다 [3][13].
+처리기마다 본문 전체를 `try`로 감싸고 `catch`에서 예외 문구를 `isError` 참인 응답으로 돌려준다 [3][13].
+`extract_credentials`가 필드 값을 나누고 base64로 디코딩하고 Kerberos 해시 문자열을 만드는 동안 난 예외도 이 `catch`로 간다 [12][13].
+`get_summary_stats`와 `get_conversations`는 `tshark` 출력을 해석하지 않고 응답에 싣는다 [9][10].
+
+**한계.** `check_threats`와 `check_ip_threats`는 URLhaus 목록을 받아 IP를 뽑는 단계를 따로 `try`로 감싼다 [14][15].
+이 단계에서 난 예외는 표준 오류에 쓰고 대조를 실행하지 않은 채 위협이 없다는 응답을 만들므로 호출은 성공으로 끝난다 [14][15].
+네트워크를 끈 컨테이너에서 두 도구를 부르자 내려받기 예외가 났지만 `isError` 없는 응답이 왔다 [4].
+
+### 근거
+
+[1] `capture_packets`는 `timeout`과 `maxBuffer` 없이 `execAsync`를 부른다.
+
+```javascript
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+      let packets = JSON.parse(stdout);
+```
+
+[`index.js:62-72`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L62-L72)
+
+[2] Node.js 22.17.0의 `exec`는 0이 아닌 종료 코드에 `Command failed:` 오류를 만들고 `promisify`로 감싼 함수는 그 오류로 Promise를 거부한다: [`lib/child_process.js:239-255`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L239-L255), [`lib/child_process.js:407-422`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L407-L422).
+
+[3] `capture_packets`의 `catch`는 예외 문구를 오류 응답으로 돌려준다.
+
+```javascript
+    } catch (error) {
+      console.error(`Error in capture_packets: ${error.message}`);
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+```
+
+[`index.js:92-95`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L92-L95)
+
+[4] (실행 확인) 컨테이너에서 시험 pcap 파일과 루프백 캡처로 도구를 불렀다.
+끝 30바이트를 자른 pcap 파일은 `tshark`가 종료 코드 2와 함께 패킷 42개를 출력했다.
+출력이 15,168,897바이트인 pcap 파일로 부른 `analyze_pcap`은 `stdout maxBuffer length exceeded`로 끝났다.
+네트워크를 끈 상태의 `check_threats`와 `check_ip_threats`는 `isError` 없이 끝났다.
+
+[5] Node.js 22.17.0의 `execFile`은 표준 출력 길이가 `maxBuffer`를 넘으면 `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` 오류를 두고 프로세스를 끝낸다: [`lib/child_process.js:464-488`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L464-L488).
+
+[6] Node.js 22.17.0의 `execFile` 기본값은 `timeout` 0과 `maxBuffer` 1 MiB다: [`lib/child_process.js:96`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L96), [`lib/child_process.js:324-337`](https://github.com/nodejs/node/blob/3567fa7d70fee8831ab2891e6940ca63be568b08/lib/child_process.js#L324-L337).
+
+[7] `analyze_pcap`은 표준 오류를 옮겨 쓰고 표준 출력을 `JSON.parse`로 해석한다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+      const packets = JSON.parse(stdout);
+```
+
+[`index.js:317-322`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L317-L322)
+
+[8] `capture_packets`도 표준 출력을 `JSON.parse`로 해석한다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+      let packets = JSON.parse(stdout);
+```
+
+[`index.js:67-72`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L67-L72)
+
+[9] `get_summary_stats`는 표준 출력을 형식 확인 없이 응답에 넣는다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz io,phs`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Protocol hierarchy statistics for LLM analysis:\n${stdout}`,
+        }],
+      };
+```
+
+[`index.js:119-132`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L119-L132)
+
+[10] `get_conversations`도 표준 출력을 형식 확인 없이 응답에 넣는다.
+
+```javascript
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -qz conv,tcp`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      if (stderr) console.error(`tshark stderr: ${stderr}`);
+
+      await fs.unlink(tempPcap).catch(err => console.error(`Failed to delete ${tempPcap}: ${err.message}`));
+
+      return {
+        content: [{
+          type: 'text',
+          text: `TCP/UDP conversation statistics for LLM analysis:\n${stdout}`,
+        }],
+      };
+```
+
+[`index.js:160-173`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L160-L173)
+
+[11] `check_threats`는 표준 출력을 줄과 탭으로 나누기만 한다.
+
+```javascript
+      const { stdout } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T fields -e ip.src -e ip.dst`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+      const ips = [...new Set(stdout.split('\n').flatMap(line => line.split('\t')).filter(ip => ip && ip !== 'unknown'))];
+      console.error(`Captured ${ips.length} unique IPs: ${ips.join(', ')}`);
+```
+
+[`index.js:201-206`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L201-L206)
+
+[12] `extract_credentials`의 해석과 응답이다: [`index.js:391-503`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L391-L503).
+
+[13] `extract_credentials`의 `catch`도 예외를 오류 응답으로 돌려준다.
+
+```javascript
+      } catch (error) {
+        console.error(`Error in extract_credentials: ${error.message}`);
+        return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+      }
+```
+
+[`index.js:504-507`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L504-L507)
+
+[14] `check_threats`는 내려받기와 목록 해석을 따로 `try`로 감싼다.
+
+```javascript
+      try {
+        const response = await axios.get(urlhausUrl);
+        console.error(`URLhaus response status: ${response.status}, length: ${response.data.length} chars`);
+        console.error(`URLhaus raw data (first 200 chars): ${response.data.slice(0, 200)}`);
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        urlhausThreats = ips.filter(ip => urlhausData.includes(ip));
+        console.error(`Checked IPs against URLhaus: ${urlhausThreats.length} threats found - ${urlhausThreats.join(', ') || 'None'}`);
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+```
+
+[`index.js:212-230`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L212-L230)
+
+[15] `check_ip_threats`도 같다.
+
+```javascript
+      try {
+        const response = await axios.get(urlhausUrl);
+        console.error(`URLhaus response status: ${response.status}, length: ${response.data.length} chars`);
+        console.error(`URLhaus raw data (first 200 chars): ${response.data.slice(0, 200)}`);
+        const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+        urlhausData = [...new Set(response.data.split('\n')
+          .map(line => {
+            const match = line.match(ipRegex);
+            return match ? match[0] : null;
+          })
+          .filter(ip => ip))];
+        console.error(`URLhaus lookup successful: ${urlhausData.length} blacklist IPs fetched`);
+        console.error(`Sample URLhaus IPs: ${urlhausData.slice(0, 5).join(', ') || 'None'}`);
+        isThreat = urlhausData.includes(ip);
+        console.error(`IP ${ip} checked against URLhaus: ${isThreat ? 'Threat found' : 'No threat found'}`);
+      } catch (e) {
+        console.error(`Failed to fetch URLhaus data: ${e.message}`);
+        urlhausData = [];
+      }
+```
+
+[`index.js:265-283`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L265-L283)

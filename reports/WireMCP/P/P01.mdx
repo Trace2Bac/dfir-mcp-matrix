@@ -1,0 +1,153 @@
+---
+cell: P01
+details:
+- id: not_implemented
+---
+
+# P01 분석 방법 적합성 확인
+
+### 미구현
+
+**판단.** 서버는 증거 형식, OS, 대상 환경을 판별하지 않고 도구마다 정해 둔 명령을 대조 없이 실행한다 [1][2].
+`tshark`를 실행하는 도구 6개는 도구마다 추출할 필드나 통계 종류를 코드에 고정해 두고 입력에 따라 바꾸지 않는다 [1][2][3].
+`check_ip_threats`는 `tshark`를 실행하지 않고 받은 IP 하나를 URLhaus 목록과 대조한다 [4].
+`analyze_pcap`과 `extract_credentials`는 받은 `pcapPath`에 `fs.access`로 파일이 있는지만 확인하고 `tshark -r`에 넘긴다 [2][3].
+캡처 파일 형식은 서버 코드가 판별하지 않는다.
+`tshark`는 읽기 형식을 정하지 않은 호출에서 Wireshark의 파일 읽기 라이브러리 wiretap으로 파일을 열며 형식을 스스로 알아낸다 [5].
+`extract_credentials`는 HTTP, FTP, Telnet, Kerberos가 캡처 파일에 있는지 보지 않고 두 필드 추출 명령을 늘 실행한다 [3].
+
+실시간 캡처 도구 4개(`capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`)는 인자 `interface`를 받고 값이 없으면 `en0`을 쓴다 [1].
+서버는 받은 이름이 서버 호스트에 있는 인터페이스인지 확인하지 않고 그대로 `tshark -i`에 넘긴다 [1].
+서버는 인터페이스 목록을 조회하는 도구를 두지 않는다 [6].
+`findTshark`는 `process.platform`이 `win32`인지로 `tshark` 실행 파일을 찾을 경로 목록을 고른다 [7].
+이 값은 분석 도구를 찾는 데만 쓰이고 증거나 분석 방법을 고르는 데 쓰이지 않는다 [7].
+
+### 근거
+
+[1] 실시간 캡처 도구는 `interface`의 기본값을 `en0`으로 두고 받은 값을 캡처 명령에 넣는다.
+
+```javascript
+server.tool(
+  'capture_packets',
+  'Capture live traffic and provide raw packet data as JSON for LLM analysis',
+  {
+    interface: z.string().optional().default('en0').describe('Network interface to capture from (e.g., eth0, en0)'),
+    duration: z.number().optional().default(5).describe('Capture duration in seconds'),
+  },
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { interface, duration } = args;
+      const tempPcap = 'temp_capture.pcap';
+      console.error(`Capturing packets on ${interface} for ${duration}s`);
+
+      await execAsync(
+        `${tsharkPath} -i ${interface} -w ${tempPcap} -a duration:${duration}`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${tempPcap}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags -e frame.time -e http.request.method -e http.response.code`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:48-70`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L48-L70)
+
+같은 인자와 명령을 쓰는 `get_summary_stats`, `get_conversations`, `check_threats`다: [`index.js:100-122`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L100-L122), [`index.js:141-163`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L141-L163), [`index.js:182-204`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L182-L204).
+
+[2] `analyze_pcap`은 파일이 있는지 확인한 뒤 정해 둔 필드를 추출한다.
+
+```javascript
+server.tool(
+  'analyze_pcap',
+  'Analyze a PCAP file and provide general packet data as JSON for LLM analysis',
+  {
+    pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+  },
+  async (args) => {
+    try {
+      const tsharkPath = await findTshark();
+      const { pcapPath } = args;
+      console.error(`Analyzing PCAP file: ${pcapPath}`);
+
+      // Check if file exists
+      await fs.access(pcapPath);
+
+      // Extract broad packet data
+      const { stdout, stderr } = await execAsync(
+        `${tsharkPath} -r "${pcapPath}" -T json -e frame.number -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e udp.srcport -e udp.dstport -e http.host -e http.request.uri -e frame.protocols`,
+        { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+      );
+```
+
+[`index.js:301-320`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L301-L320)
+
+[3] `extract_credentials`는 파일이 있는지 확인한 뒤 평문 자격증명 필드와 Kerberos 필드를 차례로 추출한다.
+
+```javascript
+server.tool(
+    'extract_credentials',
+    'Extract potential credentials (HTTP Basic Auth, FTP, Telnet) from a PCAP file for LLM analysis',
+    {
+      pcapPath: z.string().describe('Path to the PCAP file to analyze (e.g., ./demo.pcap)'),
+    },
+    async (args) => {
+      try {
+        const tsharkPath = await findTshark();
+        const { pcapPath } = args;
+        console.error(`Extracting credentials from PCAP file: ${pcapPath}`);
+  
+        await fs.access(pcapPath);
+  
+        // Extract plaintext credentials
+        const { stdout: plaintextOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e http.authbasic -e ftp.request.command -e ftp.request.arg -e telnet.data -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+
+        // Extract Kerberos credentials
+        const { stdout: kerberosOut } = await execAsync(
+          `${tsharkPath} -r "${pcapPath}" -T fields -e kerberos.CNameString -e kerberos.realm -e kerberos.cipher -e kerberos.type -e kerberos.msg_type -e frame.number`,
+          { env: { ...process.env, PATH: `${process.env.PATH}:/usr/bin:/usr/local/bin:/opt/homebrew/bin` } }
+        );
+```
+
+[`index.js:365-389`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L365-L389)
+
+[4] `check_ip_threats`는 받은 IP를 URLhaus 목록에서 찾는다: [`index.js:250-298`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L250-L298).
+
+[5] Wireshark 4.0.17의 `tshark`는 `-X read_format`이 없으면 읽기 형식을 `WTAP_TYPE_AUTO`로 두고 `cf_open`에서 `wtap_open_offline`으로 파일을 연다: [`tshark.c:841`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L841-L841), [`tshark.c:2087-2095`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L2087-L2095), [`tshark.c:2240`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L2240-L2240), [`tshark.c:4469`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/tshark.c#L4469-L4469).
+`wtap_open_offline`은 `WTAP_TYPE_AUTO`이면 서명으로 판별하는 형식부터 시도한다: [`wiretap/file_access.c:945-1100`](https://github.com/wireshark/wireshark/blob/882448bcf104995d64853a11b0d160783668d2fa/wiretap/file_access.c#L945-L1100).
+
+[6] (실행 확인) MCP SDK 클라이언트로 받은 도구 목록은 `capture_packets`, `get_summary_stats`, `get_conversations`, `check_threats`, `check_ip_threats`, `analyze_pcap`, `extract_credentials`의 7개였다.
+
+[7] `findTshark`는 `which`로 찾지 못하면 플랫폼에 따라 정해 둔 경로에서 `tshark`를 찾는다.
+
+```javascript
+async function findTshark() {
+  try {
+    const tsharkPath = await which('tshark');
+    console.error(`Found tshark at: ${tsharkPath}`);
+    return tsharkPath;
+  } catch (err) {
+    console.error('which failed to find tshark:', err.message);
+    const fallbacks = process.platform === 'win32'
+      ? ['C:\\Program Files\\Wireshark\\tshark.exe', 'C:\\Program Files (x86)\\Wireshark\\tshark.exe']
+      : ['/usr/bin/tshark', '/usr/local/bin/tshark', '/opt/homebrew/bin/tshark', '/Applications/Wireshark.app/Contents/MacOS/tshark'];
+    
+    for (const path of fallbacks) {
+      try {
+        await execAsync(`${path} -v`);
+        console.error(`Found tshark at fallback: ${path}`);
+        return path;
+      } catch (e) {
+        console.error(`Fallback ${path} failed: ${e.message}`);
+      }
+    }
+    throw new Error('tshark not found. Please install Wireshark (https://www.wireshark.org/download.html) and ensure tshark is in your PATH.');
+  }
+}
+```
+
+[`index.js:17-39`](https://github.com/0xKoda/WireMCP/blob/7f45f8b2b4adeb76be8c6227eefb38533fdd6b1e/index.js#L17-L39)
