@@ -134,6 +134,13 @@ const config: Config = {
           position: 'left',
         },
         {
+          type: 'docSidebar',
+          sidebarId: 'problemsSidebar',
+          docsPluginId: 'problems',
+          position: 'left',
+          label: 'Problems',
+        },
+        {
           to: '/compare',
           label: 'Compare',
           position: 'left',
@@ -213,6 +220,20 @@ const config: Config = {
         remarkPlugins: [noSingleTilde, cellData],
       },
     ],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        // 문제 매트릭스: 장(1~4) → 원고(1.1~4.4) → 소제목 → 문제 묶음. tools/problems_build.py가 만든다
+        id: 'problems',
+        path: '../problems',
+        routeBasePath: 'problems',
+        sidebarPath: './sidebarsProblems.ts',
+        // 폴더 이름 1.1, 1.2를 번호 접두사로 읽지 않게 한다
+        numberPrefixParser: false,
+        editUrl: editUrlIn('problems'),
+        remarkPlugins: [noSingleTilde],
+      },
+    ],
   ],
   themes: [
     [
@@ -220,9 +241,9 @@ const config: Config = {
       {
         hashed: true,
         language: ["en", "ko"],
-        docsRouteBasePath: ["/reports", "/docs", "/"],
+        docsRouteBasePath: ["/reports", "/docs", "/problems", "/"],
         // hashed 색인 이름은 이 폴더들의 파일로 계산한다. 원본 폴더를 주어야 내용이 바뀔 때 새 색인을 받는다.
-        docsDir: ["../reports", "../docs", "../matrix/cells"],
+        docsDir: ["../reports", "../docs", "../problems", "../matrix/cells"],
         indexBlog: false,
         highlightSearchTermsOnTargetPage: true,
       },
