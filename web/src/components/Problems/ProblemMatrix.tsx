@@ -25,7 +25,7 @@ type DrawerProps = {
   onClose: () => void;
 };
 
-// 원고 패널. 원고의 소제목과 문제는 받은 데이터로 바로 그리고, 문제 화면만 iframe으로 띄운다
+// 항목 패널. 항목의 소제목과 문제는 받은 데이터로 바로 그리고, 문제 화면만 iframe으로 띄운다
 export function ProblemDrawer({ data, cellId, openProblem, openServer, open, onClose }: DrawerProps) {
   const baseUrl = useBaseUrl('/');
   const { organizationName, projectName } = useDocusaurusContext().siteConfig;
@@ -37,7 +37,7 @@ export function ProblemDrawer({ data, cellId, openProblem, openServer, open, onC
     <PageDrawer
       title={openProblem ? `${cell.id} ${openProblem}` : `${cell.id} ${cell.name}`}
       subtitle={openServer ?? undefined}
-      label={openProblem ? `${cell.id} ${openProblem} 문제` : `${cell.id} ${cell.name} 원고`}
+      label={openProblem ? `${cell.id} ${openProblem} 문제` : `${cell.id} ${cell.name} 항목`}
       page={path ? { url: `${baseUrl}${path}`, detail: openServer } : null}
       openUrl={path ? undefined : `${baseUrl}problems/${cell.axis}/${cell.id}`}
       editUrl={`${editBase}/problems/_data/problems.csv`}
@@ -58,7 +58,7 @@ const LEVELS: { cls: 'lv1' | 'lv2' | 'lv3' | 'lv4'; label: string; min: number }
 ];
 const level = (n: number) => LEVELS.find(l => n >= l.min)!.cls;
 
-// 문제 매트릭스 화면: 장(1~4)을 열로, 원고를 칸으로 놓는다. 서버 × 문제 지도는 첫 화면(src/pages/index.tsx)에 있다
+// 문제 매트릭스 화면: 장(1~4)을 열로, 항목을 칸으로 놓는다. 서버 × 문제 지도는 첫 화면(src/pages/index.tsx)에 있다
 export default function ProblemMatrix() {
   const data = useProblemsData();
   const { openCell, openProblem, openServer, open } = useProblemQuery();
@@ -75,8 +75,8 @@ export default function ProblemMatrix() {
   );
 }
 
-// 구조 보기: 장(1~4)을 열로, 원고를 칸으로 놓는다. 칸 안에는 소제목 줄을 두고, 줄마다 문제를 네모 하나로 그린다.
-// 원고 이름을 누르면 오른쪽 패널에 그 원고를, 네모를 누르면 그 문제를 연다
+// 구조 보기: 장(1~4)을 열로, 항목을 칸으로 놓는다. 칸 안에는 소제목 줄을 두고, 줄마다 문제를 네모 하나로 그린다.
+// 항목 이름을 누르면 오른쪽 패널에 그 항목을, 네모를 누르면 그 문제를 연다
 function StructureGrid({ data, openCell, openProblem, open }: Omit<DrawerProps, 'cellId' | 'openServer' | 'onClose'> & { openCell: string | null }) {
   const axes = Object.keys(data.chapters);
   const n = axes.length;

@@ -102,8 +102,8 @@ const config: Config = {
           label: 'Problems',
         },
         {
-          to: '/docs/',
-          label: 'Docs',
+          to: '/analyze',
+          label: 'Analyze',
           position: 'left',
         },
         {
@@ -117,17 +117,20 @@ const config: Config = {
       style: 'light',
       links: [
         {
-          title: 'Docs',
+          title: 'Matrix',
           items: [
+            {
+              label: 'Map',
+              to: '/',
+            },
             {
               label: 'Problems',
               to: '/problems/',
             },
             {
-              label: 'Docs',
-              to: '/docs/',
+              label: 'Analyze',
+              to: '/analyze',
             },
-
           ],
         },
         {
@@ -150,19 +153,6 @@ const config: Config = {
   plugins: [
     // 문제 매트릭스 화면 데이터(static/data/problems.json)를 problems/_data/problems.json에서 둔다
     problemsDataPlugin,
-    [
-      '@docusaurus/plugin-content-docs',
-      {
-        id: 'docs',
-        path: '../docs',
-        routeBasePath: 'docs',
-        sidebarPath: './sidebars.ts',
-        // 결정 기록·작성 규칙의 template.mdx는 복사해 쓰는 틀이라 사이트 목록에 넣지 않는다(앞 넷은 Docusaurus 기본값)
-        exclude: ['**/_*.{js,jsx,ts,tsx,md,mdx}', '**/_*/**', '**/*.test.{js,jsx,ts,tsx}', '**/__tests__/**', '**/template.mdx'],
-        editUrl: editUrlIn('docs'),
-        remarkPlugins: [noSingleTilde],
-      },
-    ],
   ],
   themes: [
     [
@@ -170,9 +160,9 @@ const config: Config = {
       {
         hashed: true,
         language: ["en", "ko"],
-        docsRouteBasePath: ["/problems", "/docs"],
+        docsRouteBasePath: ["/problems"],
         // hashed 색인 이름은 이 폴더들의 파일로 계산한다. 원본 폴더를 주어야 내용이 바뀔 때 새 색인을 받는다.
-        docsDir: ["../problems", "../docs"],
+        docsDir: ["../problems"],
         indexBlog: false,
         highlightSearchTermsOnTargetPage: true,
       },

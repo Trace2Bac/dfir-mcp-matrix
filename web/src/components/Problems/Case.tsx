@@ -5,7 +5,7 @@ import styles from './Case.module.css';
 // 문제 화면의 서버 사례 하나. 요지(children) 아래에 코드 위치를 두고, 누르면 기준 커밋의 그 줄을 펼친다.
 // 코드는 빌드에 넣지 않고 펼칠 때 raw.githubusercontent.com에서 받는다(tools/problems_build.py의 parse_locs가 refs를 만든다)
 type Ref = { path: string; from: number; to: number };
-type Props = { n: number; repo: string; commit: string; refs: Ref[]; raw: string; children: ReactNode };
+type Props = { label: string; ok: boolean; repo: string; commit: string; refs: Ref[]; raw: string; children: ReactNode };
 
 const CONTEXT = 3; // 범위 앞뒤로 더 보이는 줄
 const MAX_LINES = 120; // 한 번에 보이는 줄 수 상한
@@ -57,7 +57,7 @@ function Excerpt({ repo, commit, r }: { repo: string; commit: string; r: Ref }) 
   );
 }
 
-export default function Case({ n, repo, commit, refs, raw, children }: Props) {
+export default function Case({ label, ok, repo, commit, refs, raw, children }: Props) {
   const [open, setOpen] = useState<Set<number>>(new Set());
   const toggle = (i: number) =>
     setOpen(prev => {
@@ -67,9 +67,9 @@ export default function Case({ n, repo, commit, refs, raw, children }: Props) {
     });
   const allOpen = refs.length > 0 && open.size === refs.length;
   return (
-    <div className={styles.card}>
+    <div className={`${styles.card} ${ok ? styles.cardOk : styles.cardHit}`}>
       <div className={styles.head}>
-        <span className={styles.n}>사례 {n}</span>
+        <span className={styles.n}>{label}</span>
         {refs.length > 1 && (
           <button type="button" className={styles.all} onClick={() => setOpen(allOpen ? new Set() : new Set(refs.map((_, i) => i)))}>
             {allOpen ? '코드 모두 접기' : '코드 모두 펼치기'}

@@ -6,7 +6,7 @@ import PageDrawer from './PageDrawer';
 import { ProblemDetails, problemPath, useProblemQuery } from './ProblemDetails';
 import { useProblemsData } from './ProblemMatrix';
 
-// 원고(셀) 화면. 소제목마다 문제를 보이고, 문제나 서버를 누르면 오른쪽 패널에 문제 화면을 연다
+// 항목(셀) 화면. 소제목마다 문제를 보이고, 문제나 서버를 누르면 오른쪽 패널에 문제 화면을 연다
 export default function ProblemCell({ id }: { id: string }) {
   const data = useProblemsData();
   const isBrowser = useIsBrowser();

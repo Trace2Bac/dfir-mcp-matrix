@@ -2,10 +2,8 @@
 
 python tools/problems_build.py [저장소 루트]
 
-축은 가이드라인의 장(1~4), 셀은 원고(1.1~4.4), 상세는 원고의 구현방안 소제목(소제목ID 1.3.2)이다.
-소제목마다 공개 서버에서 관찰된 문제(문제ID P0001)를 두고, 문제 화면에 해당 기능이 있는 서버와
-문제가 관찰된 서버, 수정 전후 검증 실험(dfir-mcp-bench)을 싣는다.
-근거의 강도와 시험 기록은 근거 대장에서 관리하며 여기에는 싣지 않는다.
+장(1~4) → 항목(1.1~4.4) → 소제목(1.3.2) → 문제(P0001) 차례로 놓고, 문제 화면에 서버별 판정과
+근거 코드, 실행 검증을 싣는다. 판정은 분석 회차(snapshots.csv)마다 근거(findings.csv)로 정한다.
 만든 파일은 손으로 고치지 않는다. 데이터를 고친 뒤 이 스크립트를 다시 돌린다.
 """
 import csv, json, os, re, shutil, sys, collections as C
@@ -19,48 +17,92 @@ def read(name):
     return list(csv.DictReader(open(os.path.join(DATA, name), encoding="utf-8")))
 
 chapters = read("chapters.csv"); cells = read("cells.csv"); heads = read("headings.csv")
-probs = read("problems.csv"); obs = read("observations.csv"); vers = read("verifications.csv"); servers = read("servers.csv")
-# 분석 회차(스냅샷). 서버마다 첫 전체 분석의 커밋이 기준 커밋이고, 사례(observations)는 그 커밋에서 찾은 것이다.
-# 뒤의 스냅샷에서 다시 본 결과는 checks.csv에 둔다. 전체 분석 스냅샷은 그때까지 관찰된 문제마다 결과가 있어야 하고,
-# 일부 확인 스냅샷은 적힌 문제만 갱신한다. 같은 문제·서버는 가장 늦은 스냅샷의 결과가 현재 상태다
+probs = read("problems.csv"); finds = read("findings.csv"); vers = read("verifications.csv"); servers = read("servers.csv")
 snapshots = read("snapshots.csv")
-checks = read("checks.csv") if os.path.exists(os.path.join(DATA, "checks.csv")) else []
+
+head_of = {h["소제목ID"]: h for h in heads}
+prob = {p["문제ID"]: p for p in probs}
+cell_of = {pid: head_of[p["소제목ID"]]["원고"] for pid, p in prob.items()}
+
+# 분석 회차(스냅샷)는 서버의 한 커밋에서 확인한 범위다. 범위는 '전체', 항목(1.3), 문제(P0025)를 공백으로 나열하고
+# 앞에 '-'를 붙이면 뺀다. 서버마다 커밋일 차례로 놓고, 첫 '전체' 스냅샷의 커밋이 기준 커밋이다
+def scope_of(text):
+    got = set()
+    for tok in (text or "").split():
+        neg = tok.startswith("-")
+        t = tok.lstrip("-")
+        ids = set(prob) if t == "전체" else {pid for pid in prob if cell_of[pid] == t} if t in {c["원고"] for c in cells} else {t}
+        if not ids <= set(prob):
+            sys.exit(f"snapshots.csv: 범위의 {t}를 모른다")
+        got = got - ids if neg else got | ids
+    return got
+
 snaps_of = C.defaultdict(list)
 for i, sn in enumerate(snapshots):
-    snaps_of[sn["서버"]].append((sn["분석일"], i, sn))
+    sn["covers"] = scope_of(sn["범위"])
+    snaps_of[sn["서버"]].append((sn["커밋일"], i, sn))
 for x in snaps_of:
     snaps_of[x] = [sn for _, _, sn in sorted(snaps_of[x], key=lambda t: t[:2])]
 base = {}
 for x, sns in snaps_of.items():
-    full = [sn for sn in sns if sn["범위"] == "전체"]
+    full = [sn for sn in sns if "전체" in sn["범위"].split()]
     if not full:
         sys.exit(f"snapshots.csv: {x}에 전체 분석 스냅샷이 없다")
     base[x] = full[0]
-repo = {s["서버"]: (s["저장소"], base[s["서버"]]["커밋"]) for s in servers if s["서버"] in base}
 missing = [s["서버"] for s in servers if s["서버"] not in base]
 if missing:
     sys.exit(f"snapshots.csv: 스냅샷이 없는 서버 {missing}")
+repo = {s["서버"]: (s["저장소"], base[s["서버"]]["커밋"]) for s in servers}
 snap_key = {(sn["서버"], sn["커밋"]): sn for sn in snapshots}
-check_at = {}
-for k in checks:
-    sn = snap_key.get((k["서버"], k["커밋"]))
+
+# 근거(findings.csv) 한 줄은 한 커밋에서 본 근거 하나다. 판정은 관찰됨이나 문제 없음만 적고,
+# 스냅샷 범위 안에서 줄이 없는 문제는 기능 없음, 범위 밖은 확인 안 함으로 계산한다
+rows_at = C.defaultdict(list)
+for f in finds:
+    sn = snap_key.get((f["서버"], f["커밋"]))
     if not sn:
-        sys.exit(f"checks.csv: {k['문제ID']} {k['서버']} {k['커밋'][:7]}에 해당하는 스냅샷이 없다")
-    check_at[(k["문제ID"], k["서버"], k["커밋"])] = {**k, "확인일": sn["분석일"], "범위": sn["범위"]}
-observed_at = C.defaultdict(set)  # 서버 → 기준 커밋에서 관찰된 문제
-for o in obs:
-    observed_at[o["서버"]].add(o["문제ID"])
-latest = {}
+        sys.exit(f"findings.csv: {f['서버']} {f['커밋'][:7]}에 해당하는 스냅샷이 없다")
+    if f["문제ID"] not in prob or f["판정"] not in ("관찰됨", "문제 없음"):
+        sys.exit(f"findings.csv: 잘못된 줄 {f['서버']} {f['문제ID']} {f['판정']}")
+    if f["문제ID"] not in sn["covers"]:
+        sys.exit(f"findings.csv: {f['문제ID']}는 {f['서버']} {f['커밋'][:7]} 스냅샷의 범위 밖이다")
+    rows_at[(f["서버"], f["커밋"], f["문제ID"])].append(f)
+for k, rs in rows_at.items():
+    if len({r["판정"] for r in rs}) > 1:
+        sys.exit(f"findings.csv: {k[0]} {k[1][:7]} {k[2]}에 판정이 둘이다")
+
+# (문제, 서버)마다 스냅샷 차례의 판정 이력. 마지막 줄이 마지막으로 확인한 판정이고, 이력이 없으면 확인 안 함이다
+history = {}
 for x, sns in snaps_of.items():
-    for sn in sns:
-        if sn is base[x]:
-            continue
-        for pid in sorted(observed_at[x]):
-            k = check_at.get((pid, x, sn["커밋"]))
-            if k:
-                latest[(pid, x)] = k
-            elif sn["범위"] == "전체":
-                sys.exit(f"checks.csv: 전체 분석 스냅샷 {x} {sn['커밋'][:7]}에 {pid}의 결과가 없다")
+    for pid in prob:
+        h = []
+        for sn in sns:
+            if pid not in sn["covers"]:
+                continue
+            rs = rows_at.get((x, sn["커밋"], pid), [])
+            state = rs[0]["판정"] if rs else "기능 없음"
+            h.append({"snap": sn, "state": state, "est": bool(rs) and all(r["추정"] for r in rs), "rows": rs})
+        history[(pid, x)] = h
+
+def status(pid, x):
+    """마지막 판정, 변화(고쳐짐·다시 생김), 마지막 확인 스냅샷, 추정 여부"""
+    h = history[(pid, x)]
+    if not h:
+        return {"state": "확인 안 함", "change": "", "snap": None, "est": False}
+    last = h[-1]
+    before = [e["state"] for e in h[:-1]]
+    change = ""
+    if last["state"] == "문제 없음" and "관찰됨" in before:
+        change = "고쳐짐"
+    elif last["state"] == "관찰됨" and any(e["state"] == "문제 없음" and not e["est"] for e in h[:-1]):
+        change = "다시 생김"
+    return {"state": last["state"], "change": change, "snap": last["snap"], "est": last["est"]}
+
+ST = {(pid, x): status(pid, x) for pid in prob for x in repo}
+evidence = C.defaultdict(list)  # 문제 → 근거 줄(추정 줄 제외)
+for f in finds:
+    if not f["추정"]:
+        evidence[f["문제ID"]].append(f)
 
 def ref_link(ref):
     """근거 글의 owner/repo#번호를 PR 링크로 바꾼다."""
@@ -68,13 +110,6 @@ def ref_link(ref):
     if m:
         return f"[#{m.group(2)}](https://github.com/{m.group(1)}/pull/{m.group(2)})"
     return f"[링크]({ref})" if (ref or "").startswith("http") else esc(ref)
-
-def check_text(k):
-    r, _ = repo.get(k["서버"], ("", ""))
-    commit = f"[`{k['커밋'][:7]}`](https://github.com/{r}/tree/{k['커밋']})" if r else f"`{k['커밋'][:7]}`"
-    cls = {"고쳐짐": "pm-fixed", "남아 있음": "pm-hit"}.get(k["결과"], "")
-    out = f'<span className="pm-state {cls}">{k["결과"]}</span> {commit}'
-    return out + (f" {ref_link(k['근거'])}" if k["근거"] else "") + f" ({k['확인일']})"
 
 def esc(text):
     """코드 표기(`...`) 밖의 MDX 특수 글자를 이스케이프한다."""
@@ -156,16 +191,10 @@ cell_name = {c["원고"]: c["이름"] for c in cells}
 by_cell_heads = C.defaultdict(list)
 for h in heads:
     by_cell_heads[h["원고"]].append(h)
-# 문제ID(P0001)는 소제목과 따로 매긴 식별자다. 문제는 소제목ID(1.3.2)로 소제목에, 소제목은 원고에 속한다
-head_of = {h["소제목ID"]: h for h in heads}
-prob = {p["문제ID"]: p for p in probs}
-cell_of = {pid: head_of[p["소제목ID"]]["원고"] for pid, p in prob.items()}
+# 문제ID(P0001)는 소제목과 따로 매긴 식별자다. 문제는 소제목ID(1.3.2)로 소제목에, 소제목은 항목에 속한다
 probs_in = C.defaultdict(list)
 for p in probs:
     probs_in[p["소제목ID"]].append(p["문제ID"])
-obs_by = C.defaultdict(list)
-for o in obs:
-    obs_by[o["문제ID"]].append(o)
 # 검증 방법(약한 것부터). 모든 사례는 코드 확인에서 시작하고, 실행한 검증은 verifications.csv에 쌓는다
 METHODS = ["코드 확인", "PoC", "시험", "모델 실험"]
 RESULTS = {"재현됨", "재현 안 됨", "통과", "실패", "영향 있음", "영향 없음"}
@@ -176,15 +205,14 @@ for v in vers:
     ver_by[(v["문제ID"], v["서버"])].append(v)
 
 def methods_of(pid, x):
-    """그 문제·서버에서 쓴 검증 방법. 관찰된 사례는 코드 확인을 기본으로 갖는다"""
+    """그 문제·서버에서 쓴 검증 방법. 코드 위치가 있는 근거는 코드 확인이다"""
     got = {v["방법"] for v in ver_by.get((pid, x), [])}
-    if x in observed_at and pid in observed_at[x]:
+    if any(f["서버"] == x and f["코드위치"] for f in evidence[pid]):
         got.add("코드 확인")
     return [m for m in METHODS if m in got]
 
 def ver_badges(pid, x):
     return " ".join(f'<span className="pm-v{" pm-v-run" if m != "코드 확인" else ""}">{m}</span>' for m in methods_of(pid, x))
-listsplit = lambda s: [x.strip() for x in (s or "").split(";") if x.strip()]
 
 def cell_dir(it):
     return os.path.join(P, it[0], it)
@@ -196,39 +224,64 @@ def prob_link(pid):
 def srv_link(s):
     return f"/problems/servers/{slug_srv(s)}"
 
-# 첫 화면
+def applies(pid):
+    """그 기능이 있는 서버(마지막 판정이 관찰됨이나 문제 없음)와 확인 안 한 서버"""
+    on = [x for x in repo if ST[(pid, x)]["state"] in ("관찰됨", "문제 없음")]
+    unk = [x for x in repo if ST[(pid, x)]["state"] == "확인 안 함"]
+    return on, unk
+
+def observed(pid):
+    return [x for x in repo if ST[(pid, x)]["state"] == "관찰됨"]
+
+def commit_link(x, sn):
+    r, _ = repo[x]
+    return f"[`{sn['커밋'][:7]}`](https://github.com/{r}/tree/{sn['커밋']})"
+
+BADGE = {"관찰됨": "pm-hit", "문제 없음": "pm-ok", "확인 안 함": "pm-unk", "기능 없음": ""}
+
+def badge(st):
+    out = f'<span className="pm-state {BADGE[st["state"]]}">{st["state"]}</span>'
+    if st["change"]:
+        out += f' <span className="pm-state {"pm-fixed" if st["change"] == "고쳐짐" else "pm-hit"}">{st["change"]}</span>'
+    if st["est"]:
+        out += ' <span className="pm-note">추정</span>'
+    return out
+
+NOTE = "모든 판정은 적힌 커밋 기준이며, 서버의 현재 버전과 다를 수 있다."
+
+# 첫 화면(문제 목록)
 lines = ["---", "title: 문제 매트릭스", "sidebar_position: 0", "hide_table_of_contents: true", "---", "", GEN, "",
          "import ProblemMatrix from '@site/src/components/Problems/ProblemMatrix';", "",
          "# 문제 매트릭스", "",
-         "DFIR MCP 서버 구현 가이드라인의 원고마다, 공개 서버 21개에서 관찰된 문제를 구현방안 소제목별로 묶어 보여 준다.", "",
-         "- 열은 가이드라인의 장, 칸은 원고(1.1~4.4), 칸 안의 줄은 소제목(1.3.2)이고, 네모 하나가 문제 하나(P0001)다. 색이 진할수록 그 문제가 관찰된 서버가 많다.",
+         f"DFIR MCP 서버 구현 가이드라인의 항목마다, 공개 서버 {len(repo)}개에서 관찰된 문제를 소제목별로 묶어 보여 준다.", "",
+         "- 열은 가이드라인의 장, 칸은 항목(1.1~4.4), 칸 안의 줄은 소제목(1.3.2)이고, 네모 하나가 문제 하나(P0001)다. 색이 진할수록 그 문제가 관찰된 서버가 많다.",
          "- 서버 × 문제 지도는 [첫 화면](/)에 있다.",
-         "- 문제 화면에서 그 기능이 있는 서버와 문제가 관찰된 서버, 서버별 사례를 확인한다.",
-         "- 근거의 강도와 시험 기록은 근거 대장에서 관리하며 여기에는 싣지 않는다. 수정 전후 검증은 [dfir-mcp-bench](https://github.com/Trace2Bac/dfir-mcp-bench) 실험으로 잇는다.", "",
-         "원고 이름을 누르면 오른쪽 패널에 그 원고를 열고, 문제나 칸을 누르면 그 문제를 연다.", "", "<ProblemMatrix />", "",
+         "- 문제 화면에서 서버별 판정과 그 근거(코드, 실행 검증)를 확인한다. " + NOTE, "",
+         "항목 이름을 누르면 오른쪽 패널에 그 항목을 열고, 네모를 누르면 그 문제를 연다.", "", "<ProblemMatrix />", "",
          "<details>", "<summary>표로 보기</summary>", "",
-         "| 장 | 원고 | 소제목 | 문제 | 관찰된 서버 |", "|---|---|---|---|---|"]
+         "| 장 | 항목 | 소제목 | 문제 | 관찰된 서버 |", "|---|---|---|---|---|"]
 for ch in chapters:
     its = [c["원고"] for c in cells if c["장"] == ch["장"]]
-    nh = sum(len(by_cell_heads[i]) for i in its)
-    npb = sum(1 for p in probs if cell_of[p["문제ID"]] in its)
-    nsv = len({o["서버"] for o in obs if cell_of[o["문제ID"]] in its})
-    lines.append(f"| [{ch['장']} {ch['이름']}](/problems/{ch['장']}) | {len(its)} | {nh} | {npb} | {nsv} |")
-lines += ["", "</details>", "", f"서버별로 보려면 [서버 목록](/problems/servers)을 본다."]
+    pids = [p for p in prob if cell_of[p] in its]
+    nsv = len({x for p in pids for x in observed(p)})
+    lines.append(f"| [{ch['장']} {ch['이름']}](/problems/{ch['장']}) | {len(its)} | {sum(len(by_cell_heads[i]) for i in its)} | {len(pids)} | {nsv} |")
+lines += ["", "</details>", "", "서버별로 보려면 [서버 목록](/problems/servers)을 본다."]
 write(os.path.join(P, "index.mdx"), "\n".join(lines))
 
-# 축(장)
+# 장
 for ch in chapters:
     its = [c["원고"] for c in cells if c["장"] == ch["장"]]
     lines = ["---", f"title: {yq(ch['장'] + ' ' + ch['이름'])}", f"sidebar_label: {yq(ch['장'] + ' ' + ch['이름'])}", f"sidebar_position: {int(ch['장'])}", "---", "", GEN, "",
-             f"# {ch['장']} {ch['이름']}", "", "| 원고 | 소제목 | 문제 | 관찰된 서버 |", "|---|---|---|---|"]
+             f"# {ch['장']} {ch['이름']}", "", "| 항목 | 소제목 | 문제 | 관찰된 서버 |", "|---|---|---|---|"]
     for it in its:
-        npb = sum(1 for p in probs if cell_of[p["문제ID"]] == it)
-        nsv = len({o["서버"] for o in obs if cell_of[o["문제ID"]] == it})
-        lines.append(f"| [{it} {cell_name[it]}](/problems/{it[0]}/{it}) | {len(by_cell_heads[it])} | {npb} | {nsv} |")
+        pids = [p for p in prob if cell_of[p] == it]
+        nsv = len({x for p in pids for x in observed(p)})
+        lines.append(f"| [{it} {cell_name[it]}](/problems/{it[0]}/{it}) | {len(by_cell_heads[it])} | {len(pids)} | {nsv} |")
     write(os.path.join(P, ch["장"], "index.mdx"), "\n".join(lines))
 
-# 셀(원고)과 문제
+STATE_CODE = {"관찰됨": "obs", "문제 없음": "ok", "확인 안 함": "unk"}
+
+# 항목과 문제
 cells_json = []
 for c in cells:
     it = c["원고"]
@@ -247,50 +300,67 @@ for c in cells:
         if not ids:
             lines += ["이 소제목에 묶은 문제가 없다.", ""]
             continue
-        lines += ["| 문제 | 해당 기능 서버 | 관찰된 서버 |", "|---|---|---|"]
+        lines += ["| 문제 | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|"]
         for gid in ids:
             p = prob[gid]
-            den = listsplit(p["해당 기능 서버"]); ob = listsplit(p["관찰된 서버"])
-            hjson["problems"].append({"id": gid, "name": p["문제"], "den": len(den) if den else None, "denList": den, "obs": ob,
-                                      "ver": {x: methods_of(gid, x) for x in ob},
-                                      "checks": {x: {"result": k["결과"], "commit": k["커밋"][:7], "date": k["확인일"], "ref": k["근거"]}
-                                                 for (q, x), k in latest.items() if q == gid}})
-            lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}) | {len(den) if den else '정하지 않음'} | {len(ob)} |")
+            on, unk = applies(gid)
+            ob = observed(gid)
+            states = {}
+            for x in repo:
+                st = ST[(gid, x)]
+                if st["state"] == "기능 없음":
+                    continue
+                e = {"s": STATE_CODE[st["state"]]}
+                if st["est"]:
+                    e["est"] = True
+                if st["change"]:
+                    e["change"] = st["change"]
+                if st["snap"]:
+                    e["commit"] = st["snap"]["커밋"][:7]
+                    e["date"] = st["snap"]["커밋일"]
+                states[x] = e
+            hjson["problems"].append({"id": gid, "name": p["문제"], "den": len(on), "denList": on, "obs": ob,
+                                      "ver": {x: methods_of(gid, x) for x in repo if methods_of(gid, x)}, "states": states})
+            lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}) | {len(on)} | {len(ob)} | {len(unk)} |")
             order += 1
             # 문제 화면
             pl = ["---", f"title: {yq(gid + ' ' + p['문제'])}", f"sidebar_label: {yq(gid + ' ' + p['문제'][:28] + ('…' if len(p['문제']) > 28 else ''))}",
                   f"sidebar_position: {order}", "---", "", GEN, "", "import Case from '@site/src/components/Problems/Case';", "",
                   f"# {gid} {esc(p['문제'])}", "",
-                  f"원고 [{it} {c['이름']}](/problems/{it[0]}/{it}) · 소제목 {h['소제목ID']} 「{h['소제목']}」", ""]
+                  f"항목 [{it} {c['이름']}](/problems/{it[0]}/{it}) · 소제목 {h['소제목ID']} 「{h['소제목']}」", ""]
             if p["현상과 피해"]:
                 pl += ["## 현상과 피해", "", esc(p["현상과 피해"]), ""]
-            grouped = C.OrderedDict()
-            for o in sorted(obs_by[gid], key=lambda o: (o["서버"].lower(), o["사례ID"])):
-                grouped.setdefault(o["서버"], []).append(o)
-            rows = list(grouped) + sorted((x for x in den if x not in grouped), key=str.lower)
-            pl += [f"## 서버별 상태", "",
-                   f"문제가 관찰된 서버 {len(ob)}개, 해당 기능이 있는 서버 {len(den) if den else '정하지 않음'}"
-                   + ("" if den else " (기능이 있는 서버는 아직 정하지 않았다)") + ".", "",
-                   "| 서버 | 기준 커밋에서 | 검증 | 사례 | 기준 커밋 | 최신 확인 |", "|---|---|---|---|---|---|"]
+            ev = C.OrderedDict()
+            for f in sorted(evidence[gid], key=lambda f: (f["서버"].lower(), snap_key[(f["서버"], f["커밋"])]["커밋일"])):
+                ev.setdefault(f["서버"], []).append(f)
+            order_st = {"관찰됨": 0, "문제 없음": 1, "확인 안 함": 2}
+            rows = sorted((x for x in repo if ST[(gid, x)]["state"] != "기능 없음"), key=lambda x: (order_st[ST[(gid, x)]["state"]], x.lower()))
+            cnt = C.Counter(ST[(gid, x)]["state"] for x in repo)
+            pl += ["## 서버별 판정", "", NOTE + " 추정은 근거 대장의 묶음 분모에서 옮긴 판정으로, 아직 코드로 다시 확인하지 않았다.", "",
+                   " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "확인 안 함", "기능 없음")) + "", "",
+                   "| 서버 | 판정 | 확인 커밋 | 근거 |", "|---|---|---|---|"]
             for x in rows:
-                r, cm = repo.get(x, ("", ""))
-                n = len(grouped.get(x, []))
-                state = '<span className="pm-state pm-hit">관찰됨</span>' if n else '<span className="pm-state">관찰되지 않음</span>'
-                cases = f"[{n}건](#case-{slug_srv(x).lower()})" if n else ""
-                commit = f"[`{cm[:7]}`](https://github.com/{r}/tree/{cm})" if r else ""
-                k = latest.get((gid, x))
-                pl.append(f"| [{x}]({srv_link(x)}) | {state} | {ver_badges(gid, x) if n else ''} | {cases} | {commit} | {check_text(k) if k else ''} |")
-            pl += ["", "## 서버별 사례", "", "사례의 코드를 누르면 기준 커밋의 해당 줄을 펼쳐 볼 수 있다.", ""]
-            for x, os_ in grouped.items():
-                r, cm = repo.get(x, ("", ""))
-                pl += [f'<a id="case-{slug_srv(x).lower()}"></a>', "", f"### [{x}]({srv_link(x)})", ""]
-                for k, o in enumerate(os_, 1):
-                    refs = parse_locs(o["코드위치"])
-                    commit = o["커밋"] if o["커밋"] and len(o["커밋"]) >= 7 else cm
-                    raw = "" if refs or not o["코드위치"] else o["코드위치"]
-                    pl += [f"<Case n={{{k}}} repo={json.dumps(o['저장소'] or r)} commit={json.dumps(commit)} refs={{{json.dumps(refs, ensure_ascii=False)}}} raw={{{json.dumps(raw, ensure_ascii=False)}}}>",
-                           "", esc(o["요지"]), "", "</Case>", ""]
-            vs = [v for x in grouped for v in ver_by.get((gid, x), [])]
+                st = ST[(gid, x)]
+                hist = [e for e in history[(gid, x)] if e["state"] != "기능 없음" or e is history[(gid, x)][-1]]
+                where = " → ".join(f"{e['state']} {commit_link(x, e['snap'])}" for e in hist) if len(hist) > 1 else (
+                    commit_link(x, st["snap"]) if st["snap"] else "")
+                n = len(ev.get(x, []))
+                parts = ([f"[코드 {n}건](#{x.lower()})"] if n else []) + [
+                    f'<span className="pm-v pm-v-run">{m}</span>' for m in methods_of(gid, x) if m != "코드 확인"]
+                pl.append(f"| [{x}]({srv_link(x)}) | {badge(st)} | {where} | {' '.join(parts)} |")
+            if ev:
+                pl += ["", "## 근거 코드", "", "코드 위치를 누르면 그 커밋의 해당 줄을 펼쳐 볼 수 있다. 관찰됨은 문제가 있는 코드, 문제 없음은 제대로 구현했거나 고친 코드다.", ""]
+            for x, fs in ev.items():
+                r, _ = repo[x]
+                pl += [f"### [{x}]({srv_link(x)})", ""]  # 제목 id는 Docusaurus가 서버 이름을 소문자로 바꿔 붙인다
+                for f in fs:
+                    refs = parse_locs(f["코드위치"])
+                    raw = "" if refs or not f["코드위치"] else f["코드위치"]
+                    label = f"{f['판정']} · {f['커밋'][:7]}"
+                    body = esc(f["요지"]) + (f" ([{'PR #' + f['링크'].rsplit('/', 1)[1] if '/pull/' in f['링크'] else '링크'}]({f['링크']}))" if f["링크"] else "")
+                    pl += [f"<Case label={json.dumps(label, ensure_ascii=False)} ok={{{'true' if f['판정'] == '문제 없음' else 'false'}}} repo={json.dumps(r)} commit={json.dumps(f['커밋'])} refs={{{json.dumps(refs, ensure_ascii=False)}}} raw={{{json.dumps(raw, ensure_ascii=False)}}}>",
+                           "", body, "", "</Case>", ""]
+            vs = [v for x in repo for v in ver_by.get((gid, x), [])]
             if vs:
                 pl += ["## 실행 검증", "", "코드 확인 밖에 실행으로 확인한 기록이다. 방법은 PoC, 시험, 모델 실험이고, 수준은 함수 직접 호출, MCP 연결, 에이전트(모델 포함)다.", "",
                        "| 서버 | 방법 | 수준 | 커밋 | 결과 | 근거 | 메모 |", "|---|---|---|---|---|---|---|"]
@@ -308,53 +378,45 @@ for c in cells:
 
 # 서버
 lines = ["---", "title: 서버 목록", "sidebar_label: 서버 목록", "sidebar_position: 9", "---", "", GEN, "", "# 서버 목록", "",
-         "기준 커밋은 그 서버를 처음 전체 분석한 커밋이고, 관찰된 문제는 그 커밋에서 찾은 것이다. 최근 분석은 그 뒤에 다시 확인한 가장 늦은 스냅샷이다.", "",
-         "| 서버 | 기준 커밋 | 최근 분석 | 관찰된 문제 | 고쳐짐 | 원고 |", "|---|---|---|---|---|---|"]
-for s in sorted(repo, key=str.lower):
-    gs = {o["문제ID"] for o in obs if o["서버"] == s}
-    its = sorted({cell_of[g] for g in gs})
-    r, cm = repo[s]
-    last = snaps_of[s][-1]
-    recent = "" if last is base[s] else f"[`{last['커밋'][:7]}`](https://github.com/{r}/tree/{last['커밋']}) {last['분석일']} ({last['범위']})"
-    nfix = sum(1 for (g, x), k in latest.items() if x == s and k["결과"] == "고쳐짐")
-    lines.append(f"| [{s}]({srv_link(s)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {recent} | {len(gs)} | {nfix or ''} | {', '.join(its)} |")
+         "기준 커밋은 그 서버를 처음 전체 분석한 커밋이다. 확인 기록은 그 뒤에 일부 문제만 다시 본 횟수다. " + NOTE, "",
+         "| 서버 | 기준 커밋 | 확인 기록 | 관찰됨 | 고쳐짐 | 확인 안 함 | 항목 |", "|---|---|---|---|---|---|---|"]
+for x in sorted(repo, key=str.lower):
+    r, cm = repo[x]
+    obs_p = [p for p in prob if ST[(p, x)]["state"] == "관찰됨"]
+    nfix = sum(1 for p in prob if ST[(p, x)]["change"] == "고쳐짐")
+    nunk = sum(1 for p in prob if ST[(p, x)]["state"] == "확인 안 함")
+    its = sorted({cell_of[p] for p in obs_p})
+    lines.append(f"| [{x}]({srv_link(x)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {len(snaps_of[x]) - 1 or ''} | {len(obs_p)} | {nfix or ''} | {nunk or ''} | {', '.join(its)} |")
 write(os.path.join(P, "servers", "index.mdx"), "\n".join(lines))
-for s in sorted(repo, key=str.lower):
-    r, cm = repo[s]
-    sl = ["---", f"title: {yq(s)}", f"sidebar_label: {yq(s)}", "---", "", GEN, "", f"# {s}", "",
-          f"저장소 [{r}](https://github.com/{r}), 기준 커밋 [{cm[:7]}](https://github.com/{r}/tree/{cm})", "",
-          "## 분석 기록", "", "| 커밋 | 분석일 | 범위 | 결과 | 메모 |", "|---|---|---|---|---|"]
-    for sn in snaps_of[s]:
-        if sn is base[s]:
-            res = f"관찰된 문제 {len(observed_at[s])}"
-        else:
-            got = C.Counter(k["결과"] for (g, x, c), k in check_at.items() if x == s and c == sn["커밋"])
-            res = ", ".join(f"{k} {v}" for k, v in got.items())
-        sl.append(f"| [`{sn['커밋'][:7]}`](https://github.com/{r}/tree/{sn['커밋']}) | {sn['분석일']} | {sn['범위']} | {res} | {esc(sn['메모'])} |")
+for x in sorted(repo, key=str.lower):
+    r, cm = repo[x]
+    sl = ["---", f"title: {yq(x)}", f"sidebar_label: {yq(x)}", "---", "", GEN, "", f"# {x}", "",
+          f"저장소 [{r}](https://github.com/{r}), 기준 커밋 [{cm[:7]}](https://github.com/{r}/tree/{cm}). " + NOTE, "",
+          "## 확인 기록", "", "| 커밋 | 커밋일 | 분석일 | 범위 | 판정 | 메모 |", "|---|---|---|---|---|---|"]
+    for sn in snaps_of[x]:
+        got = C.Counter(rs[0]["판정"] for (y, c, _), rs in rows_at.items() if y == x and c == sn["커밋"])
+        scope = "전체" if "전체" in sn["범위"].split() else sn["범위"]
+        sl.append(f"| {commit_link(x, sn)} | {sn['커밋일']} | {sn['분석일']} | {esc(scope)} | {', '.join(f'{k} {v}' for k, v in got.items())} | {esc(sn['메모'])} |")
     sl.append("")
-    mine = [o for o in obs if o["서버"] == s]
-    by_it = C.OrderedDict()
-    for c in cells:
-        rows = [o for o in mine if cell_of[o["문제ID"]] == c["원고"]]
-        if rows:
-            by_it[c["원고"]] = rows
-    if not by_it:
+    shown = [p for p in prob if any(e["state"] == "관찰됨" for e in history[(p, x)])]
+    if not shown:
         sl += ["관찰된 문제가 없다."]
     else:
         sl += ["## 관찰된 문제", ""]
-    for it, rows in by_it.items():
-        sl += [f"### {it} {cell_name[it]}", ""]
-        gids = sorted(dict.fromkeys(o["문제ID"] for o in rows))
-        for gid in gids:
-            n = sum(1 for o in rows if o["문제ID"] == gid)
-            k = latest.get((gid, s))
-            tail = f" · 최신 확인 {k['결과']} `{k['커밋'][:7]}`" + (f" {ref_link(k['근거'])}" if k["근거"] else "") if k else ""
-            sl.append(f"- [{gid} {esc(prob[gid]['문제'])}]({prob_link(gid)}) (사례 {n}){tail}")
+    for c in cells:
+        ps = [p for p in shown if cell_of[p] == c["원고"]]
+        if not ps:
+            continue
+        sl += [f"### {c['원고']} {cell_name[c['원고']]}", ""]
+        for gid in ps:
+            st = ST[(gid, x)]
+            tail = f" · {st['change']} `{st['snap']['커밋'][:7]}`" if st["change"] else ""
+            sl.append(f"- [{gid} {esc(prob[gid]['문제'])}]({prob_link(gid)}){tail}")
         sl.append("")
-    write(os.path.join(P, "servers", f"{slug_srv(s)}.mdx"), "\n".join(sl))
+    write(os.path.join(P, "servers", f"{slug_srv(x)}.mdx"), "\n".join(sl))
 
 data = {"chapters": {ch["장"]: ch["이름"] for ch in chapters}, "servers": sorted(repo, key=str.lower), "cells": cells_json}
 with open(os.path.join(DATA, "problems.json"), "w", encoding="utf-8", newline="\n") as f:
     json.dump(data, f, ensure_ascii=False, indent=1)
     f.write("\n")
-print("문제", len(probs), "서버", len(repo), "셀", len(cells))
+print("문제", len(probs), "서버", len(repo), "항목", len(cells), "근거", len(finds))

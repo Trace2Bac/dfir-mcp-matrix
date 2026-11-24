@@ -24,17 +24,17 @@ CSV는 저장소 밖의 근거 대장에서 `tools/problems_export_from_ledger.p
 
 ## 작업별 순서
 
-### 문제나 사례를 고치거나 더할 때
+### 문제나 근거를 고치거나 더할 때
 
 1. `problems/_data/`의 해당 CSV를 고칩니다. 파일별 내용은 [problems/_data/README.md](problems/_data/README.md)에 있습니다.
 2. `python tools/problems_build.py`를 실행합니다.
 3. `web/`에서 `npm start`로 화면을 확인합니다.
 4. CSV와 생성된 페이지를 함께 커밋합니다.
 
-### 장·원고·소제목을 바꿀 때
+### 장·항목·소제목을 바꿀 때
 
 가이드라인의 목차가 바뀐 경우입니다.
-`chapters.csv`, `cells.csv`, `headings.csv`를 고치고, [결정 기록](docs/decisions/README.mdx)을 하나 더합니다.
+`chapters.csv`, `cells.csv`, `headings.csv`를 고치고, 바꾼 이유를 커밋 메시지에 남깁니다.
 
 ## 배포
 

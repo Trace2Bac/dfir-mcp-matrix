@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import useIsBrowser from '@docusaurus/useIsBrowser';
 import Link from '@docusaurus/Link';
 import styles from './ProblemMap.module.css';
-import { useProblemQuery, type Check, type ProblemsData } from './ProblemDetails';
+import { useProblemQuery, type ProblemsData, type State } from './ProblemDetails';
 import { ProblemDrawer, useProblemsData } from './ProblemMatrix';
 
 // 장마다 한 가지 색. 관찰된 칸, 장 띠, 문제별 막대에 같이 쓴다
@@ -13,11 +13,11 @@ const CELL = 8; // 칸 너비
 const STEP = 9; // 칸 너비와 간격
 const CELL_H = 14; // 칸 높이(서버 이름을 읽을 수 있게 줄을 넉넉히 둔다)
 const ROW = 17; // 줄 높이와 간격
-const CELL_GAP = 6; // 원고 사이
+const CELL_GAP = 6; // 항목 사이
 const CHAPTER_GAP = 14; // 장 사이
 const LABEL_W = 214; // 서버 이름
 const BAND_H = 26; // 장 띠
-const ID_H = 22; // 원고 번호
+const ID_H = 22; // 항목 번호
 const BAR_H = 56; // 문제별 관찰 서버 수 막대
 const TOTAL_W = 120; // 서버별 합계 막대
 
@@ -29,10 +29,8 @@ type Col = {
   head: string;
   axis: string;
   obs: Set<string>;
-  scope: Set<string>;
-  den: number | null;
-  checks: Record<string, Check>;
-  ver: Record<string, string[]>;
+  den: number;
+  st: Record<string, State>;
   x: number;
 };
 
@@ -57,10 +55,8 @@ function layout(data: ProblemsData) {
           head: `${h.id} ${h.name}`,
           axis: c.axis,
           obs: new Set(p.obs),
-          scope: new Set([...p.denList, ...p.obs]),
           den: p.den,
-          checks: p.checks,
-          ver: p.ver,
+          st: p.states,
           x,
         });
         x += STEP;
@@ -73,19 +69,20 @@ function layout(data: ProblemsData) {
 
 type Hover = { col: number; row: number | null; x: number; y: number } | null;
 
-// 첫 화면의 지도: 줄은 서버, 열은 문제(장 → 원고 → 소제목 차례)다. 칠한 칸은 그 서버에서 그 문제가 관찰된 것이다
+// 첫 화면의 지도: 줄은 서버, 열은 문제(장 → 항목 → 소제목 차례)다. 칸은 그 서버의 마지막 판정이다
 export function ProblemMapView({ data }: { data: ProblemsData }) {
   const { openCell, openProblem, openServer, open } = useProblemQuery();
   const [hover, setHover] = useState<Hover>(null);
   const [chapter, setChapter] = useState<string | null>(null);
+  const [byCount, setByCount] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const { cols, groups, chapters, width } = useMemo(() => layout(data), [data]);
   const servers = useMemo(
     () =>
       data.servers
-        .map(s => ({ name: s, n: cols.filter(c => c.obs.has(s)).length, scope: cols.filter(c => c.scope.has(s)).length }))
-        .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name)),
-    [data, cols],
+        .map(s => ({ name: s, n: cols.filter(c => c.obs.has(s)).length }))
+        .sort((a, b) => (byCount ? b.n - a.n : 0) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })),
+    [data, cols, byCount],
   );
   const maxObs = Math.max(...cols.map(c => c.obs.size), 1);
   const maxServer = Math.max(...servers.map(s => s.n), 1);
@@ -118,8 +115,8 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
   const hc = hover ? cols[hover.col] : null;
   const hs = hover && hover.row !== null ? servers[hover.row] : null;
   const pairs = cols.reduce((k, c) => k + c.obs.size, 0);
-  const runN = cols.reduce((k, c) => k + Object.values(c.ver).filter(ms => ms.some(m => m !== '코드 확인')).length, 0);
-  const fixedN = cols.reduce((k, c) => k + Object.values(c.checks).filter(x => x.result === '고쳐짐').length, 0);
+  const fixedN = cols.reduce((k, c) => k + Object.values(c.st).filter(x => x.change === '고쳐짐').length, 0);
+  const unkN = cols.reduce((k, c) => k + Object.values(c.st).filter(x => x.s === 'unk').length, 0);
   const ranked = [...cols].sort((a, b) => b.obs.size - a.obs.size || a.id.localeCompare(b.id)).slice(0, 10);
 
   return (
@@ -130,17 +127,17 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           <p className={styles.lead}>
             공개 DFIR MCP 서버 {data.servers.length}개에서 관찰된 구현 문제 {cols.length}개를 가이드라인 목차에 따라 한 장에 놓았습니다.
             <br />
-            줄은 서버, 열은 문제입니다. 칠한 칸은 그 서버에서 그 문제가 관찰됐다는 뜻입니다.
+            줄은 서버, 열은 문제입니다. 칸은 그 서버에서 마지막으로 확인한 판정입니다.
           </p>
         </div>
         <div className={styles.kpis}>
-          <Kpi n={data.cells.length} label="원고" />
+          <Kpi n={data.cells.length} label="항목" />
           <Kpi n={data.cells.reduce((k, c) => k + c.heads.length, 0)} label="소제목" />
           <Kpi n={cols.length} label="문제" />
           <Kpi n={data.servers.length} label="서버" />
-          <Kpi n={pairs} label="관찰" />
-          <Kpi n={runN} label="실행 검증" />
+          <Kpi n={pairs} label="관찰됨" />
           <Kpi n={fixedN} label="고쳐짐" />
+          <Kpi n={unkN} label="확인 안 함" />
         </div>
       </header>
 
@@ -159,12 +156,16 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
             {ax} {name}
           </button>
         ))}
+        <button type="button" className={`${styles.filter} ${byCount ? styles.filterOn : ''}`} onClick={() => setByCount(!byCount)}>
+          {byCount ? '관찰 수 차례' : '이름 차례'}
+        </button>
         <span className={styles.legend}>
           <i className={styles.lgObs} /> 관찰됨
-          <i className={styles.lgRun} /> 실행으로 검증함
-          <i className={styles.lgFixed} /> 관찰 뒤 고쳐짐
-          <i className={styles.lgScope} /> 기능 있음, 관찰되지 않음
-          <i className={styles.lgNone} /> 기능 없음 또는 정하지 않음
+          <i className={styles.lgFixed} /> 고쳐짐
+          <i className={styles.lgScope} /> 문제 없음
+          <i className={styles.lgEst} /> 문제 없음(추정)
+          <i className={styles.lgUnk} /> 확인 안 함
+          <i className={styles.lgNone} /> 기능 없음
         </span>
       </div>
 
@@ -178,6 +179,12 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           onClick={onClick}
           style={{ cursor: hover ? 'pointer' : 'default' }}
         >
+          <defs>
+            <pattern id="unk-hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect width="4" height="4" className={styles.cNone} />
+              <line x1="0" y1="0" x2="0" y2="4" className={styles.hatchLine} />
+            </pattern>
+          </defs>
           {/* 장 띠 */}
           {chapters.map(ch => (
             <g key={ch.axis} opacity={dim(ch.axis) ? 0.25 : 1}>
@@ -187,7 +194,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
               </text>
             </g>
           ))}
-          {/* 원고 번호 */}
+          {/* 항목 번호 */}
           {groups.map(g => (
             <g key={g.cell} opacity={dim(g.axis) ? 0.25 : 1}>
               <line x1={mapX + g.x0} x2={mapX + g.x1} y1={BAND_H + ID_H - 3} y2={BAND_H + ID_H - 3} stroke={CHAPTER_COLOR[g.axis]} strokeWidth={1.5} />
@@ -229,37 +236,17 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
                   {s.name.length > 28 ? `${s.name.slice(0, 27)}…` : s.name}
                 </text>
                 {cols.map(c => {
-                  const hit = c.obs.has(s.name);
-                  const inScope = c.scope.has(s.name);
-                  const fixed = hit && c.checks[s.name]?.result === '고쳐짐';
-                  if (fixed)
+                  const st = c.st[s.name];
+                  const op = dim(c.axis) ? 0.15 : 1;
+                  if (st?.change === '고쳐짐')
                     return (
-                      <rect
-                        key={c.id}
-                        x={mapX + c.x + 0.75}
-                        y={y + 0.75}
-                        width={CELL - 1.5}
-                        height={CELL_H - 1.5}
-                        rx={1.5}
-                        className={styles.cFixed}
-                        stroke={CHAPTER_COLOR[c.axis]}
-                        opacity={dim(c.axis) ? 0.15 : 1}
-                      />
+                      <rect key={c.id} x={mapX + c.x + 0.75} y={y + 0.75} width={CELL - 1.5} height={CELL_H - 1.5} rx={1.5}
+                        className={styles.cFixed} stroke={CHAPTER_COLOR[c.axis]} opacity={op} />
                     );
-                  const run = hit && (c.ver[s.name] ?? []).some(m => m !== '코드 확인');
+                  const cls = !st ? styles.cNone : st.s === 'ok' ? (st.est ? styles.cEst : styles.cScope) : st.s === 'unk' ? styles.cUnk : undefined;
                   return (
-                    <g key={c.id} opacity={dim(c.axis) ? 0.15 : 1}>
-                      <rect
-                        x={mapX + c.x}
-                        y={y}
-                        width={CELL}
-                        height={CELL_H}
-                        rx={1.5}
-                        className={hit ? undefined : inScope ? styles.cScope : styles.cNone}
-                        fill={hit ? CHAPTER_COLOR[c.axis] : undefined}
-                      />
-                      {run && <circle cx={mapX + c.x + CELL / 2} cy={y + CELL_H / 2} r={2.2} className={styles.runDot} />}
-                    </g>
+                    <rect key={c.id} x={mapX + c.x} y={y} width={CELL} height={CELL_H} rx={1.5} className={cls}
+                      fill={st?.s === 'obs' ? CHAPTER_COLOR[c.axis] : undefined} opacity={op} />
                   );
                 })}
                 <rect x={mapX + width + 16} y={y + 2} width={(s.n / maxServer) * (TOTAL_W - 34)} height={CELL_H - 4} rx={2} className={styles.totalBar} />
@@ -300,23 +287,25 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
             <div className={styles.tipName}>{hc.name}</div>
             <div className={styles.tipMeta}>소제목 {hc.head}</div>
             <div className={styles.tipMeta}>
-              관찰된 서버 {hc.obs.size} / 기능 있는 서버 {hc.den ?? '정하지 않음'}
+              관찰됨 {hc.obs.size} / 기능 있는 서버 {hc.den}
             </div>
             {hs && (
               <div className={styles.tipServer}>
                 <b>{hs.name}</b>:{' '}
-                {hc.obs.has(hs.name)
-                  ? hc.checks[hs.name]
-                    ? `기준 커밋에서 관찰됨 → ${hc.checks[hs.name].commit}에서 ${hc.checks[hs.name].result}${hc.checks[hs.name].ref ? ` (${hc.checks[hs.name].ref})` : ''}`
-                    : `관찰됨 · 검증: ${(hc.ver[hs.name] ?? []).join(', ')} · 누르면 사례를 엽니다`
-                  : hc.scope.has(hs.name) ? '기능 있음, 관찰되지 않음' : '기능 없음 또는 정하지 않음'}
+                {(() => {
+                  const st = hc.st[hs.name];
+                  if (!st) return '기능 없음';
+                  if (st.s === 'unk') return '확인 안 함';
+                  const name = st.s === 'obs' ? '관찰됨' : st.est ? '문제 없음(추정)' : '문제 없음';
+                  return `${name}${st.change ? ` · ${st.change}` : ''} · ${st.commit} (${st.date})`;
+                })()}
               </div>
             )}
           </div>
         )}
       </div>
       <p className={styles.note}>
-        칸은 코드 확인(정적 분석)으로 관찰한 문제이고, 점이 찍힌 칸만 PoC, 시험, 모델 실험으로 실행해 확인했습니다. 관찰된 문제만 표시합니다. 비어 있는 칸은 문제가 없다는 판정이 아니라, 관찰되지 않았거나 그 기능이 없다는 뜻입니다. 서버별 합계는 기능이 많은 서버일수록 커집니다.
+        판정은 대부분 코드 확인(정적 분석)으로 내렸고, 실행 검증은 문제 화면에 따로 적었습니다. 문제 없음(추정)은 근거 대장에서 옮긴 판정으로 아직 코드로 다시 확인하지 않았습니다. 서버별 합계는 기능이 많은 서버일수록 커집니다. 모든 판정은 서버마다 표시된 커밋 기준이며, 서버의 현재 버전과 다를 수 있습니다.
       </p>
 
       <section className={styles.below}>
@@ -340,7 +329,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           </ol>
         </div>
         <div className={styles.panel}>
-          <h2 className={styles.h2}>원고별 문제</h2>
+          <h2 className={styles.h2}>항목별 문제</h2>
           <div className={styles.cellList}>
             {data.cells.map(c => {
               const ps = c.heads.flatMap(h => h.problems);
@@ -364,7 +353,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
             })}
           </div>
           <Link to="/problems/" className={styles.more}>
-            원고·소제목 구조로 보기 →
+            항목·소제목 구조로 보기 →
           </Link>
         </div>
       </section>

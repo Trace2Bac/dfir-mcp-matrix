@@ -5,7 +5,7 @@ This repository has two kinds of material under two licenses.
 | Material | Paths | License |
 |---|---|---|
 | Code: tools, site, CI | `tools/`, `web/`, `.github/` | MIT ([LICENSE](LICENSE)) |
-| Content: problem matrix data and pages, docs | `problems/`, `docs/`, `*.md` guides | CC BY 4.0 ([LICENSE-CONTENT](LICENSE-CONTENT)) |
+| Content: problem matrix data and pages | `problems/`, `*.md` guides | CC BY 4.0 ([LICENSE-CONTENT](LICENSE-CONTENT)) |
 
 Attribution for content: "DFIR MCP Matrix, Trace2Bac contributors", with a link to this repository.
 
