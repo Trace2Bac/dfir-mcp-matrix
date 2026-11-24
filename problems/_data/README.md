@@ -1,6 +1,7 @@
 # problems/_data — 문제 매트릭스 데이터
 
 `problems/`의 페이지는 이 폴더의 CSV에서 `tools/problems_build.py`가 만든다. 페이지 파일은 손으로 고치지 않는다. 데이터를 고친 뒤 다시 만든다.
+같은 스크립트가 화면 데이터 `problems.json`도 만든다. 사이트의 `problems-data` 플러그인이 이 파일을 `web/static/data/`로 옮기고, 첫 화면의 격자와 원고 화면의 패널이 이 파일을 읽는다.
 
 ```
 python tools/problems_build.py

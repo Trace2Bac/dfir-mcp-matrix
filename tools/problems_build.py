@@ -8,7 +8,7 @@ python tools/problems_build.py [저장소 루트]
 근거의 강도와 시험 기록은 근거 대장에서 관리하며 여기에는 싣지 않는다.
 만든 파일은 손으로 고치지 않는다. 데이터를 고친 뒤 이 스크립트를 다시 돌린다.
 """
-import csv, os, re, shutil, sys, collections as C
+import csv, json, os, re, shutil, sys, collections as C
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 P = os.path.join(ROOT, "problems")
@@ -92,12 +92,15 @@ def srv_link(s):
     return f"/problems/servers/{slug_srv(s)}"
 
 # 첫 화면
-lines = ["---", "title: 문제 매트릭스", "sidebar_position: 0", "---", "", GEN, "",
+lines = ["---", "title: 문제 매트릭스", "sidebar_position: 0", "hide_table_of_contents: true", "---", "", GEN, "",
+         "import ProblemMatrix from '@site/src/components/Problems/ProblemMatrix';", "",
          "# 문제 매트릭스", "",
          "DFIR MCP 서버 구현 가이드라인의 원고마다, 공개 서버 21개에서 관찰된 문제를 구현방안 소제목별로 묶어 보여 준다.", "",
          "- 축은 가이드라인의 장, 셀은 원고(1.1~4.4), 상세는 원고의 구현방안 소제목이다.",
          "- 상세 아래에 문제 묶음을 두고, 문제 화면에서 그 기능이 있는 서버와 문제가 관찰된 서버를 확인한다.",
          "- 근거의 강도와 시험 기록은 근거 대장에서 관리하며 여기에는 싣지 않는다. 수정 전후 검증은 [dfir-mcp-bench](https://github.com/Trace2Bac/dfir-mcp-bench) 실험으로 잇는다.", "",
+         "원고 칸을 누르면 오른쪽 패널에 그 원고의 소제목과 문제를 연다.", "", "<ProblemMatrix />", "",
+         "<details>", "<summary>표로 보기</summary>", "",
          "| 장 | 원고 | 소제목 | 문제 | 관찰된 서버 |", "|---|---|---|---|---|"]
 for ch in chapters:
     its = [c["원고"] for c in cells if c["장"] == ch["장"]]
@@ -105,7 +108,7 @@ for ch in chapters:
     npb = sum(1 for p in probs if p["원고"] in its)
     nsv = len({o["서버"] for o in obs if o["원고"] in its})
     lines.append(f"| [{ch['장']} {ch['이름']}](/problems/{ch['장']}) | {len(its)} | {nh} | {npb} | {nsv} |")
-lines += ["", f"서버별로 보려면 [서버 목록](/problems/servers)을 본다."]
+lines += ["", "</details>", "", f"서버별로 보려면 [서버 목록](/problems/servers)을 본다."]
 write(os.path.join(P, "index.mdx"), "\n".join(lines))
 
 # 축(장)
@@ -120,14 +123,21 @@ for ch in chapters:
     write(os.path.join(P, ch["장"], "index.mdx"), "\n".join(lines))
 
 # 셀(원고)과 문제
+cells_json = []
 for c in cells:
     it = c["원고"]
     lines = ["---", f"title: {yq(it + ' ' + c['이름'])}", f"sidebar_label: {yq(it + ' ' + c['이름'])}",
-             f"sidebar_position: {int(it.split('.')[1])}", "---", "", GEN, "", f"# {it} {c['이름']}", ""]
+             f"sidebar_position: {int(it.split('.')[1])}", "hide_table_of_contents: true", "---", "", GEN, "",
+             "import ProblemCell from '@site/src/components/Problems/ProblemCell';", "",
+             f"# {it} {c['이름']}", "", f'<ProblemCell id="{it}" />', "",
+             "<details>", "<summary>목록으로 보기</summary>", ""]
     order = 0
+    cjson = {"id": it, "name": c["이름"], "axis": it[0], "heads": []}
     for h in by_cell_heads[it]:
         ids = [g for g in h["묶음"].split() if (it, g) in prob]
-        lines += [f"## {h['소제목']}", ""]
+        hjson = {"name": h["소제목"], "problems": []}
+        cjson["heads"].append(hjson)
+        lines += [f"### {h['소제목']}", ""]
         if not ids:
             lines += ["이 소제목에 묶은 문제가 없다.", ""]
             continue
@@ -135,6 +145,8 @@ for c in cells:
         for gid in ids:
             p = prob[(it, gid)]
             den = listsplit(p["해당 기능 서버"]); ob = listsplit(p["관찰된 서버"])
+            hjson["problems"].append({"id": gid, "name": p["문제"], "den": len(den) if den else None, "obs": ob,
+                                      "exps": [e["실험"] for e in exp_by.get((it, gid), [])]})
             lines.append(f"| [{gid} {esc(p['문제'])}](/problems/{it[0]}/{it}/{gid}) | {len(den) if den else '정하지 않음'} | {len(ob)} |")
             order += 1
             # 문제 화면
@@ -170,6 +182,8 @@ for c in cells:
                 pl.append("")
             write(os.path.join(cell_dir(it), f"{gid}.mdx"), "\n".join(pl))
         lines.append("")
+    lines += ["</details>"]
+    cells_json.append(cjson)
     write(os.path.join(cell_dir(it), "index.mdx"), "\n".join(lines))
 
 # 서버
@@ -202,4 +216,8 @@ for s in sorted(repo, key=str.lower):
         sl.append("")
     write(os.path.join(P, "servers", f"{slug_srv(s)}.mdx"), "\n".join(sl))
 
+data = {"chapters": {ch["장"]: ch["이름"] for ch in chapters}, "cells": cells_json}
+with open(os.path.join(DATA, "problems.json"), "w", encoding="utf-8", newline="\n") as f:
+    json.dump(data, f, ensure_ascii=False, indent=1)
+    f.write("\n")
 print("문제", len(probs), "서버", len(repo), "셀", len(cells))

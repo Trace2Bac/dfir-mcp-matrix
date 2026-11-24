@@ -8,6 +8,7 @@ import evidenceLinks from './src/remark/evidenceLinks';
 import markLines from './src/remark/markLines';
 import noSingleTilde from './src/remark/noSingleTilde';
 import matrixDataPlugin from './plugins/matrix-data';
+import problemsDataPlugin from './plugins/problems-data';
 import reportLayout from './src/remark/reportLayout';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
@@ -195,6 +196,8 @@ const config: Config = {
   plugins: [
     // 화면 데이터(static/data/matrix.json)를 만들고 원본이 바뀌면 다시 만든다
     matrixDataPlugin,
+    // 문제 매트릭스 화면 데이터(static/data/problems.json)를 problems/_data/problems.json에서 둔다
+    problemsDataPlugin,
     [
       '@docusaurus/plugin-content-docs',
       {
