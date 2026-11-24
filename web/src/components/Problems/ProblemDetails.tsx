@@ -1,16 +1,18 @@
 import React, { useCallback } from 'react';
 import { useHistory, useLocation } from '@docusaurus/router';
 import Link from '@docusaurus/Link';
-import styles from '../Matrix/Matrix.module.css';
+import styles from './Problems.module.css';
 
 // problems.json의 원고(셀) 하나. tools/problems_build.py가 problems/_data/*.csv에서 만든다
 export type ProblemCellData = {
   id: string; // 1.3
   name: string;
   axis: string; // 장 번호 1~4
-  heads: { name: string; problems: { id: string; name: string; den: number | null; obs: string[]; exps: string[] }[] }[];
+  heads: { id: string; name: string; problems: { id: string; name: string; den: number | null; denList: string[]; obs: string[]; exps: string[]; checks: Record<string, Check> }[] }[];
 };
-export type ProblemsData = { chapters: Record<string, string>; cells: ProblemCellData[]; updated_at?: string };
+// 기준 커밋 뒤의 버전에서 다시 확인한 결과(problems/_data/checks.csv의 가장 늦은 줄)
+export type Check = { result: string; commit: string; date: string; ref: string };
+export type ProblemsData = { chapters: Record<string, string>; servers: string[]; cells: ProblemCellData[]; updated_at?: string };
 
 // 패널에 연 원고·문제·서버는 ?cell=&problem=&server=로 주소에 남긴다.
 // push로 바꾸면 Docusaurus가 페이지 맨 위로 초점을 옮겨 스크롤이 올라가므로 replace만 쓴다(매트릭스 화면과 같음)
@@ -56,7 +58,7 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
     <div className={styles.cellPage}>
       <div className={styles.question}>
         <span className={styles.questionLabel}>확인 사항</span>
-        원고의 구현방안 소제목마다, 공개 서버에서 관찰된 문제를 묶어 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
+        원고의 구현방안 소제목(1.3.2)마다, 공개 서버에서 관찰된 문제(P0001)를 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
       </div>
       <div className={styles.details}>
         <h2 className={styles.sectionTitle}>소제목과 문제</h2>
@@ -64,8 +66,8 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
           <span>문제 {total}</span>
         </div>
         {cell.heads.map(h => (
-          <section key={h.name} className={styles.row}>
-            <h3 className={styles.rowTitle}>{h.name}</h3>
+          <section key={h.id} className={styles.row}>
+            <h3 className={styles.rowTitle}>{h.id} {h.name}</h3>
             {h.problems.length === 0 && <div className={styles.empty}>이 소제목에 묶은 문제가 없습니다</div>}
             {h.problems.map(p => {
               const to = `/${problemPath(cell, p.id)}`;
@@ -91,6 +93,7 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
                         className={`${styles.chip} ${p.id === openProblem && s === openServer ? styles.chipActive : ''}`}
                       >
                         {s}
+                        {p.checks[s] && <span title={`${p.checks[s].commit} ${p.checks[s].ref} (${p.checks[s].date})`}> · {p.checks[s].result}</span>}
                       </Link>
                     ))}
                   </div>

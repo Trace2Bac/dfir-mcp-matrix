@@ -4,6 +4,10 @@ python tools/problems_export_from_ledger.py <근거 대장 폴더> <매트릭스
 
 근거 대장은 저장소 밖의 로컬 자료다. 이 스크립트는 매트릭스가 쓸 칸만 꺼낸다.
 근거의 강도(원자료로 재현, 코드만 등)와 시험 기록은 내보내지 않는다.
+
+소제목ID는 원고와 소제목 순서로 정한다(1.3.2). 문제ID(P0001)는 소제목과 따로 매기는 식별자다.
+이미 내보낸 problems.csv가 있으면 그 대장ID(원고-묶음ID) → 문제ID 대응을 그대로 쓰고, 새 묶음에만 다음 번호를 준다.
+그래서 소제목을 옮기거나 묶음을 다른 소제목에 두어도 문제ID는 바뀌지 않는다.
 """
 import csv, os, re, sys, glob, collections as C
 
@@ -55,6 +59,7 @@ EXPS = [("1.3", "B2", "EXP-003", "mulder", "audit_tool_coverage가 사건 전체
         ("1.3", "B2", "EXP-006", "trudi", "공격 단계 점검이 검사하지 않은 유출 단계를 가림", "lifecycle-skip-fingerprints, lifecycle-archive-names 패치(진행 중)"),
         ("4.1", "A1", "EXP-002", "mulder", "clamscan이 디스크 이미지를 열지 못해도 0건 성공으로 보고", "clamav-limit, extract-keep 패치")]
 BENCH_COMMIT = "76b02fa"
+EXPORT_DATE = "2026-11-24"  # 근거 대장의 조사 대상 목록(검증_2026-11-24) 날짜. 기준 커밋 스냅샷의 분석일로 쓴다
 # 묶음 분모를 21개 서버의 코드로 다시 판정한 묶음(검증_2026-11-24/B2_검증표.csv). 그 밖의 묶음은 묶음분모.csv(매트릭스 셀 상세 기준)를 쓴다.
 DEN_OVERRIDE = {("1.3", "B2"): ["findevil", "mulder", "SAVVYDFIR-MCP", "sift-kernel", "trudi"]}
 
@@ -89,33 +94,73 @@ def strip_evidence(text):
     return re.sub(r"\s+([.,])", r"\1", re.sub(r"\s{2,}", " ", out)).strip()
 harm = {k: strip_evidence(v) for k, v in harm.items()}
 
+# 근거 대장의 사례 번호(CIIT-1, SK-5, 4.1-E2-mulder-2)는 대장 안에서만 쓰는 식별자라 서버 이름만 남긴다
+CASE_ALIAS = {**ALIAS, "SK": "sift-kernel"}
+def strip_case_ids(text, names):
+    alt = "|".join(sorted(map(re.escape, list(names) + list(CASE_ALIAS)), key=len, reverse=True))
+    text = re.sub(r"(?<![A-Za-z0-9_-])(?:\d\.\d-[A-Z]\d*-)?(" + alt + r")-x?\d+(?:_(?:" + alt + r")-x?\d+)*(?![A-Za-z0-9_-])",
+                  lambda m: CASE_ALIAS.get(m[1], m[1]), text)
+    text = re.sub(r"(?<![A-Za-z0-9_-])(CIIT|SK)(?![A-Za-z0-9_-])", lambda m: CASE_ALIAS[m[1]], text)
+    def dedupe(m):
+        parts = m[1].split(", ")
+        if not any(x in names for x in parts):
+            return m[0]
+        out = []
+        for x in parts:
+            if x not in out or x not in names:
+                out.append(x)
+        return "(" + ", ".join(out) + ")"
+    return re.sub(r"\(([^()]*)\)", dedupe, text)
+
 groups = C.OrderedDict()
 for r in cases:
     groups.setdefault((r["원고"], ng(r["묶음ID"])), {"name": r["묶음명"], "part": r["기능부분"], "rows": []})["rows"].append(r)
 
+# 이미 매긴 문제ID를 이어 쓴다
+old = os.path.join(OUT, "problems.csv")
+pid = {}
+if os.path.exists(old):
+    for r in csv.DictReader(open(old, encoding="utf-8")):
+        if r.get("대장ID") and r.get("문제ID"):
+            pid[r["대장ID"]] = r["문제ID"]
+nxt = max([int(v[1:]) for v in pid.values()] + [0]) + 1
+
 head_rows, prob_rows, obs_rows, unplaced = [], [], [], []
-placed = set()
+head_id, order_in = {}, []
 for it, secs in HEAD.items():
     for order, (h, ids) in enumerate(secs, 1):
-        head_rows.append({"원고": it, "순서": order, "소제목": h, "묶음": " ".join(ids)})
+        hid = f"{it}.{order}"
+        head_rows.append({"소제목ID": hid, "원고": it, "순서": order, "소제목": h})
         for gid in ids:
-            if (it, gid) in groups:
-                placed.add((it, gid))
-for (it, gid), g in groups.items():
-    if (it, gid) not in placed:
-        unplaced.append(f"{it} {gid}")
+            if (it, gid) in groups and (it, gid) not in head_id:
+                head_id[(it, gid)] = hid
+                order_in.append((it, gid))
+for key in groups:
+    if key not in head_id:
+        unplaced.append(f"{key[0]} {key[1]}")
+for it, gid in order_in:
+    if f"{it}-{gid}" not in pid:
+        pid[f"{it}-{gid}"] = f"P{nxt:04d}"; nxt += 1
+
+# 현상과 피해에서 다른 묶음을 옛 묶음ID(같은 원고의 D1, 다른 원고의 1.5 E4)로 가리킨 곳을 문제ID로 바꾼다
+def relink(text, cell):
+    text = re.sub(r"(?<![\w.])(\d\.\d) ([A-Z]\d+)(?![A-Za-z0-9-])", lambda m: pid.get(f"{m[1]}-{m[2]}", m[0]), text)
+    return re.sub(r"(?<![A-Za-z0-9.\-])([A-Z]\d+)(?![A-Za-z0-9\-])", lambda m: pid.get(f"{cell}-{m[1]}", m[0]), text)
+
+for it, gid in sorted(order_in, key=lambda k: pid[f"{k[0]}-{k[1]}"]):
+    g = groups[(it, gid)]
     d = dens.get((it, gid))
     den = [ns(x) for x in re.split(r",\s*", d["적용대상서버"]) if x.strip()] if d and d["적용대상서버"].strip() else []
     if (it, gid) in DEN_OVERRIDE:
         den = DEN_OVERRIDE[(it, gid)]
     obs = sorted({ns(r["서버"]) for r in g["rows"]})
-    sec = next((h for h, ids in HEAD.get(it, []) if gid in ids), "")
+    p_ = pid[f"{it}-{gid}"]
     name = re.sub(r"^\((판정 전|판정 보류)\)\s*", "", g["name"])
-    prob_rows.append({"원고": it, "묶음ID": gid, "소제목": sec, "문제": name, "현상과 피해": harm.get((it, gid), ""),
-                      "해당 기능 서버": "; ".join(den), "관찰된 서버": "; ".join(obs)})
+    prob_rows.append({"문제ID": p_, "소제목ID": head_id[(it, gid)], "문제": relink(name, it), "현상과 피해": strip_case_ids(relink(harm.get((it, gid), ""), it), repo_of),
+                      "해당 기능 서버": "; ".join(den), "관찰된 서버": "; ".join(obs), "대장ID": f"{it}-{gid}"})
     for r in g["rows"]:
         srv = ns(r["서버"]); repo, commit = repo_of.get(srv, ("", ""))
-        obs_rows.append({"원고": it, "묶음ID": gid, "서버": srv, "사례ID": r["사례ID"], "요지": r["요지"].strip(),
+        obs_rows.append({"문제ID": p_, "서버": srv, "사례ID": r["사례ID"], "요지": r["요지"].strip(),
                          "코드위치": r["코드위치"].strip(), "저장소": repo, "커밋": commit if r["기준커밋"][:7] == commit[:7] else r["기준커밋"].strip()})
 
 def w(name, rows):
@@ -126,7 +171,17 @@ w("cells.csv", [{"원고": k, "장": k[0], "이름": v} for k, v in TITLE.items(
 w("headings.csv", head_rows)
 w("problems.csv", prob_rows)
 w("observations.csv", obs_rows)
-w("experiments.csv", [{"원고": a, "묶음ID": b, "실험": c, "서버": d, "내용": e, "서버 변경": f, "bench 커밋": BENCH_COMMIT} for a, b, c, d, e, f in EXPS])
-w("servers.csv", [{"서버": s["서버"], "저장소": s["저장소"], "커밋": s["기준 커밋"]} for s in servers])
+w("experiments.csv", [{"문제ID": pid[f"{a}-{b}"], "실험": c, "서버": d, "내용": e, "서버 변경": f, "bench 커밋": BENCH_COMMIT} for a, b, c, d, e, f in EXPS])
+w("servers.csv", [{"서버": s["서버"], "저장소": s["저장소"]} for s in servers])
+# 기준 커밋은 첫 전체 분석 스냅샷이다. 이미 있는 snapshots.csv의 뒤 스냅샷(다시 확인한 기록)은 그대로 둔다
+old_snaps = list(csv.DictReader(open(os.path.join(OUT, "snapshots.csv"), encoding="utf-8"))) if os.path.exists(os.path.join(OUT, "snapshots.csv")) else []
+base_rows = [{"서버": s["서버"], "커밋": s["기준 커밋"], "분석일": EXPORT_DATE, "범위": "전체", "메모": "처음 분석(근거 대장 조사 대상 목록의 기준 커밋)"} for s in servers]
+base_keys = {(r["서버"], r["커밋"]) for r in base_rows}
+first_full = {}
+for r in old_snaps:
+    if r["범위"] == "전체":
+        first_full.setdefault(r["서버"], r["커밋"])
+keep = [r for r in old_snaps if (r["서버"], r["커밋"]) not in base_keys and first_full.get(r["서버"]) != r["커밋"]]
+w("snapshots.csv", base_rows + keep)
 print("문제", len(prob_rows), "관찰", len(obs_rows), "소제목", len(head_rows), "현상과 피해 있음", sum(1 for p in prob_rows if p["현상과 피해"]))
 print("소제목에 놓이지 않은 묶음", unplaced)

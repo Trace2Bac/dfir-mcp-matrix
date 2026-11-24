@@ -2,7 +2,7 @@ import React from 'react';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import useIsBrowser from '@docusaurus/useIsBrowser';
-import PageDrawer from '../Matrix/PageDrawer';
+import PageDrawer from './PageDrawer';
 import { ProblemDetails, problemPath, useProblemQuery } from './ProblemDetails';
 import { useProblemsData } from './ProblemMatrix';
 

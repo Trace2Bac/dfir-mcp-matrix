@@ -4,14 +4,14 @@ This repository has two kinds of material under two licenses.
 
 | Material | Paths | License |
 |---|---|---|
-| Code: tools, site, schemas, CI | `tools/`, `web/`, `matrix/schema/`, `.github/` | MIT ([LICENSE](LICENSE)) |
-| Content: matrix definitions, reports, docs | `matrix/` (except `matrix/schema/`), `reports/`, `docs/`, `*.md` guides | CC BY 4.0 ([LICENSE-CONTENT](LICENSE-CONTENT)) |
+| Code: tools, site, CI | `tools/`, `web/`, `.github/` | MIT ([LICENSE](LICENSE)) |
+| Content: problem matrix data and pages, docs | `problems/`, `docs/`, `*.md` guides | CC BY 4.0 ([LICENSE-CONTENT](LICENSE-CONTENT)) |
 
 Attribution for content: "DFIR MCP Matrix, Trace2Bac contributors", with a link to this repository.
 
 ## Third-party code excerpts
 
-Reports under `reports/` quote short excerpts of the analyzed MCP servers' source code at a fixed commit, to support the analysis.
+Cases under `problems/` point to, and may quote short excerpts of, the analyzed MCP servers' source code at a fixed commit, to support the analysis.
 Those excerpts are **not** covered by this repository's licenses. They remain under the license of their own project, and each excerpt links to its source file and commit.
 
 | Server | Base commit | License at that commit |

@@ -1,91 +1,47 @@
 # dfir-mcp-matrix
 
-이 저장소는 DFIR MCP 서버들이 증거 무결성, 실행 통제, 결과 전달, 기록 같은 문제를 **어떻게 구현하는지** 비교하는 매트릭스입니다.
-서버마다 셀이 다루는 일을 어떤 방식으로 하는지 분류하고, 그 판단의 근거로 기준 커밋의 코드를 함께 남깁니다.
+이 저장소는 공개 DFIR MCP 서버 21개에서 관찰된 문제를 DFIR MCP 서버 구현 가이드라인의 목차에 따라 정리한 **문제 매트릭스**입니다.
+원고(1.1~4.4)의 구현방안 소제목마다 문제를 두고, 문제마다 해당 기능이 있는 서버와 문제가 관찰된 서버, 그 근거가 된 코드 위치를 남깁니다.
 
 ## 매트릭스는 어떻게 구성되나요?
 
-매트릭스는 **축 → 셀 → 상세 항목**의 세 단계로 구성됩니다.
+매트릭스는 **장 → 원고 → 소제목 → 문제**의 네 단계로 구성됩니다.
 
-- **축**: 셀을 묶는 큰 갈래입니다. 예를 들어 "원본 증거 관리"(E)가 축 하나입니다. 축 목록은 아래 [축](#축) 표에 있습니다.
-- **셀**: 서버에서 분류할 일 하나입니다. 셀마다 무엇을 분류하는지 확인 사항 한 문장으로 적습니다. 예를 들어 `E03`(원본 변경 방지)은 원본 증거에 닿는 경로에서 원본 변경을 막는 주체와 장치를 분류합니다.
-- **상세 항목**(줄여서 **상세**): 그 셀에서 나뉘는 구현 방식 하나입니다. 예를 들어 `E03.01`은 "실행 환경의 읽기 전용 강제"입니다.
+- **장**: 가이드라인의 장 1~4입니다(작업 대상과 상태의 관리, 도구 실행, 수행 기록과 파생물의 관리, 결과 전달).
+- **원고**: 가이드라인의 항목 하나입니다. 예를 들어 1.3은 "조사 절차와 진행 관리"입니다.
+- **소제목**: 원고의 구현방안 소제목입니다. 소제목ID는 `1.3.2`처럼 원고 번호 뒤에 차례를 붙입니다.
+- **문제**: 소제목 아래에서 같은 원인으로 묶은 문제입니다. 문제ID는 `P0001`처럼 소제목과 따로 매깁니다. 해당 기능이 있는 서버, 문제가 관찰된 서버, 서버별 사례(코드 위치와 기준 커밋)를 함께 둡니다.
 
-원고 작성자는 MCP 서버마다 각 셀의 어느 상세에 해당하는지 판단하고, 그 결과를 **원고**에 씁니다.
-원고는 서버 하나가 셀 하나에 어떻게 답하는지 적은 문서입니다(`reports/<서버>/<축>/<셀ID>.mdx`).
-원고에는 다음 내용이 들어갑니다.
-
-- **구현**: 그 방식이 서버의 어느 도구나 경로에 있고 어떻게 동작하는지
-- **한계**: 구현에 적은 적용 범위 안에서 그 방식이 적용되지 않는 경로나 조건
-- **근거**: 위 설명을 뒷받침하는 자료(주로 기준 커밋의 코드 위치와 발췌)
-
-용어의 자세한 정의는 [용어 사전](docs/glossary/README.mdx)에 있습니다.
+수정 전후 검증 실험은 [dfir-mcp-bench](https://github.com/Trace2Bac/dfir-mcp-bench)에 있고, 문제에서 그 실험으로 연결합니다.
 
 ## 매트릭스 보기
 
 매트릭스는 **https://trace2bac.github.io/dfir-mcp-matrix/** 에서 볼 수 있습니다.
-로컬에서 띄우려면 다음을 실행합니다.
 
-```
-pip install -r requirements.txt
-cd web && npm ci && npm start      # http://localhost:3000/
-```
-
-화면은 Docusaurus 사이트(`web/`)입니다.
-
-- 첫 화면에서 전체 셀 구조를 볼 수 있습니다.
-- 셀을 누르면 그 셀의 상세 항목과, 상세마다 해당하는 서버가 나옵니다.
-- 서버를 누르면 그 서버의 원고(구현, 한계, 근거)가 열립니다.
-
-`npm start`와 `npm run build`는 먼저 `python tools/pilot.py build`를 실행해 화면 데이터를 만듭니다.
-그래서 Python과 Node.js 20 이상이 모두 설치되어 있어야 합니다.
-
-CI는 매트릭스 버전 태그(`v<날짜>`, 예: `v2026-10-06`)를 올릴 때만 사이트를 빌드하고 GitHub Pages에 배포합니다(`.github/workflows/matrix.yml`). PR과 `main` 푸시에서는 돌지 않습니다.
-
-## 축
-
-| 글자 | 축 | 영어 |
-|---|---|---|
-| P | 절차 관리 | Procedure management |
-| E | 원본 증거 관리 | Evidence management |
-| T | 도구 실행 통제 | Tool execution control |
-| R | 실행 결과 전달 | Result delivery |
-| F | 발견사항과 결론 | Findings and conclusions |
-| L | 서버 기록 | Logging |
-| D | 파생물 관리 | Derivative management |
-| I | 외부 연동 통제 | Integration control |
+- 첫 화면은 장을 열로, 원고를 칸으로 놓고, 칸 안에 소제목 줄과 문제 네모를 그립니다. 네모 색은 그 문제가 관찰된 서버 수입니다.
+- 원고를 누르면 그 원고의 소제목과 문제가 나오고, 네모를 누르면 그 문제가 열립니다.
+- 서버 목록에서 서버별로 관찰된 문제를 볼 수 있습니다.
 
 ## 저장소 구조
 
 ```
-matrix/          셀 구조와 정의의 원본. 축 하나 = cells/<축>/ 폴더 하나, 셀 하나 = cells/<축>/<ID>.mdx 하나  → matrix/README.md
-reports/         서버별 원고. reports/<서버>/<축>/<셀ID>.mdx                 → reports/README.mdx
-docs/
-  decisions/     구조를 바꾼 결정. 결정 하나 = 파일 하나(ADR)                 → docs/decisions/README.mdx
-web/             화면(Docusaurus). matrix/cells·reports·docs를 페이지로, 화면 데이터로 셀 표를 그린다
-tools/pilot.py   validate·check·build·fill·renumber
-.github/workflows/matrix.yml   버전 태그(v<날짜>)를 올릴 때만 validate·build 후 GitHub Pages에 배포
+problems/_data/   문제 매트릭스의 원본 데이터(CSV)                         → problems/_data/README.md
+problems/         CSV에서 만든 페이지. 손으로 고치지 않는다
+tools/            problems_build.py(CSV → 페이지), problems_export_from_ledger.py(근거 대장 → CSV)
+docs/             결정 기록, 작성 규칙, 용어 사전
+web/              화면(Docusaurus)
+.github/workflows/matrix.yml   배포 태그(v<날짜>)를 올릴 때만 빌드 후 GitHub Pages에 배포
 ```
 
 ## 기여하기
 
-작업별 순서와 판단 기준은 **[CONTRIBUTING.md](CONTRIBUTING.md)** 에 있습니다. 처음 기여한다면 이 문서부터 읽으세요.
+작업 순서는 **[CONTRIBUTING.md](CONTRIBUTING.md)** 에 있습니다.
 LLM에게 수정을 맡길 때는 [AGENTS.md](AGENTS.md)를 읽게 하세요. Claude Code는 `CLAUDE.md`를 거쳐 이 파일을 자동으로 읽습니다.
 
-자주 쓰는 명령은 다음과 같습니다.
+## 이전 매트릭스
 
-```
-python tools/pilot.py validate          # 스키마와 파일끼리의 일관성(태그를 올리면 CI도 돌린다)
-python tools/pilot.py check [서버 ...]   # validate + 원고 형식·근거·발췌 원문 대조(서버 클론 필요)
-python tools/pilot.py build             # 화면 데이터 web/static/data/matrix.json을 만든다(npm start·build가 먼저 돌린다)
-python tools/pilot.py fill <서버>        # 원고의 @발췌를 기준 커밋 코드로 채운다
-python tools/pilot.py renumber <서버>    # 원고의 [번호]를 처음 나온 차례로 다시 매긴다
-python tools/pilot.py new <서버> …        # 새 서버 원고의 틀(서버 개요, 시범 셀)을 만든다
-python tools/coverage.py <서버>          # reports/<서버>/coverage.mdx 머리말의 기능 목록으로 기능→셀 대응표(같은 파일 본문)를 만든다
-```
-
-명령을 실행하려면 Python 3.10 이상과 `requirements.txt`의 패키지가 필요합니다.
-`check`와 `fill`을 쓰려면 분석 대상 서버의 클론도 있어야 합니다. 준비 방법은 CONTRIBUTING.md를 참고하세요.
+축·셀·상세로 서버의 구현 방식을 분류하던 이전 매트릭스(`matrix/`, `reports/`)는 브랜치 `backup/main-2026-11-24`와 태그 `backup-main-2026-11-24`에 남아 있습니다.
+바꾼 이유는 [결정 기록](docs/decisions/README.mdx)에 있습니다.
 
 ## 라이선스
 
@@ -93,9 +49,9 @@ python tools/coverage.py <서버>          # reports/<서버>/coverage.mdx 머�
 
 | 대상 | 라이선스 |
 |---|---|
-| 코드(`tools/`·`web/`·`matrix/schema/`·`.github/`) | MIT([LICENSE](LICENSE)) |
-| 매트릭스 정의, 원고, 문서 | CC BY 4.0([LICENSE-CONTENT](LICENSE-CONTENT)) |
-| 원고에 인용한 분석 대상 서버의 코드 발췌 | 각 프로젝트의 라이선스 |
+| 코드(`tools/`·`web/`·`.github/`) | MIT([LICENSE](LICENSE)) |
+| 문제 매트릭스 데이터와 페이지, 문서 | CC BY 4.0([LICENSE-CONTENT](LICENSE-CONTENT)) |
+| 사례에 인용한 분석 대상 서버의 코드 | 각 프로젝트의 라이선스 |
 
 자세한 범위는 [NOTICE.md](NOTICE.md)에 있습니다.
 
