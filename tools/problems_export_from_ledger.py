@@ -58,7 +58,9 @@ BENCH_COMMIT = "76b02fa"
 # 묶음 분모를 21개 서버의 코드로 다시 판정한 묶음(검증_2026-11-24/B2_검증표.csv). 그 밖의 묶음은 묶음분모.csv(매트릭스 셀 상세 기준)를 쓴다.
 DEN_OVERRIDE = {("1.3", "B2"): ["findevil", "mulder", "SAVVYDFIR-MCP", "sift-kernel", "trudi"]}
 
-cases = [r for r in csv.DictReader(open(f"{LEDGER}/데이터/전체_사례.csv", encoding="utf-8-sig")) if r["집계"] == "센다" and r["원고"] != "미정"]
+# 매트릭스는 기준 커밋의 코드로 확인한(정적 분석) 사례만 싣는다. 코드 위치가 없는 사례는 근거 대장에서 정적 분석으로 위치를 채운 뒤 싣는다
+cases = [r for r in csv.DictReader(open(f"{LEDGER}/데이터/전체_사례.csv", encoding="utf-8-sig"))
+         if r["집계"] == "센다" and r["원고"] != "미정" and r["코드위치"].strip()]
 dens = {(d["원고"], ng(d["묶음ID"])): d for d in csv.DictReader(open(f"{LEDGER}/데이터/묶음분모.csv", encoding="utf-8-sig"))}
 servers = list(csv.DictReader(open(f"{LEDGER}/검증_2026-11-24/조사대상_목록.csv", encoding="utf-8-sig")))
 repo_of = {s["서버"]: (s["저장소"], s["기준 커밋"]) for s in servers}
@@ -87,7 +89,30 @@ def strip_evidence(text):
         return f"({', '.join(keep)})" if keep else ""
     out = re.sub(r"\(([^()]*)\)", fix, text)
     return re.sub(r"\s+([.,])", r"\1", re.sub(r"\s{2,}", " ", out)).strip()
-harm = {k: strip_evidence(v) for k, v in harm.items()}
+# 근거 강도(약함, 가능), 작업 이력(보완, 판정 전, 결정 대기), 다른 묶음 참조, 시험 번호도 싣지 않는다.
+# 괄호 안 항목은 서버 이름만 남기고(사례 번호와 시험 번호를 뗀다), 사례 ID나 검토 메모가 든 문장은 뺀다.
+ALIASES = sorted({ns(s["서버"]) for s in servers} | {"CIIT"}, key=len, reverse=True)
+DROP_ITEM = re.compile(r"약함|보완|판정 전|이어짐|함께$|^피해는|^MCP$|^서술$|대기")
+DROP_SENT = re.compile(r"\d\.\d-[A-Z]\d+-|범위 결정|사례는 찾지 못했다|이번 보완")
+def clean_harm(text):
+    def fix(m):
+        keep = []
+        for t in re.split(r",\s*", m.group(1)):
+            t = t.strip()
+            if not t or re.search(r"\s가능$", t) or DROP_ITEM.search(t):
+                continue
+            srv = next((a for a in ALIASES if t == a or t.startswith(a + "-") or t.startswith(a + " ")), None)
+            if srv:
+                t = re.sub(r"^(%s)-\d+$" % re.escape(srv), srv, t)
+                t = re.sub(r"\s+(M\d+[a-z]?|[세두네] 건|코드)$", "", t)
+            if t not in keep:
+                keep.append(t)
+        return f"({', '.join(keep)})" if keep else ""
+    out = re.sub(r"\(([^()]*)\)", fix, text)
+    sents = [x for x in re.split(r"(?<=다\.)\s+", out) if x and not DROP_SENT.search(x)]
+    out = " ".join(sents)
+    return re.sub(r"\s+([.,])", r"", re.sub(r"\s{2,}", " ", out)).strip()
+harm = {k: clean_harm(strip_evidence(v)) for k, v in harm.items()}
 
 groups = C.OrderedDict()
 for r in cases:

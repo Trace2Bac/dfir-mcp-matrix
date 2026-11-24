@@ -49,9 +49,27 @@ def code_links(loc, srv, commit):
         return f"[{path}:{a}{'-' + b if b else ''}](https://github.com/{r}/blob/{c}/{path}{anchor})"
     pieces = re.split(r"((?:[\w.-]+/)*[\w.-]+\.\w+:\d+(?:-\d+)?)", loc)
     out = []
+    last = None  # 앞에 나온 파일. "a.py:1-2, 5, 9-10"처럼 쉼표 뒤 줄 범위도 그 파일로 링크한다(";"에서 끊는다)
     for p in pieces:
         m = re.fullmatch(r"((?:[\w.-]+/)*[\w.-]+\.\w+):(\d+)(?:-(\d+))?", p)
-        out.append(rep(m) if m else esc(p))
+        if m:
+            out.append(rep(m)); last = m.group(1); continue
+        segs = re.split(r"(;)", p)
+        for i, seg in enumerate(segs):
+            if seg == ";":
+                last = None; out.append(seg); continue
+            if last:
+                parts = re.split(r"((?<=,\s)\d+(?:-\d+)?(?=[,;)\s]|$))", seg)
+                for q in parts:
+                    n = re.fullmatch(r"(\d+)(?:-(\d+))?", q)
+                    if n and q:
+                        out.append(rep(re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", f"{last}:{q}")))
+                    else:
+                        out.append(esc(q))
+                if "(" in seg or ")" in seg:
+                    last = None
+            else:
+                out.append(esc(seg))
     return "".join(out)
 
 def slug_srv(s):
