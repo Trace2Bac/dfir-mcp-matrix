@@ -3,13 +3,16 @@ import { useHistory, useLocation } from '@docusaurus/router';
 import Link from '@docusaurus/Link';
 import styles from '../Matrix/Matrix.module.css';
 
-// problems.json의 원고(셀) 하나. tools/problems_build.py가 problems/_data/*.csv에서 만든다
+// problems.json의 원고(셀) 하나. tools/problems_build.py가 problems/_data/*.csv에서 만든다.
+// 소제목(heads)은 서버가 수행하는 처리 하나이고, 문제는 소제목에 놓인 원래 묶음이다.
+// 한 묶음이 여러 소제목에 갈릴 수 있어 문제 번호(id)만으로는 겹치므로, 화면에서는 "소제목/문제" 키(key)로 가리킨다
 export type ProblemCellData = {
   id: string; // 1.3
   name: string;
   axis: string; // 장 번호 1~4
-  heads: { name: string; problems: { id: string; name: string; den: number | null; obs: string[]; exps: string[] }[] }[];
+  heads: { id: string; name: string; desc: string; problems: ProblemItem[] }[];
 };
+export type ProblemItem = { key: string; id: string; name: string; den: number | null; obs: string[]; exps: string[]; path: string };
 export type ProblemsData = { chapters: Record<string, string>; cells: ProblemCellData[]; updated_at?: string };
 
 // 패널에 연 원고·문제·서버는 ?cell=&problem=&server=로 주소에 남긴다.
@@ -35,7 +38,9 @@ export function useProblemQuery() {
 
 export const isPlainClick = (e: React.MouseEvent) => e.button === 0 && !(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey);
 
-export const problemPath = (cell: ProblemCellData, problem: string) => `problems/${cell.axis}/${cell.id}/${problem}`;
+// 키(소제목/문제)로 문제를 찾는다. path는 baseUrl을 붙이기 전의 문제 페이지 경로다
+export const findProblem = (cell: ProblemCellData, key: string | null): ProblemItem | null =>
+  key ? cell.heads.flatMap(h => h.problems).find(p => p.key === key) ?? null : null;
 
 type Props = {
   cell: ProblemCellData;
@@ -56,7 +61,7 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
     <div className={styles.cellPage}>
       <div className={styles.question}>
         <span className={styles.questionLabel}>확인 사항</span>
-        원고의 구현방안 소제목마다, 공개 서버에서 관찰된 문제를 묶어 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
+        원고의 소제목(서버가 수행하는 처리)마다, 공개 서버에서 관찰된 문제를 묶어 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
       </div>
       <div className={styles.details}>
         <h2 className={styles.sectionTitle}>소제목과 문제</h2>
@@ -64,17 +69,18 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
           <span>문제 {total}</span>
         </div>
         {cell.heads.map(h => (
-          <section key={h.name} className={styles.row}>
-            <h3 className={styles.rowTitle}>{h.name}</h3>
+          <section key={h.id} className={styles.row}>
+            <h3 className={styles.rowTitle}>{h.id} {h.name}</h3>
+            {h.desc && <p className={styles.specialDesc}>{h.desc}</p>}
             {h.problems.length === 0 && <div className={styles.empty}>이 소제목에 묶은 문제가 없습니다</div>}
             {h.problems.map(p => {
-              const to = `/${problemPath(cell, p.id)}`;
+              const to = `/${p.path}`;
               return (
-                <div key={p.id} style={{ margin: '0.6rem 0 0.9rem' }}>
+                <div key={p.key} style={{ margin: '0.6rem 0 0.9rem' }}>
                   <Link
                     to={to}
-                    onClick={e => click(e, p.id, null)}
-                    style={{ fontWeight: p.id === openProblem && !openServer ? 700 : 600 }}
+                    onClick={e => click(e, p.key, null)}
+                    style={{ fontWeight: p.key === openProblem && !openServer ? 700 : 600 }}
                   >
                     {p.id} {p.name}
                   </Link>
@@ -87,8 +93,8 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
                       <Link
                         key={s}
                         to={to}
-                        onClick={e => click(e, p.id, s)}
-                        className={`${styles.chip} ${p.id === openProblem && s === openServer ? styles.chipActive : ''}`}
+                        onClick={e => click(e, p.key, s)}
+                        className={`${styles.chip} ${p.key === openProblem && s === openServer ? styles.chipActive : ''}`}
                       >
                         {s}
                       </Link>

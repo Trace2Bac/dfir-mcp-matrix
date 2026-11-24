@@ -4,7 +4,7 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Link from '@docusaurus/Link';
 import PageDrawer from '../Matrix/PageDrawer';
 import styles from '../Matrix/Matrix.module.css';
-import { ProblemDetails, problemPath, useProblemQuery, isPlainClick, type ProblemsData } from './ProblemDetails';
+import { ProblemDetails, findProblem, useProblemQuery, isPlainClick, type ProblemsData } from './ProblemDetails';
 
 // problems.json을 받는다. 데이터는 problems-data 플러그인이 static/data/problems.json으로 둔다(plugins/problems-data.ts)
 export function useProblemsData(): ProblemsData | null {
@@ -32,16 +32,17 @@ export function ProblemDrawer({ data, cellId, openProblem, openServer, open, onC
   const editBase = `https://github.com/${organizationName}/${projectName}/edit/main`;
   const cell = data.cells.find(c => c.id === cellId);
   if (!cell) return null;
-  const path = openProblem ? problemPath(cell, openProblem) : null;
+  const prob = findProblem(cell, openProblem);
+  const path = prob ? prob.path : null;
   return (
     <PageDrawer
-      title={openProblem ? `${cell.id} ${openProblem}` : `${cell.id} ${cell.name}`}
+      title={prob ? `${prob.key.split('/')[0]} ${prob.id}` : `${cell.id} ${cell.name}`}
       subtitle={openServer ?? undefined}
-      label={openProblem ? `${cell.id} ${openProblem} 문제` : `${cell.id} ${cell.name} 원고`}
+      label={prob ? `${prob.key} 문제` : `${cell.id} ${cell.name} 원고`}
       page={path ? { url: `${baseUrl}${path}`, detail: openServer } : null}
       openUrl={path ? undefined : `${baseUrl}problems/${cell.axis}/${cell.id}`}
       editUrl={`${editBase}/problems/_data/problems.csv`}
-      back={openProblem ? { label: cell.id, onClick: () => open(cell.id) } : undefined}
+      back={prob ? { label: cell.id, onClick: () => open(cell.id) } : undefined}
       onClose={onClose}
     >
       <ProblemDetails cell={cell} openProblem={openProblem} openServer={openServer} onOpen={(p, s) => open(cell.id, p, s)} />
