@@ -32,6 +32,7 @@ type Col = {
   scope: Set<string>;
   den: number | null;
   checks: Record<string, Check>;
+  ver: Record<string, string[]>;
   x: number;
 };
 
@@ -59,6 +60,7 @@ function layout(data: ProblemsData) {
           scope: new Set([...p.denList, ...p.obs]),
           den: p.den,
           checks: p.checks,
+          ver: p.ver,
           x,
         });
         x += STEP;
@@ -116,6 +118,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
   const hc = hover ? cols[hover.col] : null;
   const hs = hover && hover.row !== null ? servers[hover.row] : null;
   const pairs = cols.reduce((k, c) => k + c.obs.size, 0);
+  const runN = cols.reduce((k, c) => k + Object.values(c.ver).filter(ms => ms.some(m => m !== '코드 확인')).length, 0);
   const fixedN = cols.reduce((k, c) => k + Object.values(c.checks).filter(x => x.result === '고쳐짐').length, 0);
   const ranked = [...cols].sort((a, b) => b.obs.size - a.obs.size || a.id.localeCompare(b.id)).slice(0, 10);
 
@@ -136,6 +139,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           <Kpi n={cols.length} label="문제" />
           <Kpi n={data.servers.length} label="서버" />
           <Kpi n={pairs} label="관찰" />
+          <Kpi n={runN} label="실행 검증" />
           <Kpi n={fixedN} label="고쳐짐" />
         </div>
       </header>
@@ -157,6 +161,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
         ))}
         <span className={styles.legend}>
           <i className={styles.lgObs} /> 관찰됨
+          <i className={styles.lgRun} /> 실행으로 검증함
           <i className={styles.lgFixed} /> 관찰 뒤 고쳐짐
           <i className={styles.lgScope} /> 기능 있음, 관찰되지 않음
           <i className={styles.lgNone} /> 기능 없음 또는 정하지 않음
@@ -241,18 +246,20 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
                         opacity={dim(c.axis) ? 0.15 : 1}
                       />
                     );
+                  const run = hit && (c.ver[s.name] ?? []).some(m => m !== '코드 확인');
                   return (
-                    <rect
-                      key={c.id}
-                      x={mapX + c.x}
-                      y={y}
-                      width={CELL}
-                      height={CELL_H}
-                      rx={1.5}
-                      className={hit ? undefined : inScope ? styles.cScope : styles.cNone}
-                      fill={hit ? CHAPTER_COLOR[c.axis] : undefined}
-                      opacity={dim(c.axis) ? 0.15 : 1}
-                    />
+                    <g key={c.id} opacity={dim(c.axis) ? 0.15 : 1}>
+                      <rect
+                        x={mapX + c.x}
+                        y={y}
+                        width={CELL}
+                        height={CELL_H}
+                        rx={1.5}
+                        className={hit ? undefined : inScope ? styles.cScope : styles.cNone}
+                        fill={hit ? CHAPTER_COLOR[c.axis] : undefined}
+                      />
+                      {run && <circle cx={mapX + c.x + CELL / 2} cy={y + CELL_H / 2} r={2.2} className={styles.runDot} />}
+                    </g>
                   );
                 })}
                 <rect x={mapX + width + 16} y={y + 2} width={(s.n / maxServer) * (TOTAL_W - 34)} height={CELL_H - 4} rx={2} className={styles.totalBar} />
@@ -301,7 +308,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
                 {hc.obs.has(hs.name)
                   ? hc.checks[hs.name]
                     ? `기준 커밋에서 관찰됨 → ${hc.checks[hs.name].commit}에서 ${hc.checks[hs.name].result}${hc.checks[hs.name].ref ? ` (${hc.checks[hs.name].ref})` : ''}`
-                    : '관찰됨 · 누르면 사례를 엽니다'
+                    : `관찰됨 · 검증: ${(hc.ver[hs.name] ?? []).join(', ')} · 누르면 사례를 엽니다`
                   : hc.scope.has(hs.name) ? '기능 있음, 관찰되지 않음' : '기능 없음 또는 정하지 않음'}
               </div>
             )}
@@ -309,7 +316,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
         )}
       </div>
       <p className={styles.note}>
-        관찰된 문제만 표시합니다. 비어 있는 칸은 문제가 없다는 판정이 아니라, 관찰되지 않았거나 그 기능이 없다는 뜻입니다. 서버별 합계는 기능이 많은 서버일수록 커집니다.
+        칸은 코드 확인(정적 분석)으로 관찰한 문제이고, 점이 찍힌 칸만 PoC, 시험, 모델 실험으로 실행해 확인했습니다. 관찰된 문제만 표시합니다. 비어 있는 칸은 문제가 없다는 판정이 아니라, 관찰되지 않았거나 그 기능이 없다는 뜻입니다. 서버별 합계는 기능이 많은 서버일수록 커집니다.
       </p>
 
       <section className={styles.below}>

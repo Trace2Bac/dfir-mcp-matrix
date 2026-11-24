@@ -8,7 +8,7 @@ export type ProblemCellData = {
   id: string; // 1.3
   name: string;
   axis: string; // 장 번호 1~4
-  heads: { id: string; name: string; problems: { id: string; name: string; den: number | null; denList: string[]; obs: string[]; exps: string[]; checks: Record<string, Check> }[] }[];
+  heads: { id: string; name: string; problems: { id: string; name: string; den: number | null; denList: string[]; obs: string[]; ver: Record<string, string[]>; checks: Record<string, Check> }[] }[];
 };
 // 기준 커밋 뒤의 버전에서 다시 확인한 결과(problems/_data/checks.csv의 가장 늦은 줄)
 export type Check = { result: string; commit: string; date: string; ref: string };
@@ -82,7 +82,10 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
                   </Link>
                   <div style={{ fontSize: '0.8rem', color: 'var(--ifm-color-emphasis-700)', margin: '0.2rem 0 0.35rem' }}>
                     해당 기능 서버 {p.den ?? '정하지 않음'} · 관찰된 서버 {p.obs.length}
-                    {p.exps.length > 0 && <> · 검증 실험 {p.exps.join(', ')}</>}
+                    {(() => {
+                      const run = Object.values(p.ver).filter(ms => ms.some(m => m !== '코드 확인')).length;
+                      return run > 0 ? <> · 실행 검증 {run}</> : null;
+                    })()}
                   </div>
                   <div className={styles.servers}>
                     {p.obs.map(s => (

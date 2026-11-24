@@ -3,7 +3,8 @@
 python tools/problems_export_from_ledger.py <근거 대장 폴더> <매트릭스 저장소 루트>
 
 근거 대장은 저장소 밖의 로컬 자료다. 이 스크립트는 매트릭스가 쓸 칸만 꺼낸다.
-근거의 강도(원자료로 재현, 코드만 등)와 시험 기록은 내보내지 않는다.
+근거의 강도(원자료로 재현, 코드만 등)와 시험 기록은 내보내지 않는다. 실행 검증(verifications.csv)과
+다시 확인한 기록(snapshots.csv의 뒤 스냅샷, checks.csv)은 이 스크립트가 쓰지 않는다.
 
 소제목ID는 원고와 소제목 순서로 정한다(1.3.2). 문제ID(P0001)는 소제목과 따로 매기는 식별자다.
 이미 내보낸 problems.csv가 있으면 그 대장ID(원고-묶음ID) → 문제ID 대응을 그대로 쓰고, 새 묶음에만 다음 번호를 준다.
@@ -52,13 +53,6 @@ HEAD = {
  "4.4": [("증거에서 나온 비밀 값", ["A1", "A2", "B1"]), ("조사자가 제공한 복호화 비밀", ["B2"]), ("서버 자격증명", ["C1", "C2", "C3", "C4", "C5"]),
          ("외부 전송의 범위와 수신처", ["D1", "D2", "D3", "E1", "E2", "E3", "E4"])],
 }
-# bench 실험(Trace2Bac/dfir-mcp-bench, 2026-11-24 클론 76b02fa)과 문제 묶음의 대응
-EXPS = [("1.3", "B2", "EXP-003", "mulder", "audit_tool_coverage가 사건 전체 감사 로그의 도구 이름으로 모든 디스크 이미지를 검사한 것으로 보고", "calebevans/mulder#270"),
-        ("1.3", "B2", "EXP-004", "findevil", "assess_coverage가 셸 이력을 파일별로 세지 않아 보지 않은 이력을 가림", "coverage-per-location 패치"),
-        ("1.3", "B2", "EXP-005", "trudi", "해시만 계산한 압축 파일로 유출 단계를 검사한 것으로 셈", "lifecycle-skip-fingerprints 패치"),
-        ("1.3", "B2", "EXP-006", "trudi", "공격 단계 점검이 검사하지 않은 유출 단계를 가림", "lifecycle-skip-fingerprints, lifecycle-archive-names 패치(진행 중)"),
-        ("4.1", "A1", "EXP-002", "mulder", "clamscan이 디스크 이미지를 열지 못해도 0건 성공으로 보고", "clamav-limit, extract-keep 패치")]
-BENCH_COMMIT = "76b02fa"
 EXPORT_DATE = "2026-11-24"  # 근거 대장의 조사 대상 목록(검증_2026-11-24) 날짜. 기준 커밋 스냅샷의 분석일로 쓴다
 # 묶음 분모를 21개 서버의 코드로 다시 판정한 묶음(검증_2026-11-24/B2_검증표.csv). 그 밖의 묶음은 묶음분모.csv(매트릭스 셀 상세 기준)를 쓴다.
 DEN_OVERRIDE = {("1.3", "B2"): ["findevil", "mulder", "SAVVYDFIR-MCP", "sift-kernel", "trudi"]}
@@ -171,7 +165,6 @@ w("cells.csv", [{"원고": k, "장": k[0], "이름": v} for k, v in TITLE.items(
 w("headings.csv", head_rows)
 w("problems.csv", prob_rows)
 w("observations.csv", obs_rows)
-w("experiments.csv", [{"문제ID": pid[f"{a}-{b}"], "실험": c, "서버": d, "내용": e, "서버 변경": f, "bench 커밋": BENCH_COMMIT} for a, b, c, d, e, f in EXPS])
 w("servers.csv", [{"서버": s["서버"], "저장소": s["저장소"]} for s in servers])
 # 기준 커밋은 첫 전체 분석 스냅샷이다. 이미 있는 snapshots.csv의 뒤 스냅샷(다시 확인한 기록)은 그대로 둔다
 old_snaps = list(csv.DictReader(open(os.path.join(OUT, "snapshots.csv"), encoding="utf-8"))) if os.path.exists(os.path.join(OUT, "snapshots.csv")) else []

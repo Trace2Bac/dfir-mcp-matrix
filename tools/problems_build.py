@@ -13,14 +13,13 @@ import csv, json, os, re, shutil, sys, collections as C
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 P = os.path.join(ROOT, "problems")
 DATA = os.path.join(P, "_data")
-BENCH = "https://github.com/Trace2Bac/dfir-mcp-bench/tree/{commit}/experiments/{exp}"
 GEN = "{/* 이 파일은 tools/problems_build.py가 만든다. 손으로 고치지 않는다. */}"
 
 def read(name):
     return list(csv.DictReader(open(os.path.join(DATA, name), encoding="utf-8")))
 
 chapters = read("chapters.csv"); cells = read("cells.csv"); heads = read("headings.csv")
-probs = read("problems.csv"); obs = read("observations.csv"); exps = read("experiments.csv"); servers = read("servers.csv")
+probs = read("problems.csv"); obs = read("observations.csv"); vers = read("verifications.csv"); servers = read("servers.csv")
 # 분석 회차(스냅샷). 서버마다 첫 전체 분석의 커밋이 기준 커밋이고, 사례(observations)는 그 커밋에서 찾은 것이다.
 # 뒤의 스냅샷에서 다시 본 결과는 checks.csv에 둔다. 전체 분석 스냅샷은 그때까지 관찰된 문제마다 결과가 있어야 하고,
 # 일부 확인 스냅샷은 적힌 문제만 갱신한다. 같은 문제·서버는 가장 늦은 스냅샷의 결과가 현재 상태다
@@ -167,9 +166,24 @@ for p in probs:
 obs_by = C.defaultdict(list)
 for o in obs:
     obs_by[o["문제ID"]].append(o)
-exp_by = C.defaultdict(list)
-for e in exps:
-    exp_by[e["문제ID"]].append(e)
+# 검증 방법(약한 것부터). 모든 사례는 코드 확인에서 시작하고, 실행한 검증은 verifications.csv에 쌓는다
+METHODS = ["코드 확인", "PoC", "시험", "모델 실험"]
+RESULTS = {"재현됨", "재현 안 됨", "통과", "실패", "영향 있음", "영향 없음"}
+ver_by = C.defaultdict(list)
+for v in vers:
+    if v["방법"] not in METHODS or v["결과"] not in RESULTS or v["문제ID"] not in prob or v["서버"] not in repo:
+        sys.exit(f"verifications.csv: 잘못된 줄 {v}")
+    ver_by[(v["문제ID"], v["서버"])].append(v)
+
+def methods_of(pid, x):
+    """그 문제·서버에서 쓴 검증 방법. 관찰된 사례는 코드 확인을 기본으로 갖는다"""
+    got = {v["방법"] for v in ver_by.get((pid, x), [])}
+    if x in observed_at and pid in observed_at[x]:
+        got.add("코드 확인")
+    return [m for m in METHODS if m in got]
+
+def ver_badges(pid, x):
+    return " ".join(f'<span className="pm-v{" pm-v-run" if m != "코드 확인" else ""}">{m}</span>' for m in methods_of(pid, x))
 listsplit = lambda s: [x.strip() for x in (s or "").split(";") if x.strip()]
 
 def cell_dir(it):
@@ -238,7 +252,7 @@ for c in cells:
             p = prob[gid]
             den = listsplit(p["해당 기능 서버"]); ob = listsplit(p["관찰된 서버"])
             hjson["problems"].append({"id": gid, "name": p["문제"], "den": len(den) if den else None, "denList": den, "obs": ob,
-                                      "exps": [e["실험"] for e in exp_by.get(gid, [])],
+                                      "ver": {x: methods_of(gid, x) for x in ob},
                                       "checks": {x: {"result": k["결과"], "commit": k["커밋"][:7], "date": k["확인일"], "ref": k["근거"]}
                                                  for (q, x), k in latest.items() if q == gid}})
             lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}) | {len(den) if den else '정하지 않음'} | {len(ob)} |")
@@ -257,7 +271,7 @@ for c in cells:
             pl += [f"## 서버별 상태", "",
                    f"문제가 관찰된 서버 {len(ob)}개, 해당 기능이 있는 서버 {len(den) if den else '정하지 않음'}"
                    + ("" if den else " (기능이 있는 서버는 아직 정하지 않았다)") + ".", "",
-                   "| 서버 | 기준 커밋에서 | 사례 | 기준 커밋 | 최신 확인 |", "|---|---|---|---|---|"]
+                   "| 서버 | 기준 커밋에서 | 검증 | 사례 | 기준 커밋 | 최신 확인 |", "|---|---|---|---|---|---|"]
             for x in rows:
                 r, cm = repo.get(x, ("", ""))
                 n = len(grouped.get(x, []))
@@ -265,7 +279,7 @@ for c in cells:
                 cases = f"[{n}건](#case-{slug_srv(x).lower()})" if n else ""
                 commit = f"[`{cm[:7]}`](https://github.com/{r}/tree/{cm})" if r else ""
                 k = latest.get((gid, x))
-                pl.append(f"| [{x}]({srv_link(x)}) | {state} | {cases} | {commit} | {check_text(k) if k else ''} |")
+                pl.append(f"| [{x}]({srv_link(x)}) | {state} | {ver_badges(gid, x) if n else ''} | {cases} | {commit} | {check_text(k) if k else ''} |")
             pl += ["", "## 서버별 사례", "", "사례의 코드를 누르면 기준 커밋의 해당 줄을 펼쳐 볼 수 있다.", ""]
             for x, os_ in grouped.items():
                 r, cm = repo.get(x, ("", ""))
@@ -276,11 +290,15 @@ for c in cells:
                     raw = "" if refs or not o["코드위치"] else o["코드위치"]
                     pl += [f"<Case n={{{k}}} repo={json.dumps(o['저장소'] or r)} commit={json.dumps(commit)} refs={{{json.dumps(refs, ensure_ascii=False)}}} raw={{{json.dumps(raw, ensure_ascii=False)}}}>",
                            "", esc(o["요지"]), "", "</Case>", ""]
-            ex = exp_by.get(gid, [])
-            if ex:
-                pl += ["## 검증 실험 (dfir-mcp-bench)", ""]
-                for e in ex:
-                    pl.append(f"- [{e['실험']}]({BENCH.format(commit=e['bench 커밋'], exp=e['실험'])}) {e['서버']}: {esc(e['내용'])}. 서버 변경: {esc(e['서버 변경'])}")
+            vs = [v for x in grouped for v in ver_by.get((gid, x), [])]
+            if vs:
+                pl += ["## 실행 검증", "", "코드 확인 밖에 실행으로 확인한 기록이다. 방법은 PoC, 시험, 모델 실험이고, 수준은 함수 직접 호출, MCP 연결, 에이전트(모델 포함)다.", "",
+                       "| 서버 | 방법 | 수준 | 커밋 | 결과 | 근거 | 메모 |", "|---|---|---|---|---|---|---|"]
+                for v in vs:
+                    r, cm = repo[v["서버"]]
+                    vc = v["커밋"] or cm
+                    link = f"[{'PR #' + v['근거'].rsplit('/', 1)[1] if '/pull/' in v['근거'] else v['근거'].rstrip('/').rsplit('/', 1)[1]}]({v['근거']})" if v["근거"].startswith("http") else esc(v["근거"])
+                    pl.append(f"| {v['서버']} | {v['방법']} | {v['수준']} | [`{vc[:7]}`](https://github.com/{r}/tree/{vc}) | {v['결과']} | {link} | {esc(v['메모'])} |")
                 pl.append("")
             write(os.path.join(cell_dir(it), f"{gid}.mdx"), "\n".join(pl))
         lines.append("")
