@@ -16,8 +16,21 @@ GEN = "{/* 이 파일은 tools/problems_build.py가 만든다. 손으로 고치�
 def read(name):
     return list(csv.DictReader(open(os.path.join(DATA, name), encoding="utf-8")))
 
-chapters = read("chapters.csv"); cells = read("cells.csv"); heads = read("headings.csv")
-probs = read("problems.csv"); finds = read("findings.csv"); vers = read("verifications.csv"); servers = read("servers.csv")
+# 1·3장은 근거 대장에서 내보낸 headings·problems·findings.csv를 쓰고, 2·4장은 ch2/·ch4/에서 직접 관리한다(정의·판정 기준·CWE·ASTM 칸이 더 있다).
+# 폴더가 있는 장은 위의 공용 파일에 그 장 줄이 있어도(내보내기가 다시 쓴 경우) 폴더 쪽만 쓴다
+CH = sorted(d for d in os.listdir(DATA) if re.fullmatch(r"ch\d+", d))
+own = {d[2:] for d in CH}
+chap_of = lambda hid: hid.split(".")[0]
+def read_ch(name):
+    return [r for d in CH for r in read(os.path.join(d, name))]
+chapters = read("chapters.csv"); cells = read("cells.csv")
+heads = [h for h in read("headings.csv") if chap_of(h["소제목ID"]) not in own] + read_ch("headings.csv")
+probs = [p for p in read("problems.csv") if chap_of(p["소제목ID"]) not in own] + read_ch("problems.csv")
+shared_ids = {p["문제ID"] for p in probs if chap_of(p["소제목ID"]) not in own}
+finds = [f for f in read("findings.csv") if f["문제ID"] in shared_ids] + read_ch("findings.csv")
+vers = read("verifications.csv"); servers = read("servers.csv")
+# 폴더로 관리하는 장(2·4장)은 문제가 관찰된 사례만 근거로 둔다. 근거가 없는 서버는 "관찰되지 않음"이다(기능 유무를 따지지 않는다)
+obs_only = {p["문제ID"] for p in read_ch("problems.csv")}
 snapshots = read("snapshots.csv")
 
 head_of = {h["소제목ID"]: h for h in heads}
@@ -241,6 +254,61 @@ def badge(st):
 
 NOTE = "모든 판정은 적힌 커밋 기준이며, 서버의 현재 버전과 다를 수 있다."
 
+# 원인(CWE)과 결과(ASTM E3016-18 오류 범주). 2·4장 문제의 CWE·ASTM 칸에서 읽는다
+ASTM = {  # 범주: (짧은 이름, 설명)
+    "INCOMP": ("불완전", "있어야 할 결과가 빠짐 (Incompleteness)"),
+    "INAC_EX": ("없는 것을 있다고 함", "증거에 없는 항목이 결과에 나옴 (Inaccuracy: Existence)"),
+    "INAC_ALT": ("내용 변경", "결과 값이 원래 데이터와 달라짐 (Inaccuracy: Alteration)"),
+    "INAC_AS": ("잘못된 연결", "항목이 다른 출처·대상과 연결됨 (Inaccuracy: Association)"),
+    "INAC_COR": ("손상 감지 못함", "손상·변조를 잡아내지 못함 (Inaccuracy: Corruption)"),
+    "MISINT": ("오해를 부르는 표시", "결과가 잘못 해석되게 표시됨 (Misinterpretation)"),
+}
+CWE_RE = re.compile(r"CWE-(\d+)(?:\s+([A-Z][A-Za-z0-9'\-]*(?:\s+(?:[A-Za-z0-9'\-]+|\([A-Za-z ]+\)))*))?")
+
+CWE_NAME = {r["CWE"]: r for r in read("cwe.csv")}  # 공식 영어 이름과 한국어 번역
+
+def cwe_of(p):
+    out = []
+    for m in CWE_RE.finditer(p.get("CWE") or ""):
+        if m.group(1) not in [n for n, _ in out]:
+            out.append((m.group(1), (m.group(2) or "").strip()))
+    return out
+
+def cwe_names(n, name=""):
+    """(한국어, 영어) 이름. 표에 없으면 데이터에 적힌 영어 이름만 쓴다."""
+    r = CWE_NAME.get(n)
+    return (r["한국어"], r["이름"]) if r else ("", name)
+
+def astm_of(p):
+    return [t for t in re.findall(r"INCOMP|INAC_EX|INAC_ALT|INAC_AS|INAC_COR|MISINT", p.get("ASTM") or "") if t]
+
+def class_badges(cwes, astms, short=False):
+    b = [f'<a className="pm-cwe" href="https://cwe.mitre.org/data/definitions/{n}.html" title={json.dumps(" · ".join(x for x in cwe_names(n, name) if x) or "CWE-" + n, ensure_ascii=False)}>CWE-{n}</a>' for n, name in cwes]
+    b += [f'<span className="pm-astm" title={json.dumps(ASTM[t][1], ensure_ascii=False)}>{t}{"" if short else " " + ASTM[t][0]}</span>' for t in dict.fromkeys(astms)]
+    return " ".join(b) or "—"
+
+def class_box(p, cwes, astms):
+    purp = [x.strip() for x in (p.get("목적") or "").split(",") if x.strip()]
+    if not (cwes or astms or purp):
+        return []
+    rows = []
+    if cwes:
+        items = []
+        for n, name in cwes:
+            ko, en = cwe_names(n, name)
+            items.append(f'<div className="pm-cwe-item">{class_badges([(n, name)], [])} <b>{esc(ko or en)}</b>'
+                         + (f' <span className="pm-class-name">{esc(en)}</span>' if ko and en else "") + "</div>")
+        rows.append('<div className="pm-class-row"><span className="pm-class-k">원인 (CWE)</span><span className="pm-class-v">' + "".join(items) + "</span></div>")
+    if astms:
+        rows.append('<div className="pm-class-row"><span className="pm-class-k">결과 (ASTM E3016)</span><span className="pm-class-v">'
+                    + " ".join(f'<span className="pm-astm" title={json.dumps(ASTM[t][1], ensure_ascii=False)}>{t} {ASTM[t][0]}</span>' for t in dict.fromkeys(astms))
+                    + "</span></div>")
+    if purp:
+        rows.append('<div className="pm-class-row"><span className="pm-class-k">훼손되는 목적</span><span className="pm-class-v">'
+                    + " ".join(f'<span className="pm-purpose">{esc(x)}</span>' for x in purp) + "</span></div>")
+    return ['<div className="pm-class">'] + rows + ["</div>", ""]
+
+
 # 첫 화면(문제 목록)
 lines = ["---", "title: 문제 매트릭스", "sidebar_position: 0", "hide_table_of_contents: true", "---", "", GEN, "",
          "import ProblemMatrix from '@site/src/components/Problems/ProblemMatrix';", "",
@@ -292,7 +360,11 @@ for c in cells:
         if not ids:
             lines += ["이 소제목에 묶은 문제가 없다.", ""]
             continue
-        lines += ["| 문제 | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|"]
+        has_class = any(cwe_of(prob[g]) or astm_of(prob[g]) for g in ids)
+        only_obs = all(g in obs_only for g in ids)
+        lines += (["| 문제 | 원인(CWE) · 결과(ASTM) | 관찰된 서버 |", "|---|---|---|"] if only_obs
+                  else ["| 문제 | 원인(CWE) · 결과(ASTM) | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|---|"] if has_class
+                  else ["| 문제 | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|"])
         for gid in ids:
             p = prob[gid]
             on, unk = applies(gid)
@@ -309,25 +381,40 @@ for c in cells:
                     e["commit"] = st["snap"]["커밋"][:7]
                     e["date"] = st["snap"]["커밋일"]
                 states[x] = e
-            hjson["problems"].append({"id": gid, "name": p["문제"], "den": len(on), "denList": on, "obs": ob,
-                                      "ver": {x: methods_of(gid, x) for x in repo if methods_of(gid, x)}, "states": states})
-            lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}) | {len(on)} | {len(ob)} | {len(unk)} |")
+            cwes, astms = cwe_of(p), astm_of(p)
+            pj = {"id": gid, "name": p["문제"], "den": len(on), "denList": on, "obs": ob,
+                  "ver": {x: methods_of(gid, x) for x in repo if methods_of(gid, x)}, "states": states}
+            if cwes or astms:
+                pj.update({"cwe": [f"CWE-{n}" for n, _ in cwes], "cweName": [cwe_names(n, name)[0] or cwe_names(n, name)[1] for n, name in cwes], "astm": astms})
+            if gid in obs_only:
+                pj["obsOnly"] = True
+            hjson["problems"].append(pj)
+            tag_cell = (f" | {class_badges(cwes, astms, short=True)}" if has_class else "")
+            lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}){tag_cell} | {len(ob)} |" if only_obs
+                         else f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}){tag_cell} | {len(on)} | {len(ob)} | {len(unk)} |")
             order += 1
             # 문제 화면
             pl = ["---", f"title: {yq(gid + ' ' + p['문제'])}", f"sidebar_label: {yq(gid + ' ' + p['문제'][:28] + ('…' if len(p['문제']) > 28 else ''))}",
                   f"sidebar_position: {order}", "---", "", GEN, "", "import Case from '@site/src/components/Problems/Case';", "",
                   f"# {gid} {esc(p['문제'])}", "",
                   f"항목 [{it} {c['이름']}](/problems/{it[0]}/{it}) · 소제목 {h['소제목ID']} 「{h['소제목']}」", ""]
-            if p["현상과 피해"]:
-                pl += ["## 현상과 피해", "", esc(p["현상과 피해"]), ""]
+            desc = p.get("설명") or p.get("현상과 피해", "")  # 2·4장은 설명, 1·3장은 현상과 피해
+            if desc:
+                pl += [esc(desc), ""]
+            pl += class_box(p, cwes, astms)
             ev = C.OrderedDict()
             for f in sorted(evidence[gid], key=lambda f: (f["서버"].lower(), snap_key[(f["서버"], f["커밋"])]["커밋일"])):
                 ev.setdefault(f["서버"], []).append(f)
             order_st = {"관찰됨": 0, "문제 없음": 1, "확인 안 함": 2}
             rows = sorted((x for x in repo if ST[(gid, x)]["state"] != "기능 없음"), key=lambda x: (order_st[ST[(gid, x)]["state"]], x.lower()))
             cnt = C.Counter(ST[(gid, x)]["state"] for x in repo)
-            pl += ["## 서버별 판정", "", NOTE + " 추정은 문제가 없음을 증명하지 못한 판정이다. 코드 위치가 있으면 그 문제를 찾아 코드를 보았으나 발견하지 못한 것이고, 없으면 근거 대장의 묶음 분모에서 옮겨 아직 이 문제로 코드를 보지 않은 것이다.", "",
-                   " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "확인 안 함", "기능 없음")) + "", "",
+            if gid in obs_only:
+                not_seen = sorted((x for x in repo if ST[(gid, x)]["state"] == "기능 없음"), key=str.lower)
+                summary = f"관찰됨 {cnt['관찰됨']}" + (f" · 확인 안 함 {cnt['확인 안 함']}" if cnt["확인 안 함"] else "") + (
+                    f" · 관찰되지 않음 {len(not_seen)} ({', '.join(not_seen)})" if not_seen else "")
+            else:
+                summary = " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "확인 안 함", "기능 없음"))
+            pl += ["## 서버별 판정", "", summary, "",
                    "| 서버 | 판정 | 확인 커밋 | 근거 |", "|---|---|---|---|"]
             for x in rows:
                 st = ST[(gid, x)]
