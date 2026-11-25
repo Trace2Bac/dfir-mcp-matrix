@@ -115,7 +115,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
   const hc = hover ? cols[hover.col] : null;
   const hs = hover && hover.row !== null ? servers[hover.row] : null;
   const pairs = cols.reduce((k, c) => k + c.obs.size, 0);
-  const fixedN = cols.reduce((k, c) => k + Object.values(c.st).filter(x => x.change === '고쳐짐').length, 0);
   const unkN = cols.reduce((k, c) => k + Object.values(c.st).filter(x => x.s === 'unk').length, 0);
   const ranked = [...cols].sort((a, b) => b.obs.size - a.obs.size || a.id.localeCompare(b.id)).slice(0, 10);
 
@@ -136,7 +135,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           <Kpi n={cols.length} label="문제" />
           <Kpi n={data.servers.length} label="서버" />
           <Kpi n={pairs} label="관찰됨" />
-          <Kpi n={fixedN} label="고쳐짐" />
           <Kpi n={unkN} label="확인 안 함" />
         </div>
       </header>
@@ -161,7 +159,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
         </button>
         <span className={styles.legend}>
           <i className={styles.lgObs} /> 관찰됨
-          <i className={styles.lgFixed} /> 고쳐짐
           <i className={styles.lgScope} /> 문제 없음
           <i className={styles.lgEst} /> 문제 없음(추정)
           <i className={styles.lgUnk} /> 확인 안 함
@@ -238,11 +235,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
                 {cols.map(c => {
                   const st = c.st[s.name];
                   const op = dim(c.axis) ? 0.15 : 1;
-                  if (st?.change === '고쳐짐')
-                    return (
-                      <rect key={c.id} x={mapX + c.x + 0.75} y={y + 0.75} width={CELL - 1.5} height={CELL_H - 1.5} rx={1.5}
-                        className={styles.cFixed} stroke={CHAPTER_COLOR[c.axis]} opacity={op} />
-                    );
                   const cls = !st ? styles.cNone : st.s === 'ok' ? (st.est ? styles.cEst : styles.cScope) : st.s === 'unk' ? styles.cUnk : undefined;
                   return (
                     <rect key={c.id} x={mapX + c.x} y={y} width={CELL} height={CELL_H} rx={1.5} className={cls}
@@ -297,7 +289,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
                   if (!st) return '기능 없음';
                   if (st.s === 'unk') return '확인 안 함';
                   const name = st.s === 'obs' ? '관찰됨' : st.est ? '문제 없음(추정)' : '문제 없음';
-                  return `${name}${st.change ? ` · ${st.change}` : ''} · ${st.commit} (${st.date})`;
+                  return `${name} · ${st.commit} (${st.date})`;
                 })()}
               </div>
             )}
@@ -305,7 +297,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
         )}
       </div>
       <p className={styles.note}>
-        판정은 대부분 코드 확인(정적 분석)으로 내렸고, 실행 검증은 문제 화면에 따로 적었습니다. 문제 없음(추정)은 근거 대장에서 옮긴 판정으로 아직 코드로 다시 확인하지 않았습니다. 서버별 합계는 기능이 많은 서버일수록 커집니다. 모든 판정은 서버마다 표시된 커밋 기준이며, 서버의 현재 버전과 다를 수 있습니다.
+        판정은 대부분 코드 확인(정적 분석)으로 내렸고, 실행 검증은 문제 화면에 따로 적었습니다. 문제 없음(추정)은 문제가 없음을 증명하지 못한 판정입니다. 그 문제를 찾아 코드를 보았으나 발견하지 못한 경우와, 근거 대장에서 옮겨 아직 이 문제로 코드를 보지 않은 경우가 있습니다. 서버별 합계는 기능이 많은 서버일수록 커집니다. 모든 판정은 서버마다 표시된 커밋 기준이며, 서버의 현재 버전과 다를 수 있습니다.
       </p>
 
       <section className={styles.below}>

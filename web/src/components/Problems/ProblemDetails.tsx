@@ -11,7 +11,7 @@ export type ProblemCellData = {
   heads: { id: string; name: string; problems: { id: string; name: string; den: number; denList: string[]; obs: string[]; ver: Record<string, string[]>; states: Record<string, State> }[] }[];
 };
 // 서버별 마지막 판정. obs 관찰됨, ok 문제 없음, unk 확인 안 함이고, 없는 서버는 기능 없음이다(tools/problems_build.py)
-export type State = { s: 'obs' | 'ok' | 'unk'; est?: boolean; change?: string; commit?: string; date?: string };
+export type State = { s: 'obs' | 'ok' | 'unk'; est?: boolean; commit?: string; date?: string };
 export type ProblemsData = { chapters: Record<string, string>; servers: string[]; cells: ProblemCellData[]; updated_at?: string };
 
 // 패널에 연 항목·문제·서버는 ?cell=&problem=&server=로 주소에 남긴다.
@@ -96,7 +96,6 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
                         className={`${styles.chip} ${p.id === openProblem && s === openServer ? styles.chipActive : ''}`}
                       >
                         {s}
-                        {p.states[s]?.change && <span title={`${p.states[s].commit} (${p.states[s].date})`}> · {p.states[s].change}</span>}
                       </Link>
                     ))}
                   </div>

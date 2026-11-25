@@ -85,23 +85,17 @@ for x, sns in snaps_of.items():
         history[(pid, x)] = h
 
 def status(pid, x):
-    """마지막 판정, 변화(고쳐짐·다시 생김), 마지막 확인 스냅샷, 추정 여부"""
+    """마지막 판정, 마지막 확인 스냅샷, 추정 여부. 서버마다 한 시점(기준 커밋)만 다루므로 회차 사이의 변화는 계산하지 않는다"""
     h = history[(pid, x)]
     if not h:
-        return {"state": "확인 안 함", "change": "", "snap": None, "est": False}
+        return {"state": "확인 안 함", "snap": None, "est": False}
     last = h[-1]
-    before = [e["state"] for e in h[:-1]]
-    change = ""
-    if last["state"] == "문제 없음" and "관찰됨" in before:
-        change = "고쳐짐"
-    elif last["state"] == "관찰됨" and any(e["state"] == "문제 없음" and not e["est"] for e in h[:-1]):
-        change = "다시 생김"
-    return {"state": last["state"], "change": change, "snap": last["snap"], "est": last["est"]}
+    return {"state": last["state"], "snap": last["snap"], "est": last["est"]}
 
 ST = {(pid, x): status(pid, x) for pid in prob for x in repo}
-evidence = C.defaultdict(list)  # 문제 → 근거 줄(추정 줄 제외)
+evidence = C.defaultdict(list)  # 문제 → 근거 줄(코드 위치가 없는 추정 줄 제외)
 for f in finds:
-    if not f["추정"]:
+    if not f["추정"] or f["코드위치"].strip():
         evidence[f["문제ID"]].append(f)
 
 def ref_link(ref):
@@ -241,8 +235,6 @@ BADGE = {"관찰됨": "pm-hit", "문제 없음": "pm-ok", "확인 안 함": "pm-
 
 def badge(st):
     out = f'<span className="pm-state {BADGE[st["state"]]}">{st["state"]}</span>'
-    if st["change"]:
-        out += f' <span className="pm-state {"pm-fixed" if st["change"] == "고쳐짐" else "pm-hit"}">{st["change"]}</span>'
     if st["est"]:
         out += ' <span className="pm-note">추정</span>'
     return out
@@ -313,8 +305,6 @@ for c in cells:
                 e = {"s": STATE_CODE[st["state"]]}
                 if st["est"]:
                     e["est"] = True
-                if st["change"]:
-                    e["change"] = st["change"]
                 if st["snap"]:
                     e["commit"] = st["snap"]["커밋"][:7]
                     e["date"] = st["snap"]["커밋일"]
@@ -336,7 +326,7 @@ for c in cells:
             order_st = {"관찰됨": 0, "문제 없음": 1, "확인 안 함": 2}
             rows = sorted((x for x in repo if ST[(gid, x)]["state"] != "기능 없음"), key=lambda x: (order_st[ST[(gid, x)]["state"]], x.lower()))
             cnt = C.Counter(ST[(gid, x)]["state"] for x in repo)
-            pl += ["## 서버별 판정", "", NOTE + " 추정은 근거 대장의 묶음 분모에서 옮긴 판정으로, 아직 코드로 다시 확인하지 않았다.", "",
+            pl += ["## 서버별 판정", "", NOTE + " 추정은 문제가 없음을 증명하지 못한 판정이다. 코드 위치가 있으면 그 문제를 찾아 코드를 보았으나 발견하지 못한 것이고, 없으면 근거 대장의 묶음 분모에서 옮겨 아직 이 문제로 코드를 보지 않은 것이다.", "",
                    " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "확인 안 함", "기능 없음")) + "", "",
                    "| 서버 | 판정 | 확인 커밋 | 근거 |", "|---|---|---|---|"]
             for x in rows:
@@ -378,15 +368,14 @@ for c in cells:
 
 # 서버
 lines = ["---", "title: 서버 목록", "sidebar_label: 서버 목록", "sidebar_position: 9", "---", "", GEN, "", "# 서버 목록", "",
-         "기준 커밋은 그 서버를 처음 전체 분석한 커밋이다. 확인 기록은 그 뒤에 일부 문제만 다시 본 횟수다. " + NOTE, "",
-         "| 서버 | 기준 커밋 | 확인 기록 | 관찰됨 | 고쳐짐 | 확인 안 함 | 항목 |", "|---|---|---|---|---|---|---|"]
+         "기준 커밋은 그 서버를 분석한 커밋이다. " + NOTE, "",
+         "| 서버 | 기준 커밋 | 관찰됨 | 확인 안 함 | 항목 |", "|---|---|---|---|---|"]
 for x in sorted(repo, key=str.lower):
     r, cm = repo[x]
     obs_p = [p for p in prob if ST[(p, x)]["state"] == "관찰됨"]
-    nfix = sum(1 for p in prob if ST[(p, x)]["change"] == "고쳐짐")
     nunk = sum(1 for p in prob if ST[(p, x)]["state"] == "확인 안 함")
     its = sorted({cell_of[p] for p in obs_p})
-    lines.append(f"| [{x}]({srv_link(x)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {len(snaps_of[x]) - 1 or ''} | {len(obs_p)} | {nfix or ''} | {nunk or ''} | {', '.join(its)} |")
+    lines.append(f"| [{x}]({srv_link(x)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {len(obs_p)} | {nunk or ''} | {', '.join(its)} |")
 write(os.path.join(P, "servers", "index.mdx"), "\n".join(lines))
 for x in sorted(repo, key=str.lower):
     r, cm = repo[x]
@@ -410,8 +399,7 @@ for x in sorted(repo, key=str.lower):
         sl += [f"### {c['원고']} {cell_name[c['원고']]}", ""]
         for gid in ps:
             st = ST[(gid, x)]
-            tail = f" · {st['change']} `{st['snap']['커밋'][:7]}`" if st["change"] else ""
-            sl.append(f"- [{gid} {esc(prob[gid]['문제'])}]({prob_link(gid)}){tail}")
+            sl.append(f"- [{gid} {esc(prob[gid]['문제'])}]({prob_link(gid)})")
         sl.append("")
     write(os.path.join(P, "servers", f"{slug_srv(x)}.mdx"), "\n".join(sl))
 
