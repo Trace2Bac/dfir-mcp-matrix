@@ -12,7 +12,7 @@ python tools/problems_build.py
 | `chapters.csv` | 장 1~4 |
 | `cells.csv` | 항목 1.1~4.4와 이름 |
 | `servers.csv` | 서버와 저장소 |
-| `cwe.csv` | 문제에 쓴 CWE의 공식 영어 이름과 한국어 번역. 화면은 한국어 이름을 보이고 영어 이름을 함께 적는다 |
+| `cwe.csv` | 문제에 쓴 CWE의 공식 영어 이름, 한국어 번역, MITRE 매핑 허용 여부(허용·검토 후 허용·권장 안 함·금지, CWE 5.0 기준). 권장 안 함·금지인 CWE는 화면에 표시한다 |
 | `snapshots.csv` | 분석 회차: 서버, 커밋, 커밋일, 분석일, 범위, 메모 |
 | `verifications.csv` | 실행 검증: 문제ID, 서버, 방법(PoC·시험·모델 실험), 수준, 커밋, 결과, 근거, 메모 |
 | `headings.csv`, `problems.csv`, `findings.csv` | 1·3장 소제목, 문제(대장ID 포함), 근거. 근거 대장에서 내보낸다 |

@@ -296,7 +296,10 @@ def class_box(p, cwes, astms):
         items = []
         for n, name in cwes:
             ko, en = cwe_names(n, name)
-            items.append(f'<div className="pm-cwe-item">{class_badges([(n, name)], [])} <b>{esc(ko or en)}</b>'
+            usage = (CWE_NAME.get(n) or {}).get("매핑", "")
+            warn = (f' <span className="pm-cwe-warn" title="MITRE는 이 CWE를 취약점 분류에 쓰는 것을 \'{usage}\'으로 표시한다. 뜻이 가장 가까워 알고 쓴다.">MITRE 매핑 {usage}</span>'
+                    if usage in ("금지", "권장 안 함") else "")
+            items.append(f'<div className="pm-cwe-item">{class_badges([(n, name)], [])} <b>{esc(ko or en)}</b>{warn}'
                          + (f' <span className="pm-class-name">{esc(en)}</span>' if ko and en else "") + "</div>")
         rows.append('<div className="pm-class-row"><span className="pm-class-k">원인 (CWE)</span><span className="pm-class-v">' + "".join(items) + "</span></div>")
     if astms:
