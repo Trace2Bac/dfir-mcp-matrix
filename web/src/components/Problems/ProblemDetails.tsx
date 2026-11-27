@@ -62,7 +62,7 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
     <div className={styles.cellPage}>
       <div className={styles.question}>
         <span className={styles.questionLabel}>확인 사항</span>
-        항목의 소제목(1.3.2)마다, 공개 서버에서 관찰된 문제(P0001)를 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
+        항목의 소제목(1.3.2)마다, 공개 서버에서 관찰된 문제(P1001)를 보여 줍니다. 문제를 누르면 그 문제의 정의와 서버별 사례를 봅니다.
       </div>
       <div className={styles.details}>
         <h2 className={styles.sectionTitle}>소제목과 문제</h2>

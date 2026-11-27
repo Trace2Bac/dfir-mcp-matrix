@@ -2,7 +2,7 @@
 
 python tools/problems_build.py [저장소 루트]
 
-장(1~4) → 항목(1.1~4.4) → 소제목(1.3.2) → 문제(P0001) 차례로 놓고, 문제 화면에 서버별 판정과
+장(1~4) → 항목(1.1~4.4) → 소제목(1.3.2) → 문제(P1001) 차례로 놓고, 문제 화면에 서버별 판정과
 근거 코드, 실행 검증을 싣는다. 판정은 분석 회차(snapshots.csv)마다 근거(findings.csv)로 정한다.
 만든 파일은 손으로 고치지 않는다. 데이터를 고친 뒤 이 스크립트를 다시 돌린다.
 """
@@ -16,28 +16,29 @@ GEN = "{/* 이 파일은 tools/problems_build.py가 만든다. 손으로 고치�
 def read(name):
     return list(csv.DictReader(open(os.path.join(DATA, name), encoding="utf-8")))
 
-# 1·3장은 근거 대장에서 내보낸 headings·problems·findings.csv를 쓰고, 2·4장은 ch2/·ch4/에서 직접 관리한다(정의·판정 기준·CWE·ASTM 칸이 더 있다).
-# 폴더가 있는 장은 위의 공용 파일에 그 장 줄이 있어도(내보내기가 다시 쓴 경우) 폴더 쪽만 쓴다
+# 장마다 ch1/~ch4/ 폴더에서 소제목(headings.csv)·문제(problems.csv)·근거(findings.csv)를 관리한다
 CH = sorted(d for d in os.listdir(DATA) if re.fullmatch(r"ch\d+", d))
-own = {d[2:] for d in CH}
-chap_of = lambda hid: hid.split(".")[0]
 def read_ch(name):
     return [r for d in CH for r in read(os.path.join(d, name))]
+def read_opt(name):
+    """공용 파일과, 장 폴더에 같은 이름의 파일이 있으면 그 줄을 이어 붙인다(장마다 따로 더할 수 있게)"""
+    rows = read(name) if os.path.exists(os.path.join(DATA, name)) else []
+    return rows + [r for d in CH if os.path.exists(os.path.join(DATA, d, name)) for r in read(os.path.join(d, name))]
 chapters = read("chapters.csv"); cells = read("cells.csv")
-heads = [h for h in read("headings.csv") if chap_of(h["소제목ID"]) not in own] + read_ch("headings.csv")
-probs = [p for p in read("problems.csv") if chap_of(p["소제목ID"]) not in own] + read_ch("problems.csv")
-shared_ids = {p["문제ID"] for p in probs if chap_of(p["소제목ID"]) not in own}
-finds = [f for f in read("findings.csv") if f["문제ID"] in shared_ids] + read_ch("findings.csv")
-vers = read("verifications.csv"); servers = read("servers.csv")
-# 폴더로 관리하는 장(2·4장)은 문제가 관찰된 사례만 근거로 둔다. 근거가 없는 서버는 "관찰되지 않음"이다(기능 유무를 따지지 않는다)
-obs_only = {p["문제ID"] for p in read_ch("problems.csv")}
-snapshots = read("snapshots.csv")
+heads = read_ch("headings.csv")
+probs = read_ch("problems.csv")
+finds = read_ch("findings.csv")
+vers = read_opt("verifications.csv"); servers = read("servers.csv")
+# 2·4장은 문제가 관찰된 사례만 근거로 둔다. 근거가 없는 서버는 "관찰되지 않음"이다(기능 유무를 따지지 않는다)
+# 정의 칸(전제)이 있는 장(1·3장)은 네 가지 판정을 그대로 둔다. 판단 불가 줄은 확인 안 함으로 보인다
+obs_only = {p["문제ID"] for p in read_ch("problems.csv") if not p.get("전제")}
+snapshots = read_opt("snapshots.csv")
 
 head_of = {h["소제목ID"]: h for h in heads}
 prob = {p["문제ID"]: p for p in probs}
 cell_of = {pid: head_of[p["소제목ID"]]["원고"] for pid, p in prob.items()}
 
-# 분석 회차(스냅샷)는 서버의 한 커밋에서 확인한 범위다. 범위는 '전체', 항목(1.3), 문제(P0025)를 공백으로 나열하고
+# 분석 회차(스냅샷)는 서버의 한 커밋에서 확인한 범위다. 범위는 '전체', 항목(1.3), 문제(P1025)를 공백으로 나열하고
 # 앞에 '-'를 붙이면 뺀다. 서버마다 커밋일 차례로 놓고, 첫 '전체' 스냅샷의 커밋이 기준 커밋이다
 def scope_of(text):
     got = set()
@@ -75,7 +76,7 @@ for f in finds:
     sn = snap_key.get((f["서버"], f["커밋"]))
     if not sn:
         sys.exit(f"findings.csv: {f['서버']} {f['커밋'][:7]}에 해당하는 스냅샷이 없다")
-    if f["문제ID"] not in prob or f["판정"] not in ("관찰됨", "문제 없음"):
+    if f["문제ID"] not in prob or f["판정"] not in ("관찰됨", "문제 없음", "판단 불가"):
         sys.exit(f"findings.csv: 잘못된 줄 {f['서버']} {f['문제ID']} {f['판정']}")
     if f["문제ID"] not in sn["covers"]:
         sys.exit(f"findings.csv: {f['문제ID']}는 {f['서버']} {f['커밋'][:7]} 스냅샷의 범위 밖이다")
@@ -93,7 +94,7 @@ for x, sns in snaps_of.items():
             if pid not in sn["covers"]:
                 continue
             rs = rows_at.get((x, sn["커밋"], pid), [])
-            state = rs[0]["판정"] if rs else "기능 없음"
+            state = ("확인 안 함" if rs[0]["판정"] == "판단 불가" else rs[0]["판정"]) if rs else "기능 없음"
             h.append({"snap": sn, "state": state, "est": bool(rs) and all(r["추정"] for r in rs), "rows": rs})
         history[(pid, x)] = h
 
@@ -106,9 +107,9 @@ def status(pid, x):
     return {"state": last["state"], "snap": last["snap"], "est": last["est"]}
 
 ST = {(pid, x): status(pid, x) for pid in prob for x in repo}
-evidence = C.defaultdict(list)  # 문제 → 근거 줄(코드 위치가 없는 추정 줄 제외)
+evidence = C.defaultdict(list)  # 문제 → 페이지에 싣는 근거 줄. 관찰됨만 싣고 문제 없음의 코드는 싣지 않는다
 for f in finds:
-    if not f["추정"] or f["코드위치"].strip():
+    if f["판정"] == "관찰됨":
         evidence[f["문제ID"]].append(f)
 
 def ref_link(ref):
@@ -198,7 +199,7 @@ cell_name = {c["원고"]: c["이름"] for c in cells}
 by_cell_heads = C.defaultdict(list)
 for h in heads:
     by_cell_heads[h["원고"]].append(h)
-# 문제ID(P0001)는 소제목과 따로 매긴 식별자다. 문제는 소제목ID(1.3.2)로 소제목에, 소제목은 항목에 속한다
+# 문제ID(P1001, 첫 자리가 장)는 소제목과 따로 매긴 식별자다. 문제는 소제목ID(1.3.2)로 소제목에, 소제목은 항목에 속한다
 probs_in = C.defaultdict(list)
 for p in probs:
     probs_in[p["소제목ID"]].append(p["문제ID"])
@@ -265,7 +266,7 @@ ASTM = {  # 범주: (짧은 이름, 설명)
 }
 CWE_RE = re.compile(r"CWE-(\d+)(?:\s+([A-Z][A-Za-z0-9'\-]*(?:\s+(?:[A-Za-z0-9'\-]+|\([A-Za-z ]+\)))*))?")
 
-CWE_NAME = {r["CWE"]: r for r in read("cwe.csv")}  # 공식 영어 이름과 한국어 번역
+CWE_NAME = {r["CWE"]: r for r in read_opt("cwe.csv")}  # 공식 영어 이름과 한국어 번역
 
 def cwe_of(p):
     out = []
@@ -317,7 +318,7 @@ lines = ["---", "title: 문제 매트릭스", "sidebar_position: 0", "hide_table
          "import ProblemMatrix from '@site/src/components/Problems/ProblemMatrix';", "",
          "# 문제 매트릭스", "",
          f"DFIR MCP 서버 구현 가이드라인의 항목마다, 공개 서버 {len(repo)}개에서 관찰된 문제를 소제목별로 묶어 보여 준다.", "",
-         "- 열은 가이드라인의 장, 칸은 항목(1.1~4.4), 칸 안의 줄은 소제목(1.3.2)이고, 네모 하나가 문제 하나(P0001)다. 색이 진할수록 그 문제가 관찰된 서버가 많다.",
+         "- 열은 가이드라인의 장, 칸은 항목(1.1~4.4), 칸 안의 줄은 소제목(1.3.2)이고, 네모 하나가 문제 하나(P1001)다. 색이 진할수록 그 문제가 관찰된 서버가 많다.",
          "- 서버 × 문제 지도는 [첫 화면](/)에 있다.",
          "- 문제 화면에서 서버별 판정과 그 근거(코드, 실행 검증)를 확인한다. " + NOTE, "",
          "항목 이름을 누르면 오른쪽 패널에 그 항목을 열고, 네모를 누르면 그 문제를 연다.", "", "<ProblemMatrix />", "",
@@ -366,8 +367,8 @@ for c in cells:
         has_class = any(cwe_of(prob[g]) or astm_of(prob[g]) for g in ids)
         only_obs = all(g in obs_only for g in ids)
         lines += (["| 문제 | 원인(CWE) · 결과(ASTM) | 관찰된 서버 |", "|---|---|---|"] if only_obs
-                  else ["| 문제 | 원인(CWE) · 결과(ASTM) | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|---|"] if has_class
-                  else ["| 문제 | 기능 있음 | 관찰됨 | 확인 안 함 |", "|---|---|---|---|"])
+                  else ["| 문제 | 원인(CWE) · 결과(ASTM) | 기능 있음 | 관찰됨 |", "|---|---|---|---|"] if has_class
+                  else ["| 문제 | 기능 있음 | 관찰됨 |", "|---|---|---|"])
         for gid in ids:
             p = prob[gid]
             on, unk = applies(gid)
@@ -394,7 +395,7 @@ for c in cells:
             hjson["problems"].append(pj)
             tag_cell = (f" | {class_badges(cwes, astms, short=True)}" if has_class else "")
             lines.append(f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}){tag_cell} | {len(ob)} |" if only_obs
-                         else f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}){tag_cell} | {len(on)} | {len(ob)} | {len(unk)} |")
+                         else f"| [{gid} {esc(p['문제'])}]({prob_link(gid)}){tag_cell} | {len(on)} | {len(ob)} |")
             order += 1
             # 문제 화면
             pl = ["---", f"title: {yq(gid + ' ' + p['문제'])}", f"sidebar_label: {yq(gid + ' ' + p['문제'][:28] + ('…' if len(p['문제']) > 28 else ''))}",
@@ -404,6 +405,8 @@ for c in cells:
             desc = p.get("설명") or p.get("현상과 피해", "")  # 2·4장은 설명, 1·3장은 현상과 피해
             if desc:
                 pl += [esc(desc), ""]
+            if p.get("전제"):  # 1·3장 정의: 전제, 결함, 피해, 경계
+                pl += ["## 정의", ""] + [line for k in ("전제", "결함", "피해", "경계") if p.get(k) for line in (f"**{k}** {esc(p[k])}", "")]
             pl += class_box(p, cwes, astms)
             ev = C.OrderedDict()
             for f in sorted(evidence[gid], key=lambda f: (f["서버"].lower(), snap_key[(f["서버"], f["커밋"])]["커밋일"])):
@@ -413,10 +416,10 @@ for c in cells:
             cnt = C.Counter(ST[(gid, x)]["state"] for x in repo)
             if gid in obs_only:
                 not_seen = sorted((x for x in repo if ST[(gid, x)]["state"] == "기능 없음"), key=str.lower)
-                summary = f"관찰됨 {cnt['관찰됨']}" + (f" · 확인 안 함 {cnt['확인 안 함']}" if cnt["확인 안 함"] else "") + (
+                summary = f"관찰됨 {cnt['관찰됨']}" + (
                     f" · 관찰되지 않음 {len(not_seen)} ({', '.join(not_seen)})" if not_seen else "")
             else:
-                summary = " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "확인 안 함", "기능 없음"))
+                summary = " · ".join(f"{k} {cnt[k]}" for k in ("관찰됨", "문제 없음", "기능 없음"))
             pl += ["## 서버별 판정", "", summary, "",
                    "| 서버 | 판정 | 확인 커밋 | 근거 |", "|---|---|---|---|"]
             for x in rows:
@@ -429,7 +432,7 @@ for c in cells:
                     f'<span className="pm-v pm-v-run">{m}</span>' for m in methods_of(gid, x) if m != "코드 확인"]
                 pl.append(f"| [{x}]({srv_link(x)}) | {badge(st)} | {where} | {' '.join(parts)} |")
             if ev:
-                pl += ["", "## 근거 코드", "", "코드 위치를 누르면 그 커밋의 해당 줄을 펼쳐 볼 수 있다. 관찰됨은 문제가 있는 코드, 문제 없음은 제대로 구현했거나 고친 코드다.", ""]
+                pl += ["", "## 근거 코드", "", "코드 위치를 누르면 그 커밋의 해당 줄을 펼쳐 볼 수 있다. 관찰됨인 서버의 문제가 있는 코드만 싣는다.", ""]
             for x, fs in ev.items():
                 r, _ = repo[x]
                 pl += [f"### [{x}]({srv_link(x)})", ""]  # 제목 id는 Docusaurus가 서버 이름을 소문자로 바꿔 붙인다
@@ -459,13 +462,12 @@ for c in cells:
 # 서버
 lines = ["---", "title: 서버 목록", "sidebar_label: 서버 목록", "sidebar_position: 9", "---", "", GEN, "", "# 서버 목록", "",
          "기준 커밋은 그 서버를 분석한 커밋이다. " + NOTE, "",
-         "| 서버 | 기준 커밋 | 관찰됨 | 확인 안 함 | 항목 |", "|---|---|---|---|---|"]
+         "| 서버 | 기준 커밋 | 관찰됨 | 항목 |", "|---|---|---|---|"]
 for x in sorted(repo, key=str.lower):
     r, cm = repo[x]
     obs_p = [p for p in prob if ST[(p, x)]["state"] == "관찰됨"]
-    nunk = sum(1 for p in prob if ST[(p, x)]["state"] == "확인 안 함")
     its = sorted({cell_of[p] for p in obs_p})
-    lines.append(f"| [{x}]({srv_link(x)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {len(obs_p)} | {nunk or ''} | {', '.join(its)} |")
+    lines.append(f"| [{x}]({srv_link(x)}) | [`{cm[:7]}`](https://github.com/{r}/tree/{cm}) | {len(obs_p)} | {', '.join(its)} |")
 write(os.path.join(P, "servers", "index.mdx"), "\n".join(lines))
 for x in sorted(repo, key=str.lower):
     r, cm = repo[x]

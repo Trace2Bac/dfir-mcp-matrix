@@ -14,6 +14,7 @@ python tools/problems_export_from_ledger.py <근거 대장 폴더> <매트릭스
 (데이터/목차_2026-11-24.csv, 데이터/사례_소제목배치_2026-11-24.csv, 데이터/scripts/import_outline.py가 만든다).
 문제 하나는 "소제목에 놓인 원래 묶음"이다. 한 묶음의 사례가 여러 소제목에 갈리면 원래 문제ID는 한 소제목에 남기고
 (원래 원고의 소제목 가운데 사례가 가장 많은 곳, 없으면 사례가 가장 많은 곳), 나머지 소제목에는 대장ID@소제목ID로 새 번호를 준다.
+이미 번호를 받은 대장ID@소제목ID는 그 번호를 유지하고, 통합으로 사례가 없어진 문제의 번호는 폐기한다.
 소제목별로 다시 쓴 문제 이름과 현상과 피해(데이터/문제이름_소제목별_2026-11-24.csv)와
 같은 소제목 안의 겹치는 문제를 합친 통합표(데이터/문제통합_소제목별_2026-11-25.csv)를 적용한다.
 """
@@ -40,6 +41,9 @@ merge = {r["사례ID"]: r for r in csv.DictReader(open(MERGE, encoding="utf-8-si
 EXPORT_DATE = "2026-11-24"  # 근거 대장의 조사 대상 목록(검증_2026-11-24) 날짜. 기준 커밋 스냅샷의 분석일로 쓴다
 # 묶음 분모를 21개 서버의 코드로 다시 판정한 묶음(검증_2026-11-24/B2_검증표.csv). 그 밖의 묶음은 묶음분모.csv(매트릭스 셀 상세 기준)를 쓴다.
 DEN_OVERRIDE = {("1.3", "B2"): ["findevil", "mulder", "SAVVYDFIR-MCP", "sift-kernel", "trudi"]}
+# 분류를 고치며 사례를 다른 문제로 합친 서버는 원래 문제에서 문제 없음(추정)으로 바꾸지 않고 확인 안 함으로 둔다.
+# 그 서버를 그 문제로 코드에서 본 것이 아니기 때문이다. (대장ID, 서버)
+RECLASS_UNK = {("1.5-B1", "MyIRTeam")}
 
 # 매트릭스는 기준 커밋의 코드로 확인한(정적 분석) 사례만 싣는다. 코드 위치가 없는 사례는 근거 대장에서 정적 분석으로 위치를 채운 뒤 싣는다.
 # 개편안에서 배치를 보류한 사례(새 항목 후보 범위)는 싣지 않는다
@@ -56,6 +60,15 @@ if INCLUDE_UNASSIGNED and os.path.exists(SURVEY):
     for r in csv.DictReader(open(SURVEY, encoding="utf-8-sig")):
         survey[(r["소제목"], r["묶음"].replace("-", ""))].append(r)
 unk_pairs = set()  # (문제ID, 서버): 판단 불가
+# 장 단위 재분석(21개 서버 전체를 코드로 다시 판정한 결과). 이 파일에 있는 문제는 분모를 쓰지 않고 이 판정으로 칸을 정한다.
+# 관찰됨은 확인된 위치를 모두 적은 줄, 문제 없음은 본 위치를 적은 추정 줄, 기능 없음은 줄 없이 계산, 판단 불가는 확인 안 함이다.
+# 근거 대장의 사례 줄(실행 확인 등)은 그대로 함께 싣는다
+REANALYSIS = sorted(glob.glob(f"{LEDGER}/데이터/*장_재분석_*.csv"))
+reanal = C.defaultdict(dict)
+for fpath in REANALYSIS:
+    for r in csv.DictReader(open(fpath, encoding="utf-8-sig")):
+        reanal[r["문제ID"]][r["서버"]] = r
+conflicts = []
 cases = [r for r in csv.DictReader(open(f"{LEDGER}/데이터/전체_사례.csv", encoding="utf-8-sig"))
          if r["집계"] == "센다" and r["코드위치"].strip() and place.get(r["사례ID"]) and (INCLUDE_UNASSIGNED or r["원고"] != "미정")]
 dens = {(d["원고"], ng(d["묶음ID"])): d for d in csv.DictReader(open(f"{LEDGER}/데이터/묶음분모.csv", encoding="utf-8-sig"))}
@@ -160,14 +173,23 @@ def full_commit(srv, raw):
     tok = re.split(r"[,\s]+", raw.strip())[0]
     return next((c for c in known_commits[srv] if c.startswith(tok)), tok)
 
-# 이미 매긴 문제ID를 이어 쓴다
+# 이미 매긴 문제ID를 이어 쓴다. 커밋된 problems.csv의 대응을 먼저 읽고 작업 중인 파일로 덮어, 한 번 내보내기에서 빠졌던 묶음이
+# 다시 생겨도 원래 번호를 받게 한다. 새 번호는 두 파일에 있던 가장 큰 번호 다음이다(지운 번호는 다시 쓰지 않는다)
 old = os.path.join(OUT, "problems.csv")
 pid = {}
+try:
+    head = subprocess.run(["git", "-C", REPO, "show", "HEAD:problems/_data/problems.csv"], capture_output=True, text=True, encoding="utf-8").stdout
+    for r in csv.DictReader(head.splitlines()):
+        if r.get("대장ID") and r.get("문제ID"):
+            pid[r["대장ID"]] = r["문제ID"]
+except FileNotFoundError:
+    pass
+seen = set(pid.values())
 if os.path.exists(old):
     for r in csv.DictReader(open(old, encoding="utf-8")):
         if r.get("대장ID") and r.get("문제ID"):
-            pid[r["대장ID"]] = r["문제ID"]
-nxt = max([int(v[1:]) for v in pid.values()] + [0]) + 1
+            pid[r["대장ID"]] = r["문제ID"]; seen.add(r["문제ID"])
+nxt = max([int(v[1:]) for v in seen] + [0]) + 1
 
 # 갈린 묶음에서 원래 문제ID를 남길 소제목: 원래 원고의 소제목 가운데 사례가 가장 많은 곳, 없으면 사례가 가장 많은 곳
 size = C.Counter()
@@ -179,7 +201,11 @@ for (sec, it, gid) in groups:
     home = [k for k in cands if k[0][:3] == it] or cands
     primary[(it, gid)] = max(home, key=lambda k: (size[k], -sec_order[k[0]]))[0]
 def ledger_id(sec, it, gid):
+    # 이미 번호를 받은 부분(대장ID@소제목ID)은 그 번호를 그대로 쓴다. 원래 번호가 남던 부분이 통합으로 없어져도
+    # 다른 부분이 원래 번호를 이어받지 않는다(원래 번호는 폐기되고 다시 쓰지 않는다)
     base = f"{it}-{gid}"
+    if f"{base}@{sec}" in pid:
+        return f"{base}@{sec}"
     return base if primary[(it, gid)] == sec else f"{base}@{sec}"
 for key in sorted(groups, key=lambda k: (sec_order[k[0]], k[1], k[2])):
     lid = ledger_id(*key)
@@ -203,9 +229,13 @@ for (sec, it, gid), g in sorted(groups.items(), key=lambda kv: pid[ledger_id(*kv
     if (it, gid) in DEN_OVERRIDE:
         den = DEN_OVERRIDE[(it, gid)]
     obs = sorted({ns(r["서버"]) for r in g["rows"]})
-    # 갈리거나 통합된 문제는 분모를 정하지 않는다. 원래 한 소제목에만 있던 묶음이 사례를 받기만 했고 그 서버가 모두 기존 분모 안이면 분모를 그대로 쓴다
-    if is_split and not (len(split[(it, gid)]) == 1 and den and set(obs) <= set(den)):
-        den = []
+    # 여러 소제목에 갈린 묶음은 분모를 정하지 않는다(묶음 전체의 분모가 각 부분에 맞는지 판정한 적이 없다).
+    # 한 소제목에만 있는 묶음이 통합으로 사례를 받거나 내준 경우는 기존 분모에 관찰 서버를 더해 쓴다(관찰된 서버는 그 기능이 있다)
+    if is_split:
+        if len(split[(it, gid)]) == 1 and den:
+            den = sorted(set(den) | set(obs))
+        else:
+            den = []
     rn = rename.get((sec, gid if it == "미정" else f"{it}-{gid}"))
     alt = not INCLUDE_UNASSIGNED and rn is not None
     name = ((alt and (rn.get("미정제외_새이름") or "").strip()) or (rn["새이름"].strip() if rn else "")) or re.sub(r"^\((판정 전|판정 보류)\)\s*", "", g["name"])
@@ -218,6 +248,20 @@ for (sec, it, gid), g in sorted(groups.items(), key=lambda kv: pid[ledger_id(*kv
         c = commit if r["기준커밋"][:7] == commit[:7] else full_commit(srv, r["기준커밋"])
         ledger_rows.append({"서버": srv, "커밋": c, "문제ID": p_, "판정": "관찰됨", "추정": "", "출처": "대장",
                             "코드위치": r["코드위치"].strip(), "요지": r["요지"].strip(), "링크": ""})
+    if p_ in reanal:
+        for srv, x in reanal[p_].items():
+            v = x["판정"]
+            if srv in obs and v != "관찰됨":
+                conflicts.append((p_, srv, v))
+            if v == "판단 불가":
+                if srv not in obs:  # 대장 사례가 관찰인 칸은 재분석이 판정을 미뤄도 관찰을 지운다고 보지 않는다
+                    unk_pairs.add((p_, srv))
+            elif v in ("관찰됨", "문제 없음"):
+                ledger_rows.append({"서버": srv, "커밋": repo_of[srv][1], "문제ID": p_, "판정": v,
+                                    "추정": "예" if v == "문제 없음" else "", "출처": "대장",
+                                    "코드위치": x["코드위치"].strip(), "요지": x["요지"].strip(), "링크": ""})
+        no_den[p_] = False
+        continue
     sv = survey.get((sec, gid), []) if it == "미정" and INCLUDE_UNASSIGNED else None  # 조사할 서버가 없던 묶음은 관찰 서버만 분모
     if sv is not None:
         # 미정 묶음: 관찰 사례가 있는 서버와, 조사에서 관찰됨이나 문제 없음으로 본 서버가 분모다
@@ -226,7 +270,7 @@ for (sec, it, gid), g in sorted(groups.items(), key=lambda kv: pid[ledger_id(*kv
             srv = ns(x["서버"])
             if x["범위"] or x["판정"] == "기능 없음":
                 continue
-            if x["판정"] == "판단 불가":
+            if x["판정"] in ("판단 불가", "확인 안 함"):
                 unk_pairs.add((p_, srv)); continue
             if srv in obs:
                 continue  # 이미 관찰 사례가 있으면 그 사례를 따른다
@@ -238,6 +282,8 @@ for (sec, it, gid), g in sorted(groups.items(), key=lambda kv: pid[ledger_id(*kv
         continue
     # 묶음 분모에 있지만 관찰되지 않은 서버는 기준 커밋에서 문제 없음(추정)으로 둔다. 코드 위치가 없는 이 줄은 기능이 있다고 판정했을 뿐 이 문제로 코드를 보지 않은 줄이다
     for srv in den:
+        if (lid.split("@")[0], srv) in RECLASS_UNK and srv not in obs:
+            unk_pairs.add((p_, srv)); continue
         if srv not in obs:
             ledger_rows.append({"서버": srv, "커밋": repo_of[srv][1], "문제ID": p_, "판정": "문제 없음", "추정": "예", "출처": "대장",
                                 "코드위치": "", "요지": "", "링크": ""})
@@ -247,6 +293,14 @@ def w(name, rows):
     with open(os.path.join(OUT, name), "w", encoding="utf-8", newline="") as f:
         x = csv.DictWriter(f, fieldnames=list(rows[0].keys()), quoting=csv.QUOTE_ALL, lineterminator="\n"); x.writeheader(); x.writerows(rows)
 w("chapters.csv", [{"장": a, "이름": b} for a, b, c in CHAPTERS])
+# problems/_data/ch<장>/ 폴더로 직접 관리하는 장은 공용 파일에 쓰지 않는다(빌드도 그 장은 폴더만 읽는다)
+OWN = {d[2:] for d in os.listdir(OUT) if re.fullmatch(r"ch\d+", d) and os.path.isdir(os.path.join(OUT, d))}
+own_ids = {p["문제ID"] for p in prob_rows if p["소제목ID"].split(".")[0] in OWN}
+head_rows = [h for h in head_rows if h["소제목ID"].split(".")[0] not in OWN]
+prob_rows = [p for p in prob_rows if p["문제ID"] not in own_ids]
+ledger_rows = [r for r in ledger_rows if r["문제ID"] not in own_ids]
+no_den = {p: v for p, v in no_den.items() if p not in own_ids}
+unk_pairs = {(p, x) for p, x in unk_pairs if p not in own_ids}
 w("cells.csv", [{"원고": k, "장": k[0], "이름": v} for k, v in TITLE.items()])
 w("headings.csv", head_rows)
 w("problems.csv", prob_rows)
@@ -256,7 +310,7 @@ w("servers.csv", [{"서버": s["서버"], "저장소": s["저장소"]} for s in 
 # 사람이 같은 서버·커밋·문제에 판정을 적었으면 그 판정을 따르고 대장 줄은 넣지 않는다
 fpath = os.path.join(OUT, "findings.csv")
 old_f = list(csv.DictReader(open(fpath, encoding="utf-8"))) if os.path.exists(fpath) else []
-human = [r for r in old_f if r["출처"] != "대장"]
+human = [r for r in old_f if r["출처"] != "대장" and r["문제ID"] not in own_ids]
 taken = {(r["서버"], r["커밋"], r["문제ID"]) for r in human}
 skipped = [r for r in ledger_rows if (r["서버"], r["커밋"], r["문제ID"]) in taken]
 w("findings.csv", [r for r in ledger_rows if (r["서버"], r["커밋"], r["문제ID"]) not in taken] + human)
@@ -301,3 +355,4 @@ w("snapshots.csv", snap_rows + [r for r in old_snaps if (r["서버"], r["커밋"
 print("사람이 판정을 적어 넣지 않은 대장 줄", len(skipped))
 print("문제", len(prob_rows), "대장 근거", len(ledger_rows), "소제목", len(head_rows), "현상과 피해 있음", sum(1 for p in prob_rows if p["현상과 피해"]))
 print("소제목에 놓이지 않은 묶음", unplaced)
+print("재분석 문제", len(reanal), "대장 사례는 관찰인데 재분석은 다른 칸", conflicts)

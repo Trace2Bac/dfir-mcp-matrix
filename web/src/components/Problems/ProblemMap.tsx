@@ -117,7 +117,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
   const hc = hover ? cols[hover.col] : null;
   const hs = hover && hover.row !== null ? servers[hover.row] : null;
   const pairs = cols.reduce((k, c) => k + c.obs.size, 0);
-  const unkN = cols.reduce((k, c) => k + Object.values(c.st).filter(x => x.s === 'unk').length, 0);
   const ranked = [...cols].sort((a, b) => b.obs.size - a.obs.size || a.id.localeCompare(b.id)).slice(0, 10);
 
   return (
@@ -137,7 +136,6 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
           <Kpi n={cols.length} label="문제" />
           <Kpi n={data.servers.length} label="서버" />
           <Kpi n={pairs} label="관찰됨" />
-          <Kpi n={unkN} label="확인 안 함" />
         </div>
       </header>
 
