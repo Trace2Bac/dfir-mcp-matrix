@@ -19,7 +19,7 @@ cd web && npm ci && npm start      # http://localhost:3000/
 | `problems/_data/*.csv`, `problems/_data/ch*/*.csv` | `problems/**.mdx`, `problems/_data/problems.json` | `python tools/problems_build.py` |
 | `problems/_data/problems.json` | `web/static/data/problems.json` | `npm start`, `npm run build`(플러그인이 옮긴다) |
 
-생성물은 손으로 고치지 않고 커밋하지도 않습니다(`.gitignore`). 배포할 때 CI가 CSV에서 다시 만듭니다. 화면을 보려면 먼저 `python tools/problems_build.py`를 실행합니다.
+생성물은 손으로 고치지 않고 커밋하지도 않습니다(`.gitignore`). 배포할 때 CI가 CSV에서 다시 만듭니다. `web/`에서 `npm start`·`npm run build`를 하면 먼저 자동으로 만듭니다.
 
 ## 장별로 나눠 작업하기
 
