@@ -3,7 +3,7 @@
 python tools/import_bench_pocs.py <dfir-mcp-bench 저장소 경로>
 
 bench의 pocs/<문제ID>/<서버>/<사례ID>/runs/<커밋>/result.json 가운데 Docker 이미지에서 돌린 것(image가 있는 것)만
-가져온다. poc.yaml의 realism이 forced(억지)인 PoC는 가져오지 않는다(그 사례는 매트릭스에서 빼고 장 폴더의 excluded.csv에 남긴다). 사례ID가 근거(findings.csv)에 있고, 실행한 커밋이 그 서버의 기준 커밋과 같아야 한다.
+가져온다. poc.yaml의 realism이 forced(억지)인 PoC는 가져오지 않는다(그 사례는 매트릭스에서 뺀다). 사례ID가 근거(findings.csv)에 있고, 실행한 커밋이 그 서버의 기준 커밋과 같아야 한다.
 이 스크립트가 넣은 줄(근거가 bench의 pocs/를 가리키는 줄)만 지우고 다시 쓰며, 사람이 적은 줄은 그대로 둔다.
 근거 링크는 bench 사이트의 그 사례 PoC 화면(한국어)이다. 결과를 bench에 커밋하고 올린 뒤에 돌린다.
 """
@@ -66,7 +66,7 @@ def main():
                     where = case_ch.get(r["case_id"])
                     poc = open(os.path.join(pdir, server, case, "poc.yaml"), encoding="utf-8").read()
                     if re.search(r"^realism:\s*forced\s*$", poc, re.M):
-                        skipped.append((r["case_id"], "PoC가 억지(forced)라 사례에서 뺄 대상(excluded.csv)"))
+                        skipped.append((r["case_id"], "PoC가 억지(forced)라 사례에서 뺄 대상"))
                     elif not r.get("image"):
                         skipped.append((r["case_id"], "Docker 밖에서 돌린 결과"))
                     elif not where or where[1:] != (r["problem"], r["server"]):

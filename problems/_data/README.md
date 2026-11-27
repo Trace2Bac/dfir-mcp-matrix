@@ -17,7 +17,6 @@ python tools/problems_build.py
 | `servers.csv` | 서버와 저장소 |
 | `snapshots.csv` | 분석 회차: 서버, 커밋, 커밋일, 분석일, 범위, 메모 |
 | `ch<N>/verifications.csv` | 그 장 문제의 실행 검증: 문제ID, 서버, 방법(PoC·시험·모델 실험), 수준, 커밋, 결과, 근거, 메모 |
-| `ch<N>/excluded.csv` | 근거에서 뺀 사례: 사례ID, 서버, 커밋, 문제ID, 코드위치, 요지, 단계, 사유, 근거, 날짜. 동적 분석(PoC)에서 조건이나 결과가 억지스러워 결함으로 보기 어려운 사례를 남긴다. 빌드는 읽지 않는다 |
 
 ## 문제로 다루는 범위
 
@@ -140,7 +139,7 @@ CWE 이름은 MITRE 공식 영어 이름(CWE 5.0)으로 `cwe.csv`에 둔다.
 
 ## 검증 방법
 
-모든 근거는 코드 확인(정적 분석)에서 시작한다. 실행으로 더 확인하면 그 장의 `ch<N>/verifications.csv`에 한 줄을 더한다. dfir-mcp-bench의 PoC 결과는 `python tools/import_bench_pocs.py <bench 경로>`로 가져온다(사례ID 칸이 채워지고, 근거는 bench 사이트의 그 사례 PoC 화면을 가리킨다. 다시 돌리면 그 줄만 새로 쓴다). 동적 분석은 정적 분석으로 찾은 사례를 걸러 내는 단계다. PoC의 현실성이 억지(`forced`)이면 가져오지 않고, 그 사례는 `findings.csv`에서 빼 `excluded.csv`에 남긴다.
+모든 근거는 코드 확인(정적 분석)에서 시작한다. 실행으로 더 확인하면 그 장의 `ch<N>/verifications.csv`에 한 줄을 더한다. dfir-mcp-bench의 PoC 결과는 `python tools/import_bench_pocs.py <bench 경로>`로 가져온다(사례ID 칸이 채워지고, 근거는 bench 사이트의 그 사례 PoC 화면을 가리킨다. 다시 돌리면 그 줄만 새로 쓴다). 동적 분석은 정적 분석으로 찾은 사례를 걸러 내는 단계다. 재현되지 않거나 조건이 억지스러운 사례는 `findings.csv`에서 뺀다.
 
 | 방법 | 하는 일 | 결과 |
 |---|---|---|
