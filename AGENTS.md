@@ -5,7 +5,7 @@
 
 ## 지켜야 할 것
 
-- **원본 데이터만 고칩니다.** 원본은 `problems/_data/*.csv`입니다. 판정은 `findings.csv`에 관찰됨이나 문제 없음만 적고, 그 커밋의 분석 회차를 `snapshots.csv`에 둡니다(`problems/_data/README.md`). `problems/**.mdx`, `problems/_data/problems.json`, `web/static/data/`, `web/build/`는 생성물이므로 고치지 않습니다.
+- **원본 데이터만 고칩니다.** 원본은 `problems/_data/*.csv`와 장별 폴더(`problems/_data/ch1/`, `ch3/`)의 CSV입니다. 판정은 `findings.csv`에 관찰됨이나 문제 없음만 적고(장별 폴더는 판단 불가도 적습니다), 그 커밋의 분석 회차를 `snapshots.csv`에 둡니다(`problems/_data/README.md`). `problems/**.mdx`, `problems/_data/problems.json`, `web/static/data/`, `web/build/`는 생성물이므로 고치지 않습니다.
 - **CSV를 고친 뒤에는 `python tools/problems_build.py`를 실행하고, 생성된 페이지도 함께 커밋합니다.** 배포할 때 CI가 다시 만들어 저장소와 다르면 실패합니다.
 - **근거는 실제 코드에서 확인한 것만 씁니다.** 근거에는 서버, 커밋, 코드 위치를 적습니다. 있을 법한 문제를 지어내지 않습니다. 사람이 더한 근거는 `출처`를 비웁니다.
 - **글은 글말로 씁니다.** 구어 대신 글말로 쓰고, 문장은 "~다"로 끝냅니다.

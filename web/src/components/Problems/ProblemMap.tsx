@@ -30,6 +30,7 @@ type Col = {
   axis: string;
   obs: Set<string>;
   den: number;
+  obsOnly?: boolean; // 2·4장: 관찰된 사례만 있고 기능 유무를 따지지 않는다
   st: Record<string, State>;
   x: number;
 };
@@ -56,6 +57,7 @@ function layout(data: ProblemsData) {
           axis: c.axis,
           obs: new Set(p.obs),
           den: p.den,
+          obsOnly: p.obsOnly,
           st: p.states,
           x,
         });
@@ -279,7 +281,7 @@ export function ProblemMapView({ data }: { data: ProblemsData }) {
             <div className={styles.tipName}>{hc.name}</div>
             <div className={styles.tipMeta}>소제목 {hc.head}</div>
             <div className={styles.tipMeta}>
-              관찰됨 {hc.obs.size} / 기능 있는 서버 {hc.den}
+              관찰됨 {hc.obs.size}{hc.obsOnly ? '' : ` / 기능 있는 서버 ${hc.den}`}
             </div>
             {hs && (
               <div className={styles.tipServer}>

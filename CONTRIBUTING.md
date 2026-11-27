@@ -16,11 +16,11 @@ cd web && npm ci && npm start      # http://localhost:3000/
 
 | 원본 | 생성물 | 만드는 명령 |
 |---|---|---|
-| `problems/_data/*.csv` | `problems/**.mdx`, `problems/_data/problems.json` | `python tools/problems_build.py` |
+| `problems/_data/*.csv`, `problems/_data/ch*/*.csv` | `problems/**.mdx`, `problems/_data/problems.json` | `python tools/problems_build.py` |
 | `problems/_data/problems.json` | `web/static/data/problems.json` | `npm start`, `npm run build`(플러그인이 옮긴다) |
 
 생성물은 손으로 고치지 않습니다. CSV를 고친 뒤 다시 만듭니다.
-CSV는 저장소 밖의 근거 대장에서 `tools/problems_export_from_ledger.py`로 내보낼 수도 있습니다.
+1장과 3장은 `problems/_data/ch1/`, `ch3/` 폴더의 CSV를 직접 고칩니다. 폴더가 없는 장의 CSV는 저장소 밖의 근거 대장에서 `tools/problems_export_from_ledger.py`로 내보낼 수도 있습니다.
 
 ## 작업별 순서
 

@@ -8,7 +8,11 @@ export type ProblemCellData = {
   id: string; // 1.3
   name: string;
   axis: string; // 장 번호 1~4
-  heads: { id: string; name: string; problems: { id: string; name: string; den: number; denList: string[]; obs: string[]; ver: Record<string, string[]>; states: Record<string, State> }[] }[];
+  heads: { id: string; name: string; problems: { id: string; name: string; den: number; denList: string[]; obs: string[]; ver: Record<string, string[]>; states: Record<string, State>; cwe?: string[]; cweName?: string[]; astm?: string[]; obsOnly?: boolean }[] }[];
+};
+// 결과 범주(ASTM E3016-18). tools/problems_build.py의 ASTM과 같은 이름이다
+export const ASTM_LABEL: Record<string, string> = {
+  INCOMP: '불완전', INAC_EX: '없는 것을 있다고 함', INAC_ALT: '내용 변경', INAC_AS: '잘못된 연결', INAC_COR: '손상 감지 못함', MISINT: '오해를 부르는 표시',
 };
 // 서버별 마지막 판정. obs 관찰됨, ok 문제 없음, unk 확인 안 함이고, 없는 서버는 기능 없음이다(tools/problems_build.py)
 export type State = { s: 'obs' | 'ok' | 'unk'; est?: boolean; commit?: string; date?: string };
@@ -80,8 +84,21 @@ export function ProblemDetails({ cell, openProblem, openServer, onOpen }: Props)
                   >
                     {p.id} {p.name}
                   </Link>
+                  {(p.cwe?.length || p.astm?.length) ? (
+                    <div style={{ margin: '0.3rem 0 0.1rem' }}>
+                      {p.cwe?.map((c, i) => (
+                        <span key={c} style={{ marginRight: '0.5rem', fontSize: '0.8rem' }}>
+                          <a className="pm-cwe" href={`https://cwe.mitre.org/data/definitions/${c.slice(4)}.html`} target="_blank" rel="noopener noreferrer">{c}</a>
+                          {p.cweName?.[i]}
+                        </span>
+                      ))}
+                      {p.astm?.map(a => (
+                        <span key={a} className="pm-astm" title={`ASTM E3016: ${ASTM_LABEL[a] ?? a}`}>{a} {ASTM_LABEL[a]}</span>
+                      ))}
+                    </div>
+                  ) : null}
                   <div style={{ fontSize: '0.8rem', color: 'var(--ifm-color-emphasis-700)', margin: '0.2rem 0 0.35rem' }}>
-                    기능 있음 {p.den} · 관찰됨 {p.obs.length}
+                    {p.obsOnly ? <>관찰됨 {p.obs.length}</> : <>기능 있음 {p.den} · 관찰됨 {p.obs.length}</>}
                     {(() => {
                       const run = Object.values(p.ver).filter(ms => ms.some(m => m !== '코드 확인')).length;
                       return run > 0 ? <> · 실행 검증 {run}</> : null;
