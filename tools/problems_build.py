@@ -29,9 +29,10 @@ heads = read_ch("headings.csv")
 probs = read_ch("problems.csv")
 finds = read_ch("findings.csv")
 vers = read_opt("verifications.csv"); servers = read("servers.csv")
-# 2·4장은 문제가 관찰된 사례만 근거로 둔다. 근거가 없는 서버는 "관찰되지 않음"이다(기능 유무를 따지지 않는다)
-# 정의 칸(전제)이 있는 장(1·3장)은 네 가지 판정을 그대로 둔다. 판단 불가 줄은 확인 안 함으로 보인다
-obs_only = {p["문제ID"] for p in read_ch("problems.csv") if not p.get("전제")}
+# 판정은 관찰됨 / 문제 없음 / 판단 불가이고, 줄이 없으면 기능 없음이다. 판단 불가 줄은 확인 안 함으로 보인다.
+# 아직 문제 없음·판단 불가 줄을 적지 않은 장(관찰된 사례만 있는 장)은 기능 유무를 따지지 않고 근거가 없는 서버를 "관찰되지 않음"으로 둔다
+judged = {d for d in CH if any(r["판정"] in ("문제 없음", "판단 불가") for r in read(os.path.join(d, "findings.csv")))}
+obs_only = {p["문제ID"] for d in CH if d not in judged for p in read(os.path.join(d, "problems.csv"))}
 snapshots = read_opt("snapshots.csv")
 
 head_of = {h["소제목ID"]: h for h in heads}
@@ -207,6 +208,7 @@ for p in probs:
 METHODS = ["코드 확인", "PoC", "시험", "모델 실험"]
 RESULTS = {"재현됨", "재현 안 됨", "통과", "실패", "영향 있음", "영향 없음"}
 ver_by = C.defaultdict(list)
+case_index = {}  # 사례ID → 문제 화면의 그 사례 앵커. 웹의 /case/<사례ID>가 쓴다
 for v in vers:
     if v["방법"] not in METHODS or v["결과"] not in RESULTS or v["문제ID"] not in prob or v["서버"] not in repo:
         sys.exit(f"verifications.csv: 잘못된 줄 {v}")
@@ -439,9 +441,16 @@ for c in cells:
                 for f in fs:
                     refs = parse_locs(f["코드위치"])
                     raw = "" if refs or not f["코드위치"] else f["코드위치"]
-                    label = f"{f['판정']} · {f['커밋'][:7]}"
+                    cid = f.get("사례ID", "")
+                    label = " · ".join(x for x in (cid, f["판정"], f["커밋"][:7]) if x)
                     body = esc(f["요지"]) + (f" ([{'PR #' + f['링크'].rsplit('/', 1)[1] if '/pull/' in f['링크'] else '링크'}]({f['링크']}))" if f["링크"] else "")
-                    pl += [f"<Case label={json.dumps(label, ensure_ascii=False)} ok={{{'true' if f['판정'] == '문제 없음' else 'false'}}} repo={json.dumps(r)} commit={json.dumps(f['커밋'])} refs={{{json.dumps(refs, ensure_ascii=False)}}} raw={{{json.dumps(raw, ensure_ascii=False)}}}>",
+                    # 사례ID가 있으면 그 사례로 바로 오는 앵커(/case/<사례ID>가 여기로 보낸다)와 실행 검증(PoC) 링크를 붙인다
+                    pv = [v for v in ver_by.get((gid, x), []) if cid and v.get("사례ID") == cid]
+                    extra = (f" id={json.dumps(cid)}" if cid else "") + (
+                        f" runs={{{json.dumps([{'method': v['방법'], 'result': v['결과'], 'url': v['근거']} for v in pv], ensure_ascii=False)}}}" if pv else "")
+                    if cid:
+                        case_index[cid] = f"{prob_link(gid)}#{cid}"
+                    pl += [f"<Case label={json.dumps(label, ensure_ascii=False)} ok={{{'true' if f['판정'] == '문제 없음' else 'false'}}} repo={json.dumps(r)} commit={json.dumps(f['커밋'])} refs={{{json.dumps(refs, ensure_ascii=False)}}} raw={{{json.dumps(raw, ensure_ascii=False)}}}{extra}>",
                            "", body, "", "</Case>", ""]
             vs = [v for x in repo for v in ver_by.get((gid, x), [])]
             if vs:
@@ -495,7 +504,7 @@ for x in sorted(repo, key=str.lower):
         sl.append("")
     write(os.path.join(P, "servers", f"{slug_srv(x)}.mdx"), "\n".join(sl))
 
-data = {"chapters": {ch["장"]: ch["이름"] for ch in chapters}, "servers": sorted(repo, key=str.lower), "cells": cells_json}
+data = {"chapters": {ch["장"]: ch["이름"] for ch in chapters}, "servers": sorted(repo, key=str.lower), "cells": cells_json, "cases": dict(sorted(case_index.items()))}
 with open(os.path.join(DATA, "problems.json"), "w", encoding="utf-8", newline="\n") as f:
     json.dump(data, f, ensure_ascii=False, indent=1)
     f.write("\n")

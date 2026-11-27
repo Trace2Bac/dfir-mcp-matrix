@@ -1,11 +1,18 @@
 import React, { type ReactNode, useEffect, useState } from 'react';
 import CodeBlock from '@theme/CodeBlock';
+import useBrokenLinks from '@docusaurus/useBrokenLinks';
 import styles from './Case.module.css';
 
 // 문제 화면의 서버 사례 하나. 요지(children) 아래에 코드 위치를 두고, 누르면 기준 커밋의 그 줄을 펼친다.
 // 코드는 빌드에 넣지 않고 펼칠 때 raw.githubusercontent.com에서 받는다(tools/problems_build.py의 parse_locs가 refs를 만든다)
 type Ref = { path: string; from: number; to: number };
-type Props = { label: string; ok: boolean; repo: string; commit: string; refs: Ref[]; raw: string; children: ReactNode };
+// 실행 검증 하나(verifications.csv 한 줄). PoC면 url이 dfir-mcp-bench의 그 사례 화면이다
+type Run = { method: string; result: string; url: string };
+type Props = {
+  label: string; ok: boolean; repo: string; commit: string; refs: Ref[]; raw: string; children: ReactNode;
+  id?: string; // 사례ID. 앵커로 쓴다(/case/<사례ID>가 여기로 보낸다)
+  runs?: Run[];
+};
 
 const CONTEXT = 3; // 범위 앞뒤로 더 보이는 줄
 const MAX_LINES = 120; // 한 번에 보이는 줄 수 상한
@@ -57,8 +64,9 @@ function Excerpt({ repo, commit, r }: { repo: string; commit: string; r: Ref }) 
   );
 }
 
-export default function Case({ label, ok, repo, commit, refs, raw, children }: Props) {
+export default function Case({ label, ok, repo, commit, refs, raw, children, id, runs = [] }: Props) {
   const [open, setOpen] = useState<Set<number>>(new Set());
+  useBrokenLinks().collectAnchor(id); // 사례 앵커를 빌드의 링크 검사에 알린다
   const toggle = (i: number) =>
     setOpen(prev => {
       const next = new Set(prev);
@@ -67,9 +75,16 @@ export default function Case({ label, ok, repo, commit, refs, raw, children }: P
     });
   const allOpen = refs.length > 0 && open.size === refs.length;
   return (
-    <div className={`${styles.card} ${ok ? styles.cardOk : styles.cardHit}`}>
+    <div id={id} className={`${styles.card} ${ok ? styles.cardOk : styles.cardHit}`}>
       <div className={styles.head}>
-        <span className={styles.n}>{label}</span>
+        <span className={styles.n}>
+          {label}
+          {runs.map((v, i) => (
+            <a key={i} href={v.url} target="_blank" rel="noopener noreferrer" className={`${styles.run} ${v.result === '재현됨' ? styles.runHit : ''}`}>
+              {v.method} {v.result} ↗
+            </a>
+          ))}
+        </span>
         {refs.length > 1 && (
           <button type="button" className={styles.all} onClick={() => setOpen(allOpen ? new Set() : new Set(refs.map((_, i) => i)))}>
             {allOpen ? '코드 모두 접기' : '코드 모두 펼치기'}
