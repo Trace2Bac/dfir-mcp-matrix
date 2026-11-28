@@ -49,3 +49,16 @@
 - 실행기 기능(pocs/README.md 참고): 폴더 fixture(`dir: true`, 폴더 `mode`), 서버가 쓴 파일 검사(`file_contains`·`file_not_contains`·`file_regex`), 보조 서비스(`services:` — 가짜 HTTP(S) 서버·기록기), 서버가 직접 부르는 모델 백엔드용 가짜 Anthropic API(`anthropic_stub`).
 - 아직 없는 것: 큰 증거 파일(메모리 이미지) 가져오기.
 - 외부 서비스에는 PoC를 만들 때도 직접 요청하지 않는다(응답 형식은 문서로 확인).
+
+## 7. 1장으로 넘기는 mulder 사례 (2026-11-28)
+2장 사례 중 1장 문제와 같은 결함이라 우리 쪽에서 뺀 것이다. 1장 사례로 넣을지, 이미 있는 1장 사례에 코드 위치만 더할지 정해 주면 된다.
+
+| 원래 사례 | 1장 대상 | 서버·커밋 | 코드 위치 | 요지 |
+|---|---|---|---|---|
+| P2049-025 | P1044 | mulder 3164843 | src/mulder/server/tools/case.py:432-466; src/mulder/db.py:1254-1310 | `verify_evidence_integrity`는 적재 때 기록한 해시와 비교해 검증한다고 알리지만 해시가 없어 비교하지 못한 `no_hash_recorded` source가 있어도 `modified`가 0이면 전체 `status`를 `all_verified`로 내고, 그 source의 `window_count`도 0으로 채운다. (조건: 해시 기록 기능 이전에 만든 사건 DB를 쓸 때) |
+| P2054-054 | P1021-017 | mulder 3164843 | src/mulder/server/tools/artifacts.py:1181-1186; src/mulder/server/tools/composite/exfil.py:502-505 | `detect_timestomping` 오류의 `suggestion`과 exfil 복합 도구 안내가 등록되지 않은 `run_ez_tool('MFTECmd', ...)`를 지시해(실제는 `run_mft_parser`) 없는 도구 호출이 된다. |
+| P2054-059 | P1021 | mulder 3164843 | src/mulder/orchestrator/prompts/cross_system_analyst.md:98-101; src/mulder/server/tools/findings.py:995-997; src/mulder/orchestrator/phases.py:187-187 | cross-system analyst 시스템 프롬프트가 `deduplicate_findings`(dry_run 후 적용)를 쓰라고 지시하지만 이 도구의 `tool_access`는 NARRATIVE_EXECUTOR·NARRATIVE_ANALYST·REPORT뿐이라 CROSS_ANALYST allowlist에 없어, 그 단계의 모델에는 해당 도구가 주어지지 않는다. |
+| P2054-060 | P1021 | mulder 3164843 | src/mulder/orchestrator/prompts/extract_analyst.md:108-120; src/mulder/server/tools/extract/evtx.py:466-468; src/mulder/orchestrator/phases.py:161-161 | extract analyst 프롬프트가 EVTX가 있으면 `index_evtx_file`로 모든 채널을 색인하라(MANDATORY)고 지시하지만 이 도구는 `Role.EXTRACT_EXECUTOR` 전용이라 EXTRACT_ANALYST allowlist에 없어, 지시대로 호출할 수 없다. |
+| P2049-054 | P1042-013 | mulder 3164843 | src/mulder/server/tools/case.py:147-183; src/mulder/server/tools/case.py:240-260 | `scan_evidence`는 'Evidence hashing complete for chain of custody'라 알리지만 `_hash_and_register_evidence`는 파일이 아닌 manifest 항목(디렉터리형 증거)을 조용히 건너뛰고 해시한 개수도 알리지 않아, 해시하지 않은 증거가 있어도 완료로 표기된다. (조건: 디렉터리형 증거) |
+| P2049-099 | P1021-020 | mulder 3164843 | src/mulder/server/tools/core.py:572-587; src/mulder/db.py:763-771; src/mulder/server/tools/extract/misc.py:240-275 | `parse_prefetch`는 파싱된 Prefetch 전체를 돌려준다고 알리지만 어느 도구도 만들지 않는 source 이름 `prefetch.all`을 읽어(`run_prefetch_parser`는 `ez.prefetch`로 적재) 추출 뒤에도 늘 0건 성공을 돌려준다. |
+| P2066-023 | P1013-004 | mulder 3164843 | src/mulder/server/tools/extract/misc.py:735-756 | `run_regripper`의 `profile`을 검사하지 않고 `-p`로 넘겨 rip.pl이 플러그인 폴더에 이어 붙여 require하므로, `../`가 든 값이면 플러그인 폴더 밖의 Perl 파일이 실행된다. |
