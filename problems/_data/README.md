@@ -139,7 +139,7 @@ CWE 이름은 MITRE 공식 영어 이름(CWE 5.0)으로 `cwe.csv`에 둔다.
 
 ## 검증 방법
 
-모든 근거는 코드 확인(정적 분석)에서 시작한다. 실행으로 더 확인하면 그 장의 `ch<N>/verifications.csv`에 한 줄을 더한다. dfir-mcp-bench의 PoC 결과는 `python tools/import_bench_pocs.py <bench 경로>`로 가져온다(사례ID 칸이 채워지고, 근거는 bench 사이트의 그 사례 PoC 화면을 가리킨다. 다시 돌리면 그 줄만 새로 쓴다). 동적 분석은 정적 분석으로 찾은 사례를 걸러 내는 단계다. 재현되지 않거나 조건이 억지스러운 사례는 `findings.csv`에서 뺀다.
+모든 근거는 코드 확인(정적 분석)에서 시작한다. 실행으로 더 확인하면 그 장의 `ch<N>/verifications.csv`에 한 줄을 더한다. dfir-mcp-bench의 PoC 결과는 `python tools/import_bench_pocs.py <bench 경로> ch1,ch3`처럼 자기 장만 골라 가져온다(장을 적지 않으면 모든 장. 사례ID 칸이 채워지고, 근거는 bench 사이트의 그 사례 PoC 화면을 가리킨다. 다시 돌리면 그 줄만 새로 쓴다). 동적 분석은 정적 분석으로 찾은 사례를 걸러 내는 단계다. 재현되지 않거나 조건이 억지스러운 사례는 `findings.csv`에서 뺀다.
 
 | 방법 | 하는 일 | 결과 |
 |---|---|---|

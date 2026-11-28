@@ -1,6 +1,8 @@
 """dfir-mcp-bench의 PoC 실행 결과를 장별 verifications.csv로 가져온다.
 
-python tools/import_bench_pocs.py <dfir-mcp-bench 저장소 경로>
+python tools/import_bench_pocs.py <dfir-mcp-bench 저장소 경로> [ch2,ch4 ...]
+
+장을 적으면 그 장의 verifications.csv만 다시 쓴다(장마다 맡은 사람이 자기 장만 가져올 수 있게).
 
 bench의 pocs/<문제ID>/<서버>/<사례ID>/runs/<커밋>/result.json 가운데 Docker 이미지에서 돌린 것(image가 있는 것)만
 가져온다. poc.yaml의 realism이 forced(억지)인 PoC는 가져오지 않는다(그 사례는 매트릭스에서 뺀다). 사례ID가 근거(findings.csv)에 있고, 실행한 커밋이 그 서버의 기준 커밋과 같아야 한다.
@@ -29,9 +31,10 @@ def read(path):
 
 
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         sys.exit(__doc__)
     bench = sys.argv[1]
+    only = set(sys.argv[2].split(",")) if len(sys.argv) == 3 else None
     dirty = subprocess.run(["git", "-C", bench, "status", "--porcelain", "pocs"], capture_output=True, text=True).stdout.strip()
     if dirty:
         sys.exit("bench의 pocs/에 커밋하지 않은 변경이 있다. 결과를 커밋하고 올린 뒤에 돌린다(근거 링크가 bench 사이트의 화면을 가리킨다).")
@@ -88,6 +91,8 @@ def main():
                         })
 
     for ch in chapters:
+        if only and ch not in only:
+            continue
         path = os.path.join(DATA, ch, "verifications.csv")
         old = read(path)
         keep = [v for v in old if not is_poc_link(v.get("근거", ""))]
