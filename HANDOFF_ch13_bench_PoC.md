@@ -44,6 +44,8 @@
   `python tools/import_bench_pocs.py <bench 경로> ch1,ch3`
 - 장을 적지 않으면 모든 장 파일을 다시 쓰니 꼭 장을 적는다.
 
-## 6. 알려진 환경 문제 (2026-11-28)
-- trudi 이미지: fastmcp 4.2.2라 job(비동기) 도구가 MCPError로 실패한다(trudi가 fastmcp를 고정하지 않은 탓, 기준일 최신 4.0.9도 같음). `/usr/local/bin/evtx_dump.py` 없음, vol 경로 고정, sudo·Anthropic 키·velociraptor·psort 없음. 이런 사례는 "보류"로 둔다.
-- 실행기에 아직 없는 기능: 가짜 Anthropic 엔드포인트, 폴더 권한(mode) 지정, 큰 증거 파일(메모리 이미지) 가져오기, 서버가 쓴 파일 내용 검사 규칙.
+## 6. 알려진 환경 문제와 쓸 수 있는 기능 (2026-11-28)
+- trudi: 기본 이미지 `trudi-88fbca7`는 fastmcp 4.2.2라 job(비동기) 도구가 MCPError로 실패한다(trudi가 fastmcp를 고정하지 않은 탓). job 도구나 evtx_filter가 필요한 사례는 `variant: trudi-88fbca7-fastmcp3`을 쓴다(fastmcp 3.4.7, /usr/local/bin/evtx_dump.py 있음). vol 경로 고정, velociraptor·psort 없음은 그대로다.
+- 실행기 기능(pocs/README.md 참고): 폴더 fixture(`dir: true`, 폴더 `mode`), 서버가 쓴 파일 검사(`file_contains`·`file_not_contains`·`file_regex`), 보조 서비스(`services:` — 가짜 HTTP(S) 서버·기록기), 서버가 직접 부르는 모델 백엔드용 가짜 Anthropic API(`anthropic_stub`).
+- 아직 없는 것: 큰 증거 파일(메모리 이미지) 가져오기.
+- 외부 서비스에는 PoC를 만들 때도 직접 요청하지 않는다(응답 형식은 문서로 확인).
